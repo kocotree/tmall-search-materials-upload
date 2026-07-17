@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tmall Search Material Uploads"
+  short_description: "Validate and review Tmall search material upload tasks"
+  default_prompt: "Use $upload-search-materials to validate this month product media and prepare upload tasks for human review."
