@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>天猫搜推素材审核 - {{ store }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; color: #1f2937; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #d1d5db; padding: 8px; vertical-align: top; text-align: left; }
+    th { background: #f3f4f6; }
+    img { width: 88px; height: 88px; object-fit: cover; margin: 2px; }
+    .blocked { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <h1>天猫搜推素材审核</h1>
+  <p>目标店铺：{{ store }}</p>
+  <table>
+    <thead>
+      <tr>
+        <th>任务 ID</th><th>商品 ID</th><th>类型/坑位</th><th>素材</th>
+        <th>标题</th><th>描述</th><th>状态</th><th>阻断原因</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.task_id }}</td>
+        <td>{{ item.product_id }}</td>
+        <td>{{ item.material_type }} / {{ item.slot_index }}</td>
+        <td>
+          {% for asset in item.assets %}
+          <img src="{{ asset.source_path }}" alt="{{ asset.asset_id }}" title="{{ asset.source_system }} / {{ asset.license_status }}">
+          {% endfor %}
+        </td>
+        <td>{{ item.title }}</td>
+        <td>{{ item.description }}</td>
+        <td>{{ item.status.value }}</td>
+        <td class="blocked">{{ item.reason_codes | join('; ') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>
