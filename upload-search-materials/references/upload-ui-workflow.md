@@ -13,7 +13,7 @@
 
 ## 补采
 
-只处理 eligibility 为 eligible 且导出无法确定缺口的商品。按精确商品 ID 搜索，读取目标 3/9 坑、现有素材数、空坑位和审核状态。素材表容器或字段不存在时返回 `SELECTOR_INVALID`。
+只处理 eligibility 为 eligible 且导出无法确定缺口的商品。按精确商品 ID 搜索，读取目标 3/9 坑、现有素材数、空坑位和审核状态。素材表容器或字段不存在时返回 `SELECTOR_INVALID`：商品 eligibility 保持 `eligible`，受影响坑位进入 `needs_manual_review`，未知字段保持未知。
 
 ## 发布
 

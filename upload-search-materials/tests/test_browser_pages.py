@@ -163,13 +163,18 @@ def test_missing_material_table_is_not_interpreted_as_zero():
     page.texts["#desired-slots"] = "3坑"
     selectors = dict(REQUIRED_SELECTOR_VALUES)
 
-    with pytest.raises(SelectorInvalidError, match="material_table"):
-        supplement_material_status(
-            page,
-            selectors,
-            ["123"],
-            collected_at="2026-07-17T10:00:00+08:00",
-        )
+    rows = supplement_material_status(
+        page,
+        selectors,
+        ["123"],
+        collected_at="2026-07-17T10:00:00+08:00",
+    )
+
+    assert rows[0]["状态"] == "needs_manual_review"
+    assert rows[0]["原因码"] == "SELECTOR_INVALID"
+    assert rows[0]["现有素材数"] == ""
+    assert rows[0]["空坑位"] == ""
+    assert "failed_field=material_table" in rows[0]["证据"]
 
 
 def test_material_status_supplement_reads_exact_product():
@@ -195,8 +200,10 @@ def test_material_status_supplement_reads_exact_product():
             "空坑位": "3",
             "审核状态": "审核通过;审核中",
             "审核状态完整": "true",
+            "状态": "ready_for_review",
+            "原因码": "",
             "采集时间": "2026-07-17T10:00:00+08:00",
-            "证据": "product=123;rows=2",
+            "证据": "product=123;rows=2;selector_version=runtime",
         }
     ]
 
@@ -293,6 +300,32 @@ def test_publish_timeout_does_not_click_twice(tmp_path):
     assert page.clicked.count("#publish") == 1
     assert outcome.status == "publish_uncertain"
     assert outcome.retry_allowed is False
+
+
+def test_before_publish_checkpoint_runs_before_the_single_click(tmp_path):
+    page = configured_upload_page()
+    page.visible.add("#success")
+    page.texts["#remote-id"] = "RM-1"
+    item = approved_item(tmp_path)
+    checkpoints = []
+
+    def checkpoint():
+        assert "#publish" not in page.clicked
+        checkpoints.append("uploading-persisted")
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        approval_manifest(item),
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+        before_publish=checkpoint,
+    )
+
+    assert checkpoints == ["uploading-persisted"]
+    assert page.clicked.count("#publish") == 1
+    assert outcome.status == "submitted"
 
 
 def test_changed_approved_content_stops_before_publish(tmp_path):

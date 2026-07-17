@@ -235,10 +235,15 @@ def test_approve_creates_manifest_only_for_selected_ready_items(tmp_path):
         ]
     )
     manifest = json.loads((run_dir / "approval-manifest.json").read_text(encoding="utf-8"))
+    persisted_items = json.loads((run_dir / "material-items.json").read_text(encoding="utf-8"))
+    state = StateStore(run_dir / "run.sqlite3")
 
     assert exit_code == 0
     assert manifest["entries"][0]["task_id"] == "MAT-1"
     assert len(manifest["manifest_sha256"]) == 64
+    assert persisted_items[0]["status"] == "approved"
+    assert state.item_status("MAT-1") == "approved"
+    state.close()
 
 
 def test_publish_requires_manifest_before_browser_use(tmp_path):

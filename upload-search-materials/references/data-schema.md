@@ -18,11 +18,28 @@
 
 `backend-material-status.csv` 字段：`商品ID`、`目标坑位`、`现有素材数`、`空坑位`、`审核状态`、`审核状态完整`、`采集时间`、`证据`。
 
-未知值保留未知；缺失选择器不能写成 0 或空列表。
+未知值保留未知；缺失选择器不能写成 0 或空列表。`证据` 至少包含商品 ID、目标坑位、页面可见店铺、选择器配置版本、失败字段或选择器、采集时间，以及截图或 DOM 摘要文件的路径和 SHA-256。发生 `SELECTOR_INVALID` 时，数值字段保持未知，另记录原因码和受影响坑位的 `needs_manual_review` 状态。
 
 ## Asset Record
 
 字段：`asset_id`、`product_id`、`sku`、`asset_type`、`source_system`、`source_path`、`license_status`、`sha256`、`width`、`height`、`duration`、`validation_status`、`reason_codes`。
+
+目录型素材默认只在 `<asset-root>/<商品ID>/` 查找，其次在 `<asset-root>/<货号>/` 查找。逐文件授权必须由素材清单表示；批次级 `--license-status confirmed` 只能用于该目录内所有文件已由用户确认同一授权状态的情形。
+
+## AI 文案响应
+
+JSON 顶层为对象，键使用 `<商品ID>:<坑位号>`，值至少包含 `title` 和 `description` 字符串。例如：
+
+```json
+{
+  "123456:1": {
+    "title": "儿童水杯",
+    "description": "依据已提供商品属性生成的描述"
+  }
+}
+```
+
+文案只能使用已提供的商品属性作为事实依据；缺失响应或依据不足进入人工审核。
 
 ## Two-Level Tasks
 
@@ -37,3 +54,7 @@
 必需字段：schema version、目标店铺、精确 task ID、商品 ID、媒体 SHA-256、标题、描述、动作、批准人、批准时间、有效期和 manifest SHA-256。
 
 发布前对规范化 JSON 重新计算 SHA-256。批准后的内容变化不得沿用旧批准。
+
+## 时间与批次格式
+
+所有 CLI 时间参数使用带时区的 ISO 8601，例如 `2026-07-17T10:00:00+08:00`。`run-id` 建议使用不可重复且可读的值，例如 `20260717T100000+0800-kktree-export`；导出批次 ID 与后续 dry-run 的内部 run ID 分开记录并通过来源文件哈希关联。

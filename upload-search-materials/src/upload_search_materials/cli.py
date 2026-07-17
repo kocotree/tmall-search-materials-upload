@@ -284,6 +284,13 @@ def _approve(args) -> int:
         args.confirmed_at,
         valid_until=args.valid_until,
     )
+    write_json(run_dir / "material-items.json", items)
+    state = StateStore(run_dir / "run.sqlite3")
+    try:
+        for item in selected:
+            state.save_item(item.task_id, "approved")
+    finally:
+        state.close()
     write_json(run_dir / "approval-manifest.json", manifest)
     return 0
 
@@ -357,6 +364,19 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                     existing = state.item_record(item.task_id)
                     if existing is None or existing["status"] != "approved":
                         state.save_item(item.task_id, "approved")
+                    attempt_count = int(existing["attempt_count"]) if existing else 0
+
+                    def persist_pre_publish_checkpoint(
+                        task_id=item.task_id,
+                        next_attempt=attempt_count + 1,
+                    ):
+                        state.save_item(
+                            task_id,
+                            "uploading",
+                            evidence="PRE_PUBLISH_CHECKPOINT",
+                            attempt_count=next_attempt,
+                        )
+
                     outcome = upload_approved_item(
                         resolved_page,
                         item,
@@ -364,15 +384,15 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                         selectors,
                         expected_store=args.store,
                         now=args.now or _now_iso(),
+                        before_publish=persist_pre_publish_checkpoint,
                     )
+                    checkpoint = state.item_record(item.task_id)
                     state.save_item(
                         item.task_id,
                         outcome.status,
                         remote_material_id=outcome.remote_material_id,
                         evidence=outcome.evidence or outcome.reason,
-                        attempt_count=(
-                            1 if outcome.status in {"submitted", "publish_uncertain"} else 0
-                        ),
+                        attempt_count=int(checkpoint["attempt_count"]),
                     )
                     outcomes.append(
                         {
@@ -446,6 +466,8 @@ def _supplement(args, page, page_factory=None) -> int:
         "空坑位",
         "审核状态",
         "审核状态完整",
+        "状态",
+        "原因码",
         "采集时间",
         "证据",
     ]

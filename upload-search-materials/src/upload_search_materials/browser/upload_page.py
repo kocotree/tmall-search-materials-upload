@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from typing import Callable
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -65,6 +66,7 @@ def upload_approved_item(
     *,
     expected_store: str,
     now: str,
+    before_publish: Callable[[], None] | None = None,
 ) -> UploadOutcome:
     approval = verify_manifest(
         manifest,
@@ -85,6 +87,8 @@ def upload_approved_item(
     except (StoreIdentityError, HumanCheckRequired, ProductIdentityError, SelectorInvalidError) as error:
         return UploadOutcome("blocked", str(error), retry_allowed=False)
 
+    if before_publish is not None:
+        before_publish()
     try:
         page.locator(selectors["publish_button"]).click()
     except PlaywrightTimeoutError:
