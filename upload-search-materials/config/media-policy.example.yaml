@@ -1,0 +1,18 @@
+image:
+  formats: [jpg, jpeg, png, webp]
+  allowed_aspect_ratios: ["3:4", "1:1"]
+  aspect_ratio_tolerance: 0.02
+  min_images_per_item: 3
+  max_images_per_item: 9
+
+video:
+  formats: null
+  codecs: null
+  duration_min_seconds: null
+  duration_max_seconds: null
+  min_width: null
+  min_height: null
+  aspect_ratios: null
+  max_size_mb: null
+  cover_required: null
+  watermark_allowed: null
