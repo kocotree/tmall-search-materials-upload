@@ -87,3 +87,17 @@ def test_non_selected_category_is_recorded_not_dropped():
 
     assert decisions[0].status == "excluded"
     assert decisions[0].reason_codes == ["NOT_IN_MONTHLY_CATEGORY"]
+
+
+def test_nondigit_product_id_is_blocked_in_authoritative_path():
+    product = ProductRecord(
+        product_id="../outside",
+        title="普通商品",
+        grade="A级",
+        category="水杯",
+    )
+
+    decisions = evaluate_all([product], {}, {"水杯": {"A级"}})
+
+    assert decisions[0].status == "blocked"
+    assert decisions[0].reason_codes == ["INVALID_PRODUCT_ID"]

@@ -6,10 +6,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
 import sys
 from typing import Sequence
 
-from .approval import create_manifest, render_review_html
+from .approval import create_manifest, render_review_html, verify_manifest
 from .assets import (
     DirectoryAssetSource,
     inspect_asset,
@@ -266,11 +267,21 @@ def _approve(args) -> int:
         material_item_from_dict(value)
         for value in read_json(run_dir / "material-items.json")
     ]
+    product_tasks_path = run_dir / "product-tasks.json"
+    if not product_tasks_path.is_file():
+        print("批准失败：product-tasks.json 不存在", file=sys.stderr)
+        return 1
+    product_statuses = {
+        str(task.get("product_id", "")): task.get("status", "")
+        for task in read_json(product_tasks_path)
+    }
     requested = set(args.task_id)
     selected = [
         item
         for item in items
-        if item.task_id in requested and item.status == MaterialStatus.READY_FOR_REVIEW
+        if item.task_id in requested
+        and item.status == MaterialStatus.READY_FOR_REVIEW
+        and product_statuses.get(item.product_id) == "ready_for_review"
     ]
     if {item.task_id for item in selected} != requested:
         print("批准失败：存在未知或未达到 ready_for_review 的 task ID", file=sys.stderr)
@@ -283,12 +294,22 @@ def _approve(args) -> int:
         args.confirmed_by,
         args.confirmed_at,
         valid_until=args.valid_until,
+        run_id=run["run_id"],
+        source_sha256=run.get("source_sha256", {}),
     )
     write_json(run_dir / "material-items.json", items)
     state = StateStore(run_dir / "run.sqlite3")
     try:
         for item in selected:
-            state.save_item(item.task_id, "approved")
+            if state.item_status(item.task_id) is None:
+                state.save_item(item.task_id, "ready_for_review")
+            _persist_item_transition(
+                state,
+                item.task_id,
+                "approved",
+                reason="APPROVED_BY_USER",
+                evidence=f"manifest={manifest['manifest_sha256']}",
+            )
     finally:
         state.close()
     write_json(run_dir / "approval-manifest.json", manifest)
@@ -305,6 +326,56 @@ def partition_persisted_items(state: StateStore, items, *, resume: bool):
     return upload_items, verification_items
 
 
+def _persist_item_transition(
+    state: StateStore,
+    task_id: str,
+    new_status: str,
+    *,
+    reason: str,
+    evidence: str,
+    remote_material_id: str | None = None,
+    attempt_count: int = 0,
+) -> None:
+    current = state.item_status(task_id)
+    if current is None:
+        state.save_item(
+            task_id,
+            new_status,
+            remote_material_id=remote_material_id,
+            evidence=evidence,
+            attempt_count=attempt_count,
+        )
+        return
+    if current != new_status:
+        state.record_transition(
+            task_id,
+            current,
+            new_status,
+            reason=reason,
+            evidence=evidence,
+            remote_material_id=remote_material_id,
+            attempt_count=attempt_count,
+        )
+        return
+    state.update_item_evidence(
+        task_id,
+        evidence=evidence,
+        remote_material_id=remote_material_id,
+        attempt_count=attempt_count,
+    )
+
+
+def _run_sources_unchanged(run: dict) -> bool:
+    files = run.get("source_files", {})
+    expected = run.get("source_sha256", {})
+    if set(files) != set(expected):
+        return False
+    try:
+        return all(sha256_file(Path(files[name])) == expected[name] for name in files)
+    except OSError:
+        return False
+
+
 def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
     run_dir = Path(args.run_dir)
     manifest_path = run_dir / "approval-manifest.json"
@@ -315,15 +386,67 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
         print("发布被阻断：选择器配置不存在", file=sys.stderr)
         return 2
     selectors = load_selectors(Path(args.selectors))
+    run = read_json(run_dir / "run.json")
     manifest = read_json(manifest_path)
-    entries = {entry["task_id"] for entry in manifest["entries"]}
+    manifest_entries = manifest.get("entries")
+    if not isinstance(manifest_entries, list):
+        print("发布被阻断：manifest entries 无效", file=sys.stderr)
+        return 2
+    entries = {entry.get("task_id") for entry in manifest_entries if isinstance(entry, dict)}
     items = [
         material_item_from_dict(value)
         for value in read_json(run_dir / "material-items.json")
         if value.get("task_id") in entries
     ]
+    if not entries or {item.task_id for item in items} != entries:
+        print("发布被阻断：manifest task 与批次任务不一致", file=sys.stderr)
+        return 2
     for item in items:
         item.status = MaterialStatus.APPROVED
+    if not _run_sources_unchanged(run):
+        print("发布被阻断：批次输入文件缺失或哈希变化", file=sys.stderr)
+        return 2
+    approval = verify_manifest(
+        manifest,
+        items,
+        expected_store=run.get("store", ""),
+        now=_now_iso(),
+        expected_run_id=run.get("run_id", ""),
+        expected_source_sha256=run.get("source_sha256", {}),
+        rehash_assets=True,
+    )
+    if not approval.valid or args.store.strip() != run.get("store", "").strip():
+        reason = approval.reason or "STORE_IDENTITY_MISMATCH"
+        print(f"发布被阻断：{reason}", file=sys.stderr)
+        return 2
+    state_path = run_dir / "run.sqlite3"
+    if not state_path.is_file():
+        print("发布被阻断：STATE_MISSING / run.sqlite3 不存在，必须先远端核验", file=sys.stderr)
+        return 2
+    try:
+        preflight_state = StateStore(state_path)
+        try:
+            persisted = {
+                item.task_id: preflight_state.item_record(item.task_id)
+                for item in items
+            }
+        finally:
+            preflight_state.close()
+    except sqlite3.DatabaseError:
+        print("发布被阻断：STATE_MISSING / run.sqlite3 损坏，必须先远端核验", file=sys.stderr)
+        return 2
+    if any(record is None for record in persisted.values()):
+        print("发布被阻断：STATE_MISSING / 任务状态记录缺失，必须先远端核验", file=sys.stderr)
+        return 2
+    if not resume:
+        unresolved = [
+            task_id
+            for task_id, record in persisted.items()
+            if record["status"] not in {"approved", "ready_for_review"}
+        ]
+        if unresolved:
+            print("发布被阻断：存在已尝试任务，请使用 resume", file=sys.stderr)
+            return 2
     try:
         with page_context(page, args.cdp_url, page_factory) as resolved_page:
             outcomes = []
@@ -334,6 +457,7 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                     items,
                     resume=resume,
                 )
+                batch_paused = False
                 for item in verification_items:
                     existing = state.item_record(item.task_id)
                     outcome = verify_remote_item(
@@ -344,9 +468,13 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                         submitted_at=existing["updated_at"],
                     )
                     persisted_status = "failed" if outcome.status == "not_found" else outcome.status
-                    state.save_item(
+                    if existing["status"] == "under_review" and persisted_status == "submitted":
+                        persisted_status = "under_review"
+                    _persist_item_transition(
+                        state,
                         item.task_id,
                         persisted_status,
+                        reason=outcome.reason or "REMOTE_VERIFIED",
                         remote_material_id=outcome.remote_material_id,
                         evidence=outcome.evidence or outcome.reason,
                         attempt_count=int(existing["attempt_count"]),
@@ -360,19 +488,32 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                             "evidence": outcome.evidence,
                         }
                     )
-                for item in upload_items:
+                    if outcome.status == "publish_uncertain":
+                        batch_paused = True
+                        break
+                for item in ([] if batch_paused else upload_items):
                     existing = state.item_record(item.task_id)
                     if existing is None or existing["status"] != "approved":
-                        state.save_item(item.task_id, "approved")
+                        if existing is None:
+                            state.save_item(item.task_id, "ready_for_review")
+                        _persist_item_transition(
+                            state,
+                            item.task_id,
+                            "approved",
+                            reason="MANIFEST_APPROVED",
+                            evidence=f"manifest={manifest['manifest_sha256']}",
+                        )
                     attempt_count = int(existing["attempt_count"]) if existing else 0
 
                     def persist_pre_publish_checkpoint(
                         task_id=item.task_id,
                         next_attempt=attempt_count + 1,
                     ):
-                        state.save_item(
+                        _persist_item_transition(
+                            state,
                             task_id,
                             "uploading",
+                            reason="PRE_PUBLISH_CHECKPOINT",
                             evidence="PRE_PUBLISH_CHECKPOINT",
                             attempt_count=next_attempt,
                         )
@@ -383,13 +524,15 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                         manifest,
                         selectors,
                         expected_store=args.store,
-                        now=args.now or _now_iso(),
+                        now=_now_iso(),
                         before_publish=persist_pre_publish_checkpoint,
                     )
                     checkpoint = state.item_record(item.task_id)
-                    state.save_item(
+                    _persist_item_transition(
+                        state,
                         item.task_id,
                         outcome.status,
+                        reason=outcome.reason or "PUBLISH_RESULT",
                         remote_material_id=outcome.remote_material_id,
                         evidence=outcome.evidence or outcome.reason,
                         attempt_count=int(checkpoint["attempt_count"]),
@@ -403,14 +546,30 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                             "evidence": outcome.evidence,
                         }
                     )
+                    if outcome.status == "publish_uncertain":
+                        break
             finally:
                 state.close()
     except BrowserSessionRequired as error:
         print(f"发布被阻断：{error}", file=sys.stderr)
         return 2
-    write_json(run_dir / "upload-results.json", outcomes)
+    results_path = run_dir / "upload-results.json"
+    previous_outcomes = read_json(results_path) if results_path.is_file() else []
+    outcomes_by_task = {
+        value.get("task_id"): value
+        for value in previous_outcomes
+        if value.get("task_id")
+    }
+    outcomes_by_task.update(
+        {value["task_id"]: value for value in outcomes if value.get("task_id")}
+    )
+    durable_outcomes = [outcomes_by_task[task_id] for task_id in sorted(outcomes_by_task)]
+    write_json(results_path, durable_outcomes)
     successful_states = {"submitted", "under_review", "success"}
-    return 0 if all(value["status"] in successful_states for value in outcomes) else 1
+    return 0 if entries and all(
+        outcomes_by_task.get(task_id, {}).get("status") in successful_states
+        for task_id in entries
+    ) else 1
 
 
 def _report(args) -> int:
@@ -530,14 +689,12 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--store", required=True)
     publish.add_argument("--selectors", required=True)
     publish.add_argument("--cdp-url")
-    publish.add_argument("--now")
 
     resume = subparsers.add_parser("resume", help="Resume using persisted state")
     resume.add_argument("--run-dir", required=True)
     resume.add_argument("--store", required=True)
     resume.add_argument("--selectors", required=True)
     resume.add_argument("--cdp-url")
-    resume.add_argument("--now")
 
     report = subparsers.add_parser("report", help="Regenerate the Chinese batch summary")
     report.add_argument("--run-dir", required=True)

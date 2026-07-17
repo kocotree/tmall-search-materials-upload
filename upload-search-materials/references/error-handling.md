@@ -19,6 +19,7 @@
 | `PUBLISH_UNCERTAIN` | 点击发布后没有可信结果 | 禁止重发，先远端回查 |
 | `REMOTE_EVIDENCE_MISMATCH` | 远端记录与批准指纹/坑位/时间不一致 | 保持不确定并转人工 |
 | `MODERATION_FAILED` | 平台审核失败 | 记录平台原因，转人工处理 |
+| `STATE_MISSING` | `run.sqlite3`、任务状态行或状态证据缺失/损坏 | 禁止自动上传，先做可信远端核验 |
 
 ## 重试边界
 
@@ -26,6 +27,7 @@
 - 发布按钮在一个 `material_item` 上最多点击一次。
 - 点击发布后的超时、页面关闭或成功信号缺失一律进入 `publish_uncertain`。
 - `publish_uncertain` 必须通过正确店铺、精确商品 ID、目标坑位、批准内容指纹和提交时间窗口回查。
+- `run.sqlite3` 及 manifest 中每个 task 的状态行必须存在；流程不得静默创建新状态库后重排队。
 - 只有远端素材列表可见、精确检索成功且没有对应记录时，才能返回 `REMOTE_ABSENCE_CONFIRMED`；重新发布仍需要新的显式执行决定。
 - `REMOTE_ABSENCE_CONFIRMED` 不会使原 task 回到可上传状态。若人工决定重提，必须生成新 task ID、重新生成批准清单并再次显式执行；原 task 保留审计历史。
 

@@ -73,6 +73,7 @@ def upload_approved_item(
         [item],
         expected_store=expected_store,
         now=now,
+        rehash_assets=True,
     )
     if not approval.valid:
         return UploadOutcome("blocked", approval.reason, retry_allowed=False)

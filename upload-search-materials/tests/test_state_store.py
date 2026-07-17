@@ -44,6 +44,48 @@ def test_valid_transition_is_persisted_with_evidence(tmp_path):
     store.close()
 
 
+def test_reconciliation_can_resolve_uploading_directly_to_success(tmp_path):
+    store = StateStore(tmp_path / "run.sqlite3")
+    store.save_item("MAT-1", "uploading", evidence="PRE_PUBLISH_CHECKPOINT", attempt_count=1)
+
+    store.record_transition(
+        "MAT-1",
+        "uploading",
+        "success",
+        reason="REMOTE_VERIFIED",
+        evidence="remote row",
+        remote_material_id="RM-1",
+        attempt_count=1,
+    )
+
+    record = store.item_record("MAT-1")
+    assert record["status"] == "success"
+    assert record["remote_material_id"] == "RM-1"
+    assert record["attempt_count"] == 1
+    assert record["evidence"] == "remote row"
+    store.close()
+
+
+@pytest.mark.parametrize("old_status", ["submitted", "under_review"])
+def test_inconclusive_reverification_returns_durable_state_to_uncertain(tmp_path, old_status):
+    store = StateStore(tmp_path / "run.sqlite3")
+    store.save_item("MAT-1", old_status, remote_material_id="RM-1", evidence="old remote row")
+
+    store.record_transition(
+        "MAT-1",
+        old_status,
+        "publish_uncertain",
+        reason="REMOTE_TABLE_NOT_VISIBLE",
+        evidence="verification unavailable",
+        remote_material_id="RM-1",
+        attempt_count=1,
+    )
+
+    assert store.item_status("MAT-1") == "publish_uncertain"
+    assert store.transitions_for("MAT-1")[-1]["reason"] == "REMOTE_TABLE_NOT_VISIBLE"
+    store.close()
+
+
 def test_invalid_transition_does_not_modify_state(tmp_path):
     store = StateStore(tmp_path / "run.sqlite3")
     store.save_item("MAT-1", "approved")

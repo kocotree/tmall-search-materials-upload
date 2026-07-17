@@ -11,10 +11,10 @@ ALLOWED_TRANSITIONS = {
     "needs_manual_review": {"ready_for_review", "failed"},
     "ready_for_review": {"approved", "needs_manual_review"},
     "approved": {"uploading", "ready_for_review", "blocked"},
-    "uploading": {"submitted", "failed", "publish_uncertain"},
+    "uploading": {"submitted", "under_review", "success", "failed", "publish_uncertain"},
     "publish_uncertain": {"submitted", "under_review", "success", "failed"},
-    "submitted": {"under_review", "success", "failed"},
-    "under_review": {"success", "failed"},
+    "submitted": {"under_review", "success", "failed", "publish_uncertain"},
+    "under_review": {"success", "failed", "publish_uncertain"},
     "failed": {"ready_for_review"},
 }
 
@@ -164,6 +164,8 @@ class StateStore:
         *,
         reason: str,
         evidence: str,
+        remote_material_id: str | None = None,
+        attempt_count: int | None = None,
     ) -> None:
         current = self.item_status(task_id)
         if current != old_status:
@@ -181,8 +183,43 @@ class StateStore:
                 (task_id, old_status, new_status, reason, evidence, timestamp),
             )
             self.connection.execute(
-                "UPDATE material_items SET status=?, evidence=?, updated_at=? WHERE task_id=?",
-                (new_status, evidence, timestamp, task_id),
+                """
+                UPDATE material_items SET
+                    status=?, evidence=?,
+                    remote_material_id=COALESCE(?, remote_material_id),
+                    attempt_count=COALESCE(?, attempt_count),
+                    updated_at=?
+                WHERE task_id=?
+                """,
+                (
+                    new_status,
+                    evidence,
+                    remote_material_id,
+                    attempt_count,
+                    timestamp,
+                    task_id,
+                ),
+            )
+
+    def update_item_evidence(
+        self,
+        task_id: str,
+        *,
+        evidence: str,
+        remote_material_id: str | None = None,
+        attempt_count: int | None = None,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE material_items SET
+                    evidence=?,
+                    remote_material_id=COALESCE(?, remote_material_id),
+                    attempt_count=COALESCE(?, attempt_count),
+                    updated_at=?
+                WHERE task_id=?
+                """,
+                (evidence, remote_material_id, attempt_count, utc_now_iso(), task_id),
             )
 
     def transitions_for(self, task_id: str) -> list[dict]:

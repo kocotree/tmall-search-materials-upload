@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -242,7 +243,7 @@ def approved_item(tmp_path):
         source_path=str(image),
         asset_type="image",
         license_status="confirmed",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(b"image").hexdigest(),
         validation_status="valid",
     )
     return MaterialItem(
@@ -333,6 +334,26 @@ def test_changed_approved_content_stops_before_publish(tmp_path):
     item = approved_item(tmp_path)
     manifest = approval_manifest(item)
     item.title = "审批后修改"
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        manifest,
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+    )
+
+    assert outcome.status == "blocked"
+    assert outcome.reason == "APPROVED_CONTENT_CHANGED"
+    assert "#publish" not in page.clicked
+
+
+def test_replaced_asset_bytes_stop_before_publish(tmp_path):
+    page = configured_upload_page()
+    item = approved_item(tmp_path)
+    manifest = approval_manifest(item)
+    Path(item.assets[0].source_path).write_bytes(b"replaced after approval")
 
     outcome = upload_approved_item(
         page,

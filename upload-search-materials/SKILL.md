@@ -40,7 +40,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 - 不调用未公开的天猫内部 API，不绕过登录、验证码、扫码、短信、风控或权限。
 - 当前店铺与目标店铺不一致：整批进入 blocked，任何任务都不得搜索或发布。
 - 批次 blocked 是运行门禁：保留各 item 原状态并标记 held，不把坑位任务强改成不存在于其状态机的 blocked；店铺恢复正确并重新核验后再决定是否解除门禁。
-- 批准必须引用 `approval-manifest.json` 的总 SHA-256；口头“全部发”不能替代批次清单。
+- 批准清单总 SHA-256 必须覆盖 run ID、店铺、输入哈希、批准人、有效期和全部 item；发布使用系统时钟并重算输入及媒体文件哈希。口头“全部发”不能替代批次清单。
 - 单个 item 的媒体、标题、描述、动作或坑位变化：只撤销该 item 的批准。店铺、schema、manifest 总哈希或批次输入哈希变化：阻断整批。
 - 单项批准撤销时从 `approved` 退回 `ready_for_review`，记录 `APPROVED_CONTENT_CHANGED`，重新生成该项内容哈希并重新批准；其他未变化 item 保留批准但可被批次门禁暂时 held。
 - 发布按钮每个 item 最多点击一次。点击后结果不可信时，该 item 进入 `publish_uncertain`，同时暂停批次并先回查。

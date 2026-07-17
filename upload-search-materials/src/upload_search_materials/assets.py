@@ -198,9 +198,10 @@ class DirectoryAssetSource:
         self.root = Path(root).resolve()
 
     def collect(self, product_id: str, sku: str) -> list[Path]:
-        candidates = [self.root / product_id] if product_id else []
+        candidates = [(self.root / product_id).resolve()] if product_id else []
         if sku:
-            candidates.append(self.root / sku)
+            candidates.append((self.root / sku).resolve())
+        candidates = [candidate for candidate in candidates if candidate.is_relative_to(self.root)]
         directory = next((candidate for candidate in candidates if candidate.is_dir()), None)
         if directory is None:
             return []

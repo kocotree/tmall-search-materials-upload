@@ -34,7 +34,7 @@ def verify_remote_item(
         return UploadOutcome(
             "not_found",
             "REMOTE_ABSENCE_CONFIRMED",
-            retry_allowed=True,
+            retry_allowed=False,
             evidence=f"product={item.product_id};slot={item.slot_index};remote_rows=0",
         )
     fingerprint = page.locator(selectors["remote_material_fingerprint"]).inner_text().strip()

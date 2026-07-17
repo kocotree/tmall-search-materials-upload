@@ -73,6 +73,18 @@ def test_directory_source_prefers_product_id_then_sku(tmp_path):
     assert paths == [product_dir / "product.png"]
 
 
+def test_directory_source_rejects_paths_outside_root(tmp_path):
+    root = tmp_path / "assets"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"secret")
+
+    paths = DirectoryAssetSource(root).collect("../outside", "")
+
+    assert paths == []
+
+
 def test_manifest_source_filters_by_product_and_keeps_license(tmp_path):
     manifest = tmp_path / "assets.csv"
     image_path = tmp_path / "a.png"

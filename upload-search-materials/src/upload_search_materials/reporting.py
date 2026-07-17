@@ -130,23 +130,59 @@ def write_summary(run_dir: Path) -> Path:
         if (directory / "material-items.json").exists()
         else []
     )
+    upload_results = (
+        read_json(directory / "upload-results.json")
+        if (directory / "upload-results.json").exists()
+        else []
+    )
+    outcomes_by_task = {
+        value.get("task_id", ""): value
+        for value in upload_results
+        if value.get("task_id")
+    }
+    effective_material_statuses = [
+        outcomes_by_task.get(item.get("task_id", ""), item).get("status", "unknown")
+        for item in material_items
+    ]
     product_counts = Counter(item.get("status", "unknown") for item in product_tasks)
-    material_counts = Counter(item.get("status", "unknown") for item in material_items)
+    material_counts = Counter(effective_material_statuses)
     lines = [
         f"# 批次报告 {run.get('run_id', '')}",
         "",
         f"- 目标店铺: {run.get('store', '')}",
+        f"- 目标月份: {run.get('month', '')}",
         f"- 模式: {run.get('mode', '')}",
+        "",
+        "## 输入 SHA-256",
+        "",
+    ]
+    source_hashes = run.get("source_sha256", {})
+    if source_hashes:
+        lines.extend(f"- {name}: {digest}" for name, digest in sorted(source_hashes.items()))
+    else:
+        lines.append("- 未记录")
+    lines.extend([
         "",
         "## 商品任务",
         "",
-    ]
+    ])
     lines.extend(f"- {status}: {count}" for status, count in sorted(product_counts.items()))
     lines.extend(["", "## 坑位任务", ""])
     if material_counts:
         lines.extend(f"- {status}: {count}" for status, count in sorted(material_counts.items()))
     else:
         lines.append("- 无坑位任务")
+    if upload_results:
+        lines.extend(["", "## 远端结果", ""])
+        for result in upload_results:
+            lines.append(
+                "- {task} / {remote} / {status}{reason}".format(
+                    task=result.get("task_id", ""),
+                    remote=result.get("remote_material_id") or "无远端ID",
+                    status=result.get("status", "unknown"),
+                    reason=(f" / {result['reason']}" if result.get("reason") else ""),
+                )
+            )
     output = directory / "summary.md"
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output

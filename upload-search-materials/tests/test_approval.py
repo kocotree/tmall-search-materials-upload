@@ -93,6 +93,31 @@ def test_manifest_entry_tampering_is_detected():
     assert result.reason == "MANIFEST_HASH_INVALID"
 
 
+def test_manifest_expiry_tampering_is_detected():
+    item = sample_material_item()
+    manifest = create_manifest(
+        "KK Tree",
+        [item],
+        "operator",
+        "2026-07-17T10:00:00+08:00",
+        valid_until="2026-07-18T10:00:00+08:00",
+        run_id="RUN-1",
+        source_sha256={"products": "a" * 64},
+    )
+    manifest["valid_until"] = "2099-07-18T10:00:00+08:00"
+
+    result = verify_manifest(
+        manifest,
+        [item],
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+        expected_run_id="RUN-1",
+        expected_source_sha256={"products": "a" * 64},
+    )
+
+    assert result.reason == "MANIFEST_HASH_INVALID"
+
+
 def test_expired_manifest_is_rejected():
     item = sample_material_item()
     manifest = create_manifest(
@@ -111,6 +136,26 @@ def test_expired_manifest_is_rejected():
     )
 
     assert result.reason == "APPROVAL_EXPIRED"
+
+
+def test_future_dated_approval_is_rejected():
+    item = sample_material_item()
+    manifest = create_manifest(
+        "KK Tree",
+        [item],
+        "operator",
+        "2026-07-18T10:00:00+08:00",
+        valid_until="2026-07-19T10:00:00+08:00",
+    )
+
+    result = verify_manifest(
+        manifest,
+        [item],
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+    )
+
+    assert result.reason == "APPROVAL_NOT_YET_VALID"
 
 
 def test_review_html_escapes_copy_and_shows_task_id(tmp_path):

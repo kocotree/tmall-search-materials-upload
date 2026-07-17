@@ -104,6 +104,17 @@ def evaluate_all(
                 EligibilityDecision("", source_row, "blocked", ["MISSING_PRODUCT_ID"], evidence)
             )
             continue
+        if not record.product_id.isdigit():
+            decisions.append(
+                EligibilityDecision(
+                    record.product_id,
+                    source_row,
+                    "blocked",
+                    ["INVALID_PRODUCT_ID"],
+                    evidence,
+                )
+            )
+            continue
         if id_counts[record.product_id] > 1:
             decisions.append(
                 EligibilityDecision(

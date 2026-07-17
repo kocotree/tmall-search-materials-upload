@@ -51,9 +51,9 @@ JSON 顶层为对象，键使用 `<商品ID>:<坑位号>`，值至少包含 `tit
 
 ## Approval Manifest
 
-必需字段：schema version、目标店铺、精确 task ID、商品 ID、媒体 SHA-256、标题、描述、动作、批准人、批准时间、有效期和 manifest SHA-256。
+必需字段：schema version、run ID、目标店铺、批次输入 SHA-256、精确 task ID、商品 ID、媒体 SHA-256、标题、描述、动作、批准人、批准时间、有效期和 manifest SHA-256。
 
-发布前对规范化 JSON 重新计算 SHA-256。批准后的内容变化不得沿用旧批准。
+manifest SHA-256 覆盖除自身之外的完整规范化批准信封，不能只覆盖 entries。发布前使用可信系统时钟检查有效期，重算批次输入文件和每个媒体文件的 SHA-256；批准后的内容变化不得沿用旧批准。
 
 ## 时间与批次格式
 

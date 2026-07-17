@@ -7,6 +7,8 @@ from openpyxl import Workbook
 from PIL import Image
 
 import pytest
+import upload_search_materials.cli as cli_module
+from upload_search_materials.approval import create_manifest
 
 from upload_search_materials.cli import (
     BrowserSessionRequired,
@@ -16,6 +18,7 @@ from upload_search_materials.cli import (
 )
 from upload_search_materials.reporting import material_item_from_dict
 from upload_search_materials.state_store import StateStore
+from upload_search_materials.browser.upload_page import UploadOutcome
 
 
 PRODUCT_HEADERS = [
@@ -192,7 +195,18 @@ def test_approve_creates_manifest_only_for_selected_ready_items(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "run.json").write_text(
-        json.dumps({"store": "KK Tree", "run_id": "RUN-1"}, ensure_ascii=False),
+        json.dumps(
+            {
+                "store": "KK Tree",
+                "run_id": "RUN-1",
+                "source_sha256": {"products": "a" * 64},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "product-tasks.json").write_text(
+        json.dumps([{"product_id": "123", "status": "ready_for_review"}]),
         encoding="utf-8",
     )
     (run_dir / "material-items.json").write_text(
@@ -240,10 +254,57 @@ def test_approve_creates_manifest_only_for_selected_ready_items(tmp_path):
 
     assert exit_code == 0
     assert manifest["entries"][0]["task_id"] == "MAT-1"
+    assert manifest["run_id"] == "RUN-1"
+    assert manifest["source_sha256"] == {"products": "a" * 64}
     assert len(manifest["manifest_sha256"]) == 64
     assert persisted_items[0]["status"] == "approved"
     assert state.item_status("MAT-1") == "approved"
+    assert state.transitions_for("MAT-1")[0]["reason"] == "APPROVED_BY_USER"
     state.close()
+
+
+def test_approve_rejects_child_of_blocked_product(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"store": "KK Tree", "run_id": "RUN-1", "source_sha256": {}}),
+        encoding="utf-8",
+    )
+    (run_dir / "product-tasks.json").write_text(
+        json.dumps([{"product_id": "123", "status": "blocked"}]),
+        encoding="utf-8",
+    )
+    (run_dir / "material-items.json").write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "MAT-1",
+                    "product_id": "123",
+                    "material_type": "image_text",
+                    "slot_index": 1,
+                    "status": "ready_for_review",
+                    "assets": [],
+                    "title": "标题",
+                    "description": "描述内容满足长度要求。",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "approve",
+            "--run-dir", str(run_dir),
+            "--task-id", "MAT-1",
+            "--confirmed-by", "operator",
+            "--confirmed-at", "2026-07-17T10:00:00+08:00",
+            "--valid-until", "2026-07-18T10:00:00+08:00",
+        ]
+    )
+
+    assert exit_code == 1
+    assert not (run_dir / "approval-manifest.json").exists()
 
 
 def test_publish_requires_manifest_before_browser_use(tmp_path):
@@ -267,14 +328,38 @@ def test_report_summarizes_existing_artifacts(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "run.json").write_text(
-        json.dumps({"run_id": "RUN-1", "store": "KK Tree", "mode": "dry-run"}),
+        json.dumps(
+            {
+                "run_id": "RUN-1",
+                "store": "KK Tree",
+                "month": 7,
+                "mode": "dry-run",
+                "source_sha256": {"products": "a" * 64},
+            }
+        ),
         encoding="utf-8",
     )
     (run_dir / "product-tasks.json").write_text(
         json.dumps([{"status": "blocked"}, {"status": "ready_for_review"}]),
         encoding="utf-8",
     )
-    (run_dir / "material-items.json").write_text("[]", encoding="utf-8")
+    (run_dir / "material-items.json").write_text(
+        json.dumps([{"task_id": "MAT-1", "status": "approved"}]),
+        encoding="utf-8",
+    )
+    (run_dir / "upload-results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "MAT-1",
+                    "status": "under_review",
+                    "remote_material_id": "RM-1",
+                    "reason": "",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     exit_code = main(["report", "--run-dir", str(run_dir)])
     summary = (run_dir / "summary.md").read_text(encoding="utf-8")
@@ -282,6 +367,10 @@ def test_report_summarizes_existing_artifacts(tmp_path):
     assert exit_code == 0
     assert "blocked: 1" in summary
     assert "ready_for_review: 1" in summary
+    assert "目标月份: 7" in summary
+    assert "products: " + "a" * 64 in summary
+    assert "under_review: 1" in summary
+    assert "MAT-1 / RM-1 / under_review" in summary
 
 
 def test_run_builds_reviewable_items_when_all_inputs_are_resolved(tmp_path):
@@ -477,3 +566,103 @@ def test_repeated_publish_does_not_requeue_submitted_item(tmp_path):
     assert upload_items == []
     assert verification_items == []
     state.close()
+
+
+def test_publish_uncertain_pauses_remaining_batch_items(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    items = [
+        {
+            "task_id": task_id,
+            "product_id": product_id,
+            "material_type": "image_text",
+            "slot_index": 1,
+            "status": "approved",
+            "assets": [],
+            "title": "标题",
+            "description": "描述内容满足长度要求。",
+        }
+        for task_id, product_id in (("MAT-1", "123"), ("MAT-2", "456"))
+    ]
+    (run_dir / "material-items.json").write_text(json.dumps(items), encoding="utf-8")
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "RUN-1",
+                "store": "KK Tree",
+                "source_files": {},
+                "source_sha256": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_items = [material_item_from_dict(value) for value in items]
+    (run_dir / "approval-manifest.json").write_text(
+        json.dumps(
+            create_manifest(
+                "KK Tree",
+                manifest_items,
+                "operator",
+                "2026-07-17T10:00:00+08:00",
+                valid_until="2099-07-18T10:00:00+08:00",
+                run_id="RUN-1",
+                source_sha256={},
+            )
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_upload(page, item, manifest, selectors, **kwargs):
+        calls.append(item.task_id)
+        kwargs["before_publish"]()
+        return UploadOutcome("publish_uncertain", "PUBLISH_UNCERTAIN", evidence="timeout")
+
+    monkeypatch.setattr(cli_module, "upload_approved_item", fake_upload)
+    selectors = Path(__file__).parents[1] / "config" / "selectors.example.yaml"
+
+    missing_state_exit = main(
+        [
+            "publish",
+            "--run-dir", str(run_dir),
+            "--store", "KK Tree",
+            "--selectors", str(selectors),
+        ],
+        page=object(),
+    )
+    assert missing_state_exit == 2
+    assert calls == []
+    assert not (run_dir / "run.sqlite3").exists()
+
+    state = StateStore(run_dir / "run.sqlite3")
+    state.save_item("MAT-1", "approved")
+    state.save_item("MAT-2", "approved")
+    state.close()
+
+    exit_code = main(
+        [
+            "publish",
+            "--run-dir", str(run_dir),
+            "--store", "KK Tree",
+            "--selectors", str(selectors),
+        ],
+        page=object(),
+    )
+
+    assert exit_code == 1
+    assert calls == ["MAT-1"]
+    first_results = (run_dir / "upload-results.json").read_text(encoding="utf-8")
+
+    repeated_exit = main(
+        [
+            "publish",
+            "--run-dir", str(run_dir),
+            "--store", "KK Tree",
+            "--selectors", str(selectors),
+        ],
+        page=object(),
+    )
+
+    assert repeated_exit == 2
+    assert calls == ["MAT-1"]
+    assert (run_dir / "upload-results.json").read_text(encoding="utf-8") == first_results
