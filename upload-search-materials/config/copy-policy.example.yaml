@@ -1,0 +1,20 @@
+title:
+  max_characters: 30
+  preferred_han_characters: [8, 20]
+
+description:
+  min_characters: 10
+  max_characters: 1000
+
+allowed_source_fields:
+  - 商品标题
+  - 品类
+  - 卖点1
+  - 卖点2
+  - 短标题
+  - 商家短标题
+  - 利益点
+  - 利益点（短）
+  - 品牌
+
+prohibited_terms: []
