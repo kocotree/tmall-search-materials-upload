@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "upload-search-materials"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "openpyxl>=3.1,<4",
+  "Pillow>=10,<12",
+  "playwright>=1.45,<2",
+  "Jinja2>=3.1,<4",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
