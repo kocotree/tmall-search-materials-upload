@@ -1,35 +1,50 @@
-# Business Rules
+# 业务规则
 
-## Confirmed rules
+## 已确认的商品筛选规则
 
-- Select products from the monthly category and product-grade rules.
-- Exclude products whose product grade is `清仓`.
-- Do not maintain good-experience, member-day, or points-only materials when those labels are reliably identifiable.
-- Fill every required search-recommendation slot.
-- For a 3-slot product with both media types, use 1 video and 2 image-text materials.
-- For a 9-slot product with both media types, use up to 3 videos and 6 image-text materials.
-- If no video exists, prioritize image-text material.
-- Draft titles as `KK树 + 年龄或性别 + 品类词 + 卖点词`.
-- Use model-library, authorized Xiaohongshu/NAS, Feishu, and Guanghe short-video sources only when usage rights are confirmed.
+每个输入商品都必须产生一条审计结果，状态只能是 `eligible`、`excluded` 或 `blocked`。禁止通过 `continue` 静默删除记录。
 
-## Unresolved rules
+按以下顺序判断：
 
-Mark a task `needs_manual_review` until the relevant rule is supplied:
+1. 商品 ID 为空：`blocked / MISSING_PRODUCT_ID`。
+2. 商品 ID 在来源表中重复：所有重复行均为 `blocked / DUPLICATE_PRODUCT_ID`。
+3. 产品等级为 `清仓`：`excluded / EXCLUDE_CLEARANCE`。
+4. 基础素材或搜推导出的商品/素材标题包含 `UVNO`，忽略大小写：`excluded / EXCLUDE_UVNO`。
+5. 标题包含 `好物体验`：`excluded / EXCLUDE_GOOD_EXPERIENCE`。
+6. 标题包含 `会员日`：`excluded / EXCLUDE_MEMBER_DAY`。
+7. 标题包含 `积分`：`excluded / EXCLUDE_POINTS`。
+8. 公司品类不在目标月份规则中：`excluded / NOT_IN_MONTHLY_CATEGORY`。
+9. 标准化产品等级不在该品类目标月份允许等级中：`excluded / GRADE_NOT_SELECTED`。
+10. 其余商品：`eligible`。
 
-- Which product field identifies `UVNO`, good-experience, member-day, points-only, inactive, or special-supply products.
-- Which table wins if monthly category and grade tables conflict.
-- How to resolve duplicate product IDs with different names or grades.
-- Whether new products missing a product ID should be skipped or queued until listing completes.
-- Whether B-grade products ever qualify.
-- How to derive age, gender, category term, and selling points without inference.
-- Prohibited advertising terms and content-review policy.
-- Whether existing material may be reused across products.
+同一商品可以命中多个标题排除规则；系统只写一条审计记录，并按 `UVNO`、`好物体验`、`会员日`、`积分` 的固定顺序保留全部原因码。结构性阻断优先于业务排除。
 
-## Selection decision
+## 坑位分配规则
 
-1. Require a non-empty unique product ID for upload.
-2. Exclude `清仓`.
-3. Match the selected month and company category to the merged monthly rules table.
-4. Match the normalized product grade to the permitted grades.
-5. Apply only exclusion labels that map to documented fields.
-6. Send duplicate IDs, conflicting records, and missing source fields to manual review.
+- 填满后台要求的全部搜推坑位。
+- 3 坑商品同时具备两种媒体时，使用 1 个视频和 2 个图文素材。
+- 9 坑商品同时具备两种媒体时，最多使用 3 个视频和 6 个图文素材。
+- 没有合规视频时优先图文，不得用未配置规格或未确认授权的视频补位。
+
+## 文案规则
+
+- 标题结构为 `KK树 + 有依据的年龄或性别 + 品类词 + 卖点词`。
+- 年龄、性别、材质、认证、功效和防晒等级没有来源字段依据时必须省略。
+- 文案在禁用词、依据或长度校验失败时进入 `needs_manual_review`。
+
+## 素材来源规则
+
+- 只使用授权状态已确认的模特库、NAS、小红书、飞书和光合素材。
+- 商品 ID 是主匹配键，货号是后备键；商品名称不能作为未经确认的唯一匹配依据。
+- 缺少某个来源配置只阻断依赖该来源的坑位，不阻断已由其他合规来源满足的商品。
+
+## 尚需运行时配置的规则
+
+- 月度规则表发生冲突时的权威来源。
+- 重复商品 ID 对应不同名称或等级时的人工裁决方式。
+- B 级商品是否在某些月份例外准入。
+- AI 文案禁用词和广告审核政策。
+- 不同商品之间能否复用同一远端素材。
+- 完整视频容器、编码、时长、分辨率、比例、大小、封面和水印要求。
+
+缺少这些配置时，对应商品或坑位必须进入 `blocked` 或 `needs_manual_review`，不能猜测或伪装为成功。
