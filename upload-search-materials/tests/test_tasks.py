@@ -96,3 +96,26 @@ def test_excluded_product_gets_product_task_but_no_upload_state():
 
     assert tasks[0].status == ProductStatus.EXCLUDED
     assert tasks[0].reason_codes == ["EXCLUDE_POINTS"]
+
+
+def test_product_task_is_blocked_when_not_all_empty_slots_have_items():
+    product = ProductRecord(product_id="123", title="水杯", grade="A级", category="水杯")
+    one_item = build_material_items(
+        run_id="RUN-1",
+        product_id="123",
+        target_slot_indexes=[1],
+        asset_groups=[("image_text", [asset("a"), asset("b"), asset("c")])],
+        copy_results=[copy_result()],
+    )
+
+    tasks = build_product_tasks(
+        run_id="RUN-1",
+        products=[product],
+        decisions_by_product={"123": ("eligible", [])},
+        desired_slots_by_product={"123": 3},
+        material_items_by_product={"123": one_item},
+        required_new_items_by_product={"123": 3},
+    )
+
+    assert tasks[0].status == ProductStatus.BLOCKED
+    assert tasks[0].reason_codes == ["MATERIAL_ITEMS_INCOMPLETE"]

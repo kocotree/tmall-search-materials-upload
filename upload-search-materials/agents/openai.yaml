@@ -1,4 +1,4 @@
 interface:
-  display_name: "Tmall Search Material Uploads"
-  short_description: "Validate and review Tmall search material upload tasks"
-  default_prompt: "Use $upload-search-materials to validate this month product media and prepare upload tasks for human review."
+  display_name: "天猫搜推素材自动化"
+  short_description: "审计、补采、审批并安全发布天猫搜推素材"
+  default_prompt: "Use $upload-search-materials to run a dry-run for this Tmall material batch, preserve every eligibility decision, and stop at explicit safety gates."

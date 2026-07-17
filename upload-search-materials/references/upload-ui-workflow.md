@@ -1,30 +1,31 @@
-# Upload UI Workflow
+# Playwright 后台流程
 
-## Technology choice
+## 会话与配置
 
-1. Use an authorized official API only when its documentation, credentials, scopes, rate limits, idempotency behavior, and status-query endpoint are available.
-2. Otherwise use Playwright or the in-app browser against the user's existing signed-in Tmall session.
-3. Use semantic DOM roles, labels, and nearby text. Avoid fixed screen coordinates.
-4. Keep visual computer-use actions as a fallback for controls that have no stable DOM representation.
-5. Do not use Firecrawl for authenticated upload and publishing.
+- 用户自行登录天猫并处理验证码、短信、扫码和风控。
+- CLI 通过运行时 `--cdp-url` 连接用户已启动的 Chromium 会话；不持久化会话秘密。
+- 每次导出、补采和发布前读取页面可见店铺名，必须与目标店铺完全一致。
+- 生产选择器通过版本库外的 YAML 文件传入。缺少任何必需键立即停止。
 
-## Current navigation
+## 导出
 
-Navigate to `商品 -> 素材中心 -> 商品素材管理 -> 搜推素材`, search by exact product ID, and open the empty material slot. Choose `发图文` or `发视频` according to the confirmed task plan.
+分别触发基础素材和搜推经营数据下载，用 `run_id` 命名保存，记录原始文件名、下载时间和 SHA-256，不覆盖历史批次。
 
-## Publish sequence
+## 补采
 
-1. Confirm the store identity and signed-in account.
-2. Search for the exact product ID and verify the displayed product name.
-3. Count existing and empty slots; stop on disagreement with the task.
-4. Upload validated files.
-5. Fill the reviewed title and description.
-6. Pause at the final publish action and obtain explicit confirmation for the exact task ID unless already supplied in the current task.
-7. Publish once.
-8. Wait for a visible success or moderation state.
-9. Return to the list and verify the slot/material count.
-10. Record the remote material ID, visible state, timestamp, and screenshot or text evidence.
+只处理 eligibility 为 eligible 且导出无法确定缺口的商品。按精确商品 ID 搜索，读取目标 3/9 坑、现有素材数、空坑位和审核状态。素材表容器或字段不存在时返回 `SELECTOR_INVALID`。
 
-## Selector maintenance
+## 发布
 
-Do not freeze CSS selectors from screenshots. During implementation, record stable roles/labels and maintain a small page-object layer. If the page layout or wording changes, stop publication and mark tasks `needs_manual_review` until selectors are revalidated.
+1. 验证 manifest schema、总哈希、有效期和目标店铺。
+2. 重算当前 item 的媒体、标题、描述、动作和坑位内容。
+3. 精确搜索商品 ID，核对页面商品和目标空坑位。
+4. 根据批准类型选择图文或视频，上传批准文件并填入批准文案。
+5. 点击发布一次，记录时间和页面证据。
+6. 返回列表或详情页，核对远端素材 ID、坑位、指纹、提交时间和审核状态。
+
+发布后超时或成功信号/远端 ID 缺失时进入 `publish_uncertain` 并暂停批次。禁止再次点击发布；先执行远端核验。
+
+## 选择器原则
+
+优先 `data-testid`、稳定 `data-*`、固定字段属性和 ARIA role/label。禁止用屏幕坐标作为常规实现。页面变化只修改 Page Object 或运行时配置，不把选择器写入业务规则。

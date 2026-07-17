@@ -105,7 +105,9 @@ def build_product_tasks(
     decisions_by_product: Mapping[str, tuple[str, list[str]]],
     desired_slots_by_product: Mapping[str, int],
     material_items_by_product: Mapping[str, list[MaterialItem]],
+    required_new_items_by_product: Mapping[str, int] | None = None,
 ) -> list[ProductTask]:
+    required_new_items_by_product = required_new_items_by_product or {}
     tasks = []
     for fallback_row, product in enumerate(products, 2):
         status_name, reasons = decisions_by_product.get(
@@ -124,6 +126,9 @@ def build_product_tasks(
         elif not items:
             status = ProductStatus.BLOCKED
             reasons = [*reasons, "MATERIAL_ITEMS_MISSING"]
+        elif len(items) != required_new_items_by_product.get(product.product_id, len(items)):
+            status = ProductStatus.BLOCKED
+            reasons = [*reasons, "MATERIAL_ITEMS_INCOMPLETE"]
         elif all(item.status == MaterialStatus.READY_FOR_REVIEW for item in items):
             status = ProductStatus.READY_FOR_REVIEW
         else:

@@ -146,6 +146,16 @@ class StateStore:
         ).fetchone()
         return str(row["status"]) if row else None
 
+    def item_record(self, task_id: str) -> dict | None:
+        row = self.connection.execute(
+            """
+            SELECT task_id, status, remote_material_id, evidence, attempt_count, updated_at
+            FROM material_items WHERE task_id=?
+            """,
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def record_transition(
         self,
         task_id: str,

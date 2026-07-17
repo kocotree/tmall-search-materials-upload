@@ -80,3 +80,22 @@ def test_run_metadata_survives_restart(tmp_path):
         "config_hash": "abc",
     }
     reopened.close()
+
+
+def test_item_record_includes_persisted_remote_evidence_and_timestamp(tmp_path):
+    store = StateStore(tmp_path / "run.sqlite3")
+    store.save_item(
+        "MAT-1",
+        "publish_uncertain",
+        remote_material_id=None,
+        evidence="timeout",
+        attempt_count=1,
+    )
+
+    record = store.item_record("MAT-1")
+
+    assert record["status"] == "publish_uncertain"
+    assert record["evidence"] == "timeout"
+    assert record["attempt_count"] == 1
+    assert "T" in record["updated_at"]
+    store.close()

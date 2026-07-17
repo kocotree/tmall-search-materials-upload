@@ -17,6 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]
 
+[project.scripts]
+tmall-materials = "upload_search_materials.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -1,46 +1,39 @@
-# Data Schema
+# 数据结构
 
-## Product source
+## 输入表
 
-Required columns:
+商品总表 CSV 必需字段：`商品ID`、`商品名称（查找引用）`、`货号（查找引用）`、`产品等级`、`链接`、`运营`、`组别`、`品类-公司维度划分`。
 
-| Column | Purpose | Blocking condition |
-| --- | --- | --- |
-| `商品ID` | Unique remote product key | Blank, non-numeric, or duplicated |
-| `商品名称（查找引用）` | Review label | Blank |
-| `货号（查找引用）` | Asset fallback key | Blank when no product-ID directory exists |
-| `产品等级` | Monthly eligibility | Blank or unknown value |
-| `链接` | Product verification | Blank before publishing |
-| `运营` | Task owner | Blank |
-| `组别` | Reporting group | Blank |
-| `品类-公司维度划分` | Monthly rule join key | Blank or unmatched |
+月度规则 CSV 必需字段：`月份`、`品类`、`要推等级`。
 
-Treat `商品ID` as text to avoid numeric formatting and precision changes.
+基础素材 XLSX 必需字段：`商品ID`、`商品标题`、`商品白底图`、`短标题` 或其标准化别名。搜推经营 XLSX 必需字段：`商品id/商品ID`、`素材类型`。
 
-## Monthly rule source
+缺少必需表头阻断整批；单行缺 ID、非法 ID 或重复 ID 只阻断受影响行。商品 ID 全程保持字符串。
 
-Use the merged rule table with columns `月份`, `品类`, and `要推等级`. Normalize Chinese and ASCII commas, trim spaces, and compare exact normalized values.
+## Eligibility Audit
 
-## Asset layout
+每个输入行包含 `source_row`、商品字段、`status`、`reason_codes` 和 `evidence_json`。所有输入行都必须出现一次。
 
-Prefer:
+## Browser Supplement
 
-```text
-asset-root/
-  <商品ID>/
-    images/
-      01.jpg
-      02.jpg
-      03.jpg
-    videos/
-      01.mp4
-    metadata.json
-```
+`backend-material-status.csv` 字段：`商品ID`、`目标坑位`、`现有素材数`、`空坑位`、`审核状态`、`审核状态完整`、`采集时间`、`证据`。
 
-Allow a `货号` directory only as a fallback. Never fuzzy-match on product name without human confirmation.
+未知值保留未知；缺失选择器不能写成 0 或空列表。
 
-## Task fields
+## Asset Record
 
-Each task must include `task_id`, product identifiers, owner, month, category, grade, asset directory, image/video counts, desired slot count, status, reason, confirmation identity/time, attempt count, remote material ID, evidence, and timestamps.
+字段：`asset_id`、`product_id`、`sku`、`asset_type`、`source_system`、`source_path`、`license_status`、`sha256`、`width`、`height`、`duration`、`validation_status`、`reason_codes`。
 
-Allowed initial states are `pending_validation`, `ready_for_review`, `needs_manual_review`, `skipped`, and `blocked`.
+## Two-Level Tasks
+
+`product_task` 保存 `task_id`、`run_id`、商品 ID、资格状态、目标坑位数、负责人和原因码。
+
+`material_item` 保存 `task_id`、商品 ID、媒体类型、slot index、媒体清单、标题、描述、内容哈希、状态、尝试次数、远端素材 ID 和原因码。
+
+坑位 task ID 由 `run_id + product_id + material_type + slot_index` 确定性生成。
+
+## Approval Manifest
+
+必需字段：schema version、目标店铺、精确 task ID、商品 ID、媒体 SHA-256、标题、描述、动作、批准人、批准时间、有效期和 manifest SHA-256。
+
+发布前对规范化 JSON 重新计算 SHA-256。批准后的内容变化不得沿用旧批准。
