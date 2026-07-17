@@ -23,6 +23,11 @@ REQUIRED_SELECTORS = {
     "publish_button",
     "success_signal",
     "remote_material_id",
+    "remote_material_table",
+    "remote_material_fingerprint",
+    "remote_material_status",
+    "remote_material_slot",
+    "remote_material_time",
 }
 
 

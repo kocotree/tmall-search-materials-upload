@@ -15,6 +15,11 @@ from upload_search_materials.browser.session import (
     assert_store_identity,
     detect_human_check,
 )
+from upload_search_materials.browser.upload_page import upload_approved_item
+from upload_search_materials.browser.verifier import verify_remote_item
+from upload_search_materials.approval import create_manifest
+from upload_search_materials.models import AssetRecord, MaterialItem, MaterialStatus
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
 REQUIRED_SELECTOR_VALUES = {
@@ -37,6 +42,11 @@ REQUIRED_SELECTOR_VALUES = {
     "publish_button": "#publish",
     "success_signal": "#success",
     "remote_material_id": "#remote-id",
+    "remote_material_table": "#remote-table",
+    "remote_material_fingerprint": "#remote-fingerprint",
+    "remote_material_status": "#remote-status",
+    "remote_material_slot": "#remote-slot",
+    "remote_material_time": "#remote-time",
 }
 
 
@@ -62,11 +72,17 @@ class FakeLocator:
     def fill(self, value):
         self.page.filled.append((self.selector, value))
 
+    def set_input_files(self, values):
+        self.page.input_files.append((self.selector, list(values)))
+
     def press(self, key):
         self.page.pressed.append((self.selector, key))
 
     def click(self):
         self.page.clicked.append(self.selector)
+        error = self.page.click_errors.get(self.selector)
+        if error:
+            raise error
 
 
 class FakePage:
@@ -78,6 +94,8 @@ class FakePage:
         self.filled = []
         self.pressed = []
         self.clicked = []
+        self.input_files = []
+        self.click_errors = {}
 
     def locator(self, selector):
         return FakeLocator(self, selector)
@@ -207,3 +225,138 @@ def test_export_reports_preserves_both_downloads_and_hashes(tmp_path):
     assert all(Path(record.path).exists() for record in records)
     assert all(len(record.sha256) == 64 for record in records)
     assert page.clicked == ["#export-basic", "#export-search"]
+
+
+def approved_item(tmp_path):
+    image = tmp_path / "a.png"
+    image.write_bytes(b"image")
+    asset = AssetRecord(
+        product_id="123",
+        source_path=str(image),
+        asset_type="image",
+        license_status="confirmed",
+        sha256="a" * 64,
+        validation_status="valid",
+    )
+    return MaterialItem(
+        task_id="MAT-1",
+        product_id="123",
+        material_type="image_text",
+        slot_index=1,
+        status=MaterialStatus.APPROVED,
+        assets=[asset],
+        title="KK树便携水杯",
+        description="便携水杯设计，满足日常携带和饮水使用需求。",
+        content_hash="fingerprint-1",
+    )
+
+
+def approval_manifest(item):
+    return create_manifest(
+        "KK Tree",
+        [item],
+        "operator",
+        "2026-07-17T10:00:00+08:00",
+        valid_until="2026-07-18T10:00:00+08:00",
+    )
+
+
+def configured_upload_page():
+    page = FakePage()
+    page.texts.update(
+        {
+            "#store": "KK Tree",
+            "#product-id": "123",
+            "#desired-slots": "3坑",
+            "#material-table": "table",
+        }
+    )
+    page.visible.add("#material-table")
+    page.lists[".empty-slot"] = ["坑位1", "坑位2", "坑位3"]
+    return page
+
+
+def test_publish_timeout_does_not_click_twice(tmp_path):
+    page = configured_upload_page()
+    page.click_errors["#publish"] = PlaywrightTimeoutError("timeout")
+    item = approved_item(tmp_path)
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        approval_manifest(item),
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+    )
+
+    assert page.clicked.count("#publish") == 1
+    assert outcome.status == "publish_uncertain"
+    assert outcome.retry_allowed is False
+
+
+def test_changed_approved_content_stops_before_publish(tmp_path):
+    page = configured_upload_page()
+    item = approved_item(tmp_path)
+    manifest = approval_manifest(item)
+    item.title = "审批后修改"
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        manifest,
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+    )
+
+    assert outcome.status == "blocked"
+    assert outcome.reason == "APPROVED_CONTENT_CHANGED"
+    assert "#publish" not in page.clicked
+
+
+def test_successful_publish_records_remote_id(tmp_path):
+    page = configured_upload_page()
+    page.visible.add("#success")
+    page.texts["#remote-id"] = "RM-1"
+    item = approved_item(tmp_path)
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        approval_manifest(item),
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+    )
+
+    assert outcome.status == "submitted"
+    assert outcome.remote_material_id == "RM-1"
+    assert page.input_files == [("#file-input", [item.assets[0].source_path])]
+
+
+def test_remote_match_resolves_uncertain(tmp_path):
+    page = configured_upload_page()
+    page.visible.add("#remote-table")
+    page.texts.update(
+        {
+            "#remote-id": "RM-1",
+            "#remote-fingerprint": "fingerprint-1",
+            "#remote-status": "审核中",
+            "#remote-slot": "1",
+            "#remote-time": "2026-07-17T11:00:05+08:00",
+        }
+    )
+    item = approved_item(tmp_path)
+
+    outcome = verify_remote_item(
+        page,
+        item,
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        submitted_at="2026-07-17T11:00:00+08:00",
+    )
+
+    assert outcome.status == "under_review"
+    assert outcome.remote_material_id == "RM-1"
+    assert outcome.retry_allowed is False
