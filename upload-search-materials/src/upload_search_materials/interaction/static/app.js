@@ -3,6 +3,8 @@
 
   const shell = document.querySelector("[data-component='AppShell']");
   if (!shell) return;
+  const UiState = window.InteractionUiState;
+  if (!UiState) throw new Error("interaction UI state module is unavailable");
 
   const registry = JSON.parse(document.querySelector("#stage-registry").textContent);
   const stages = new Map(registry.map((stage) => [stage.id, stage]));
@@ -20,21 +22,15 @@
   const currentStageLabel = document.querySelector("[data-current-stage-label]");
   const lastSubmittedLabel = document.querySelector("[data-last-submitted]");
   const taskDirectoryLabel = document.querySelector("[data-task-directory]");
+  const connectionLabel = document.querySelector("[data-connection-label]");
 
   let sessionId = shell.dataset.sessionId || "";
   let currentStageId = railButtons[0]?.dataset.stageId || "setup";
   let revision = 0;
-  let latestRecoveryInstruction = "";
   let lastSubmittedAt = null;
+  let uiState = UiState.createState(currentStageId);
 
-  const statusCopy = {
-    draft: "编辑中",
-    ready_for_agent: "已提交，等待 Agent",
-    processing: "Agent 处理中",
-    needs_user_input: "补充后重新提交",
-    blocked: "补充后重新提交",
-    completed: "已完成",
-  };
+  const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
   const resultRenderers = {
     "setup_form": [],
@@ -140,7 +136,26 @@
     return values;
   }
 
-  function setStatus(status) {
+  function hydrateForm(form, values) {
+    Object.entries(values || {}).forEach(([name, value]) => {
+      const controls = [...form.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
+      if (!controls.length) return;
+      const first = controls[0];
+      if (first.type === "radio") {
+        controls.forEach((control) => { control.checked = control.value === String(value); });
+        return;
+      }
+      const kind = controls.length > 1 ? "list" : (first.dataset.valueKind || "string");
+      const presentation = UiState.controlPresentation(value, kind, controls.length);
+      controls.forEach((control, index) => {
+        if (kind === "boolean") control.checked = presentation.checked;
+        else control.value = presentation.values[index] ?? "";
+      });
+    });
+  }
+
+  function renderStatus() {
+    const status = uiState.dirty ? "draft" : uiState.serverStatus;
     const copy = statusCopy[status] || statusCopy.draft;
     statusBadge.textContent = copy;
     statusBadge.dataset.status = status;
@@ -154,14 +169,16 @@
         : status === "processing"
           ? "Agent 处理中"
           : "提交给 Agent";
-    submitButton.disabled = ["ready_for_agent", "processing", "completed"].includes(status);
-    saveButton.disabled = ["ready_for_agent", "processing", "completed"].includes(status);
-    updateResultsRecovery(status);
+    const lockedByServer = !uiState.dirty
+      && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
+    submitButton.disabled = lockedByServer;
+    saveButton.disabled = lockedByServer;
+    updateResultsRecovery(UiState.recoveryView(uiState));
   }
 
-  function updateResultsRecovery(status) {
+  function updateResultsRecovery(recovery) {
     const isResults = currentStageId === "results";
-    const mayRecover = isResults && ["needs_user_input", "blocked"].includes(status);
+    const mayRecover = isResults && recovery.visible;
     const recoveryForm = document.querySelector("[data-results-recovery]");
     if (recoveryForm) {
       recoveryForm.hidden = !mayRecover;
@@ -179,21 +196,38 @@
       saveButton.hidden = true;
       saveButton.disabled = true;
       submitButton.hidden = false;
+      submitButton.disabled = !recovery.submitEnabled;
+      submitButton.textContent = "补充后重新提交";
     } else {
       saveButton.hidden = false;
       submitButton.hidden = false;
     }
   }
 
-  function renderResult(componentName, result) {
-    if (!result || typeof result !== "object") return;
+  function renderResult(componentName, view) {
     const module = document.querySelector(`[data-component="${CSS.escape(componentName)}"]`);
-    const empty = module?.querySelector("[data-empty-state]");
-    if (!module || !empty) return;
+    const content = module?.querySelector("[data-result-content]");
+    if (!content) return;
+    content.replaceChildren();
+
+    if (view.mode === "empty") {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.dataset.emptyState = view.label;
+      const mark = document.createElement("span");
+      mark.setAttribute("aria-hidden", "true");
+      mark.textContent = "◎";
+      const label = document.createElement("strong");
+      label.textContent = view.label;
+      empty.append(mark, label);
+      content.appendChild(empty);
+      return;
+    }
 
     const summary = document.createElement("div");
     summary.className = "result-data";
     const heading = document.createElement("strong");
+    const result = view.result;
     heading.textContent = result.summary || "Agent 已返回结果";
     summary.appendChild(heading);
     if (Array.isArray(result.evidence) && result.evidence.length) {
@@ -205,30 +239,40 @@
       });
       summary.appendChild(evidence);
     }
-    empty.replaceWith(summary);
+    content.appendChild(summary);
   }
 
-  function renderStageResult(schemaComponent, result) {
+  function renderStageResult(schemaComponent) {
+    const view = UiState.resultView(uiState);
     (resultRenderers[schemaComponent] || []).forEach((rendererName) => {
-      renderResult(rendererName, result);
+      renderResult(rendererName, view);
     });
   }
 
   async function loadStage() {
+    const requestedStageId = currentStageId;
     if (!sessionId) {
       revision = 0;
       revisionLabel.textContent = "0";
-      setStatus("draft");
+      renderStatus();
+      renderStageResult(stages.get(requestedStageId).component);
       return;
     }
     try {
-      const payload = await fetchJson(apiPath(`/stages/${currentStageId}`));
+      const payload = await fetchJson(apiPath(`/stages/${requestedStageId}`));
+      if (requestedStageId !== currentStageId) return;
       revision = payload.state.revision;
       revisionLabel.textContent = String(revision);
-      setStatus(payload.state.status);
-      const stage = stages.get(currentStageId);
-      renderStageResult(stage.component, payload.result || payload.state.result);
+      uiState = UiState.receiveStage(uiState, {
+        stageId: requestedStageId,
+        status: payload.state.status,
+        result: payload.result,
+      });
+      if (payload.input) hydrateForm(activeForm(), payload.input.values);
+      renderStatus();
+      renderStageResult(stages.get(requestedStageId).component);
     } catch (error) {
+      if (requestedStageId !== currentStageId) return;
       actionMessage.textContent = error.message;
     }
   }
@@ -260,67 +304,90 @@
         revision = payload.revision;
         lastSubmittedAt = new Date();
         lastSubmittedLabel.textContent = lastSubmittedAt.toLocaleString("zh-CN", { hour12: false });
-        setStatus("ready_for_agent");
+        uiState = UiState.receiveStage(uiState, {
+          stageId: currentStageId,
+          status: "ready_for_agent",
+          result: null,
+        });
+        renderStatus();
+        renderStageResult(stages.get(currentStageId).component);
         actionMessage.textContent = "交接已持久化，正在等待 Agent 接收。";
-        await loadRecoveryInstruction();
+        await loadRecoveryInstruction(currentStageId);
       } else {
         revision += 1;
-        setStatus("draft");
+        uiState = UiState.receiveStage(uiState, {
+          stageId: currentStageId,
+          status: "draft",
+          result: null,
+        });
+        renderStatus();
+        renderStageResult(stages.get(currentStageId).component);
         actionMessage.textContent = "草稿已保存；不会创建 Agent 交接。";
       }
       revisionLabel.textContent = String(revision);
     } catch (error) {
       showFieldErrors(form, error.fieldErrors || {});
       actionMessage.textContent = error.message;
-      setStatus("draft");
+      uiState = UiState.markDirty(uiState);
+      renderStatus();
     }
   }
 
-  async function loadRecoveryInstruction() {
+  async function loadRecoveryInstruction(stageId = currentStageId) {
+    recoveryButton.disabled = true;
     if (!sessionId) return;
     try {
-      const payload = await fetchJson(apiPath(`/stages/${currentStageId}/recovery`));
-      latestRecoveryInstruction = payload.instruction;
-      recoveryButton.disabled = false;
+      const payload = await fetchJson(apiPath(`/stages/${stageId}/recovery`));
+      uiState = UiState.receiveRecovery(uiState, stageId, payload.instruction);
+      if (currentStageId === stageId && uiState.recoveryInstruction) {
+        recoveryButton.disabled = false;
+      }
     } catch (error) {
-      latestRecoveryInstruction = "";
-      recoveryButton.disabled = true;
+      if (currentStageId === stageId) recoveryButton.disabled = true;
     }
   }
 
   async function copyRecoveryInstruction() {
-    if (!latestRecoveryInstruction) await loadRecoveryInstruction();
-    if (!latestRecoveryInstruction) return;
-    await navigator.clipboard.writeText(latestRecoveryInstruction);
+    if (!uiState.recoveryInstruction) await loadRecoveryInstruction(currentStageId);
+    if (!uiState.recoveryInstruction) return;
+    await navigator.clipboard.writeText(uiState.recoveryInstruction);
     recoveryButton.textContent = "已复制恢复指令";
     window.setTimeout(() => { recoveryButton.textContent = "复制恢复指令"; }, 1800);
   }
 
   async function pollStage() {
     if (document.hidden || !sessionId) return;
+    const requestedStageId = currentStageId;
     try {
       const [stageState, sessionPayload] = await Promise.all([
-        fetchJson(apiPath(`/stages/${currentStageId}/status`)),
+        fetchJson(apiPath(`/stages/${requestedStageId}/status`)),
         fetchJson(apiPath()),
       ]);
+      if (requestedStageId !== currentStageId) return;
+      const priorRevision = revision;
+      const priorStatus = uiState.serverStatus;
       revision = stageState.revision;
       revisionLabel.textContent = String(revision);
-      setStatus(stageState.status);
       const heartbeat = sessionPayload.session.last_agent_heartbeat;
-      const heartbeatAge = heartbeat ? Date.now() - Date.parse(heartbeat) : Infinity;
-      const agentOnline = stageState.status === "processing" && heartbeatAge < 10000;
-      offlinePanel.hidden = agentOnline;
-      if (!agentOnline) {
-        offlinePanel.querySelector(".offline-title strong").textContent = "Agent 未连接";
-      }
+      uiState = UiState.receiveStatus(uiState, stageState.status, heartbeat);
+      renderStatus();
+      const connection = UiState.connectionView(uiState, Date.now());
+      connectionLabel.textContent = connection.connectionLabel;
+      offlinePanel.hidden = connection.connectionLabel === "Agent 已连接";
+      if (priorRevision !== revision || priorStatus !== stageState.status) await loadStage();
     } catch (error) {
       offlinePanel.hidden = false;
+      connectionLabel.textContent = "Agent 状态暂不可用";
     }
   }
 
   function activateStage(stageId) {
     if (!stages.has(stageId)) return;
     currentStageId = stageId;
+    uiState = UiState.switchStage(uiState, stageId);
+    recoveryButton.disabled = true;
+    revision = 0;
+    revisionLabel.textContent = "0";
     railButtons.forEach((button) => {
       const active = button.dataset.stageId === stageId;
       button.classList.toggle("is-active", active);
@@ -335,8 +402,11 @@
     titleLabel.textContent = stage.title;
     currentStageLabel.textContent = stage.title;
     actionMessage.textContent = "填写完成后可保存草稿，或提交给 Agent。";
+    renderStatus();
+    renderStageResult(stage.component);
     window.scrollTo({ top: 0, behavior: "smooth" });
     loadStage();
+    if (sessionId) loadRecoveryInstruction(stageId);
   }
 
   railButtons.forEach((button) => {
@@ -344,7 +414,10 @@
   });
   panels.forEach((panel) => {
     panel.addEventListener("input", () => {
-      if (panel.dataset.stagePanel === currentStageId) setStatus("draft");
+      if (panel.dataset.stagePanel === currentStageId) {
+        uiState = UiState.markDirty(uiState);
+        renderStatus();
+      }
     });
   });
   saveButton.addEventListener("click", () => persistStage("draft"));
@@ -356,5 +429,4 @@
 
   setInterval(pollStage, 2000);
   activateStage(currentStageId);
-  if (sessionId) loadRecoveryInstruction();
 })();

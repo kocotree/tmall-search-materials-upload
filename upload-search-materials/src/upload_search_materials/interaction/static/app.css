@@ -236,7 +236,8 @@ input:focus, textarea:focus, select:focus { border-color: #4d7f6e; box-shadow: 0
 input[aria-invalid="true"], textarea[aria-invalid="true"], select[aria-invalid="true"] { border-color: var(--accent); }
 input:disabled, textarea:disabled, select:disabled { color: #89928e; background: #eef1ef; }
 
-.path-list { display: grid; gap: 10px; }
+.path-list { display: grid; min-width: 0; gap: 10px; margin: 0; padding: 0; border: 0; }
+.path-list legend { margin-bottom: 7px; padding: 0; font-size: 12px; font-weight: 700; }
 .source-path { display: grid; grid-template-columns: minmax(180px, 0.28fr) 1fr; align-items: center; gap: 12px; }
 .source-path > span { color: var(--muted); font-size: 11px; font-weight: 700; }
 .check-control { display: inline-flex !important; align-items: center; gap: 9px; min-height: 42px; margin: 0 !important; }

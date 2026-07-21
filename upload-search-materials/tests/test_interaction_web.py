@@ -136,7 +136,10 @@ def test_page_receives_optional_session_id(client, session_id):
 
 
 def test_javascript_uses_task_three_api_and_precise_status_copy(client):
-    javascript = client.get("/static/app.js").get_data(as_text=True)
+    javascript = "\n".join(
+        client.get(path).get_data(as_text=True)
+        for path in ("/static/ui-state.js", "/static/app.js")
+    )
 
     assert "编辑中" in javascript
     assert "已提交，等待 Agent" in javascript
@@ -170,6 +173,27 @@ def test_results_recovery_form_is_hidden_and_disabled_by_default(client):
     assert re.search(r'<form[^>]+data-results-recovery[^>]+hidden', html)
     for field_name in ("recovery_action", "manual_notes", "allow_retry_after_remote_absence"):
         assert re.search(rf'<(?:input|select|textarea)[^>]+name="{field_name}"[^>]+disabled', html)
+
+
+def test_result_modules_keep_persistent_content_containers(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert html.count("data-result-content") == 10
+
+
+def test_image_roots_are_grouped_and_controls_describe_stable_field_errors(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert re.search(
+        r'<fieldset[^>]+data-field-group="image_roots"[^>]*>.*?<legend>\s*图片源路径',
+        html,
+        re.DOTALL,
+    )
+    for stage in STAGES:
+        for field in stage.fields:
+            error_id = f"{stage.id}-{field.name}-error"
+            assert f'id="{error_id}"' in html
+            assert f'aria-describedby="{error_id}"' in html
 
 
 def test_compact_styles_keep_result_tables_scrollable_above_fixed_handoff(client):
@@ -418,6 +442,39 @@ def test_stage_read_exposes_current_agent_result_for_schema_renderer(
     assert response.status_code == 200
     assert response.json["result"]["summary"] == "真实结果：1 个商品已完成"
     assert response.json["result"]["revision"] == submitted.json["revision"]
+
+
+def test_stage_read_returns_only_allowlisted_current_input_values(
+    client, session_id, tmp_path
+):
+    roots = [r"Y:\视觉部\1-模特图", r"Z:\图片\买家秀"]
+    saved = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/draft",
+        json={
+            "values": {
+                "image_roots": roots,
+                "source_types": ["模特图", "买家秀"],
+                "include_video": False,
+            }
+        },
+    )
+    input_path = tmp_path / session_id / "04-asset-matching" / "input.json"
+    document = json.loads(input_path.read_text(encoding="utf-8"))
+    document["values"]["password"] = "must-not-leak"
+    input_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+
+    response = client.get(f"/api/sessions/{session_id}/stages/asset_matching")
+
+    assert saved.status_code == 200
+    assert response.status_code == 200
+    assert response.json["input"] == {
+        "revision": 1,
+        "values": {
+            "image_roots": roots,
+            "source_types": ["模特图", "买家秀"],
+            "include_video": False,
+        },
+    }
 
 
 def test_recovery_returns_session_store_instruction(client, session_id):

@@ -93,6 +93,7 @@ def create_app(runs_root: Path) -> Flask:
         return jsonify(
             stage=asdict(stage),
             state=state["stages"][stage_id],
+            input=_current_input(store, session_id, stage, state),
             result=_current_result(store, session_id, stage_id, state),
         )
 
@@ -180,6 +181,35 @@ def _current_result(
     ):
         return None
     return result
+
+
+def _current_input(
+    store: SessionStore,
+    session_id: str,
+    stage: StageDefinition,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return allowlisted values only when input matches the durable revision."""
+
+    input_path = store._stage_path(session_id, stage.id) / "input.json"
+    try:
+        with input_path.open(encoding="utf-8") as stream:
+            document = json.load(stream)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or not isinstance(document.get("values"), dict):
+        return None
+    revision = state["stages"][stage.id]["revision"]
+    if (
+        document.get("session_id") != session_id
+        or document.get("stage_id") != stage.id
+        or document.get("revision") != revision
+    ):
+        return None
+    return {
+        "revision": revision,
+        "values": _allowlisted_values(stage, document["values"]),
+    }
 
 
 def _json_object() -> dict[str, Any]:
