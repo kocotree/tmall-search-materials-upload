@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>素材上新工作台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="app-shell" data-component="AppShell" data-session-id="{{ session_id }}" data-runs-root="{{ runs_root }}">
+    <aside class="stage-rail" data-component="StageRail" aria-label="任务阶段">
+      <div class="brand-block">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <div>
+          <p class="eyebrow">MATERIAL OPS</p>
+          <p class="brand-name">素材上新工作台</p>
+        </div>
+      </div>
+
+      <div class="rail-meta">
+        <span>当前任务</span>
+        <strong data-session-label>{{ session_id or "尚未创建" }}</strong>
+      </div>
+
+      <nav class="stage-list">
+        {% for stage in stages %}
+        <button
+          class="stage-link{% if loop.first %} is-active{% endif %}"
+          type="button"
+          data-stage-id="{{ stage.id }}"
+          aria-current="{{ 'step' if loop.first else 'false' }}"
+        >
+          <span class="stage-index">{{ "%02d"|format(loop.index) }}</span>
+          <span class="stage-copy">
+            <strong>{{ stage.title }}</strong>
+            <small data-rail-status="{{ stage.id }}">{{ "只读" if stage.read_only else "待填写" }}</small>
+          </span>
+          <span class="stage-dot" aria-hidden="true"></span>
+        </button>
+        {% endfor %}
+      </nav>
+
+      <div class="rail-footnote">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span>本地持久化 · 无自动发布</span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="workspace-header">
+        <div>
+          <p class="eyebrow">SCHEMA-DRIVEN WORKFLOW</p>
+          <h1 data-current-title>{{ stages[0].title }}</h1>
+        </div>
+        <dl class="header-meta">
+          <div><dt>状态</dt><dd><span class="status-badge" data-current-status>编辑中</span></dd></div>
+          <div><dt>任务 ID</dt><dd data-session-label>{{ session_id or "尚未创建" }}</dd></div>
+          <div><dt>Revision</dt><dd data-revision>0</dd></div>
+        </dl>
+      </header>
+
+      <div class="stage-stack">
+        {% for stage in stages %}
+        <section
+          class="stage-panel{% if loop.first %} is-active{% endif %}"
+          data-stage-panel="{{ stage.id }}"
+          data-stage-component="{{ stage.component }}"
+          data-read-only="{{ 'true' if stage.read_only else 'false' }}"
+          {% if not loop.first %}hidden{% endif %}
+        >
+          <div class="stage-heading">
+            <div>
+              <p class="stage-number">阶段 {{ "%02d"|format(loop.index) }} / {{ "%02d"|format(stages|length) }}</p>
+              <h2>{{ stage.title }}</h2>
+              <p>{{ stage.description }}</p>
+            </div>
+            <span class="component-pill">{{ stage.component }}</span>
+          </div>
+
+          {% if stage.id == "completeness" %}
+          <section class="result-module" data-component="InspectionMatrix">
+            <div class="module-heading"><div><p class="eyebrow">INSPECTION MATRIX</p><h3>完整度矩阵</h3></div><span>基础素材 / 搜推素材</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>Agent 返回真实巡检结果后，这里会展示完整度与缺口。</p></div>
+          </section>
+          {% elif stage.id == "scope" %}
+          <section class="result-module" data-component="ProductScopeTable">
+            <div class="module-heading"><div><p class="eyebrow">PRODUCT SCOPE</p><h3>商品维护范围</h3></div><span>维护 / 排除</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>读取规则结果后，将逐项展示商品范围和排除原因。</p></div>
+          </section>
+          {% elif stage.id == "asset_matching" %}
+          <section class="result-module" data-component="AssetMatchGallery">
+            <div class="module-heading"><div><p class="eyebrow">ASSET MATCH</p><h3>素材候选画廊</h3></div><span>来源 / 授权 / 匹配依据</span></div>
+            <div class="match-legend" aria-label="匹配标签">
+              <span>商品 ID 命中</span><span>SKU 命中</span><span>已确认别名</span><span class="is-pending">名称候选 · 待确认</span>
+            </div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>真实候选图片、来源和匹配依据将在 Agent 扫描后出现。</p></div>
+          </section>
+          {% elif stage.id == "image_review" %}
+          <section class="result-module" data-component="CropDecision">
+            <div class="module-heading"><div><p class="eyebrow">CROP DECISION</p><h3>适用性与裁剪预览</h3></div><span>原图 / 目标比例</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>图片元数据和裁剪建议会从真实结果载入。</p></div>
+          </section>
+          {% elif stage.id == "slots_copy" %}
+          <section class="result-module" data-component="SlotBoard">
+            <div class="module-heading"><div><p class="eyebrow">SLOT BOARD</p><h3>坑位编排</h3></div><span>3 / 9 坑位</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>坑位和素材组将根据真实任务数据生成。</p></div>
+          </section>
+          <section class="result-module" data-component="CopyEditor">
+            <div class="module-heading"><div><p class="eyebrow">COPY EDITOR</p><h3>文案编辑</h3></div><span>标题 / 描述 / 校验</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>文案草稿和规则校验结果尚未生成。</p></div>
+          </section>
+          {% elif stage.id == "dry_run" %}
+          <section class="result-module" data-component="DryRunSummary">
+            <div class="module-heading"><div><p class="eyebrow">DRY-RUN</p><h3>全量审查摘要</h3></div><span>任务 / 阻塞 / 证据</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>不预填数量；真实任务汇总会随 Agent 结果更新。</p></div>
+          </section>
+          {% elif stage.id == "approval" %}
+          <section class="result-module" data-component="ApprovalChecklist">
+            <div class="module-heading"><div><p class="eyebrow">APPROVAL</p><h3>精确任务授权</h3></div><span>ready_for_review</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>仅在 dry-run 返回可审任务后显示授权清单。</p></div>
+          </section>
+          {% elif stage.id == "production_confirmation" %}
+          <section class="result-module" data-component="ProductionConfirmation">
+            <div class="module-heading"><div><p class="eyebrow">PRODUCTION</p><h3>生产确认摘要</h3></div><span>范围 / 数量 / 哈希</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>这里仅核对交接内容，不在浏览器执行生产动作。</p></div>
+          </section>
+          {% elif stage.id == "results" %}
+          <section class="result-module" data-component="ResultTimeline">
+            <div class="module-heading"><div><p class="eyebrow">RESULTS</p><h3>结果与恢复时间线</h3></div><span>结果 / 回查 / 异常</span></div>
+            <div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>发布、回查和异常记录只从 Agent 结果读取。</p></div>
+          </section>
+          {% endif %}
+
+          <form class="schema-form" data-stage-form="{{ stage.id }}" novalidate{% if stage.id == "results" %} data-results-recovery hidden{% endif %}>
+            <div class="form-heading">
+              <div><p class="eyebrow">USER INPUT</p><h3>{{ "恢复处理" if stage.id == "results" else "本阶段输入" }}</h3></div>
+              <span>字段由阶段 Schema 生成</span>
+            </div>
+            <div class="field-grid">
+              {% for field in stage.fields %}
+              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'multi_select'] %} field-wide{% endif %}" data-field="{{ field.name }}">
+                <label for="{{ stage.id }}-{{ field.name }}">
+                  {{ field.label }}{% if field.required %}<span class="required" aria-label="必填">*</span>{% endif %}
+                </label>
+
+                {% if field.component == "path_list" and field.name == "image_roots" %}
+                <div class="path-list">
+                  {% for source in image_sources %}
+                  <label class="source-path" data-source-label="{{ source.label }}">
+                    <span>{{ source.label }}</span>
+                    <input id="{{ stage.id }}-{{ field.name }}-{{ loop.index }}" name="{{ field.name }}" type="text" value="{{ source.path }}" data-value-kind="list"{% if field.required %} required{% endif %}>
+                  </label>
+                  {% endfor %}
+                </div>
+                {% elif field.component == "textarea" %}
+                <textarea id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}" rows="4"{% if field.required %} required{% endif %}{% if field.disabled %} disabled{% endif %}></textarea>
+                {% elif field.component == "table" %}
+                <textarea id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}" rows="4" data-value-kind="json-list" placeholder="[]"{% if field.required %} required{% endif %}{% if field.disabled %} disabled{% endif %}></textarea>
+                {% elif field.component == "multi_select" %}
+                <textarea id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}" rows="3" data-value-kind="line-list" placeholder="每行一项"{% if field.required %} required{% endif %}{% if field.disabled %} disabled{% endif %}></textarea>
+                {% elif field.component == "checkbox" %}
+                <label class="check-control">
+                  <input id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}" type="checkbox" data-value-kind="boolean"{% if field.required %} required{% endif %}{% if field.disabled %} disabled{% endif %}>
+                  <span>{{ "已确认" if field.required else "启用" }}</span>
+                </label>
+                {% elif field.component == "select" %}
+                <select id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}"{% if field.required %} required{% endif %}{% if field.disabled %} disabled{% endif %}>
+                  <option value="">请选择</option><option value="retry">确认后重试</option><option value="skip">记录并跳过</option>
+                </select>
+                {% elif field.component == "radio" %}
+                <div class="radio-group">
+                  <label><input id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}" type="radio" value="revise"{% if field.required %} required{% endif %}>返回修改</label>
+                  <label><input name="{{ field.name }}" type="radio" value="confirm">确认结果</label>
+                </div>
+                {% else %}
+                <input
+                  id="{{ stage.id }}-{{ field.name }}"
+                  name="{{ field.name }}"
+                  type="{{ 'text' if field.component == 'path' else ('datetime-local' if field.component == 'datetime' else field.component) }}"
+                  {% if field.component == "number" %}step="any" data-value-kind="number"{% endif %}
+                  {% if field.required %}required{% endif %}{% if field.disabled %} disabled{% endif %}
+                >
+                {% endif %}
+
+                {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+                <p class="field-error" data-field-error="{{ field.name }}" aria-live="polite"></p>
+              </div>
+              {% endfor %}
+            </div>
+          </form>
+        </section>
+        {% endfor %}
+      </div>
+
+      <section class="offline-panel" data-offline-panel aria-live="polite">
+        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong>Agent 未连接</strong></div>
+        <p>网页只保存交接，不会假装启动 Agent。需要时可复制恢复指令并粘贴回原 Codex 任务。</p>
+        <dl>
+          <div><dt>当前任务目录</dt><dd data-task-directory>{{ runs_root }}{{ '\\' if session_id else '' }}{{ session_id }}</dd></div>
+          <div><dt>当前阶段</dt><dd data-current-stage-label>{{ stages[0].title }}</dd></div>
+          <div><dt>最近一次提交时间</dt><dd data-last-submitted>尚未提交</dd></div>
+        </dl>
+        <button type="button" class="secondary-button" data-copy-recovery disabled>复制恢复指令</button>
+      </section>
+
+      <div class="handoff-spacer" aria-hidden="true"></div>
+      <footer class="handoff-bar" data-component="HandoffBar">
+        <div class="handoff-state">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <div><small>交接状态</small><strong data-handoff-status>编辑中</strong></div>
+        </div>
+        <p class="action-message" data-action-message aria-live="polite">填写完成后可保存草稿，或提交给 Agent。</p>
+        <div class="handoff-actions">
+          <button type="button" class="secondary-button" data-save-draft>保存草稿</button>
+          <button type="button" class="primary-button" data-submit-stage>提交给 Agent</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <script id="stage-registry" type="application/json">{{ stage_registry|tojson }}</script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>

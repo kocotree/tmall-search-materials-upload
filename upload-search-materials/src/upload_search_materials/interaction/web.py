@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
 from .session import InteractionConflict, InteractionPathError, SessionStore
-from .stages import FieldDefinition, StageDefinition, get_stage
+from .stages import STAGES, FieldDefinition, StageDefinition, get_stage
+
+
+IMAGE_SOURCES: tuple[dict[str, str], ...] = (
+    {"label": "视觉部 · 模特图", "path": r"Y:\视觉部\1-模特图"},
+    {
+        "label": "小红书 KOC 置换 · 淘宝买家秀",
+        "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀",
+    },
+    {
+        "label": "小红书 KOC 置换 · 买家秀",
+        "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
+    },
+)
+
+RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
 
 
 def create_app(runs_root: Path) -> Flask:
-    """Create the local JSON API backed by ``runs_root``."""
+    """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
     app = Flask(__name__)
     store = SessionStore(runs_root)
@@ -46,6 +62,18 @@ def create_app(runs_root: Path) -> Flask:
 
     @app.get("/")
     def index():
+        stage_registry = [asdict(stage) for stage in STAGES]
+        return render_template(
+            "index.html",
+            stages=STAGES,
+            stage_registry=stage_registry,
+            session_id=request.args.get("session_id", ""),
+            image_sources=IMAGE_SOURCES,
+            runs_root=str(store.runs_root.resolve()),
+        )
+
+    @app.get("/api")
+    def api_index():
         return jsonify(service="upload-search-materials interaction API")
 
     @app.post("/api/sessions")
@@ -62,7 +90,11 @@ def create_app(runs_root: Path) -> Flask:
     def get_stage_route(session_id: str, stage_id: str):
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
-        return jsonify(stage=asdict(stage), state=state["stages"][stage_id])
+        return jsonify(
+            stage=asdict(stage),
+            state=state["stages"][stage_id],
+            result=_current_result(store, session_id, stage_id, state),
+        )
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/draft")
     def save_draft(session_id: str, stage_id: str):
@@ -85,8 +117,13 @@ def create_app(runs_root: Path) -> Flask:
     def submit(session_id: str, stage_id: str):
         payload = _json_object()
         values = _values(payload)
-        store.load_session(session_id)
+        state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        if (
+            stage_id == "results"
+            and state["stages"][stage_id]["status"] not in RESULTS_USER_ACTION_STATUSES
+        ):
+            return _error("results stage is not awaiting user action", 409)
         field_errors = _unknown_value_errors(stage, values) | _value_errors(stage, values)
         if field_errors:
             return _validation_error(field_errors)
@@ -118,6 +155,31 @@ def create_app(runs_root: Path) -> Flask:
         return jsonify(instruction=store.recovery_instruction(session_id, stage_id))
 
     return app
+
+
+def _current_result(
+    store: SessionStore,
+    session_id: str,
+    stage_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return only the result bound to the stage's current durable revision."""
+
+    result_path = store._stage_path(session_id, stage_id) / "result.json"
+    try:
+        with result_path.open(encoding="utf-8") as stream:
+            result = json.load(stream)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    if (
+        result.get("session_id") != session_id
+        or result.get("stage_id") != stage_id
+        or result.get("revision") != state["stages"][stage_id]["revision"]
+    ):
+        return None
+    return result
 
 
 def _json_object() -> dict[str, Any]:

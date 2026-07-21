@@ -1,3 +1,5 @@
+import html as html_module
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -5,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from upload_search_materials.interaction.web import create_app
+from upload_search_materials.interaction.session import SessionStore
+from upload_search_materials.interaction.stages import STAGES
 
 
 @pytest.fixture
@@ -37,12 +41,181 @@ def test_create_session_returns_timestamp_id(client):
     assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{2})?", response.json["session_id"])
 
 
-def test_root_is_json_service_description(client):
+def test_root_renders_ten_stage_left_rail(client):
     response = client.get("/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/html"
+    assert html.count('data-stage-id="') == 10
+    assert "完整度巡检" in html
+    assert "生产确认" in html
+
+
+def test_api_is_json_service_description(client):
+    response = client.get("/api")
 
     assert response.status_code == 200
     assert response.is_json
     assert response.json["service"] == "upload-search-materials interaction API"
+
+
+def test_every_interactive_field_has_named_control(client):
+    html = client.get("/").get_data(as_text=True)
+
+    for stage in STAGES:
+        for field in stage.fields:
+            assert f'name="{field.name}"' in html
+
+
+def test_page_explains_agent_offline_recovery(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert "Agent 未连接" in html
+    assert "复制恢复指令" in html
+    assert "当前任务目录" in html
+    assert "当前阶段" in html
+    assert "最近一次提交时间" in html
+
+
+def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
+    html = client.get("/").get_data(as_text=True)
+    components = {
+        "InspectionMatrix",
+        "ProductScopeTable",
+        "AssetMatchGallery",
+        "CropDecision",
+        "SlotBoard",
+        "CopyEditor",
+        "DryRunSummary",
+        "ApprovalChecklist",
+        "ProductionConfirmation",
+        "ResultTimeline",
+    }
+
+    for component in components:
+        assert f'data-component="{component}"' in html
+    for label in ("商品 ID 命中", "SKU 命中", "已确认别名", "名称候选 · 待确认"):
+        assert label in html
+
+
+def test_page_uses_explicit_empty_states_without_fabricated_counts(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert html.count('data-empty-state="尚未扫描"') >= 10
+    assert "18 张" not in html
+
+
+def test_asset_matching_prefills_three_editable_labeled_image_roots(client):
+    decoded = html_module.unescape(client.get("/").get_data(as_text=True))
+    expected_roots = (
+        r"Y:\视觉部\1-模特图",
+        r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀",
+        r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
+    )
+
+    for root in expected_roots:
+        assert f'value="{root}"' in decoded
+    source_labels = re.findall(r'data-source-label="([^"]+)"', decoded)
+    assert len(source_labels) == 3
+    assert len(set(source_labels)) == 3
+    assert decoded.count('name="image_roots"') == 3
+
+
+def test_video_control_is_visible_disabled_and_deferred(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert re.search(r'<input[^>]+name="include_video"[^>]+disabled', html)
+    assert "本轮测试延期" in html
+
+
+def test_page_receives_optional_session_id(client, session_id):
+    html = client.get(f"/?session_id={session_id}").get_data(as_text=True)
+
+    assert f'data-session-id="{session_id}"' in html
+
+
+def test_javascript_uses_task_three_api_and_precise_status_copy(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert "编辑中" in javascript
+    assert "已提交，等待 Agent" in javascript
+    assert "Agent 处理中" in javascript
+    assert "补充后重新提交" in javascript
+    assert "Agent 未连接" in javascript
+    assert "2000" in javascript
+    assert "/api/sessions" in javascript
+    assert "/draft" in javascript
+    assert "/submit" in javascript
+    assert "/status" in javascript
+    assert "/recovery" in javascript
+    for endpoint in re.findall(r"fetch\(([^,)]+)", javascript):
+        assert "publish" not in endpoint.lower()
+        assert "upload" not in endpoint.lower()
+    assert "subprocess" not in javascript.lower()
+    assert "playwright" not in javascript.lower()
+
+
+def test_javascript_selects_result_renderers_by_schema_component(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert "resultRenderers" in javascript
+    for component in {stage.component for stage in STAGES if stage.id != "setup"}:
+        assert f'"{component}"' in javascript
+
+
+def test_results_recovery_form_is_hidden_and_disabled_by_default(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert re.search(r'<form[^>]+data-results-recovery[^>]+hidden', html)
+    for field_name in ("recovery_action", "manual_notes", "allow_retry_after_remote_absence"):
+        assert re.search(rf'<(?:input|select|textarea)[^>]+name="{field_name}"[^>]+disabled', html)
+
+
+def test_compact_styles_keep_result_tables_scrollable_above_fixed_handoff(client):
+    stylesheet = client.get("/static/app.css").get_data(as_text=True)
+
+    assert "@media (max-width: 1120px)" in stylesheet
+    assert ".table-scroll" in stylesheet
+    assert "overflow-x: auto" in stylesheet
+    assert ".handoff-spacer" in stylesheet
+
+
+def test_results_stage_rejects_ordinary_submission_without_creating_handoff(
+    client, session_id, tmp_path
+):
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/results/submit",
+        json={"values": {}},
+    )
+
+    assert response.status_code == 409
+    results_directory = tmp_path / session_id / "10-results"
+    assert not (results_directory / "input.json").exists()
+    assert not (results_directory / "handoff.json").exists()
+
+
+@pytest.mark.parametrize("status", ["needs_user_input", "blocked"])
+def test_results_stage_accepts_recovery_only_when_session_status_requires_user_action(
+    client, session_id, tmp_path, status
+):
+    state_path = tmp_path / session_id / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["stages"]["results"]["status"] = status
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/results/submit",
+        json={
+            "values": {
+                "recovery_action": "retry",
+                "manual_notes": "已核对远端状态",
+                "allow_retry_after_remote_absence": True,
+            }
+        },
+    )
+
+    assert response.status_code == 202
 
 
 @pytest.mark.parametrize(
@@ -219,6 +392,32 @@ def test_stage_read_and_status_expose_schema_and_state(client, session_id):
     assert stage.json["stage"]["id"] == "setup"
     assert {field["name"] for field in stage.json["stage"]["fields"]} >= {"store", "month"}
     assert status.json == {"revision": 0, "status": "draft"}
+
+
+def test_stage_read_exposes_current_agent_result_for_schema_renderer(
+    client, session_id, tmp_path
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={"values": valid_production_confirmation()},
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "production_confirmation",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="completed",
+        summary="真实结果：1 个商品已完成",
+        evidence=[{"product_id": "887508274682", "count": 1}],
+    )
+
+    response = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation"
+    )
+
+    assert response.status_code == 200
+    assert response.json["result"]["summary"] == "真实结果：1 个商品已完成"
+    assert response.json["result"]["revision"] == submitted.json["revision"]
 
 
 def test_recovery_returns_session_store_instruction(client, session_id):
