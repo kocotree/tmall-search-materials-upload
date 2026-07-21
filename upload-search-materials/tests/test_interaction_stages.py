@@ -58,7 +58,12 @@ def test_stages_have_rendering_metadata_with_chinese_copy():
 
 
 def test_asset_source_contract_requires_one_exclusive_input_before_matching():
-    setup_fields = {field.name: field for field in get_stage("setup").fields}
+    setup = get_stage("setup")
+    setup_fields = {field.name: field for field in setup.fields}
+    constraint, = setup.exactly_one_constraints
+
+    assert constraint.field_names == ("asset_root", "asset_manifest")
+    assert constraint.required_before_stage == "asset_matching"
     for name, other_name in (
         ("asset_root", "asset_manifest"),
         ("asset_manifest", "asset_root"),
@@ -66,7 +71,7 @@ def test_asset_source_contract_requires_one_exclusive_input_before_matching():
         field = setup_fields[name]
         assert field.required is False
         assert field.exclusive_with == (other_name,)
-        assert field.required_before_stage == "asset_matching"
+        assert field.required_before_stage is None
 
 
 def test_recovery_fields_are_conditionally_enabled_only_for_actionable_exceptions():

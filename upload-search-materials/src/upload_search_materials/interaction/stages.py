@@ -19,6 +19,14 @@ class FieldDefinition:
 
 
 @dataclass(frozen=True)
+class ExactlyOneConstraint:
+    """Require exactly one field in a group before entering a later stage."""
+
+    field_names: tuple[str, ...]
+    required_before_stage: str
+
+
+@dataclass(frozen=True)
 class StageDefinition:
     """One ordered stage of the interaction workflow."""
 
@@ -29,6 +37,7 @@ class StageDefinition:
     fields: tuple[FieldDefinition, ...]
     previous_stage: str | None = None
     read_only: bool = False
+    exactly_one_constraints: tuple[ExactlyOneConstraint, ...] = ()
 
 
 def _field(
@@ -75,16 +84,20 @@ STAGES: tuple[StageDefinition, ...] = (
                 "图片素材根目录",
                 "path",
                 exclusive_with=("asset_manifest",),
-                required_before_stage="asset_matching",
             ),
             _field(
                 "asset_manifest",
                 "图片素材清单",
                 "path",
                 exclusive_with=("asset_root",),
-                required_before_stage="asset_matching",
             ),
             _field("runs_root", "运行目录", "path", required=True),
+        ),
+        exactly_one_constraints=(
+            ExactlyOneConstraint(
+                field_names=("asset_root", "asset_manifest"),
+                required_before_stage="asset_matching",
+            ),
         ),
     ),
     StageDefinition(
