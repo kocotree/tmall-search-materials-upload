@@ -45,6 +45,19 @@ def test_root_is_json_service_description(client):
     assert response.json["service"] == "upload-search-materials interaction API"
 
 
+@pytest.mark.parametrize(
+    ("data", "content_type", "status"),
+    [(b"{}", None, 415), (b"{", "application/json", 400)],
+)
+def test_json_body_errors_are_json_with_field_errors(client, data, content_type, status):
+    response = client.post("/api/sessions", data=data, content_type=content_type)
+
+    assert response.status_code == status
+    assert response.is_json
+    assert response.json["field_errors"] == {}
+    assert response.json["error"]
+
+
 def test_submit_rejects_missing_required_store(client, session_id):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/submit",
@@ -64,6 +77,49 @@ def test_draft_is_saved_without_handoff(client, session_id, tmp_path):
     assert response.status_code == 200
     assert response.json["status"] == "draft"
     assert not list(tmp_path.glob(f"{session_id}/**/handoff.json"))
+
+
+def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft",
+        json={"values": {"store": "测试店铺", "password": "secret"}},
+    )
+
+    assert response.status_code == 422
+    assert "password" in response.json["field_errors"]
+    assert not list(tmp_path.glob(f"{session_id}/**/input.json"))
+
+
+def test_submit_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={"values": valid_production_confirmation() | {"cookie": "secret"}},
+    )
+
+    assert response.status_code == 422
+    assert "cookie" in response.json["field_errors"]
+    assert not list(tmp_path.glob(f"{session_id}/**/input.json"))
+
+
+def test_draft_after_submit_invalidates_its_handoff_and_marks_stage_draft(client, session_id, tmp_path):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={"values": valid_production_confirmation()},
+    )
+    drafted = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/draft",
+        json={"values": {"store": "updated store"}},
+    )
+
+    assert submitted.status_code == 202
+    assert drafted.status_code == 200
+    assert client.get(f"/api/sessions/{session_id}/stages/production_confirmation/status").json == {
+        "revision": 2,
+        "status": "draft",
+    }
+    assert not list(tmp_path.glob(f"{session_id}/**/handoff.json"))
+    input_path = next(tmp_path.glob(f"{session_id}/**/input.json"))
+    assert '"password"' not in input_path.read_text(encoding="utf-8")
 
 
 def test_submit_returns_store_handoff_identity(client, session_id):

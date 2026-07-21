@@ -358,3 +358,70 @@ def test_edit_cannot_be_overwritten_by_stale_handoff_claim(tmp_path, monkeypatch
     handoff = json.loads((session.path / "01-setup" / "handoff.json").read_text(encoding="utf-8"))
     assert state["stages"]["setup"] == {"revision": 2, "status": "ready_for_agent"}
     assert handoff["revision"] == 2
+
+
+def test_expected_revision_allows_only_one_concurrent_submit(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    barrier = threading.Barrier(2)
+    handoffs = []
+    errors = []
+
+    def submit(label):
+        barrier.wait()
+        try:
+            handoffs.append(
+                store.save_input(
+                    session.session_id,
+                    "setup",
+                    {"store": label},
+                    expected_revision=1,
+                )
+            )
+        except Exception as error:
+            errors.append(error)
+
+    first = threading.Thread(target=submit, args=("first",))
+    second = threading.Thread(target=submit, args=("second",))
+    first.start()
+    second.start()
+    first.join(2)
+    second.join(2)
+
+    assert len(handoffs) == 1
+    assert handoffs[0]["revision"] == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], InteractionConflict)
+    assert store.load_session(session.session_id)["stages"]["setup"] == {
+        "revision": 1,
+        "status": "ready_for_agent",
+    }
+
+
+def test_save_draft_invalidates_current_handoff_and_downstream_state(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    setup_handoff = store.save_input(session.session_id, "setup", {"store": "submitted"})
+    store.save_input(session.session_id, "completeness", {"confirmed_product_ids": ["1"]})
+    store.write_result(
+        session.session_id,
+        "setup",
+        setup_handoff["revision"],
+        setup_handoff["input_sha256"],
+        status="completed",
+        summary="finished",
+    )
+    approval_path = session.path / "01-setup" / "approval.json"
+    approval_path.write_text("{}", encoding="utf-8")
+
+    draft = store.save_draft(session.session_id, "setup", {"store": "draft"})
+
+    assert draft["revision"] == 2
+    assert draft["values"] == {"store": "draft"}
+    assert not (session.path / "01-setup" / "handoff.json").exists()
+    assert not (session.path / "01-setup" / "result.json").exists()
+    assert not approval_path.exists()
+    assert not (session.path / "02-completeness" / "handoff.json").exists()
+    state = store.load_session(session.session_id)
+    assert state["stages"]["setup"] == {"revision": 2, "status": "draft"}
+    assert state["stages"]["completeness"]["status"] == "draft"

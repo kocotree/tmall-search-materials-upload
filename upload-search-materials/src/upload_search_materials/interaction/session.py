@@ -88,6 +88,8 @@ class SessionStore:
         stage_id: str,
         values: dict[str, Any],
         user_notes: str = "",
+        *,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         self._stage_index(stage_id)
         with self._session_lock(session_id):
@@ -95,6 +97,8 @@ class SessionStore:
             state = self.load_session(session_id)
             stage_state = state["stages"][stage_id]
             revision = int(stage_state["revision"]) + 1
+            if expected_revision is not None and expected_revision != revision:
+                raise InteractionConflict("expected revision is stale")
             created_at = self._iso_timestamp(datetime.now(timezone.utc))
 
             self._invalidate_after_edit(session_id, stage_id, state)
@@ -129,6 +133,48 @@ class SessionStore:
                 revision=revision,
             )
             return handoff
+
+    def save_draft(
+        self,
+        session_id: str,
+        stage_id: str,
+        values: dict[str, Any],
+        user_notes: str = "",
+    ) -> dict[str, Any]:
+        """Persist an editable revision and atomically revoke its handoff."""
+
+        self._stage_index(stage_id)
+        with self._session_lock(session_id):
+            stage_path = self._stage_path(session_id, stage_id)
+            state = self.load_session(session_id)
+            stage_state = state["stages"][stage_id]
+            revision = int(stage_state["revision"]) + 1
+            created_at = self._iso_timestamp(datetime.now(timezone.utc))
+
+            self._invalidate_after_edit(
+                session_id, stage_id, state, remove_current_handoff=True
+            )
+            document = {
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": revision,
+                "created_at": created_at,
+                "values": values,
+                "user_notes": user_notes,
+            }
+            self._write_json_atomic(stage_path / "input.json", document)
+            stage_state["revision"] = revision
+            stage_state["status"] = "draft"
+            state["current_stage"] = stage_id
+            self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+            self._append_event(
+                self._session_path(session_id),
+                "draft_saved",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=revision,
+            )
+            return document
 
     def write_result(
         self,
@@ -261,7 +307,12 @@ class SessionStore:
         )
 
     def _invalidate_after_edit(
-        self, session_id: str, stage_id: str, state: dict[str, Any]
+        self,
+        session_id: str,
+        stage_id: str,
+        state: dict[str, Any],
+        *,
+        remove_current_handoff: bool = False,
     ) -> None:
         """Remove results derived from an edited input and all later handoffs."""
 
@@ -270,8 +321,9 @@ class SessionStore:
         affected = STAGES[stage_index - 1 :]
         for offset, stage in enumerate(affected, start=stage_index):
             artifact_names = ("result.json", "approval.json")
-            if stage.id != stage_id:
+            if stage.id != stage_id or remove_current_handoff:
                 artifact_names = ("handoff.json", *artifact_names)
+            if stage.id != stage_id:
                 state["stages"][stage.id]["status"] = "draft"
             stage_path = self._safe_path(
                 session_path / self._stage_directory_name(offset, stage.id)

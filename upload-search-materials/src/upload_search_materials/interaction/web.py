@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, request
-from werkzeug.exceptions import BadRequest, NotFound
+from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
 from .session import InteractionConflict, InteractionPathError, SessionStore
 from .stages import FieldDefinition, StageDefinition, get_stage
@@ -23,6 +23,10 @@ def create_app(runs_root: Path) -> Flask:
     @app.errorhandler(BadRequest)
     def malformed_json(_: BadRequest):
         return _error("malformed JSON", 400)
+
+    @app.errorhandler(UnsupportedMediaType)
+    def unsupported_json(_: UnsupportedMediaType):
+        return _error("JSON content type is required", 415)
 
     @app.errorhandler(NotFound)
     def not_found(_: NotFound):
@@ -64,25 +68,42 @@ def create_app(runs_root: Path) -> Flask:
     def save_draft(session_id: str, stage_id: str):
         payload = _json_object()
         values = _values(payload)
-        get_stage(stage_id)
-        _save_draft(store, session_id, stage_id, values, _user_notes(payload))
+        store.load_session(session_id)
+        stage = get_stage(stage_id)
+        field_errors = _unknown_value_errors(stage, values)
+        if field_errors:
+            return _validation_error(field_errors)
+        store.save_draft(
+            session_id,
+            stage_id,
+            _allowlisted_values(stage, values),
+            _user_notes(payload),
+        )
         return jsonify(status="draft")
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/submit")
     def submit(session_id: str, stage_id: str):
         payload = _json_object()
         values = _values(payload)
-        session = store.load_session(session_id)
+        store.load_session(session_id)
         stage = get_stage(stage_id)
-        field_errors = _value_errors(stage, values)
+        field_errors = _unknown_value_errors(stage, values) | _value_errors(stage, values)
         if field_errors:
-            return jsonify(error="validation failed", field_errors=field_errors), 422
+            return _validation_error(field_errors)
 
-        current_revision = session["stages"][stage_id]["revision"]
-        if "revision" in payload and payload["revision"] != current_revision + 1:
-            return _error("stale revision", 409)
+        expected_revision = payload.get("revision")
+        if "revision" in payload and (
+            isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+        ):
+            return _validation_error({"revision": "must be an integer"})
 
-        handoff = store.save_input(session_id, stage_id, values, _user_notes(payload))
+        handoff = store.save_input(
+            session_id,
+            stage_id,
+            _allowlisted_values(stage, values),
+            _user_notes(payload),
+            expected_revision=expected_revision,
+        )
         return jsonify(revision=handoff["revision"], input_sha256=handoff["input_sha256"]), 202
 
     @app.get("/api/sessions/<session_id>/stages/<stage_id>/status")
@@ -97,29 +118,6 @@ def create_app(runs_root: Path) -> Flask:
         return jsonify(instruction=store.recovery_instruction(session_id, stage_id))
 
     return app
-
-
-def _save_draft(
-    store: SessionStore,
-    session_id: str,
-    stage_id: str,
-    values: dict[str, Any],
-    user_notes: str,
-) -> None:
-    """Persist user-editable input while deliberately withholding agent handoff."""
-
-    with store._session_lock(session_id):
-        stage_path = store._stage_path(session_id, stage_id)
-        state = store.load_session(session_id)
-        document = {
-            "session_id": session_id,
-            "stage_id": stage_id,
-            "revision": state["stages"][stage_id]["revision"],
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "values": values,
-            "user_notes": user_notes,
-        }
-        store._write_json_atomic(stage_path / "input.json", document)
 
 
 def _json_object() -> dict[str, Any]:
@@ -165,6 +163,20 @@ def _value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, s
     ):
         errors["overrides"] = "each override requires a reason"
     return errors
+
+
+def _unknown_value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, str]:
+    allowed_names = {field.name for field in stage.fields}
+    return {
+        name: "is not allowed for this stage"
+        for name in values
+        if name not in allowed_names
+    }
+
+
+def _allowlisted_values(stage: StageDefinition, values: dict[str, Any]) -> dict[str, Any]:
+    allowed_names = {field.name for field in stage.fields}
+    return {name: value for name, value in values.items() if name in allowed_names}
 
 
 def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | None:
@@ -264,5 +276,9 @@ def _is_readable_path(value: str) -> bool:
     return False
 
 
-def _error(message: str, status_code: int):
-    return jsonify(error=message), status_code
+def _validation_error(field_errors: dict[str, str]):
+    return _error("validation failed", 422, field_errors)
+
+
+def _error(message: str, status_code: int, field_errors: dict[str, str] | None = None):
+    return jsonify(error=message, field_errors=field_errors or {}), status_code
