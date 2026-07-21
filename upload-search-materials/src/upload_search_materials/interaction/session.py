@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,31 +43,32 @@ class SessionStore:
         base_id = created.strftime("%Y%m%d_%H%M%S")
         session_path: Path | None = None
         session_id = base_id
-        for number in range(1, 10_000):
-            session_id = base_id if number == 1 else f"{base_id}_{number:02d}"
-            candidate = self._runs_root / session_id
-            try:
-                candidate.mkdir()
-            except FileExistsError:
-                continue
-            session_path = self._safe_path(candidate)
-            break
-        if session_path is None:
-            raise InteractionConflict("unable to allocate a unique session identifier")
+        with self._file_lock(self._runs_root / ".session-create.lock"):
+            for number in range(1, 10_000):
+                session_id = base_id if number == 1 else f"{base_id}_{number:02d}"
+                candidate = self._runs_root / session_id
+                try:
+                    candidate.mkdir()
+                except FileExistsError:
+                    continue
+                session_path = self._safe_path(candidate)
+                break
+            if session_path is None:
+                raise InteractionConflict("unable to allocate a unique session identifier")
 
-        for index, stage in enumerate(STAGES, start=1):
-            (session_path / self._stage_directory_name(index, stage.id)).mkdir()
+            for index, stage in enumerate(STAGES, start=1):
+                (session_path / self._stage_directory_name(index, stage.id)).mkdir()
 
-        state = {
-            "session_id": session_id,
-            "created_at": self._iso_timestamp(created),
-            "current_stage": "setup",
-            "stages": {
-                stage.id: {"revision": 0, "status": "draft"} for stage in STAGES
-            },
-        }
-        self._write_json_atomic(session_path / "session.json", state)
-        self._append_event(session_path, "session_created", session_id=session_id)
+            state = {
+                "session_id": session_id,
+                "created_at": self._iso_timestamp(created),
+                "current_stage": "setup",
+                "stages": {
+                    stage.id: {"revision": 0, "status": "draft"} for stage in STAGES
+                },
+            }
+            self._write_json_atomic(session_path / "session.json", state)
+            self._append_event(session_path, "session_created", session_id=session_id)
         return SessionRecord(session_id=session_id, path=session_path)
 
     def load_session(self, session_id: str) -> dict[str, Any]:
@@ -87,44 +89,46 @@ class SessionStore:
         values: dict[str, Any],
         user_notes: str = "",
     ) -> dict[str, Any]:
-        stage_path = self._stage_path(session_id, stage_id)
-        state = self.load_session(session_id)
-        stage_state = state["stages"][stage_id]
-        revision = int(stage_state["revision"]) + 1
-        created_at = self._iso_timestamp(datetime.now(timezone.utc))
+        self._stage_index(stage_id)
+        with self._session_lock(session_id):
+            stage_path = self._stage_path(session_id, stage_id)
+            state = self.load_session(session_id)
+            stage_state = state["stages"][stage_id]
+            revision = int(stage_state["revision"]) + 1
+            created_at = self._iso_timestamp(datetime.now(timezone.utc))
 
-        self._invalidate_after_edit(session_id, stage_id, state)
-        input_document = {
-            "session_id": session_id,
-            "stage_id": stage_id,
-            "revision": revision,
-            "created_at": created_at,
-            "values": values,
-            "user_notes": user_notes,
-        }
-        input_path = stage_path / "input.json"
-        self._write_json_atomic(input_path, input_document)
-        handoff = {
-            "status": "ready_for_agent",
-            "session_id": session_id,
-            "stage_id": stage_id,
-            "revision": revision,
-            "created_at": created_at,
-            "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
-        }
-        self._write_json_atomic(stage_path / "handoff.json", handoff)
-        stage_state["revision"] = revision
-        stage_state["status"] = "ready_for_agent"
-        state["current_stage"] = stage_id
-        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
-        self._append_event(
-            self._session_path(session_id),
-            "input_saved",
-            session_id=session_id,
-            stage_id=stage_id,
-            revision=revision,
-        )
-        return handoff
+            self._invalidate_after_edit(session_id, stage_id, state)
+            input_document = {
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": revision,
+                "created_at": created_at,
+                "values": values,
+                "user_notes": user_notes,
+            }
+            input_path = stage_path / "input.json"
+            self._write_json_atomic(input_path, input_document)
+            handoff = {
+                "status": "ready_for_agent",
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": revision,
+                "created_at": created_at,
+                "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+            }
+            self._write_json_atomic(stage_path / "handoff.json", handoff)
+            stage_state["revision"] = revision
+            stage_state["status"] = "ready_for_agent"
+            state["current_stage"] = stage_id
+            self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+            self._append_event(
+                self._session_path(session_id),
+                "input_saved",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=revision,
+            )
+            return handoff
 
     def write_result(
         self,
@@ -141,45 +145,47 @@ class SessionStore:
     ) -> dict[str, Any]:
         """Persist an agent-owned result bound to the current user handoff."""
 
-        stage_path = self._stage_path(session_id, stage_id)
-        state = self.load_session(session_id)
-        handoff = self._read_json(stage_path / "handoff.json", "handoff")
-        expected_revision = state["stages"][stage_id]["revision"]
-        if revision != expected_revision or handoff.get("revision") != revision:
-            raise InteractionConflict("result revision does not match the current handoff")
-        if (
-            input_sha256 != handoff.get("input_sha256")
-            or hashlib.sha256((stage_path / "input.json").read_bytes()).hexdigest()
-            != input_sha256
-        ):
-            raise InteractionConflict("result input_sha256 does not match the current input")
-        if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
-            raise InteractionConflict("handoff identity does not match its path")
+        self._stage_index(stage_id)
+        with self._session_lock(session_id):
+            stage_path = self._stage_path(session_id, stage_id)
+            state = self.load_session(session_id)
+            handoff = self._read_json(stage_path / "handoff.json", "handoff")
+            expected_revision = state["stages"][stage_id]["revision"]
+            if revision != expected_revision or handoff.get("revision") != revision:
+                raise InteractionConflict("result revision does not match the current handoff")
+            if (
+                input_sha256 != handoff.get("input_sha256")
+                or hashlib.sha256((stage_path / "input.json").read_bytes()).hexdigest()
+                != input_sha256
+            ):
+                raise InteractionConflict("result input_sha256 does not match the current input")
+            if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
+                raise InteractionConflict("handoff identity does not match its path")
 
-        result = {
-            "session_id": session_id,
-            "stage_id": stage_id,
-            "revision": revision,
-            "input_sha256": input_sha256,
-            "status": status,
-            "summary": summary,
-            "blocking_reasons": list(blocking_reasons),
-            "evidence": list(evidence),
-            "next_action": next_action,
-            "created_at": self._iso_timestamp(datetime.now(timezone.utc)),
-        }
-        self._write_json_atomic(stage_path / "result.json", result)
-        state["stages"][stage_id]["status"] = status
-        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
-        self._append_event(
-            self._session_path(session_id),
-            "result_written",
-            session_id=session_id,
-            stage_id=stage_id,
-            revision=revision,
-            status=status,
-        )
-        return result
+            result = {
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": revision,
+                "input_sha256": input_sha256,
+                "status": status,
+                "summary": summary,
+                "blocking_reasons": list(blocking_reasons),
+                "evidence": list(evidence),
+                "next_action": next_action,
+                "created_at": self._iso_timestamp(datetime.now(timezone.utc)),
+            }
+            self._write_json_atomic(stage_path / "result.json", result)
+            state["stages"][stage_id]["status"] = status
+            self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+            self._append_event(
+                self._session_path(session_id),
+                "result_written",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=revision,
+                status=status,
+            )
+            return result
 
     def wait_for_handoff(
         self,
@@ -194,23 +200,33 @@ class SessionStore:
         handoff_path = stage_path / "handoff.json"
         while True:
             if handoff_path.is_file():
-                handoff = self._read_json(handoff_path, "handoff")
-                self._validate_handoff(session_id, stage_id, stage_path, handoff)
-                state = self.load_session(session_id)
-                if state["stages"][stage_id]["revision"] != handoff["revision"]:
-                    raise InteractionConflict("handoff revision does not match session state")
-                heartbeat = self._iso_timestamp(datetime.now(timezone.utc))
-                state["stages"][stage_id]["status"] = "processing"
-                state["last_agent_heartbeat"] = heartbeat
-                self._write_json_atomic(self._session_path(session_id) / "session.json", state)
-                self._append_event(
-                    self._session_path(session_id),
-                    "handoff_claimed",
-                    session_id=session_id,
-                    stage_id=stage_id,
-                    revision=handoff["revision"],
-                )
-                return handoff
+                try:
+                    with self._session_lock(session_id, deadline=deadline):
+                        stage_path = self._stage_path(session_id, stage_id)
+                        handoff_path = stage_path / "handoff.json"
+                        if not handoff_path.is_file():
+                            continue
+                        handoff = self._read_json(handoff_path, "handoff")
+                        self._validate_handoff(session_id, stage_id, stage_path, handoff)
+                        state = self.load_session(session_id)
+                        if state["stages"][stage_id]["revision"] != handoff["revision"]:
+                            raise InteractionConflict("handoff revision does not match session state")
+                        heartbeat = self._iso_timestamp(datetime.now(timezone.utc))
+                        state["stages"][stage_id]["status"] = "processing"
+                        state["last_agent_heartbeat"] = heartbeat
+                        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+                        self._append_event(
+                            self._session_path(session_id),
+                            "handoff_claimed",
+                            session_id=session_id,
+                            stage_id=stage_id,
+                            revision=handoff["revision"],
+                        )
+                        return handoff
+                except TimeoutError as error:
+                    raise TimeoutError(
+                        f"timed out waiting for handoff for stage {stage_id}"
+                    ) from error
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out waiting for handoff for stage {stage_id}")
             time.sleep(0.25)
@@ -263,6 +279,7 @@ class SessionStore:
             for artifact_name in artifact_names:
                 artifact_path = stage_path / artifact_name
                 if artifact_path.is_file():
+                    metadata = self._artifact_metadata(artifact_path, artifact_name)
                     artifact_path.unlink()
                     self._append_event(
                         session_path,
@@ -270,7 +287,25 @@ class SessionStore:
                         session_id=session_id,
                         stage_id=stage.id,
                         artifact=artifact_name,
+                        **metadata,
                     )
+
+    @staticmethod
+    def _artifact_metadata(path: Path, artifact_name: str) -> dict[str, Any]:
+        """Retain only identity-safe fields from an invalidated artifact."""
+
+        try:
+            document = SessionStore._read_json(path, artifact_name.removesuffix(".json"))
+        except InteractionConflict:
+            return {}
+        metadata: dict[str, Any] = {}
+        if isinstance(document.get("revision"), int):
+            metadata["revision"] = document["revision"]
+        if isinstance(document.get("status"), str):
+            metadata["status"] = document["status"]
+        if isinstance(document.get("input_sha256"), str):
+            metadata["input_sha256"] = document["input_sha256"]
+        return metadata
 
     @staticmethod
     def _read_json(path: Path, document_name: str) -> dict[str, Any]:
@@ -301,6 +336,58 @@ class SessionStore:
         actual_hash = hashlib.sha256((stage_path / "input.json").read_bytes()).hexdigest()
         if handoff.get("input_sha256") != actual_hash:
             raise InteractionConflict("handoff input_sha256 does not match input.json")
+
+    @contextmanager
+    def _session_lock(self, session_id: str, deadline: float | None = None):
+        """Serialize mutations from local UI and Agent processes for one session."""
+
+        session_path = self._session_path(session_id)
+        with self._file_lock(session_path / ".session.lock", deadline=deadline):
+            yield session_path
+
+    @staticmethod
+    @contextmanager
+    def _file_lock(path: Path, deadline: float | None = None):
+        """Use an OS advisory byte-range lock that releases when a process exits."""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\\0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise TimeoutError("timed out acquiring session lock")
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                while True:
+                    try:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise TimeoutError("timed out acquiring session lock")
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     def _safe_path(self, path: Path) -> Path:
         resolved = path.resolve()

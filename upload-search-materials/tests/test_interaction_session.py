@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime
 from hashlib import sha256
 
@@ -149,6 +150,22 @@ def test_edit_increments_revision_and_invalidates_current_and_downstream_state(t
         "result.json",
         "handoff.json",
     }
+    result_invalidation = next(
+        event
+        for event in invalidated
+        if event["stage_id"] == "setup" and event["artifact"] == "result.json"
+    )
+    assert {
+        "session_id",
+        "stage_id",
+        "artifact",
+        "revision",
+        "status",
+        "input_sha256",
+    } <= result_invalidation.keys()
+    assert "summary" not in result_invalidation
+    assert "values" not in result_invalidation
+    assert "user_notes" not in result_invalidation
 
 
 def test_wait_verifies_hash_and_marks_stage_processing(tmp_path):
@@ -181,6 +198,26 @@ def test_wait_times_out_only_when_explicit_deadline_expires(tmp_path):
 
     with pytest.raises(TimeoutError, match="setup"):
         store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0)
+
+
+def test_wait_timeout_applies_while_another_process_holds_the_session_lock(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    store.save_input(session.session_id, "setup", {"store": "locked"})
+    outcome = []
+
+    def claim_with_deadline():
+        try:
+            store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0.1)
+        except TimeoutError as error:
+            outcome.append(str(error))
+
+    with store._session_lock(session.session_id):
+        claimant = threading.Thread(target=claim_with_deadline)
+        claimant.start()
+        claimant.join(1)
+
+    assert outcome and "setup" in outcome[0]
 
 
 def test_write_result_binds_identity_and_updates_session(tmp_path):
@@ -216,3 +253,108 @@ def test_recovery_instruction_names_absolute_session_path_and_stage(tmp_path):
     assert "setup" in instruction
     assert "handoff.json" in instruction
     assert "input_sha256" in instruction
+
+
+def test_edit_cannot_be_overwritten_by_stale_result_claim(tmp_path, monkeypatch):
+    agent = SessionStore(tmp_path)
+    editor = SessionStore(tmp_path)
+    session = agent.create_session()
+    first = agent.save_input(session.session_id, "setup", {"store": "first"})
+    result_write_started = threading.Event()
+    allow_result_write = threading.Event()
+    edit_session_write_started = threading.Event()
+    allow_edit_session_write = threading.Event()
+    original_write = agent._write_json_atomic
+    original_editor_write = editor._write_json_atomic
+
+    def pause_stale_result(path, document):
+        if path.name == "result.json":
+            result_write_started.set()
+            assert allow_result_write.wait(2)
+        original_write(path, document)
+
+    def pause_edit_session_write(path, document):
+        if path.name == "session.json" and document["stages"]["setup"]["revision"] == 2:
+            edit_session_write_started.set()
+            assert allow_edit_session_write.wait(2)
+        original_editor_write(path, document)
+
+    monkeypatch.setattr(agent, "_write_json_atomic", pause_stale_result)
+    monkeypatch.setattr(editor, "_write_json_atomic", pause_edit_session_write)
+    agent_thread = threading.Thread(
+        target=agent.write_result,
+        args=(session.session_id, "setup", first["revision"], first["input_sha256"]),
+        kwargs={"status": "completed", "summary": "stale"},
+    )
+    edit_thread = threading.Thread(
+        target=lambda: editor.save_input(session.session_id, "setup", {"store": "second"}),
+    )
+    agent_thread.start()
+    try:
+        assert result_write_started.wait(2)
+        edit_thread.start()
+        assert not edit_session_write_started.wait(0.25)
+    finally:
+        allow_result_write.set()
+        agent_thread.join(2)
+        allow_edit_session_write.set()
+        if edit_thread.ident is not None:
+            edit_thread.join(2)
+
+    state = editor.load_session(session.session_id)
+    handoff = json.loads((session.path / "01-setup" / "handoff.json").read_text(encoding="utf-8"))
+    assert state["stages"]["setup"] == {"revision": 2, "status": "ready_for_agent"}
+    assert handoff["revision"] == 2
+    assert not (session.path / "01-setup" / "result.json").exists()
+
+
+def test_edit_cannot_be_overwritten_by_stale_handoff_claim(tmp_path, monkeypatch):
+    agent = SessionStore(tmp_path)
+    editor = SessionStore(tmp_path)
+    session = agent.create_session()
+    agent.save_input(session.session_id, "setup", {"store": "first"})
+    claim_write_started = threading.Event()
+    allow_claim_write = threading.Event()
+    edit_session_write_started = threading.Event()
+    allow_edit_session_write = threading.Event()
+    original_write = agent._write_json_atomic
+    original_editor_write = editor._write_json_atomic
+
+    def pause_stale_claim(path, document):
+        if path.name == "session.json" and document["stages"]["setup"]["status"] == "processing":
+            claim_write_started.set()
+            assert allow_claim_write.wait(2)
+        original_write(path, document)
+
+    def pause_edit_session_write(path, document):
+        if path.name == "session.json" and document["stages"]["setup"]["revision"] == 2:
+            edit_session_write_started.set()
+            assert allow_edit_session_write.wait(2)
+        original_editor_write(path, document)
+
+    monkeypatch.setattr(agent, "_write_json_atomic", pause_stale_claim)
+    monkeypatch.setattr(editor, "_write_json_atomic", pause_edit_session_write)
+    agent_thread = threading.Thread(
+        target=agent.wait_for_handoff,
+        args=(session.session_id, "setup"),
+        kwargs={"timeout_seconds": 1},
+    )
+    edit_thread = threading.Thread(
+        target=lambda: editor.save_input(session.session_id, "setup", {"store": "second"}),
+    )
+    agent_thread.start()
+    try:
+        assert claim_write_started.wait(2)
+        edit_thread.start()
+        assert not edit_session_write_started.wait(0.25)
+    finally:
+        allow_claim_write.set()
+        agent_thread.join(2)
+        allow_edit_session_write.set()
+        if edit_thread.ident is not None:
+            edit_thread.join(2)
+
+    state = editor.load_session(session.session_id)
+    handoff = json.loads((session.path / "01-setup" / "handoff.json").read_text(encoding="utf-8"))
+    assert state["stages"]["setup"] == {"revision": 2, "status": "ready_for_agent"}
+    assert handoff["revision"] == 2
