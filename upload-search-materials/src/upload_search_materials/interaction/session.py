@@ -1,0 +1,359 @@
+"""Durable, filesystem-backed interaction sessions."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .stages import STAGES, get_stage
+
+
+class InteractionPathError(ValueError):
+    """Raised when a supplied identifier could address data outside a session."""
+
+
+class InteractionConflict(RuntimeError):
+    """Raised when durable interaction state cannot be safely updated."""
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    session_id: str
+    path: Path
+
+
+class SessionStore:
+    """Create sessions and hand user input to an interaction agent."""
+
+    def __init__(self, runs_root: Path) -> None:
+        self.runs_root = Path(runs_root).expanduser()
+        self.runs_root.mkdir(parents=True, exist_ok=True)
+        self._runs_root = self.runs_root.resolve()
+
+    def create_session(self, now: datetime | None = None) -> SessionRecord:
+        created = now or datetime.now()
+        base_id = created.strftime("%Y%m%d_%H%M%S")
+        session_path: Path | None = None
+        session_id = base_id
+        for number in range(1, 10_000):
+            session_id = base_id if number == 1 else f"{base_id}_{number:02d}"
+            candidate = self._runs_root / session_id
+            try:
+                candidate.mkdir()
+            except FileExistsError:
+                continue
+            session_path = self._safe_path(candidate)
+            break
+        if session_path is None:
+            raise InteractionConflict("unable to allocate a unique session identifier")
+
+        for index, stage in enumerate(STAGES, start=1):
+            (session_path / self._stage_directory_name(index, stage.id)).mkdir()
+
+        state = {
+            "session_id": session_id,
+            "created_at": self._iso_timestamp(created),
+            "current_stage": "setup",
+            "stages": {
+                stage.id: {"revision": 0, "status": "draft"} for stage in STAGES
+            },
+        }
+        self._write_json_atomic(session_path / "session.json", state)
+        self._append_event(session_path, "session_created", session_id=session_id)
+        return SessionRecord(session_id=session_id, path=session_path)
+
+    def load_session(self, session_id: str) -> dict[str, Any]:
+        path = self._session_path(session_id)
+        try:
+            with (path / "session.json").open(encoding="utf-8") as stream:
+                state = json.load(stream)
+        except FileNotFoundError as error:
+            raise InteractionPathError(f"session does not exist: {session_id}") from error
+        if state.get("session_id") != session_id:
+            raise InteractionConflict("session.json identity does not match its path")
+        return state
+
+    def save_input(
+        self,
+        session_id: str,
+        stage_id: str,
+        values: dict[str, Any],
+        user_notes: str = "",
+    ) -> dict[str, Any]:
+        stage_path = self._stage_path(session_id, stage_id)
+        state = self.load_session(session_id)
+        stage_state = state["stages"][stage_id]
+        revision = int(stage_state["revision"]) + 1
+        created_at = self._iso_timestamp(datetime.now(timezone.utc))
+
+        self._invalidate_after_edit(session_id, stage_id, state)
+        input_document = {
+            "session_id": session_id,
+            "stage_id": stage_id,
+            "revision": revision,
+            "created_at": created_at,
+            "values": values,
+            "user_notes": user_notes,
+        }
+        input_path = stage_path / "input.json"
+        self._write_json_atomic(input_path, input_document)
+        handoff = {
+            "status": "ready_for_agent",
+            "session_id": session_id,
+            "stage_id": stage_id,
+            "revision": revision,
+            "created_at": created_at,
+            "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+        }
+        self._write_json_atomic(stage_path / "handoff.json", handoff)
+        stage_state["revision"] = revision
+        stage_state["status"] = "ready_for_agent"
+        state["current_stage"] = stage_id
+        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+        self._append_event(
+            self._session_path(session_id),
+            "input_saved",
+            session_id=session_id,
+            stage_id=stage_id,
+            revision=revision,
+        )
+        return handoff
+
+    def write_result(
+        self,
+        session_id: str,
+        stage_id: str,
+        revision: int,
+        input_sha256: str,
+        *,
+        status: str,
+        summary: str,
+        blocking_reasons: tuple[str, ...] | list[str] = (),
+        evidence: tuple[Any, ...] | list[Any] = (),
+        next_action: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist an agent-owned result bound to the current user handoff."""
+
+        stage_path = self._stage_path(session_id, stage_id)
+        state = self.load_session(session_id)
+        handoff = self._read_json(stage_path / "handoff.json", "handoff")
+        expected_revision = state["stages"][stage_id]["revision"]
+        if revision != expected_revision or handoff.get("revision") != revision:
+            raise InteractionConflict("result revision does not match the current handoff")
+        if (
+            input_sha256 != handoff.get("input_sha256")
+            or hashlib.sha256((stage_path / "input.json").read_bytes()).hexdigest()
+            != input_sha256
+        ):
+            raise InteractionConflict("result input_sha256 does not match the current input")
+        if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
+            raise InteractionConflict("handoff identity does not match its path")
+
+        result = {
+            "session_id": session_id,
+            "stage_id": stage_id,
+            "revision": revision,
+            "input_sha256": input_sha256,
+            "status": status,
+            "summary": summary,
+            "blocking_reasons": list(blocking_reasons),
+            "evidence": list(evidence),
+            "next_action": next_action,
+            "created_at": self._iso_timestamp(datetime.now(timezone.utc)),
+        }
+        self._write_json_atomic(stage_path / "result.json", result)
+        state["stages"][stage_id]["status"] = status
+        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+        self._append_event(
+            self._session_path(session_id),
+            "result_written",
+            session_id=session_id,
+            stage_id=stage_id,
+            revision=revision,
+            status=status,
+        )
+        return result
+
+    def wait_for_handoff(
+        self,
+        session_id: str,
+        stage_id: str,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Wait for a valid handoff, then claim it for the interaction agent."""
+
+        stage_path = self._stage_path(session_id, stage_id)
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        handoff_path = stage_path / "handoff.json"
+        while True:
+            if handoff_path.is_file():
+                handoff = self._read_json(handoff_path, "handoff")
+                self._validate_handoff(session_id, stage_id, stage_path, handoff)
+                state = self.load_session(session_id)
+                if state["stages"][stage_id]["revision"] != handoff["revision"]:
+                    raise InteractionConflict("handoff revision does not match session state")
+                heartbeat = self._iso_timestamp(datetime.now(timezone.utc))
+                state["stages"][stage_id]["status"] = "processing"
+                state["last_agent_heartbeat"] = heartbeat
+                self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+                self._append_event(
+                    self._session_path(session_id),
+                    "handoff_claimed",
+                    session_id=session_id,
+                    stage_id=stage_id,
+                    revision=handoff["revision"],
+                )
+                return handoff
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for handoff for stage {stage_id}")
+            time.sleep(0.25)
+
+    def recovery_instruction(self, session_id: str, stage_id: str) -> str:
+        """Describe the durable files an agent must inspect before recovering work."""
+
+        stage_path = self._stage_path(session_id, stage_id)
+        return (
+            f"Recover stage '{stage_id}' from {stage_path.parent.resolve()}. "
+            f"Read {stage_path / 'handoff.json'} and verify its input_sha256 against "
+            f"the exact bytes of {stage_path / 'input.json'} before continuing."
+        )
+
+    def _session_path(self, session_id: str) -> Path:
+        self._validate_session_id(session_id)
+        candidate = self._safe_path(self._runs_root / session_id)
+        if not candidate.is_dir():
+            raise InteractionPathError(f"session does not exist: {session_id}")
+        return candidate
+
+    def _stage_path(self, session_id: str, stage_id: str) -> Path:
+        try:
+            stage_index = next(
+                index for index, stage in enumerate(STAGES, start=1) if stage.id == stage_id
+            )
+            get_stage(stage_id)
+        except (KeyError, StopIteration):
+            raise KeyError(stage_id) from None
+        return self._safe_path(
+            self._session_path(session_id) / self._stage_directory_name(stage_index, stage_id)
+        )
+
+    def _invalidate_after_edit(
+        self, session_id: str, stage_id: str, state: dict[str, Any]
+    ) -> None:
+        """Remove results derived from an edited input and all later handoffs."""
+
+        stage_index = self._stage_index(stage_id)
+        session_path = self._session_path(session_id)
+        affected = STAGES[stage_index - 1 :]
+        for offset, stage in enumerate(affected, start=stage_index):
+            artifact_names = ("result.json", "approval.json")
+            if stage.id != stage_id:
+                artifact_names = ("handoff.json", *artifact_names)
+                state["stages"][stage.id]["status"] = "draft"
+            stage_path = self._safe_path(
+                session_path / self._stage_directory_name(offset, stage.id)
+            )
+            for artifact_name in artifact_names:
+                artifact_path = stage_path / artifact_name
+                if artifact_path.is_file():
+                    artifact_path.unlink()
+                    self._append_event(
+                        session_path,
+                        "artifact_invalidated",
+                        session_id=session_id,
+                        stage_id=stage.id,
+                        artifact=artifact_name,
+                    )
+
+    @staticmethod
+    def _read_json(path: Path, document_name: str) -> dict[str, Any]:
+        try:
+            with path.open(encoding="utf-8") as stream:
+                document = json.load(stream)
+        except FileNotFoundError as error:
+            raise InteractionConflict(f"{document_name}.json is missing") from error
+        except json.JSONDecodeError as error:
+            raise InteractionConflict(f"{document_name}.json is invalid") from error
+        if not isinstance(document, dict):
+            raise InteractionConflict(f"{document_name}.json must contain an object")
+        return document
+
+    @staticmethod
+    def _stage_index(stage_id: str) -> int:
+        try:
+            return next(index for index, stage in enumerate(STAGES, start=1) if stage.id == stage_id)
+        except StopIteration:
+            raise KeyError(stage_id) from None
+
+    @staticmethod
+    def _validate_handoff(
+        session_id: str, stage_id: str, stage_path: Path, handoff: dict[str, Any]
+    ) -> None:
+        if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
+            raise InteractionConflict("handoff identity does not match its path")
+        actual_hash = hashlib.sha256((stage_path / "input.json").read_bytes()).hexdigest()
+        if handoff.get("input_sha256") != actual_hash:
+            raise InteractionConflict("handoff input_sha256 does not match input.json")
+
+    def _safe_path(self, path: Path) -> Path:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self._runs_root)
+        except ValueError as error:
+            raise InteractionPathError("path escapes runs_root") from error
+        return resolved
+
+    @staticmethod
+    def _stage_directory_name(index: int, stage_id: str) -> str:
+        return f"{index:02d}-{stage_id.replace('_', '-')}"
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> None:
+        normalized = session_id.replace("\\", "/")
+        if (
+            not session_id
+            or normalized != session_id
+            or "/" in normalized
+            or normalized in {".", ".."}
+            or ".." in normalized.split("_")
+            or Path(session_id).is_absolute()
+            or (len(session_id) >= 2 and session_id[1] == ":")
+        ):
+            raise InteractionPathError("invalid session identifier")
+
+    @staticmethod
+    def _iso_timestamp(moment: datetime) -> str:
+        if moment.tzinfo is None:
+            return moment.isoformat(timespec="seconds")
+        return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+        payload = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, path)
+        except BaseException:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
+
+    @staticmethod
+    def _append_event(session_path: Path, event: str, **details: Any) -> None:
+        payload = {"event": event, "created_at": SessionStore._iso_timestamp(datetime.now(timezone.utc))}
+        payload.update(details)
+        with (session_path / "events.ndjson").open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
