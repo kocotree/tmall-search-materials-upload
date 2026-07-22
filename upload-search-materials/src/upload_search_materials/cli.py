@@ -13,6 +13,7 @@ from typing import Sequence
 from .approval import create_manifest, render_review_html, verify_manifest
 from .assets import (
     DirectoryAssetSource,
+    ManifestAssetSource,
     inspect_asset,
     load_media_policy,
     validate_asset_group,
@@ -85,11 +86,15 @@ class _StaticCopyProvider:
 
 
 def _build_resolved_material_items(args, run_id, products, basic, snapshots):
-    if not args.asset_root or not args.copy_responses:
+    if not (args.asset_root or args.asset_manifest) or not args.copy_responses:
         return []
     responses = read_json(Path(args.copy_responses))
     media_policy = load_media_policy(Path(args.media_policy)) if args.media_policy else None
-    source = DirectoryAssetSource(Path(args.asset_root))
+    source = (
+        ManifestAssetSource(Path(args.asset_manifest))
+        if args.asset_manifest
+        else DirectoryAssetSource(Path(args.asset_root))
+    )
     products_by_id = {product.product_id: product for product in products if product.product_id}
     basic_by_id = {row.get("商品ID", ""): row for row in basic}
     all_items = []
@@ -97,17 +102,20 @@ def _build_resolved_material_items(args, run_id, products, basic, snapshots):
         product = products_by_id.get(snapshot.product_id)
         if product is None or snapshot.empty_slot_indexes is None:
             continue
-        paths = source.collect(product.product_id, product.sku)
-        assets = [
-            inspect_asset(
-                path,
-                product.product_id,
-                args.license_status,
-                media_policy=media_policy,
-                sku=product.sku,
-            )
-            for path in paths
-        ]
+        collected = source.collect(product.product_id, product.sku)
+        if args.asset_manifest:
+            assets = collected
+        else:
+            assets = [
+                inspect_asset(
+                    path,
+                    product.product_id,
+                    args.license_status,
+                    media_policy=media_policy,
+                    sku=product.sku,
+                )
+                for path in collected
+            ]
         image_assets = [asset for asset in assets if asset.asset_type == "image"]
         video_assets = [asset for asset in assets if asset.asset_type == "video"]
         target_slots = sorted(snapshot.empty_slot_indexes)
@@ -669,7 +677,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--basic", required=True)
     run.add_argument("--search", required=True)
     run.add_argument("--backend-status")
-    run.add_argument("--asset-root")
+    asset_source = run.add_mutually_exclusive_group()
+    asset_source.add_argument("--asset-root")
+    asset_source.add_argument("--asset-manifest")
     run.add_argument("--license-status", choices=["confirmed", "unknown"], default="unknown")
     run.add_argument("--media-policy")
     run.add_argument("--copy-responses")

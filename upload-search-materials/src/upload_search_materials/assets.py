@@ -223,7 +223,10 @@ class ManifestAssetSource:
             for row in reader:
                 row_product_id = str(row.get("product_id", "")).strip()
                 row_sku = str(row.get("sku", "")).strip()
-                if row_product_id != product_id and (not sku or row_sku != sku):
+                if row_product_id:
+                    if row_product_id != product_id:
+                        continue
+                elif not sku or row_sku != sku:
                     continue
                 source_path = Path(str(row.get("source_path", "")).strip())
                 if not source_path.is_absolute():

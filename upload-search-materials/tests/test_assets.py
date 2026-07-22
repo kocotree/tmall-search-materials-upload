@@ -112,6 +112,65 @@ def test_manifest_source_filters_by_product_and_keeps_license(tmp_path):
     assert records[0].source_path == str(image_path.resolve())
 
 
+def test_manifest_source_does_not_cross_product_ids_that_share_a_sku(tmp_path):
+    manifest = tmp_path / "assets.csv"
+    image_path = tmp_path / "adult-link.png"
+    make_image(image_path)
+    with manifest.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["product_id", "sku", "source_path", "license_status", "asset_type"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "product_id": "917508646678",
+                "sku": "KQ25024",
+                "source_path": str(image_path),
+                "license_status": "confirmed",
+                "asset_type": "image",
+            }
+        )
+
+    records = ManifestAssetSource(manifest).collect("887508274682", "KQ25024")
+
+    assert records == []
+
+
+def test_manifest_source_preserves_mixed_per_file_license_statuses(tmp_path):
+    manifest = tmp_path / "assets.csv"
+    confirmed_image = tmp_path / "confirmed.png"
+    unknown_image = tmp_path / "unknown.png"
+    make_image(confirmed_image)
+    make_image(unknown_image)
+    with manifest.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["product_id", "sku", "source_path", "license_status", "asset_type"],
+        )
+        writer.writeheader()
+        for source_path, license_status in (
+            (confirmed_image, "confirmed"),
+            (unknown_image, "unknown"),
+        ):
+            writer.writerow(
+                {
+                    "product_id": "123",
+                    "sku": "SKU-1",
+                    "source_path": str(source_path),
+                    "license_status": license_status,
+                    "asset_type": "image",
+                }
+            )
+
+    records = ManifestAssetSource(manifest).collect("123", "SKU-1")
+
+    assert [record.license_status for record in records] == ["confirmed", "unknown"]
+    assert records[0].validation_status == "valid"
+    assert records[1].validation_status == "blocked"
+    assert records[1].reason_codes == ["LICENSE_UNKNOWN"]
+
+
 def test_incomplete_video_policy_blocks_video(tmp_path):
     video = tmp_path / "video.mp4"
     video.write_bytes(b"not-empty")

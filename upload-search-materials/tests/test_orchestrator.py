@@ -12,6 +12,7 @@ from upload_search_materials.approval import create_manifest
 
 from upload_search_materials.cli import (
     BrowserSessionRequired,
+    build_parser,
     main,
     page_context,
     partition_persisted_items,
@@ -436,6 +437,113 @@ def test_run_builds_reviewable_items_when_all_inputs_are_resolved(tmp_path):
     assert len(items) == 3
     assert all(item["status"] == "ready_for_review" for item in items)
     assert product_tasks[0]["status"] == "ready_for_review"
+
+
+def test_run_builds_reviewable_items_from_per_file_asset_manifest(tmp_path):
+    products, rules, basic, search = write_sources(tmp_path)
+    backend = tmp_path / "backend.csv"
+    with backend.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["商品ID", "目标坑位", "空坑位", "审核状态完整", "采集时间", "证据"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "商品ID": "123",
+                "目标坑位": "3",
+                "空坑位": "1;2;3",
+                "审核状态完整": "true",
+                "采集时间": "2026-07-17T09:00:00+08:00",
+                "证据": "fixture",
+            }
+        )
+
+    asset_manifest = tmp_path / "assets.csv"
+    with asset_manifest.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["product_id", "sku", "source_path", "license_status", "asset_type"],
+        )
+        writer.writeheader()
+        for index in range(9):
+            image = tmp_path / f"manifest-{index}.png"
+            Image.new("RGB", (400, 400), color=(index, index, index)).save(image)
+            writer.writerow(
+                {
+                    "product_id": "123",
+                    "sku": "SKU-1",
+                    "source_path": str(image),
+                    "license_status": "confirmed",
+                    "asset_type": "image",
+                }
+            )
+
+    copy_responses = tmp_path / "copy-responses.json"
+    copy_responses.write_text(
+        json.dumps(
+            {
+                f"123:{slot}": {
+                    "title": f"KK树便携水杯{slot}",
+                    "description": "便携水杯设计，满足日常携带和饮水使用需求。",
+                }
+                for slot in (1, 2, 3)
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "manifest-run"
+
+    exit_code = main(
+        [
+            "run",
+            "--month", "7",
+            "--store", "KK Tree",
+            "--products", str(products),
+            "--rules", str(rules),
+            "--basic", str(basic),
+            "--search", str(search),
+            "--backend-status", str(backend),
+            "--asset-manifest", str(asset_manifest),
+            "--copy-responses", str(copy_responses),
+            "--output", str(output),
+            "--started-at", "2026-07-17T10:00:00+08:00",
+        ]
+    )
+    items = json.loads((output / "material-items.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert len(items) == 3
+    assert all(item["status"] == "ready_for_review" for item in items)
+    assert all(
+        asset["license_status"] == "confirmed"
+        for item in items
+        for asset in item["assets"]
+    )
+    assert all(
+        asset["source_system"] == "manifest"
+        for item in items
+        for asset in item["assets"]
+    )
+
+
+def test_run_rejects_directory_and_manifest_asset_sources_together():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "run",
+                "--month", "7",
+                "--store", "KK Tree",
+                "--products", "products.csv",
+                "--rules", "rules.csv",
+                "--basic", "basic.xlsx",
+                "--search", "search.xlsx",
+                "--asset-root", "assets",
+                "--asset-manifest", "assets.csv",
+                "--output", "output",
+            ]
+        )
 
 
 def test_page_context_connects_to_runtime_cdp_without_storing_session():
