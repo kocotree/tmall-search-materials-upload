@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import sqlite3
 
 from upload_search_materials.asset_index_store import (
     AssetIndexStore,
@@ -40,6 +41,17 @@ def test_store_creates_versioned_schema_and_rejects_identity_change(tmp_path):
 
     with pytest.raises(IndexIdentityError, match="identity"):
         AssetIndexStore.open(path, IndexIdentity("other.csv", "b" * 64, "[]", 2, 1000))
+
+
+def test_open_rejects_persisted_schema_version_other_than_one(tmp_path):
+    path = tmp_path / "asset-index.sqlite3"
+    with AssetIndexStore.create(path, IDENTITY):
+        pass
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE scan_meta SET value='2' WHERE key='schema_version'")
+
+    with pytest.raises(IndexIdentityError, match="schema"):
+        AssetIndexStore.open(path, IDENTITY)
 
 
 def test_checkpoint_upserts_one_file_with_stable_id(tmp_path):
@@ -123,3 +135,30 @@ def test_successful_refresh_marks_only_unseen_partition_files_inactive(tmp_path)
         assert store.mark_partition_missing_files_inactive(partition_id, "scan-2") == 1
         assert store.file_is_active(existing_id) is False
         assert store.file_count(active_only=True) == 1
+
+
+def test_incomplete_new_scan_cannot_deactivate_files_from_a_completed_scan(tmp_path):
+    with make_store(tmp_path) as store:
+        partition_id, existing_id = add_file(store, scan_id="scan-1")
+        store.complete_partition(partition_id)
+
+        assert store.mark_partition_missing_files_inactive(partition_id, "scan-2") == 0
+        assert store.file_is_active(existing_id) is True
+
+
+def test_processed_count_is_reset_for_each_new_scan(tmp_path):
+    with make_store(tmp_path) as store:
+        partition_id, _ = add_file(store, scan_id="scan-1")
+        store.checkpoint_files(
+            partition_id,
+            "scan-1",
+            [IndexedFile("model_nas", "2026/hats/b.jpg", "C:/assets/2026/hats/b.jpg", ".jpg", 10, 20, "2026/hats")],
+        )
+        assert store.partition_record(partition_id)["processed_count"] == 2
+
+        store.checkpoint_files(
+            partition_id,
+            "scan-2",
+            [IndexedFile("model_nas", "2026/hats/c.jpg", "C:/assets/2026/hats/c.jpg", ".jpg", 10, 20, "2026/hats")],
+        )
+        assert store.partition_record(partition_id)["processed_count"] == 1

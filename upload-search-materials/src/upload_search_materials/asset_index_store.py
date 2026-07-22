@@ -66,6 +66,8 @@ CREATE TABLE partitions (
   processed_count INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '',
   checkpoint_at TEXT,
+  current_scan_id TEXT,
+  completed_scan_id TEXT,
   UNIQUE(root_id, relative_path)
 );
 CREATE TABLE files (
@@ -123,6 +125,9 @@ class AssetIndexStore:
     def open(cls, path: Path, identity: IndexIdentity) -> "AssetIndexStore":
         store = cls(sqlite3.connect(path))
         try:
+            version = store._connection.execute("SELECT value FROM scan_meta WHERE key = 'schema_version'").fetchone()
+            if version is None or int(version["value"]) != SCHEMA_VERSION:
+                raise IndexIdentityError("schema version does not match this store")
             actual = store._connection.execute("SELECT value FROM scan_meta WHERE key = 'identity'").fetchone()
             if actual is None or actual["value"] != _identity_json(identity):
                 raise IndexIdentityError("index identity does not match this database")
@@ -193,10 +198,16 @@ class AssetIndexStore:
                 if changed:
                     self._connection.execute("DELETE FROM matches WHERE file_id = ?", (existing["file_id"],))
                 result.append(int(existing["file_id"]))
-            self._connection.execute(
-                "UPDATE partitions SET status='in_progress', processed_count=processed_count + ?, checkpoint_at=? WHERE partition_id=?",
-                (len(rows), _now(), partition_id),
-            )
+            if partition["current_scan_id"] != scan_id:
+                self._connection.execute(
+                    "UPDATE partitions SET status='in_progress', processed_count=?, current_scan_id=?, completed_scan_id=NULL, checkpoint_at=? WHERE partition_id=?",
+                    (len(rows), scan_id, _now(), partition_id),
+                )
+            else:
+                self._connection.execute(
+                    "UPDATE partitions SET status='in_progress', processed_count=processed_count + ?, checkpoint_at=? WHERE partition_id=?",
+                    (len(rows), _now(), partition_id),
+                )
         return tuple(result)
 
     def update_file_inspection(self, file_id: int, *, sha256: str, width: int | None, height: int | None, validation_status: str, reason_codes: Sequence[str]) -> None:
@@ -216,7 +227,10 @@ class AssetIndexStore:
 
     def complete_partition(self, partition_id: str) -> None:
         with self._connection:
-            self._connection.execute("UPDATE partitions SET status='completed', error='', checkpoint_at=? WHERE partition_id=?", (_now(), partition_id))
+            self._connection.execute(
+                "UPDATE partitions SET status='completed', error='', completed_scan_id=current_scan_id, checkpoint_at=? WHERE partition_id=?",
+                (_now(), partition_id),
+            )
 
     def fail_partition(self, partition_id: str, error: str) -> None:
         with self._connection:
@@ -224,7 +238,7 @@ class AssetIndexStore:
 
     def mark_partition_missing_files_inactive(self, partition_id: str, scan_id: str) -> int:
         partition = self._partition(partition_id)
-        if partition["status"] != "completed":
+        if partition["status"] != "completed" or partition["completed_scan_id"] != scan_id:
             return 0
         with self._connection:
             cursor = self._connection.execute(
@@ -258,9 +272,18 @@ class AssetIndexStore:
         ).fetchall()
         return tuple({"product_id": row["product_id"], "sku": row["sku"], "product_title": row["product_title"], "match_type": row["match_type"], "match_status": row["match_status"], "reason_codes": tuple(json.loads(row["reason_codes_json"]))} for row in rows)
 
+    def partition_record(self, partition_id: str) -> dict[str, object]:
+        row = self._partition(partition_id)
+        return {
+            "status": row["status"],
+            "processed_count": row["processed_count"],
+            "current_scan_id": row["current_scan_id"],
+            "completed_scan_id": row["completed_scan_id"],
+        }
+
     def _partition(self, partition_id: str) -> sqlite3.Row:
         row = self._connection.execute(
-            "SELECT partitions.relative_path, partitions.status, roots.source_system FROM partitions JOIN roots USING(root_id) WHERE partition_id=?",
+            "SELECT partitions.relative_path, partitions.status, partitions.processed_count, partitions.current_scan_id, partitions.completed_scan_id, roots.source_system FROM partitions JOIN roots USING(root_id) WHERE partition_id=?",
             (partition_id,),
         ).fetchone()
         if row is None:
