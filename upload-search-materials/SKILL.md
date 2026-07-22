@@ -30,9 +30,25 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 7. 运行 `tmall-materials publish`。发布前重新核对店铺、商品、坑位和批准内容哈希；发布后回查远端状态。
 8. 中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
-运行 `python -m upload_search_materials.cli --help` 查看参数。所有命令从本 skill 目录执行，使用 Python 3.11+。
+运行 `uv run tmall-materials --help` 查看参数。所有命令从本 skill 目录执行；使用 `uv sync --extra test` 根据 `.python-version` 和 `uv.lock` 同步 Python 3.11 环境。
 
 首次使用先按 [operations-guide.md](references/operations-guide.md) 完成安装、CDP 浏览器启动和六阶段命令。所有时间参数必须是带时区的 ISO 8601。
+
+## 交互式任务执行
+
+1. 先解析用户指定的精确 `session_id`；不得默认选择 `runs` 中最新的会话。
+2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
+3. 启动仅监听 `localhost` 的交互页面。
+4. 等待该会话“当前阶段”的精确 `handoff.json`。
+5. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
+6. 将该阶段标记为 `processing`。
+7. 只执行该 `stage_id` 允许的动作。
+8. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
+9. 根据结果停止，或明确进入下一阶段。
+
+页面无 Agent 心跳或 Codex 任务已结束时，告知用户把页面显示的恢复指令粘贴到新建或当前 Codex 任务。不得声称 Agent 仍在后台执行，也不得声称页面能够唤醒已结束的任务。
+
+页面阶段 08/09 只产生输入和 handoff；`approve` 与 `publish` 是分开的、由 Agent 控制的 CLI 动作。对 1–3 个商品的生产测试必须在当前对话获得显式授权；素材改变后，旧批准永远不得授权发布。可复制的启动和等待命令见 [operations-guide.md](references/operations-guide.md)。
 
 ## Safety Contract
 
