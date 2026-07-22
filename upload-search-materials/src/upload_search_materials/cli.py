@@ -5,10 +5,12 @@ import csv
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
 from typing import Sequence
+from urllib.parse import urlencode
 
 from .approval import create_manifest, render_review_html, verify_manifest
 from .assets import (
@@ -36,6 +38,9 @@ from .io_tables import (
     read_search_materials_xlsx,
     sha256_file,
 )
+from .interaction.session import SessionStore
+from .interaction.stages import STAGES
+from .interaction.web import create_app
 from .material_state import merge_material_state, products_requiring_supplement
 from .models import MaterialStatus, make_run_id
 from .reporting import (
@@ -665,6 +670,51 @@ def _inspect_xlsx(args) -> int:
     return 0
 
 
+def _interact(args) -> int:
+    runs_root = args.runs_root
+    if runs_root is None:
+        runs_root = os.environ.get("TMALL_RUNS_ROOT")
+    if not runs_root:
+        print(
+            "interact requires --runs-root or TMALL_RUNS_ROOT",
+            file=sys.stderr,
+        )
+        return 2
+
+    store = SessionStore(Path(runs_root))
+    if args.session:
+        store.load_session(args.session)
+        session_id = args.session
+    else:
+        session_id = store.create_session().session_id
+
+    app = create_app(Path(runs_root))
+    query = urlencode({"session_id": session_id})
+    print(f"http://127.0.0.1:{args.port}/?{query}", flush=True)
+    app.run(
+        host="127.0.0.1",
+        port=args.port,
+        debug=False,
+        use_reloader=False,
+    )
+    return 0
+
+
+def _wait_handoff(args) -> int:
+    store = SessionStore(Path(args.runs_root))
+    try:
+        handoff = store.wait_for_handoff(
+            args.session,
+            args.stage,
+            timeout_seconds=args.timeout,
+        )
+    except TimeoutError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(handoff, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmall-materials")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -731,6 +781,20 @@ def build_parser() -> argparse.ArgumentParser:
     supplement.add_argument("--output", required=True)
     supplement.add_argument("--collected-at", required=True)
     supplement.add_argument("--cdp-url")
+
+    interact = subparsers.add_parser("interact", help="Serve the local interaction UI")
+    interact.add_argument("--runs-root")
+    interact.add_argument("--session")
+    interact.add_argument("--port", type=int, default=8765)
+
+    wait_handoff = subparsers.add_parser(
+        "wait-handoff",
+        help="Wait for one validated interaction handoff",
+    )
+    wait_handoff.add_argument("--runs-root", required=True)
+    wait_handoff.add_argument("--session", required=True)
+    wait_handoff.add_argument("--stage", choices=[stage.id for stage in STAGES], required=True)
+    wait_handoff.add_argument("--timeout", type=float)
     return parser
 
 
@@ -755,6 +819,10 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _export(args, page, page_factory)
     if args.command == "supplement":
         return _supplement(args, page, page_factory)
+    if args.command == "interact":
+        return _interact(args)
+    if args.command == "wait-handoff":
+        return _wait_handoff(args)
     raise AssertionError(args.command)
 
 

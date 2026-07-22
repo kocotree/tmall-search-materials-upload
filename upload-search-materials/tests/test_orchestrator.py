@@ -1,3 +1,4 @@
+import argparse
 import csv
 import json
 from contextlib import contextmanager
@@ -17,6 +18,8 @@ from upload_search_materials.cli import (
     page_context,
     partition_persisted_items,
 )
+from upload_search_materials.interaction.session import SessionStore as InteractionSessionStore
+from upload_search_materials.interaction.stages import STAGES
 from upload_search_materials.reporting import material_item_from_dict
 from upload_search_materials.state_store import StateStore
 from upload_search_materials.browser.upload_page import UploadOutcome
@@ -37,6 +40,180 @@ PRODUCT_HEADERS = [
 class BrowserSentinel:
     def __init__(self):
         self.publish_page_open_count = 0
+
+
+class InteractionAppSentinel:
+    def __init__(self):
+        self.run_calls = []
+
+    def run(self, **kwargs):
+        self.run_calls.append(kwargs)
+
+
+def test_interaction_commands_are_exposed_with_registry_stage_choices():
+    parser = build_parser()
+
+    interact = parser.parse_args(["interact", "--runs-root", "runs"])
+    wait = parser.parse_args(
+        [
+            "wait-handoff",
+            "--runs-root", "runs",
+            "--session", "20260721_143025",
+            "--stage", "setup",
+        ]
+    )
+    wait_parser = next(
+        action.choices["wait-handoff"]
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    stage_action = next(action for action in wait_parser._actions if action.dest == "stage")
+
+    assert interact.command == "interact"
+    assert interact.port == 8765
+    assert wait.command == "wait-handoff"
+    assert wait.timeout is None
+    assert tuple(stage_action.choices) == tuple(stage.id for stage in STAGES)
+
+
+def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, capsys):
+    app = InteractionAppSentinel()
+    calls = {"create": 0, "load": []}
+
+    class FakeStore:
+        def __init__(self, runs_root):
+            assert Path(runs_root) == tmp_path
+
+        def create_session(self):
+            calls["create"] += 1
+            return type("Session", (), {"session_id": "20260722_101112"})()
+
+        def load_session(self, session_id):
+            calls["load"].append(session_id)
+
+    monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
+    monkeypatch.setattr(cli_module, "create_app", lambda runs_root: app)
+
+    code = main(["interact", "--runs-root", str(tmp_path), "--port", "9123"])
+
+    assert code == 0
+    assert calls == {"create": 1, "load": []}
+    assert app.run_calls == [
+        {"host": "127.0.0.1", "port": 9123, "debug": False, "use_reloader": False}
+    ]
+    assert "http://127.0.0.1:9123/?session_id=20260722_101112" in capsys.readouterr().out
+
+
+def test_interact_resumes_explicit_session_without_creating_another(
+    tmp_path, monkeypatch, capsys
+):
+    app = InteractionAppSentinel()
+    calls = {"create": 0, "load": []}
+
+    class FakeStore:
+        def __init__(self, runs_root):
+            assert Path(runs_root) == tmp_path
+
+        def create_session(self):
+            calls["create"] += 1
+            raise AssertionError("explicit session must not create a session")
+
+        def load_session(self, session_id):
+            calls["load"].append(session_id)
+            return {"session_id": session_id}
+
+    monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
+    monkeypatch.setattr(cli_module, "create_app", lambda runs_root: app)
+
+    code = main(
+        [
+            "interact",
+            "--runs-root", str(tmp_path),
+            "--session", "20260722_101112",
+        ]
+    )
+
+    assert code == 0
+    assert calls == {"create": 0, "load": ["20260722_101112"]}
+    assert "session_id=20260722_101112" in capsys.readouterr().out
+
+
+def test_interact_uses_environment_only_when_runs_root_is_absent(
+    tmp_path, monkeypatch
+):
+    environment_root = tmp_path / "environment"
+    explicit_root = tmp_path / "explicit"
+    roots = []
+    app = InteractionAppSentinel()
+
+    class FakeStore:
+        def __init__(self, runs_root):
+            roots.append(Path(runs_root))
+
+        def create_session(self):
+            return type("Session", (), {"session_id": "20260722_101112"})()
+
+    monkeypatch.setenv("TMALL_RUNS_ROOT", str(environment_root))
+    monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
+    monkeypatch.setattr(cli_module, "create_app", lambda runs_root: app)
+
+    assert main(["interact"]) == 0
+    assert main(["interact", "--runs-root", str(explicit_root)]) == 0
+
+    assert roots == [environment_root, explicit_root]
+
+
+def test_wait_handoff_prints_validated_submission(tmp_path, capsys):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+    expected = store.save_input(session.session_id, "setup", {"store": "测试店铺"})
+
+    code = main(
+        [
+            "wait-handoff",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--stage", "setup",
+            "--timeout", "1",
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_wait_handoff_timeout_returns_two_without_business_execution(
+    tmp_path, monkeypatch, capsys
+):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+    monkeypatch.setattr(
+        cli_module,
+        "_run",
+        lambda args: (_ for _ in ()).throw(AssertionError("business execution invoked")),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_publish",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("publish execution invoked")
+        ),
+    )
+
+    code = main(
+        [
+            "wait-handoff",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--stage", "setup",
+            "--timeout", "0",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert "timed out waiting for handoff" in captured.err
 
 
 class CliFakeLocator:
