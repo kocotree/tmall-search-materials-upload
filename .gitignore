@@ -1,4 +1,7 @@
 .worktrees/
+.venv/
+test_evidence/
+.pytest-task-*/
 __pycache__/
 .pytest_cache/
 *.egg-info/
