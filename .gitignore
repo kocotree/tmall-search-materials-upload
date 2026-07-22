@@ -2,6 +2,7 @@
 .venv/
 test_evidence/
 .pytest-task-*/
+build/
 __pycache__/
 .pytest_cache/
 *.egg-info/

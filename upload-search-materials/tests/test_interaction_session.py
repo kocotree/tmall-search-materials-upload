@@ -2,15 +2,27 @@ import json
 import threading
 from datetime import datetime
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
 from upload_search_materials.interaction import STAGES
 from upload_search_materials.interaction.session import (
+    SCHEMA_VERSION,
     InteractionConflict,
     InteractionPathError,
     SessionStore,
 )
+
+
+VALID_STAGE_STATUSES = {
+    "draft",
+    "ready_for_agent",
+    "processing",
+    "needs_user_input",
+    "completed",
+    "blocked",
+}
 
 
 def _events(session_path):
@@ -414,7 +426,12 @@ def test_save_draft_invalidates_current_handoff_and_downstream_state(tmp_path):
     approval_path = session.path / "01-setup" / "approval.json"
     approval_path.write_text("{}", encoding="utf-8")
 
-    draft = store.save_draft(session.session_id, "setup", {"store": "draft"})
+    draft = store.save_draft(
+        session.session_id,
+        "setup",
+        {"store": "draft"},
+        expected_revision=1,
+    )
 
     assert draft["revision"] == 2
     assert draft["values"] == {"store": "draft"}
@@ -425,3 +442,169 @@ def test_save_draft_invalidates_current_handoff_and_downstream_state(tmp_path):
     state = store.load_session(session.session_id)
     assert state["stages"]["setup"] == {"revision": 2, "status": "draft"}
     assert state["stages"]["completeness"]["status"] == "draft"
+
+
+def test_wait_claims_each_handoff_revision_only_once_sequentially(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    expected = store.save_input(session.session_id, "setup", {"store": "one"})
+
+    assert store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0.1) == expected
+    with pytest.raises(TimeoutError, match="setup"):
+        store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0.05)
+
+
+def test_simultaneous_waiters_cannot_claim_the_same_handoff(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    expected = store.save_input(session.session_id, "setup", {"store": "one"})
+    barrier = threading.Barrier(2)
+    claims = []
+    errors = []
+
+    def wait():
+        barrier.wait()
+        try:
+            claims.append(
+                store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0.25)
+            )
+        except Exception as error:
+            errors.append(error)
+
+    waiters = [threading.Thread(target=wait) for _ in range(2)]
+    for waiter in waiters:
+        waiter.start()
+    for waiter in waiters:
+        waiter.join(1)
+
+    assert claims == [expected]
+    assert len(errors) == 1
+    assert isinstance(errors[0], TimeoutError)
+
+
+def test_stale_draft_compare_and_swap_preserves_all_durable_bytes(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(session.session_id, "setup", {"store": "submitted"})
+    store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="completed",
+        summary="done",
+    )
+    tracked = [
+        session.path / "session.json",
+        session.path / "01-setup" / "input.json",
+        session.path / "01-setup" / "handoff.json",
+        session.path / "01-setup" / "result.json",
+    ]
+    before = {path: path.read_bytes() for path in tracked}
+
+    with pytest.raises(InteractionConflict, match="stale"):
+        store.save_draft(
+            session.session_id,
+            "setup",
+            {"store": "stale"},
+            expected_revision=0,
+        )
+
+    assert {path: path.read_bytes() for path in tracked} == before
+
+
+def test_protocol_documents_are_versioned_and_session_metadata_is_durable(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session(datetime(2026, 7, 22, 10, 0, 0))
+    state = store.load_session(session.session_id)
+
+    assert SCHEMA_VERSION == 1
+    assert state["schema_version"] == SCHEMA_VERSION
+    assert state["updated_at"] == state["created_at"]
+    assert state["runs_root"] == str(Path(tmp_path).resolve())
+    assert state["video_test_deferred"] is True
+    assert state["last_agent_heartbeat"] is None
+    assert {entry["status"] for entry in state["stages"].values()} <= VALID_STAGE_STATUSES
+
+    draft = store.save_draft(
+        session.session_id,
+        "setup",
+        {"store": "draft"},
+        expected_revision=0,
+    )
+    assert draft["schema_version"] == SCHEMA_VERSION
+    assert isinstance(draft["submitted_at"], str)
+    handoff = store.save_input(
+        session.session_id,
+        "setup",
+        {"store": "submitted"},
+        expected_revision=2,
+    )
+    assert handoff["schema_version"] == SCHEMA_VERSION
+    result = store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="completed",
+        summary="done",
+    )
+    assert result["schema_version"] == SCHEMA_VERSION
+    assert isinstance(result["completed_at"], str)
+
+
+def test_every_session_mutation_refreshes_updated_at(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["updated_at"] = "2000-01-01T00:00:00+00:00"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    store.save_draft(
+        session.session_id,
+        "setup",
+        {"store": "draft"},
+        expected_revision=0,
+    )
+
+    assert store.load_session(session.session_id)["updated_at"] != "2000-01-01T00:00:00+00:00"
+
+
+def test_unsupported_schema_versions_are_rejected_on_session_and_handoff_reads(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["schema_version"] = 999
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(InteractionConflict, match="schema_version"):
+        store.load_session(session.session_id)
+
+    state["schema_version"] = SCHEMA_VERSION
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    store.save_input(session.session_id, "setup", {"store": "submitted"})
+    handoff_path = session.path / "01-setup" / "handoff.json"
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    handoff["schema_version"] = 999
+    handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+    with pytest.raises(InteractionConflict, match="schema_version"):
+        store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0.1)
+
+
+def test_result_status_must_belong_to_closed_protocol_set(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(session.session_id, "setup", {"store": "submitted"})
+
+    with pytest.raises(InteractionConflict, match="status"):
+        store.write_result(
+            session.session_id,
+            "setup",
+            handoff["revision"],
+            handoff["input_sha256"],
+            status="approved",
+            summary="invalid",
+        )
+
+    assert not (session.path / "01-setup" / "result.json").exists()

@@ -126,7 +126,7 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --h
 uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --help
 ```
 
-**已确认自动化证据：** 最终会话/API/UI 聚焦测试 `72 passed`，Node UI-state 测试 `8 passed`，全量回归 `185 passed, 1 warning`；唯一 warning 仍为只读源 XLSX 缺少默认样式。CLI 聚焦测试 `6 passed`、`test_orchestrator.py` 文件 `22 passed`；Skill validator 通过，Skill 压力场景 `5/5 GREEN`。
+**已确认自动化证据：** 最终交互协议/API/UI/编排聚焦测试 `112 passed`，Node UI-state 测试 `9 passed`，全量回归 `203 passed, 1 warning`；唯一 warning 仍为只读源 XLSX 缺少默认样式。CLI 聚焦测试 `6 passed`、Skill validator 通过，Skill 压力场景 `5/5 GREEN`；`uv lock --check` 通过，wheel 构建成功并包含页面模板与全部静态资源。
 
 ### 会话、交接与一致性检查
 
@@ -137,6 +137,9 @@ uv run --project .\upload-search-materials --locked tmall-materials wait-handoff
 - [x] 服务重启后能恢复任务；无活跃 Agent 时页面显示明确的恢复指令，不伪装成已经唤醒 Agent。
 - [x] 保存/提交请求返回前切换阶段，响应不得污染新阶段的表单、提交时间、状态或结果。
 - [x] 结果区只从当前绑定且校验通过的 `result.json` 展示摘要、证据、阻断原因和下一步；未扫描时显示“尚未扫描”，不得显示硬编码数量。
+- [x] `session.json`、`input.json`、`handoff.json`、`result.json` 使用版本化协议；缺失或不支持的 `schema_version` 在 SessionStore 和 Web 读取路径均拒绝处理。
+- [x] handoff 在会话锁内独占领取；同一 revision 的顺序或并发 waiter 不会重复启动 Agent 工作。
+- [x] 草稿保存使用 revision compare-and-swap；旧页面不能覆盖较新的提交或结果，前端以服务端返回 revision 为准。
 - [x] 页面不包含上传/发布调用；阶段 08/09 仅交接 Agent 和展示结果。
 
 ### 本地服务与浏览器视觉验收
@@ -324,7 +327,7 @@ git diff -- test_plan.md upload-search-materials plan.md
 | 阶段 | 状态 | 关键证据/待办 |
 | --- | --- | --- |
 | 1. 测试环境 | 通过（2026-07-20） | `test_evidence/01-environment/`；历史完整测试 `95 passed`，Skill 校验通过 |
-| 2. 交互页面与任务隔离 | 通过（2026-07-22） | 会话/API/UI `72 passed`、Node `8 passed`、全量 `185 passed`；1440/1024 浏览器与非生产 handoff 验收通过 |
+| 2. 交互页面与任务隔离 | 通过（2026-07-22） | 聚焦 `112 passed`、Node `9 passed`、全量 `203 passed`；版本协议、独占领取、草稿 CAS、wheel 资源及 1440/1024 浏览器与非生产 handoff 验收通过 |
 | 3. 素材清单与三处图片来源 | 进行中 | 历史“小芭蕉卷卷帽”图片证据已保留；三处来源综合扫描待执行；视频延期 |
 | 4. 图片策略 | 未开始 | `test_evidence/04-image-policy/` |
 | 5. 生产选择器 | 未开始 | `test_evidence/05-selectors/` |

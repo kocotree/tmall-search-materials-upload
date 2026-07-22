@@ -165,3 +165,13 @@ test("generic result sections include only present blocking reasons and next act
     nextAction: null,
   });
 });
+
+test("draft requests send the observed revision and adopt the authoritative response", () => {
+  assert.equal(typeof UiState.draftRequestBody, "function");
+  assert.equal(typeof UiState.persistedRevision, "function");
+  assert.deepEqual(
+    UiState.draftRequestBody({ store: "draft" }, 4),
+    { values: { store: "draft" }, revision: 4 },
+  );
+  assert.equal(UiState.persistedRevision({ revision: 9 }), 9);
+});

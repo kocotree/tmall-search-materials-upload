@@ -341,7 +341,9 @@
         sessionId,
         requestedGeneration,
       );
-      const body = { values };
+      const body = mode === "draft"
+        ? UiState.draftRequestBody(values, revision)
+        : { values };
       if (mode === "submit") body.revision = revision + 1;
       const payload = await fetchJson(apiPath(`/stages/${requestedStageId}${stageActions[mode]}`), {
         method: "POST",
@@ -367,7 +369,7 @@
         actionMessage.textContent = "交接已持久化，正在等待 Agent 接收。";
         await loadRecoveryInstruction(requestedStageId);
       } else {
-        revision += 1;
+        revision = UiState.persistedRevision(payload);
         uiState = UiState.receiveStage(uiState, {
           stageId: requestedStageId,
           status: "draft",

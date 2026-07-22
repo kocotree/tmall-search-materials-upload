@@ -16,6 +16,19 @@ from typing import Any
 from .stages import STAGES, get_stage
 
 
+SCHEMA_VERSION = 1
+STAGE_STATUSES = frozenset(
+    {
+        "draft",
+        "ready_for_agent",
+        "processing",
+        "needs_user_input",
+        "completed",
+        "blocked",
+    }
+)
+
+
 class InteractionPathError(ValueError):
     """Raised when a supplied identifier could address data outside a session."""
 
@@ -59,13 +72,19 @@ class SessionStore:
             for index, stage in enumerate(STAGES, start=1):
                 (session_path / self._stage_directory_name(index, stage.id)).mkdir()
 
+            created_at = self._iso_timestamp(created)
             state = {
+                "schema_version": SCHEMA_VERSION,
                 "session_id": session_id,
-                "created_at": self._iso_timestamp(created),
+                "created_at": created_at,
+                "updated_at": created_at,
                 "current_stage": "setup",
                 "stages": {
                     stage.id: {"revision": 0, "status": "draft"} for stage in STAGES
                 },
+                "runs_root": str(self._runs_root),
+                "video_test_deferred": True,
+                "last_agent_heartbeat": None,
             }
             self._write_json_atomic(session_path / "session.json", state)
             self._append_event(session_path, "session_created", session_id=session_id)
@@ -78,6 +97,9 @@ class SessionStore:
                 state = json.load(stream)
         except FileNotFoundError as error:
             raise InteractionPathError(f"session does not exist: {session_id}") from error
+        if not isinstance(state, dict):
+            raise InteractionConflict("session.json must contain an object")
+        self._validate_schema_version(state, "session")
         if state.get("session_id") != session_id:
             raise InteractionConflict("session.json identity does not match its path")
         return state
@@ -109,16 +131,19 @@ class SessionStore:
 
             self._invalidate_after_edit(session_id, stage_id, state)
             input_document = {
+                "schema_version": SCHEMA_VERSION,
                 "session_id": session_id,
                 "stage_id": stage_id,
                 "revision": revision,
                 "created_at": created_at,
+                "submitted_at": created_at,
                 "values": values,
                 "user_notes": user_notes,
             }
             input_path = stage_path / "input.json"
             self._write_json_atomic(input_path, input_document)
             handoff = {
+                "schema_version": SCHEMA_VERSION,
                 "status": "ready_for_agent",
                 "session_id": session_id,
                 "stage_id": stage_id,
@@ -130,7 +155,7 @@ class SessionStore:
             stage_state["revision"] = revision
             stage_state["status"] = "ready_for_agent"
             state["current_stage"] = stage_id
-            self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+            self._write_session_state(session_id, state)
             self._append_event(
                 self._session_path(session_id),
                 "input_saved",
@@ -146,6 +171,8 @@ class SessionStore:
         stage_id: str,
         values: dict[str, Any],
         user_notes: str = "",
+        *,
+        expected_revision: int,
     ) -> dict[str, Any]:
         """Persist an editable revision and atomically revoke its handoff."""
 
@@ -154,6 +181,8 @@ class SessionStore:
             stage_path = self._stage_path(session_id, stage_id)
             state = self.load_session(session_id)
             stage_state = state["stages"][stage_id]
+            if expected_revision != stage_state["revision"]:
+                raise InteractionConflict("expected revision is stale")
             revision = int(stage_state["revision"]) + 1
             created_at = self._iso_timestamp(datetime.now(timezone.utc))
 
@@ -161,10 +190,12 @@ class SessionStore:
                 session_id, stage_id, state, remove_current_handoff=True
             )
             document = {
+                "schema_version": SCHEMA_VERSION,
                 "session_id": session_id,
                 "stage_id": stage_id,
                 "revision": revision,
                 "created_at": created_at,
+                "submitted_at": created_at,
                 "values": values,
                 "user_notes": user_notes,
             }
@@ -172,7 +203,7 @@ class SessionStore:
             stage_state["revision"] = revision
             stage_state["status"] = "draft"
             state["current_stage"] = stage_id
-            self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+            self._write_session_state(session_id, state)
             self._append_event(
                 self._session_path(session_id),
                 "draft_saved",
@@ -198,10 +229,13 @@ class SessionStore:
         """Persist an agent-owned result bound to the current user handoff."""
 
         self._stage_index(stage_id)
+        if status not in STAGE_STATUSES:
+            raise InteractionConflict("result status is not supported")
         with self._session_lock(session_id):
             stage_path = self._stage_path(session_id, stage_id)
             state = self.load_session(session_id)
             handoff = self._read_json(stage_path / "handoff.json", "handoff")
+            self._read_json(stage_path / "input.json", "input")
             expected_revision = state["stages"][stage_id]["revision"]
             if revision != expected_revision or handoff.get("revision") != revision:
                 raise InteractionConflict("result revision does not match the current handoff")
@@ -214,7 +248,9 @@ class SessionStore:
             if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
                 raise InteractionConflict("handoff identity does not match its path")
 
+            completed_at = self._iso_timestamp(datetime.now(timezone.utc))
             result = {
+                "schema_version": SCHEMA_VERSION,
                 "session_id": session_id,
                 "stage_id": stage_id,
                 "revision": revision,
@@ -224,11 +260,12 @@ class SessionStore:
                 "blocking_reasons": list(blocking_reasons),
                 "evidence": list(evidence),
                 "next_action": next_action,
-                "created_at": self._iso_timestamp(datetime.now(timezone.utc)),
+                "created_at": completed_at,
+                "completed_at": completed_at,
             }
             self._write_json_atomic(stage_path / "result.json", result)
             state["stages"][stage_id]["status"] = status
-            self._write_json_atomic(self._session_path(session_id) / "session.json", state)
+            self._write_session_state(session_id, state)
             self._append_event(
                 self._session_path(session_id),
                 "result_written",
@@ -263,18 +300,19 @@ class SessionStore:
                         state = self.load_session(session_id)
                         if state["stages"][stage_id]["revision"] != handoff["revision"]:
                             raise InteractionConflict("handoff revision does not match session state")
-                        heartbeat = self._iso_timestamp(datetime.now(timezone.utc))
-                        state["stages"][stage_id]["status"] = "processing"
-                        state["last_agent_heartbeat"] = heartbeat
-                        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
-                        self._append_event(
-                            self._session_path(session_id),
-                            "handoff_claimed",
-                            session_id=session_id,
-                            stage_id=stage_id,
-                            revision=handoff["revision"],
-                        )
-                        return handoff
+                        if state["stages"][stage_id]["status"] == "ready_for_agent":
+                            heartbeat = self._iso_timestamp(datetime.now(timezone.utc))
+                            state["stages"][stage_id]["status"] = "processing"
+                            state["last_agent_heartbeat"] = heartbeat
+                            self._write_session_state(session_id, state)
+                            self._append_event(
+                                self._session_path(session_id),
+                                "handoff_claimed",
+                                session_id=session_id,
+                                stage_id=stage_id,
+                                revision=handoff["revision"],
+                            )
+                            return handoff
                 except TimeoutError as error:
                     raise TimeoutError(
                         f"timed out waiting for handoff for stage {stage_id}"
@@ -292,6 +330,18 @@ class SessionStore:
             f"Read {stage_path / 'handoff.json'} and verify its input_sha256 against "
             f"the exact bytes of {stage_path / 'input.json'} before continuing."
         )
+
+    def read_optional_stage_document(
+        self, session_id: str, stage_id: str, document_name: str
+    ) -> dict[str, Any] | None:
+        """Read a versioned protocol document, or return ``None`` when absent."""
+
+        if document_name not in {"input", "handoff", "result"}:
+            raise KeyError(document_name)
+        path = self._stage_path(session_id, stage_id) / f"{document_name}.json"
+        if not path.is_file():
+            return None
+        return self._read_json(path, document_name)
 
     def _session_path(self, session_id: str) -> Path:
         self._validate_session_id(session_id)
@@ -376,7 +426,19 @@ class SessionStore:
             raise InteractionConflict(f"{document_name}.json is invalid") from error
         if not isinstance(document, dict):
             raise InteractionConflict(f"{document_name}.json must contain an object")
+        SessionStore._validate_schema_version(document, document_name)
         return document
+
+    @staticmethod
+    def _validate_schema_version(document: dict[str, Any], document_name: str) -> None:
+        if document.get("schema_version") != SCHEMA_VERSION:
+            raise InteractionConflict(
+                f"{document_name}.json schema_version is not supported"
+            )
+
+    def _write_session_state(self, session_id: str, state: dict[str, Any]) -> None:
+        state["updated_at"] = self._iso_timestamp(datetime.now(timezone.utc))
+        self._write_json_atomic(self._session_path(session_id) / "session.json", state)
 
     @staticmethod
     def _stage_index(stage_id: str) -> int:
@@ -389,11 +451,13 @@ class SessionStore:
     def _validate_handoff(
         session_id: str, stage_id: str, stage_path: Path, handoff: dict[str, Any]
     ) -> None:
+        SessionStore._validate_schema_version(handoff, "handoff")
         if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
             raise InteractionConflict("handoff identity does not match its path")
         actual_hash = hashlib.sha256((stage_path / "input.json").read_bytes()).hexdigest()
         if handoff.get("input_sha256") != actual_hash:
             raise InteractionConflict("handoff input_sha256 does not match input.json")
+        SessionStore._read_json(stage_path / "input.json", "input")
 
     @contextmanager
     def _session_lock(self, session_id: str, deadline: float | None = None):

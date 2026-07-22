@@ -354,18 +354,19 @@ def test_submit_rejects_missing_required_store(client, session_id):
 def test_draft_is_saved_without_handoff(client, session_id, tmp_path):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/draft",
-        json={"values": {"store": "测试店铺"}},
+        json={"values": {"store": "测试店铺"}, "revision": 0},
     )
 
     assert response.status_code == 200
     assert response.json["status"] == "draft"
+    assert response.json["revision"] == 1
     assert not list(tmp_path.glob(f"{session_id}/**/handoff.json"))
 
 
 def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/draft",
-        json={"values": {"store": "测试店铺", "password": "secret"}},
+        json={"values": {"store": "测试店铺", "password": "secret"}, "revision": 0},
     )
 
     assert response.status_code == 422
@@ -391,7 +392,7 @@ def test_draft_after_submit_invalidates_its_handoff_and_marks_stage_draft(client
     )
     drafted = client.post(
         f"/api/sessions/{session_id}/stages/production_confirmation/draft",
-        json={"values": {"store": "updated store"}},
+        json={"values": {"store": "updated store"}, "revision": 1},
     )
 
     assert submitted.status_code == 202
@@ -403,6 +404,44 @@ def test_draft_after_submit_invalidates_its_handoff_and_marks_stage_draft(client
     assert not list(tmp_path.glob(f"{session_id}/**/handoff.json"))
     input_path = next(tmp_path.glob(f"{session_id}/**/input.json"))
     assert '"password"' not in input_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("revision", [None, True, "0"])
+def test_draft_requires_integer_current_revision(client, session_id, revision):
+    payload = {"values": {"store": "draft"}}
+    if revision is not None:
+        payload["revision"] = revision
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert response.json["field_errors"]["revision"] == "must be an integer"
+
+
+def test_stale_draft_returns_conflict_without_changing_durable_files(client, session_id, tmp_path):
+    current = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={"values": valid_production_confirmation()},
+    )
+    session_path = tmp_path / session_id
+    tracked = [
+        session_path / "session.json",
+        session_path / "09-production-confirmation" / "input.json",
+        session_path / "09-production-confirmation" / "handoff.json",
+    ]
+    before = {path: path.read_bytes() for path in tracked}
+
+    stale = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/draft",
+        json={"values": {"store": "stale"}, "revision": 0},
+    )
+
+    assert current.status_code == 202
+    assert stale.status_code == 409
+    assert {path: path.read_bytes() for path in tracked} == before
 
 
 def test_submit_returns_store_handoff_identity(client, session_id):
@@ -529,7 +568,7 @@ def test_stage_read_exposes_only_current_handoff_submission_time(
 
     drafted = client.post(
         f"/api/sessions/{session_id}/stages/production_confirmation/draft",
-        json={"values": {"store": "updated store"}},
+        json={"values": {"store": "updated store"}, "revision": 1},
     )
     draft = client.get(f"/api/sessions/{session_id}/stages/production_confirmation")
     assert drafted.status_code == 200
@@ -606,7 +645,8 @@ def test_stage_read_returns_only_allowlisted_current_input_values(
                 "image_roots": roots,
                 "source_types": ["模特图", "买家秀"],
                 "include_video": False,
-            }
+            },
+            "revision": 0,
         },
     )
     input_path = tmp_path / session_id / "04-asset-matching" / "input.json"
@@ -685,3 +725,41 @@ def test_source_code_never_imports_execution_modules():
     assert "playwright" not in text.lower()
     assert "BrowserUploader" not in text
     assert "_publish" not in text
+
+
+@pytest.mark.parametrize("artifact_name", ["input.json", "handoff.json", "result.json"])
+@pytest.mark.parametrize("schema_version", [None, 999])
+def test_stage_read_rejects_missing_or_unsupported_artifact_schema_version(
+    client, session_id, tmp_path, artifact_name, schema_version
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={"values": valid_production_confirmation()},
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "production_confirmation",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="completed",
+        summary="done",
+    )
+    artifact_path = (
+        tmp_path
+        / session_id
+        / "09-production-confirmation"
+        / artifact_name
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if schema_version is None:
+        artifact.pop("schema_version")
+    else:
+        artifact["schema_version"] = schema_version
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    response = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation"
+    )
+
+    assert response.status_code == 409
+    assert "schema_version" in response.json["error"]

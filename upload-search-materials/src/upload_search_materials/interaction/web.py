@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
@@ -108,13 +107,17 @@ def create_app(runs_root: Path) -> Flask:
         field_errors = _unknown_value_errors(stage, values)
         if field_errors:
             return _validation_error(field_errors)
-        store.save_draft(
+        expected_revision = payload.get("revision")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            return _validation_error({"revision": "must be an integer"})
+        document = store.save_draft(
             session_id,
             stage_id,
             _allowlisted_values(stage, values),
             _user_notes(payload),
+            expected_revision=expected_revision,
         )
-        return jsonify(status="draft")
+        return jsonify(status="draft", revision=document["revision"])
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/submit")
     def submit(session_id: str, stage_id: str):
@@ -170,16 +173,14 @@ def _current_result(
 ) -> dict[str, Any] | None:
     """Return only the result bound to the stage's current durable revision."""
 
-    result_path = store._stage_path(session_id, stage_id) / "result.json"
     try:
-        with result_path.open(encoding="utf-8") as stream:
-            result = json.load(stream)
+        result = store.read_optional_stage_document(session_id, stage_id, "result")
+        if result is None:
+            return None
         input_sha256 = hashlib.sha256(
             (store._stage_path(session_id, stage_id) / "input.json").read_bytes()
         ).hexdigest()
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(result, dict):
+    except (FileNotFoundError, OSError):
         return None
     if (
         result.get("session_id") != session_id
@@ -199,13 +200,10 @@ def _current_input(
 ) -> dict[str, Any] | None:
     """Return allowlisted values only when input matches the durable revision."""
 
-    input_path = store._stage_path(session_id, stage.id) / "input.json"
-    try:
-        with input_path.open(encoding="utf-8") as stream:
-            document = json.load(stream)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    document = store.read_optional_stage_document(session_id, stage.id, "input")
+    if document is None:
         return None
-    if not isinstance(document, dict) or not isinstance(document.get("values"), dict):
+    if not isinstance(document.get("values"), dict):
         return None
     revision = state["stages"][stage.id]["revision"]
     if (
@@ -230,13 +228,14 @@ def _current_submission(
 
     stage_path = store._stage_path(session_id, stage_id)
     try:
-        with (stage_path / "handoff.json").open(encoding="utf-8") as stream:
-            handoff = json.load(stream)
+        handoff = store.read_optional_stage_document(session_id, stage_id, "handoff")
+        if handoff is None:
+            return None
         input_bytes = (stage_path / "input.json").read_bytes()
-        input_document = json.loads(input_bytes)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(handoff, dict) or not isinstance(input_document, dict):
+        input_document = store.read_optional_stage_document(session_id, stage_id, "input")
+        if input_document is None:
+            return None
+    except (FileNotFoundError, OSError):
         return None
     revision = state["stages"][stage_id]["revision"]
     if (

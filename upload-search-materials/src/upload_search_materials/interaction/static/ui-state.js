@@ -138,13 +138,23 @@
     return { blockingReasons, nextAction };
   }
 
+  function draftRequestBody(values, revision) {
+    return { values, revision };
+  }
+
+  function persistedRevision(payload) {
+    return payload.revision;
+  }
+
   return {
     connectionView,
     controlPresentation,
     createRequestIdentity,
     createState,
+    draftRequestBody,
     isCurrentRequest,
     markDirty,
+    persistedRevision,
     receiveRecovery,
     receiveStage,
     receiveStatus,
