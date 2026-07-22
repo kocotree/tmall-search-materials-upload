@@ -28,6 +28,7 @@
   let currentStageId = railButtons[0]?.dataset.stageId || "setup";
   let revision = 0;
   let uiState = UiState.createState(currentStageId);
+  let stageGeneration = 0;
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -250,6 +251,29 @@
       });
       summary.appendChild(evidence);
     }
+    const sections = UiState.resultSections(result);
+    if (sections.blockingReasons.length) {
+      const blocking = document.createElement("section");
+      const label = document.createElement("strong");
+      label.textContent = "阻塞原因";
+      const reasons = document.createElement("ul");
+      sections.blockingReasons.forEach((reason) => {
+        const row = document.createElement("li");
+        row.textContent = reason;
+        reasons.appendChild(row);
+      });
+      blocking.append(label, reasons);
+      summary.appendChild(blocking);
+    }
+    if (sections.nextAction) {
+      const action = document.createElement("section");
+      const label = document.createElement("strong");
+      label.textContent = "下一步";
+      const nextAction = document.createElement("p");
+      nextAction.textContent = result.next_action;
+      action.append(label, nextAction);
+      summary.appendChild(action);
+    }
     content.appendChild(summary);
   }
 
@@ -292,6 +316,8 @@
   }
 
   async function persistStage(mode) {
+    const requestedStageId = currentStageId;
+    const requestedGeneration = stageGeneration;
     const form = activeForm();
     if (!form) return;
     clearFieldErrors(form);
@@ -306,42 +332,62 @@
     saveButton.disabled = true;
     submitButton.disabled = true;
     actionMessage.textContent = mode === "draft" ? "正在保存草稿…" : "正在创建交接…";
+    let requestIdentity = null;
     try {
       await ensureSession();
+      if (requestedStageId !== currentStageId || requestedGeneration !== stageGeneration) return;
+      requestIdentity = UiState.createRequestIdentity(
+        requestedStageId,
+        sessionId,
+        requestedGeneration,
+      );
       const body = { values };
       if (mode === "submit") body.revision = revision + 1;
-      const payload = await fetchJson(apiPath(`/stages/${currentStageId}${stageActions[mode]}`), {
+      const payload = await fetchJson(apiPath(`/stages/${requestedStageId}${stageActions[mode]}`), {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (!UiState.isCurrentRequest(
+        requestIdentity,
+        currentStageId,
+        sessionId,
+        stageGeneration,
+      )) return;
       if (mode === "submit") {
         revision = payload.revision;
         uiState = UiState.receiveStage(uiState, {
-          stageId: currentStageId,
+          stageId: requestedStageId,
           status: "ready_for_agent",
           result: null,
           submission: { created_at: payload.created_at },
         });
         renderStatus();
         renderSubmission();
-        renderStageResult(stages.get(currentStageId).component);
+        renderStageResult(stages.get(requestedStageId).component);
         actionMessage.textContent = "交接已持久化，正在等待 Agent 接收。";
-        await loadRecoveryInstruction(currentStageId);
+        await loadRecoveryInstruction(requestedStageId);
       } else {
         revision += 1;
         uiState = UiState.receiveStage(uiState, {
-          stageId: currentStageId,
+          stageId: requestedStageId,
           status: "draft",
           result: null,
           submission: null,
         });
         renderStatus();
         renderSubmission();
-        renderStageResult(stages.get(currentStageId).component);
+        renderStageResult(stages.get(requestedStageId).component);
         actionMessage.textContent = "草稿已保存；不会创建 Agent 交接。";
       }
       revisionLabel.textContent = String(revision);
     } catch (error) {
+      if (requestedStageId !== currentStageId || requestedGeneration !== stageGeneration) return;
+      if (requestIdentity && !UiState.isCurrentRequest(
+        requestIdentity,
+        currentStageId,
+        sessionId,
+        stageGeneration,
+      )) return;
       showFieldErrors(form, error.fieldErrors || {});
       actionMessage.textContent = error.message;
       uiState = UiState.markDirty(uiState);
@@ -399,6 +445,7 @@
 
   function activateStage(stageId) {
     if (!stages.has(stageId)) return;
+    stageGeneration += 1;
     currentStageId = stageId;
     uiState = UiState.switchStage(uiState, stageId);
     recoveryButton.disabled = true;

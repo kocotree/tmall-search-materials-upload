@@ -118,16 +118,39 @@
     return { values, checked };
   }
 
+  function createRequestIdentity(stageId, sessionId, generation) {
+    return { stageId, sessionId, generation };
+  }
+
+  function isCurrentRequest(identity, stageId, sessionId, generation) {
+    return identity.stageId === stageId
+      && identity.sessionId === sessionId
+      && identity.generation === generation;
+  }
+
+  function resultSections(result) {
+    const blockingReasons = Array.isArray(result?.blocking_reasons)
+      ? result.blocking_reasons.filter((reason) => typeof reason === "string" && reason.length)
+      : [];
+    const nextAction = typeof result?.next_action === "string" && result.next_action.length
+      ? result.next_action
+      : null;
+    return { blockingReasons, nextAction };
+  }
+
   return {
     connectionView,
     controlPresentation,
+    createRequestIdentity,
     createState,
+    isCurrentRequest,
     markDirty,
     receiveRecovery,
     receiveStage,
     receiveStatus,
     recoveryView,
     resultView,
+    resultSections,
     statusLabels,
     submissionView,
     switchStage,

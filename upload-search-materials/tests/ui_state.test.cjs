@@ -128,3 +128,40 @@ test("saved generic values produce control presentations without defaults", () =
     { values: ['[\n  {\n    "id": "sku-1"\n  }\n]'], checked: false },
   );
 });
+
+test("an in-flight response is rejected after the user switches stages", () => {
+  assert.equal(typeof UiState.createRequestIdentity, "function");
+  assert.equal(typeof UiState.isCurrentRequest, "function");
+  const request = UiState.createRequestIdentity("setup", "session-1", 4);
+
+  assert.equal(
+    UiState.isCurrentRequest(request, "setup", "session-1", 4),
+    true,
+  );
+  assert.equal(
+    UiState.isCurrentRequest(request, "scope", "session-1", 5),
+    false,
+  );
+  assert.equal(
+    UiState.isCurrentRequest(request, "setup", "session-2", 4),
+    false,
+  );
+});
+
+test("generic result sections include only present blocking reasons and next action", () => {
+  assert.equal(typeof UiState.resultSections, "function");
+  assert.deepEqual(
+    UiState.resultSections({
+      blocking_reasons: ["缺少主图", "别名未确认"],
+      next_action: "补充后重新提交",
+    }),
+    {
+      blockingReasons: ["缺少主图", "别名未确认"],
+      nextAction: "补充后重新提交",
+    },
+  );
+  assert.deepEqual(UiState.resultSections({}), {
+    blockingReasons: [],
+    nextAction: null,
+  });
+});

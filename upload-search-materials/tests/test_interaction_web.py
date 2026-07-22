@@ -2,6 +2,7 @@ import html as html_module
 import json
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,83 @@ def test_results_stage_accepts_recovery_only_when_session_status_requires_user_a
     assert response.status_code == 202
 
 
+def test_results_recovery_rechecks_status_inside_save_lock(
+    tmp_path, monkeypatch
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    initial_handoff = store.save_input(
+        session.session_id,
+        "results",
+        {"recovery_action": "retry"},
+    )
+    store.write_result(
+        session.session_id,
+        "results",
+        initial_handoff["revision"],
+        initial_handoff["input_sha256"],
+        status="blocked",
+        summary="awaiting recovery decision",
+    )
+
+    route_reached_save = threading.Event()
+    allow_recovery_save = threading.Event()
+    original_save_input = SessionStore.save_input
+
+    def pause_before_save_lock(self, session_id, stage_id, *args, **kwargs):
+        if stage_id == "results":
+            route_reached_save.set()
+            assert allow_recovery_save.wait(2)
+        return original_save_input(self, session_id, stage_id, *args, **kwargs)
+
+    monkeypatch.setattr(SessionStore, "save_input", pause_before_save_lock)
+    responses = []
+
+    def submit_recovery():
+        with create_app(tmp_path).test_client() as client:
+            responses.append(
+                client.post(
+                    f"/api/sessions/{session.session_id}/stages/results/submit",
+                    json={
+                        "values": {
+                            "recovery_action": "retry",
+                            "manual_notes": "retry only if still blocked",
+                            "allow_retry_after_remote_absence": True,
+                        }
+                    },
+                )
+            )
+
+    request_thread = threading.Thread(target=submit_recovery)
+    request_thread.start()
+    assert route_reached_save.wait(2)
+
+    store.write_result(
+        session.session_id,
+        "results",
+        initial_handoff["revision"],
+        initial_handoff["input_sha256"],
+        status="completed",
+        summary="agent completed while recovery request was waiting",
+    )
+    results_path = session.path / "10-results"
+    completed_artifacts = {
+        name: (results_path / name).read_bytes()
+        for name in ("input.json", "handoff.json", "result.json")
+    }
+    completed_state = (session.path / "session.json").read_bytes()
+
+    allow_recovery_save.set()
+    request_thread.join(2)
+
+    assert not request_thread.is_alive()
+    assert responses[0].status_code == 409
+    assert responses[0].json["error"] == "stage status does not allow input submission"
+    assert (session.path / "session.json").read_bytes() == completed_state
+    for name, expected_bytes in completed_artifacts.items():
+        assert (results_path / name).read_bytes() == expected_bytes
+
+
 @pytest.mark.parametrize(
     ("data", "content_type", "status"),
     [(b"{}", None, 415), (b"{", "application/json", 400)],
@@ -482,6 +560,39 @@ def test_stage_read_exposes_current_agent_result_for_schema_renderer(
     assert response.status_code == 200
     assert response.json["result"]["summary"] == "真实结果：1 个商品已完成"
     assert response.json["result"]["revision"] == submitted.json["revision"]
+
+    result_path = (
+        tmp_path
+        / session_id
+        / "09-production-confirmation"
+        / "result.json"
+    )
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["input_sha256"] = "0" * 64
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    stale = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation"
+    )
+
+    assert stale.status_code == 200
+    assert stale.json["result"] is None
+
+
+def test_generic_result_renderer_includes_optional_agent_actions_as_safe_text():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'label.textContent = "阻塞原因"' in source
+    assert 'label.textContent = "下一步"' in source
+    assert "row.textContent = reason" in source
+    assert "nextAction.textContent = result.next_action" in source
 
 
 def test_stage_read_returns_only_allowlisted_current_input_values(

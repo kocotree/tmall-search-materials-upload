@@ -120,13 +120,8 @@ def create_app(runs_root: Path) -> Flask:
     def submit(session_id: str, stage_id: str):
         payload = _json_object()
         values = _values(payload)
-        state = store.load_session(session_id)
+        store.load_session(session_id)
         stage = get_stage(stage_id)
-        if (
-            stage_id == "results"
-            and state["stages"][stage_id]["status"] not in RESULTS_USER_ACTION_STATUSES
-        ):
-            return _error("results stage is not awaiting user action", 409)
         field_errors = _unknown_value_errors(stage, values) | _value_errors(stage, values)
         if field_errors:
             return _validation_error(field_errors)
@@ -143,6 +138,9 @@ def create_app(runs_root: Path) -> Flask:
             _allowlisted_values(stage, values),
             _user_notes(payload),
             expected_revision=expected_revision,
+            allowed_current_statuses=(
+                RESULTS_USER_ACTION_STATUSES if stage_id == "results" else None
+            ),
         )
         return jsonify(
             revision=handoff["revision"],
@@ -176,6 +174,9 @@ def _current_result(
     try:
         with result_path.open(encoding="utf-8") as stream:
             result = json.load(stream)
+        input_sha256 = hashlib.sha256(
+            (store._stage_path(session_id, stage_id) / "input.json").read_bytes()
+        ).hexdigest()
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
     if not isinstance(result, dict):
@@ -184,6 +185,7 @@ def _current_result(
         result.get("session_id") != session_id
         or result.get("stage_id") != stage_id
         or result.get("revision") != state["stages"][stage_id]["revision"]
+        or result.get("input_sha256") != input_sha256
     ):
         return None
     return result

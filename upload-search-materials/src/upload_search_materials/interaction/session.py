@@ -90,12 +90,18 @@ class SessionStore:
         user_notes: str = "",
         *,
         expected_revision: int | None = None,
+        allowed_current_statuses: frozenset[str] | set[str] | None = None,
     ) -> dict[str, Any]:
         self._stage_index(stage_id)
         with self._session_lock(session_id):
             stage_path = self._stage_path(session_id, stage_id)
             state = self.load_session(session_id)
             stage_state = state["stages"][stage_id]
+            if (
+                allowed_current_statuses is not None
+                and stage_state["status"] not in allowed_current_statuses
+            ):
+                raise InteractionConflict("stage status does not allow input submission")
             revision = int(stage_state["revision"]) + 1
             if expected_revision is not None and expected_revision != revision:
                 raise InteractionConflict("expected revision is stale")
