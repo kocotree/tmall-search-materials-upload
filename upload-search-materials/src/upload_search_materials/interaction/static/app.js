@@ -27,7 +27,6 @@
   let sessionId = shell.dataset.sessionId || "";
   let currentStageId = railButtons[0]?.dataset.stageId || "setup";
   let revision = 0;
-  let lastSubmittedAt = null;
   let uiState = UiState.createState(currentStageId);
 
   const statusCopy = UiState.statusLabels;
@@ -176,6 +175,18 @@
     updateResultsRecovery(UiState.recoveryView(uiState));
   }
 
+  function renderSubmission() {
+    const { createdAt } = UiState.submissionView(uiState);
+    if (!createdAt) {
+      lastSubmittedLabel.textContent = "尚未提交";
+      return;
+    }
+    const timestamp = Date.parse(createdAt);
+    lastSubmittedLabel.textContent = Number.isFinite(timestamp)
+      ? new Date(timestamp).toLocaleString("zh-CN", { hour12: false })
+      : createdAt;
+  }
+
   function updateResultsRecovery(recovery) {
     const isResults = currentStageId === "results";
     const mayRecover = isResults && recovery.visible;
@@ -255,6 +266,7 @@
       revision = 0;
       revisionLabel.textContent = "0";
       renderStatus();
+      renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
       return;
     }
@@ -267,9 +279,11 @@
         stageId: requestedStageId,
         status: payload.state.status,
         result: payload.result,
+        submission: payload.submission,
       });
       if (payload.input) hydrateForm(activeForm(), payload.input.values);
       renderStatus();
+      renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
     } catch (error) {
       if (requestedStageId !== currentStageId) return;
@@ -302,14 +316,14 @@
       });
       if (mode === "submit") {
         revision = payload.revision;
-        lastSubmittedAt = new Date();
-        lastSubmittedLabel.textContent = lastSubmittedAt.toLocaleString("zh-CN", { hour12: false });
         uiState = UiState.receiveStage(uiState, {
           stageId: currentStageId,
           status: "ready_for_agent",
           result: null,
+          submission: { created_at: payload.created_at },
         });
         renderStatus();
+        renderSubmission();
         renderStageResult(stages.get(currentStageId).component);
         actionMessage.textContent = "交接已持久化，正在等待 Agent 接收。";
         await loadRecoveryInstruction(currentStageId);
@@ -319,8 +333,10 @@
           stageId: currentStageId,
           status: "draft",
           result: null,
+          submission: null,
         });
         renderStatus();
+        renderSubmission();
         renderStageResult(stages.get(currentStageId).component);
         actionMessage.textContent = "草稿已保存；不会创建 Agent 交接。";
       }
@@ -403,6 +419,7 @@
     currentStageLabel.textContent = stage.title;
     actionMessage.textContent = "填写完成后可保存草稿，或提交给 Agent。";
     renderStatus();
+    renderSubmission();
     renderStageResult(stage.component);
     window.scrollTo({ top: 0, behavior: "smooth" });
     loadStage();

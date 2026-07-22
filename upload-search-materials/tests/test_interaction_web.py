@@ -106,6 +106,14 @@ def test_page_uses_explicit_empty_states_without_fabricated_counts(client):
     assert "18 张" not in html
 
 
+def test_unscanned_slot_board_has_no_fabricated_slot_count(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert "3 / 9 坑位" not in html
+    assert 'data-component="SlotBoard"' in html
+    assert 'data-empty-state="尚未扫描"' in html
+
+
 def test_asset_matching_prefills_three_editable_labeled_image_roots(client):
     decoded = html_module.unescape(client.get("/").get_data(as_text=True))
     expected_roots = (
@@ -416,6 +424,38 @@ def test_stage_read_and_status_expose_schema_and_state(client, session_id):
     assert stage.json["stage"]["id"] == "setup"
     assert {field["name"] for field in stage.json["stage"]["fields"]} >= {"store", "month"}
     assert status.json == {"revision": 0, "status": "draft"}
+
+
+def test_stage_read_exposes_only_current_handoff_submission_time(
+    client, session_id, tmp_path
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={"values": valid_production_confirmation()},
+    )
+    handoff_path = tmp_path / session_id / "09-production-confirmation" / "handoff.json"
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+
+    current = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation"
+    )
+    assert submitted.status_code == 202
+    assert current.json["submission"] == {"created_at": handoff["created_at"]}
+
+    handoff["input_sha256"] = "0" * 64
+    handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+    invalidated = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation"
+    )
+    assert invalidated.json["submission"] is None
+
+    drafted = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/draft",
+        json={"values": {"store": "updated store"}},
+    )
+    draft = client.get(f"/api/sessions/{session_id}/stages/production_confirmation")
+    assert drafted.status_code == 200
+    assert draft.json["submission"] is None
 
 
 def test_stage_read_exposes_current_agent_result_for_schema_renderer(

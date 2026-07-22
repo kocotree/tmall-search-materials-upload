@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 from datetime import date, datetime
@@ -95,6 +96,7 @@ def create_app(runs_root: Path) -> Flask:
             state=state["stages"][stage_id],
             input=_current_input(store, session_id, stage, state),
             result=_current_result(store, session_id, stage_id, state),
+            submission=_current_submission(store, session_id, stage_id, state),
         )
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/draft")
@@ -142,7 +144,11 @@ def create_app(runs_root: Path) -> Flask:
             _user_notes(payload),
             expected_revision=expected_revision,
         )
-        return jsonify(revision=handoff["revision"], input_sha256=handoff["input_sha256"]), 202
+        return jsonify(
+            revision=handoff["revision"],
+            input_sha256=handoff["input_sha256"],
+            created_at=handoff["created_at"],
+        ), 202
 
     @app.get("/api/sessions/<session_id>/stages/<stage_id>/status")
     def status(session_id: str, stage_id: str):
@@ -210,6 +216,39 @@ def _current_input(
         "revision": revision,
         "values": _allowlisted_values(stage, document["values"]),
     }
+
+
+def _current_submission(
+    store: SessionStore,
+    session_id: str,
+    stage_id: str,
+    state: dict[str, Any],
+) -> dict[str, str] | None:
+    """Expose a submission time only for the current durable handoff."""
+
+    stage_path = store._stage_path(session_id, stage_id)
+    try:
+        with (stage_path / "handoff.json").open(encoding="utf-8") as stream:
+            handoff = json.load(stream)
+        input_bytes = (stage_path / "input.json").read_bytes()
+        input_document = json.loads(input_bytes)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(handoff, dict) or not isinstance(input_document, dict):
+        return None
+    revision = state["stages"][stage_id]["revision"]
+    if (
+        handoff.get("session_id") != session_id
+        or handoff.get("stage_id") != stage_id
+        or handoff.get("revision") != revision
+        or handoff.get("input_sha256") != hashlib.sha256(input_bytes).hexdigest()
+        or input_document.get("session_id") != session_id
+        or input_document.get("stage_id") != stage_id
+        or input_document.get("revision") != revision
+        or not isinstance(handoff.get("created_at"), str)
+    ):
+        return None
+    return {"created_at": handoff["created_at"]}
 
 
 def _json_object() -> dict[str, Any]:

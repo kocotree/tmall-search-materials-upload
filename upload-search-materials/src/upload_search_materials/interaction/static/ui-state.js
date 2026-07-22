@@ -21,6 +21,7 @@
       serverStatus: "draft",
       dirty: false,
       result: null,
+      submission: null,
       lastAgentHeartbeat: null,
       recoveryInstruction: null,
     };
@@ -33,6 +34,7 @@
       serverStatus: update.status,
       dirty: false,
       result: Object.hasOwn(update, "result") ? update.result : state.result,
+      submission: Object.hasOwn(update, "submission") ? update.submission : state.submission,
       lastAgentHeartbeat: Object.hasOwn(update, "lastAgentHeartbeat")
         ? update.lastAgentHeartbeat
         : state.lastAgentHeartbeat,
@@ -62,6 +64,11 @@
       return { mode: "empty", label: "尚未扫描" };
     }
     return { mode: "result", result: state.result };
+  }
+
+  function submissionView(state) {
+    const createdAt = state.submission?.created_at;
+    return { createdAt: typeof createdAt === "string" ? createdAt : null };
   }
 
   function connectionView(state, now, heartbeatWindowMs = 10000) {
@@ -122,6 +129,7 @@
     recoveryView,
     resultView,
     statusLabels,
+    submissionView,
     switchStage,
   };
 });
