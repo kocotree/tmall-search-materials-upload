@@ -107,7 +107,7 @@ uv run --project .\upload-search-materials --locked python -X utf8 $quickValidat
 
 ## 阶段 2：交互页面与任务隔离
 
-**状态：** 进行中（实现级自动化验证已有证据；第二次评审修复与真实浏览器视觉验收待控制器确认）
+**状态：** 通过（2026-07-22；自动化、真实浏览器与非生产 handoff 均已验收）
 
 **目标：** 验证十阶段交互向导、时间戳任务隔离、JSON 交接、CLI 等待和恢复提示；任何页面动作都不得直接上传或发布。
 
@@ -115,7 +115,7 @@ uv run --project .\upload-search-materials --locked python -X utf8 $quickValidat
 
 - [x] 交互阶段、会话、API/UI 自动化测试已完成一轮实现级验证。
 - [x] CLI `interact` / `wait-handoff` 已完成聚焦验证。
-- [ ] 控制器对第二次评审修复运行最终回归，并保存退出码和完整日志。
+- [x] 控制器对全部评审修复运行最终回归，并保存退出码和完整日志。
 
 ```powershell
 New-Item -ItemType Directory -Force test_evidence\02-interaction | Out-Null
@@ -126,28 +126,30 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --h
 uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --help
 ```
 
-**已确认自动化证据：** 第二次评审修复前，聚焦 UI/API 测试 `50 passed`、Node UI-state 测试 `6 passed`；CLI 聚焦测试 `6 passed`、`test_orchestrator.py` 文件 `22 passed`；Skill validator 通过，Skill 压力场景 `5/5 GREEN`。这些结果证明实现级主路径已覆盖，但不替代第二次评审修复后的最终回归和浏览器视觉验收。
+**已确认自动化证据：** 最终会话/API/UI 聚焦测试 `72 passed`，Node UI-state 测试 `8 passed`，全量回归 `185 passed, 1 warning`；唯一 warning 仍为只读源 XLSX 缺少默认样式。CLI 聚焦测试 `6 passed`、`test_orchestrator.py` 文件 `22 passed`；Skill validator 通过，Skill 压力场景 `5/5 GREEN`。
 
 ### 会话、交接与一致性检查
 
-- [ ] 每次完整任务创建 `YYYYMMDD-HHMMSS` 时间戳目录；同一秒创建两个任务时，第二个目录带碰撞后缀且两者状态互不影响。
-- [ ] 页面提交后，当前阶段生成 `input.json` 和 `handoff.json`；`wait-handoff` 输出绑定当前 session、stage、revision 和 `input_sha256` 的 JSON。
-- [ ] “最近一次提交时间”来自当前阶段有效 `handoff.created_at`，刷新页面和服务重启后仍存在；切换阶段不得显示上一阶段时间。
-- [ ] 过期 revision、错误 input hash、旧阶段或旧 revision 的 `result.json` 均被拒绝或不展示。
-- [ ] 服务重启后能恢复任务；无活跃 Agent 时页面显示明确的恢复指令，不伪装成已经唤醒 Agent。
-- [ ] 保存/提交请求返回前切换阶段，响应不得污染新阶段的表单、提交时间、状态或结果。
-- [ ] 结果区只从当前绑定且校验通过的 `result.json` 展示摘要、证据、阻断原因和下一步；未扫描时显示“尚未扫描”，不得显示硬编码数量。
-- [ ] 页面不包含上传/发布调用；阶段 08/09 仅交接 Agent 和展示结果。
+- [x] 每次完整任务创建 `YYYYMMDD_HHMMSS` 时间戳目录；同一秒创建两个任务时，第二个目录带碰撞后缀且两者状态互不影响。
+- [x] 页面提交后，当前阶段生成 `input.json` 和 `handoff.json`；`wait-handoff` 输出绑定当前 session、stage、revision 和 `input_sha256` 的 JSON。
+- [x] “最近一次提交时间”来自当前阶段有效 `handoff.created_at`，刷新页面和服务重启后仍存在；切换阶段不得显示上一阶段时间。
+- [x] 过期 revision、错误 input hash、旧阶段或旧 revision 的 `result.json` 均被拒绝或不展示。
+- [x] 服务重启后能恢复任务；无活跃 Agent 时页面显示明确的恢复指令，不伪装成已经唤醒 Agent。
+- [x] 保存/提交请求返回前切换阶段，响应不得污染新阶段的表单、提交时间、状态或结果。
+- [x] 结果区只从当前绑定且校验通过的 `result.json` 展示摘要、证据、阻断原因和下一步；未扫描时显示“尚未扫描”，不得显示硬编码数量。
+- [x] 页面不包含上传/发布调用；阶段 08/09 仅交接 Agent 和展示结果。
 
 ### 本地服务与浏览器视觉验收
 
-- [ ] 启动仅监听 `127.0.0.1` 的本地服务，保存启动日志和实际 URL。
-- [ ] 在真实浏览器逐阶段检查左侧导航、字段、帮助文案、空状态、提交状态、恢复提示、窄屏布局和键盘焦点。
-- [ ] 确认三处图片来源可编辑，视频入口明确显示延期，阶段输入均有保存/提交接口。
+- [x] 启动仅监听 `127.0.0.1` 的本地服务，保存启动日志和实际 URL。
+- [x] 在真实浏览器检查十阶段左侧导航、字段、帮助文案、空状态、提交状态、恢复提示，以及 1440×900 / 1024×768 布局；1024 宽度无横向溢出，滚到底部后输入和恢复区域不被固定交接栏遮挡。
+- [x] 确认三处图片来源可编辑，视频入口禁用并显示“本轮测试延期”，阶段输入均有保存/提交接口。
 
 ```powershell
-uv run --project .\upload-search-materials --locked tmall-materials interact --runs-root test_evidence\02-interaction\runs --host 127.0.0.1 --port 8765
+uv run --project .\upload-search-materials --locked tmall-materials interact --runs-root test_evidence\02-interaction\runs --port 8765
 ```
+
+**浏览器与 handoff 证据：** 最终本地会话 `20260722_114534` 在阶段 04 提交三处图片源；页面显示 revision `1` 和持久化提交时间。`wait-handoff` 返回 SHA-256 `868fdb9fd2e9af15dfca298c246dd4877655de36a10addaf5f2f85d65ef88cb2`，与 `input.json` 实算一致。通过 `SessionStore.write_result` 写入非生产结果后，页面正确展示摘要、证据、阻塞原因和“进入图片策略人工审查，不执行上传”；全程未调用上传或发布。
 
 **通过标准：** 最终自动化回归、JSON 绑定、重启恢复、跨阶段竞态和真实浏览器视觉检查全部通过；页面始终不执行上传或发布。
 
@@ -322,7 +324,7 @@ git diff -- test_plan.md upload-search-materials plan.md
 | 阶段 | 状态 | 关键证据/待办 |
 | --- | --- | --- |
 | 1. 测试环境 | 通过（2026-07-20） | `test_evidence/01-environment/`；历史完整测试 `95 passed`，Skill 校验通过 |
-| 2. 交互页面与任务隔离 | 进行中 | 已确认 UI/API `50 passed`、Node `6 passed`、CLI `6 passed`、orchestrator `22 passed`；第二次评审修复最终回归和浏览器视觉验收待确认 |
+| 2. 交互页面与任务隔离 | 通过（2026-07-22） | 会话/API/UI `72 passed`、Node `8 passed`、全量 `185 passed`；1440/1024 浏览器与非生产 handoff 验收通过 |
 | 3. 素材清单与三处图片来源 | 进行中 | 历史“小芭蕉卷卷帽”图片证据已保留；三处来源综合扫描待执行；视频延期 |
 | 4. 图片策略 | 未开始 | `test_evidence/04-image-policy/` |
 | 5. 生产选择器 | 未开始 | `test_evidence/05-selectors/` |
@@ -339,4 +341,4 @@ git diff -- test_plan.md upload-search-materials plan.md
 
 ## 下一步
 
-先完成阶段 2：由控制器确认第二次评审修复后的自动化回归，再进行真实浏览器视觉 smoke，重点核对阶段提交时间、跨阶段响应隔离、当前结果绑定、恢复提示和页面绝不直接上传/发布。阶段 2 通过后，继续阶段 3 的三处图片来源综合扫描与人工确认；视频测试保持延期。完成素材来源验收后，再进入阶段 4 图片策略，确认小红书常见 `2:3` 图片是允许直传、裁切还是仅作为人工候选。
+继续阶段 3：对三处图片来源执行只读综合扫描与人工确认，记录来源、匹配方式、待确认项和 SHA-256；视频测试保持延期。完成素材来源验收后，再进入阶段 4 图片策略，确认小红书常见 `2:3` 图片是允许直传、裁切还是仅作为人工候选。
