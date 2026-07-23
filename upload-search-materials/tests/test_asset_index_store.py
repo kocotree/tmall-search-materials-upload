@@ -208,6 +208,49 @@ def test_successful_refresh_marks_only_unseen_partition_files_inactive(tmp_path)
         assert store.file_count(active_only=True) == 1
 
 
+def test_finalize_partition_rolls_back_completion_when_deactivation_fails(tmp_path):
+    with make_store(tmp_path) as store:
+        partition_id, existing_id = add_file(store, scan_id="scan-1")
+        store.complete_partition(partition_id)
+        store.checkpoint_files(
+            partition_id,
+            "scan-2",
+            [
+                IndexedFile(
+                    "model_nas",
+                    "2026/hats/b.jpg",
+                    "C:/assets/2026/hats/b.jpg",
+                    ".jpg",
+                    10,
+                    20,
+                    "2026/hats",
+                )
+            ],
+        )
+        store._connection.execute(
+            "CREATE TRIGGER reject_deactivation BEFORE UPDATE OF active ON files "
+            "WHEN OLD.active=1 AND NEW.active=0 "
+            "BEGIN SELECT RAISE(ABORT, 'forced deactivation failure'); END"
+        )
+        store._connection.commit()
+
+        with pytest.raises(
+            sqlite3.IntegrityError, match="forced deactivation failure"
+        ):
+            store.finalize_partition(partition_id, "scan-2")
+
+        record = store.partition_record(partition_id)
+        assert record["status"] == "in_progress"
+        assert record["completed_scan_id"] is None
+        assert store.file_is_active(existing_id) is True
+
+        store._connection.execute("DROP TRIGGER reject_deactivation")
+        store._connection.commit()
+        assert store.finalize_partition(partition_id, "scan-2") == 1
+        assert store.partition_record(partition_id)["status"] == "completed"
+        assert store.file_is_active(existing_id) is False
+
+
 def test_incomplete_new_scan_cannot_deactivate_files_from_a_completed_scan(tmp_path):
     with make_store(tmp_path) as store:
         partition_id, existing_id = add_file(store, scan_id="scan-1")
@@ -285,3 +328,78 @@ def test_restart_partition_resets_progress_and_current_scan_visibility(tmp_path)
             "WHERE partition_id=? AND seen_scan_id='scan-2'",
             (partition_id,),
         ).fetchone()[0] == 0
+
+
+def test_scan_statistics_aggregates_committed_partition_progress_without_root_sync(
+    tmp_path,
+):
+    with make_store(tmp_path) as store:
+        root_id = store.upsert_root("model_nas", "C:/assets")
+        store.prepare_root(root_id, "scan-1")
+        store.start_root(root_id, "scan-1")
+        partition_id = store.upsert_partition(root_id, "2026/hats")
+        store.restart_partition(partition_id, "scan-1")
+        store.advance_partition_progress(
+            partition_id,
+            "scan-1",
+            3,
+            discovered=3,
+            indexed=2,
+            matched=1,
+            failed=0,
+        )
+        store.record_file_error(
+            partition_id,
+            "scan-1",
+            source_system="model_nas",
+            relative_path="2026/hats/bad.jpg",
+            code="FILE_STAT_ERROR",
+            detail="temporarily unavailable",
+        )
+
+        assert store.root_record(root_id)["discovered"] == 0
+        statistics = store.scan_statistics("scan-1")
+
+        assert statistics["roots"][0]["discovered"] == 3
+        assert statistics["roots"][0]["indexed"] == 2
+        assert statistics["roots"][0]["matched"] == 1
+        assert statistics["roots"][0]["failed"] == 1
+        assert statistics["totals"] == {
+            "discovered": 3,
+            "indexed": 2,
+            "matched": 1,
+            "failed": 1,
+        }
+
+
+def test_scan_statistics_keeps_root_failure_after_successful_partition(tmp_path):
+    with make_store(tmp_path) as store:
+        root_id = store.upsert_root("model_nas", "C:/assets")
+        store.prepare_root(root_id, "scan-1")
+        store.start_root(root_id, "scan-1")
+        partition_id = store.upsert_partition(root_id, "2026/hats")
+        store.restart_partition(partition_id, "scan-1")
+        store.advance_partition_progress(
+            partition_id,
+            "scan-1",
+            1,
+            discovered=1,
+            indexed=1,
+            matched=1,
+        )
+        store.finalize_partition(partition_id, "scan-1")
+        store.fail_root(
+            root_id,
+            "scan-1",
+            "ROOT_ENUMERATION_ERROR",
+            "root disconnected after partition completion",
+        )
+
+        statistics = store.scan_statistics("scan-1")
+
+        assert statistics["roots"][0]["status"] == "failed"
+        assert statistics["roots"][0]["error_code"] == "ROOT_ENUMERATION_ERROR"
+        assert statistics["roots"][0]["discovered"] == 1
+        assert statistics["roots"][0]["failed"] == 1
+        assert statistics["roots"][0]["partitions"][0]["failed"] == 0
+        assert statistics["totals"]["failed"] == 1

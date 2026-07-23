@@ -199,8 +199,7 @@ class _PartitionWriter:
                 "PARTITION_ENUMERATION_ERROR",
             )
         else:
-            self.indexer.store.complete_partition(self.partition_id)
-            self.indexer.store.mark_partition_missing_files_inactive(
+            self.indexer.store.finalize_partition(
                 self.partition_id, self.scan_id
             )
         self.indexer.store.sync_root_statistics(self.root_id, self.scan_id)
@@ -840,10 +839,7 @@ class IncrementalAssetIndexer:
                 "PARTITION_ENUMERATION_ERROR",
             )
         else:
-            self.store.complete_partition(partition_id)
-            self.store.mark_partition_missing_files_inactive(
-                partition_id, scan_id
-            )
+            self.store.finalize_partition(partition_id, scan_id)
         self.store.sync_root_statistics(root_id, scan_id)
 
     def _process_batch(

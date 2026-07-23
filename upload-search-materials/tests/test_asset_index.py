@@ -483,6 +483,55 @@ def test_refresh_resume_restarts_incomplete_partition_after_files_change_before_
     store.close()
 
 
+def test_refresh_resume_deactivates_deleted_file_after_finalization_interrupt(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    partition = root / "matched"
+    partition.mkdir(parents=True)
+    kept = partition / "kept.png"
+    deleted = partition / "deleted.png"
+    make_image(kept)
+    make_image(deleted)
+    store, indexer = make_indexer(
+        tmp_path, root, depth=1, checkpoint_size=1
+    )
+    assert indexer.run("new").complete
+    deleted_id = store._connection.execute(
+        "SELECT file_id FROM files WHERE relative_path='matched/deleted.png'"
+    ).fetchone()[0]
+    deleted.unlink()
+    real_finalize = store.finalize_partition
+
+    def interrupt_before_finalization(partition_id, scan_id):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        store, "finalize_partition", interrupt_before_finalization
+    )
+    with pytest.raises(KeyboardInterrupt):
+        indexer.run("refresh")
+
+    partition_id = indexer.partition_id_for("model", Path("matched"))
+    interrupted = store.partition_record(partition_id)
+    assert interrupted["status"] == "in_progress"
+    assert interrupted["completed_scan_id"] is None
+    assert store.file_is_active(deleted_id) is True
+
+    monkeypatch.setattr(store, "finalize_partition", real_finalize)
+    outcome = indexer.run("resume")
+
+    assert outcome.complete
+    assert store.file_is_active(deleted_id) is False
+    assert {
+        row["relative_path"]
+        for row in store._connection.execute(
+            "SELECT relative_path FROM files WHERE active=1"
+        )
+    } == {"matched/kept.png"}
+    store.close()
+
+
 def test_new_discovery_interrupt_persists_active_scan_for_real_resume(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "matched").mkdir(parents=True)

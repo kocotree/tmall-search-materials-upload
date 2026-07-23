@@ -654,6 +654,33 @@ class AssetIndexStore:
                 (_now(), _now(), partition_id),
             )
 
+    def finalize_partition(self, partition_id: str, scan_id: str) -> int:
+        """Atomically complete a partition and retire files unseen by this scan."""
+
+        partition = self._partition(partition_id)
+        if partition["current_scan_id"] != scan_id:
+            raise ValueError("partition is not bound to this scan")
+        completed_at = _now()
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE files SET active=0 "
+                "WHERE partition_id=? AND active=1 AND seen_scan_id<>?",
+                (partition_id, scan_id),
+            )
+            self._connection.execute(
+                "UPDATE partitions SET status='completed', error='', error_code='', "
+                "completed_scan_id=?, checkpoint_at=?, completed_at=? "
+                "WHERE partition_id=? AND current_scan_id=?",
+                (
+                    scan_id,
+                    completed_at,
+                    completed_at,
+                    partition_id,
+                    scan_id,
+                ),
+            )
+            return cursor.rowcount
+
     def fail_partition(
         self,
         partition_id: str,
@@ -849,10 +876,21 @@ class AssetIndexStore:
                 }
                 for row in partition_rows
             ]
+            if partitions:
+                for key in ("discovered", "indexed", "matched"):
+                    root[key] = sum(int(partition[key]) for partition in partitions)
+                partition_failed = sum(
+                    int(partition["failed"]) for partition in partitions
+                )
+                root["failed"] = max(
+                    partition_failed,
+                    1
+                    if root["current_scan_id"] == scan_id
+                    and root["error_code"]
+                    else 0,
+                )
             if root["current_scan_id"] != scan_id:
                 root["current_scan_id"] = scan_id
-                for key in ("discovered", "indexed", "matched", "failed"):
-                    root[key] = sum(int(partition[key]) for partition in partitions)
                 root["status"] = (
                     "partial_failure"
                     if any(partition["status"] == "failed" for partition in partitions)
