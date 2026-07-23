@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,7 +159,15 @@ class AssetIndexStore:
             return int(self._connection.execute("SELECT root_id FROM roots WHERE source_system = ?", (source_system,)).fetchone()["root_id"])
 
     def upsert_partition(self, root_id: int, relative_path: str) -> str:
-        partition_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"asset-index:{root_id}:{relative_path}"))
+        root = self._connection.execute(
+            "SELECT source_system FROM roots WHERE root_id = ?", (root_id,)
+        ).fetchone()
+        if root is None:
+            raise KeyError(root_id)
+        relative_path = Path(relative_path).as_posix()
+        partition_id = hashlib.sha256(
+            f"{root['source_system']}\0{relative_path}".encode("utf-8")
+        ).hexdigest()[:24]
         with self._connection:
             self._connection.execute(
                 "INSERT INTO partitions(partition_id, root_id, relative_path, status) VALUES (?, ?, ?, 'pending') "
@@ -168,7 +176,14 @@ class AssetIndexStore:
             )
             return str(self._connection.execute("SELECT partition_id FROM partitions WHERE root_id = ? AND relative_path = ?", (root_id, relative_path)).fetchone()["partition_id"])
 
-    def checkpoint_files(self, partition_id: str, scan_id: str, rows: Sequence[IndexedFile]) -> tuple[int, ...]:
+    def checkpoint_files(
+        self,
+        partition_id: str,
+        scan_id: str,
+        rows: Sequence[IndexedFile],
+        *,
+        count_progress: bool = True,
+    ) -> tuple[int, ...]:
         partition = self._partition(partition_id)
         result: list[int] = []
         with self._connection:
@@ -201,14 +216,28 @@ class AssetIndexStore:
             if partition["current_scan_id"] != scan_id:
                 self._connection.execute(
                     "UPDATE partitions SET status='in_progress', processed_count=?, current_scan_id=?, completed_scan_id=NULL, checkpoint_at=? WHERE partition_id=?",
-                    (len(rows), scan_id, _now(), partition_id),
+                    (len(rows) if count_progress else 0, scan_id, _now(), partition_id),
                 )
-            else:
+            elif count_progress:
                 self._connection.execute(
                     "UPDATE partitions SET status='in_progress', processed_count=processed_count + ?, checkpoint_at=? WHERE partition_id=?",
                     (len(rows), _now(), partition_id),
                 )
         return tuple(result)
+
+    def advance_partition_progress(
+        self, partition_id: str, scan_id: str, processed_count: int
+    ) -> None:
+        if processed_count < 0:
+            raise ValueError("processed_count must not be negative")
+        partition = self._partition(partition_id)
+        if partition["current_scan_id"] != scan_id:
+            raise ValueError("partition is not bound to this scan")
+        with self._connection:
+            self._connection.execute(
+                "UPDATE partitions SET status='in_progress', processed_count=processed_count + ?, checkpoint_at=? WHERE partition_id=?",
+                (processed_count, _now(), partition_id),
+            )
 
     def update_file_inspection(self, file_id: int, *, sha256: str, width: int | None, height: int | None, validation_status: str, reason_codes: Sequence[str]) -> None:
         with self._connection:
@@ -280,6 +309,24 @@ class AssetIndexStore:
             "current_scan_id": row["current_scan_id"],
             "completed_scan_id": row["completed_scan_id"],
         }
+
+    def partitions_for_root(self, root_id: int) -> tuple[dict[str, object], ...]:
+        rows = self._connection.execute(
+            "SELECT partition_id, relative_path, status, processed_count, current_scan_id, completed_scan_id "
+            "FROM partitions WHERE root_id=? ORDER BY relative_path, partition_id",
+            (root_id,),
+        ).fetchall()
+        return tuple(
+            {
+                "partition_id": row["partition_id"],
+                "relative_path": row["relative_path"],
+                "status": row["status"],
+                "processed_count": row["processed_count"],
+                "current_scan_id": row["current_scan_id"],
+                "completed_scan_id": row["completed_scan_id"],
+            }
+            for row in rows
+        )
 
     def _partition(self, partition_id: str) -> sqlite3.Row:
         row = self._connection.execute(

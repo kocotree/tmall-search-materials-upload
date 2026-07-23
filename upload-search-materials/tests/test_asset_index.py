@@ -26,8 +26,9 @@ def make_image(path: Path, size=(20, 10)):
 
 
 def make_indexer(tmp_path, root, *, depth=2, checkpoint_size=1):
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", depth, checkpoint_size)
     store = AssetIndexStore.create(
-        tmp_path / "index.sqlite3", IndexIdentity("products.csv", "a" * 64, "[]", depth, checkpoint_size)
+        tmp_path / "index.sqlite3", identity
     )
     return store, IncrementalAssetIndexer(store, Matcher(), (NamedRoot("model", root),), IndexOptions(depth, checkpoint_size))
 
@@ -88,6 +89,7 @@ def test_only_matched_image_is_inspected_and_partition_key_is_stable(tmp_path, m
     assert sum(bool(record["sha256"]) for record in records) == 1
     expected = hashlib.sha256(b"model\0matched").hexdigest()[:24]
     assert indexer.partition_id_for("model", Path("matched")) == expected
+    assert store.partition_record(expected)["status"] == "completed"
     store.close()
 
 
@@ -99,8 +101,8 @@ def test_non_images_and_symlinks_are_skipped(tmp_path):
     link = root / "linked.png"
     try:
         link.symlink_to(root / "real.png")
-    except OSError:
-        pass
+    except OSError as error:
+        pytest.skip(f"symlink creation is not permitted: {error}")
     store, indexer = make_indexer(tmp_path, root)
 
     assert indexer.run("new").indexed == 1
@@ -163,6 +165,62 @@ def test_refresh_only_deactivates_missing_file_after_successful_partition(tmp_pa
     store.close()
 
 
+def test_new_indexer_refresh_deactivates_files_from_deleted_historical_partition(tmp_path):
+    root = tmp_path / "root"
+    partition = root / "gone"
+    partition.mkdir(parents=True)
+    image = partition / "old.png"
+    make_image(image)
+    store, indexer = make_indexer(tmp_path, root, depth=1)
+    indexer.run("new")
+    old_id = file_ids(store)[0]
+    store.close()
+    image.unlink()
+    partition.rmdir()
+
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 1, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    fresh_indexer = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(1, 1),
+    )
+
+    outcome = fresh_indexer.run("refresh")
+
+    assert outcome.complete
+    assert reopened.file_is_active(old_id) is False
+    reopened.close()
+
+
+def test_refresh_root_enumeration_failure_does_not_deactivate_historical_files(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    partition = root / "existing"
+    partition.mkdir(parents=True)
+    image = partition / "old.png"
+    make_image(image)
+    store, indexer = make_indexer(tmp_path, root, depth=1)
+    indexer.run("new")
+    old_id = file_ids(store)[0]
+    real_scandir = os.scandir
+
+    def fail_root(path):
+        if Path(path) == root.resolve():
+            raise OSError("root offline")
+        return real_scandir(path)
+
+    monkeypatch.setattr("upload_search_materials.asset_index.os.scandir", fail_root)
+
+    outcome = indexer.run("refresh")
+
+    assert outcome.partial_failure
+    assert store.file_is_active(old_id) is True
+    store.close()
+
+
 def test_keyboard_interrupt_keeps_checkpoint_for_resume(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "matched").mkdir(parents=True)
@@ -182,14 +240,29 @@ def test_keyboard_interrupt_keeps_checkpoint_for_resume(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         indexer.run("new")
     assert store.file_count() == 2
+    partition_id = store._connection.execute(
+        "SELECT partition_id FROM partitions"
+    ).fetchone()[0]
+    assert store.partition_record(partition_id)["processed_count"] == 1
+    store.close()
 
     monkeypatch.setattr("upload_search_materials.asset_index.inspect_asset", real_inspect)
-    outcome = indexer.run("resume")
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 2, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    fresh_indexer = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(2, 1),
+    )
+    outcome = fresh_indexer.run("resume")
 
     assert outcome.complete
-    assert store.file_count() == 2
-    assert sum(len(store.matches_for(file_id)) for file_id in file_ids(store)) == 2
-    store.close()
+    assert outcome.indexed == 1
+    assert reopened.partition_record(partition_id)["processed_count"] == 2
+    assert reopened.file_count() == 2
+    assert sum(len(reopened.matches_for(file_id)) for file_id in file_ids(reopened)) == 2
+    reopened.close()
 
 
 def test_resume_skips_completed_and_retries_failed_partition(tmp_path, monkeypatch):

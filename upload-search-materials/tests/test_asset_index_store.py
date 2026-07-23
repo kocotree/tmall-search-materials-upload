@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import pytest
 import sqlite3
 
@@ -66,9 +67,29 @@ def test_checkpoint_upserts_one_file_with_stable_id(tmp_path):
 def test_root_and_partition_upserts_are_idempotent_and_partition_id_is_stable(tmp_path):
     with make_store(tmp_path) as store:
         root_id = store.upsert_root("model_nas", "C:/assets")
+        expected = hashlib.sha256(b"model_nas\x00" + b"2026/hats").hexdigest()[:24]
 
         assert store.upsert_root("model_nas", "C:/assets") == root_id
-        assert store.upsert_partition(root_id, "2026/hats") == store.upsert_partition(root_id, "2026/hats")
+        assert store.upsert_partition(root_id, "2026/hats") == expected
+        assert store.upsert_partition(root_id, "2026/hats") == expected
+
+
+def test_partitions_for_root_exposes_persisted_scan_progress(tmp_path):
+    with make_store(tmp_path) as store:
+        root_id = store.upsert_root("model_nas", "C:/assets")
+        partition_id, _ = add_file(store, scan_id="scan-1")
+        store.complete_partition(partition_id)
+
+        assert store.partitions_for_root(root_id) == (
+            {
+                "partition_id": partition_id,
+                "relative_path": "2026/hats",
+                "status": "completed",
+                "processed_count": 1,
+                "current_scan_id": "scan-1",
+                "completed_scan_id": "scan-1",
+            },
+        )
 
 
 def test_changed_size_or_mtime_clears_deep_metadata_and_matches(tmp_path):

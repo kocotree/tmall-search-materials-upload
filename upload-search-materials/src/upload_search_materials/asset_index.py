@@ -85,7 +85,6 @@ class IncrementalAssetIndexer:
         self.options = options
         self._scan_id: str | None = None
         self._new_started = False
-        self._known_partitions: dict[tuple[str, str], Path] = {}
 
     @staticmethod
     def partition_id_for(source_system: str, relative_partition: Path) -> str:
@@ -100,23 +99,37 @@ class IncrementalAssetIndexer:
 
         started = time.perf_counter()
         discovery = self._discover()
-        for key in set(discovery.candidates) | set(discovery.errors):
-            self._known_partitions[key] = discovery.roots[key[0]]
         partition_keys = set(discovery.candidates) | set(discovery.errors)
+        root_ids = {
+            source_system: self.store.upsert_root(source_system, str(root))
+            for source_system, root in discovery.roots.items()
+        }
+        historical_records: dict[tuple[str, str], dict[str, object]] = {}
         if mode in {"resume", "refresh"}:
-            partition_keys |= set(self._known_partitions)
+            for source_system, root_id in root_ids.items():
+                for record in self.store.partitions_for_root(root_id):
+                    key = (source_system, str(record["relative_path"]))
+                    historical_records[key] = record
+                    partition_keys.add(key)
+
+            for source_system in root_ids:
+                root_error_key = (source_system, ".")
+                root_errors = tuple(discovery.errors.get(root_error_key, ()))
+                if not root_errors:
+                    continue
+                for key in historical_records:
+                    if key[0] == source_system and key != root_error_key:
+                        discovery.errors.setdefault(key, []).extend(root_errors)
 
         registrations: dict[tuple[str, str], str] = {}
         records: dict[tuple[str, str], dict[str, object]] = {}
         for source_system, relative_partition in sorted(partition_keys):
-            root = discovery.roots.get(source_system) or self._known_partitions[
-                (source_system, relative_partition)
-            ]
-            root_id = self.store.upsert_root(source_system, str(root))
+            root_id = root_ids[source_system]
             store_partition_id = self.store.upsert_partition(root_id, relative_partition)
             registrations[(source_system, relative_partition)] = store_partition_id
-            records[(source_system, relative_partition)] = self.store.partition_record(
-                store_partition_id
+            records[(source_system, relative_partition)] = historical_records.get(
+                (source_system, relative_partition),
+                self.store.partition_record(store_partition_id),
             )
 
         scan_id = self._select_scan_id(mode, records)
@@ -133,14 +146,26 @@ class IncrementalAssetIndexer:
 
             candidates = discovery.candidates.get(key, [])
             errors = discovery.errors.get(key, [])
+            start_offset = 0
+            if (
+                mode == "resume"
+                and prior["current_scan_id"] == scan_id
+                and prior["status"] in {"in_progress", "failed"}
+            ):
+                start_offset = int(prior["processed_count"])
             try:
-                self.store.checkpoint_files(partition_id, scan_id, ())
-                for offset in range(0, len(candidates), self.options.checkpoint_size):
+                self.store.checkpoint_files(
+                    partition_id, scan_id, (), count_progress=False
+                )
+                for offset in range(
+                    start_offset, len(candidates), self.options.checkpoint_size
+                ):
                     batch = candidates[offset : offset + self.options.checkpoint_size]
                     file_ids = self.store.checkpoint_files(
                         partition_id,
                         scan_id,
                         tuple(candidate.indexed_file for candidate in batch),
+                        count_progress=False,
                     )
                     indexed += len(batch)
                     for candidate, file_id in zip(batch, file_ids):
@@ -184,6 +209,9 @@ class IncrementalAssetIndexer:
                                 for match in matches
                             ),
                         )
+                    self.store.advance_partition_progress(
+                        partition_id, scan_id, len(batch)
+                    )
                 if errors:
                     raise OSError("; ".join(errors))
                 self.store.complete_partition(partition_id)
