@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -9,8 +11,19 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from upload_search_materials.asset_index_store import AssetIndexStore, IndexIdentity
-from upload_search_materials.asset_index import IncrementalAssetIndexer, IndexOptions, NamedRoot
+import upload_search_materials.asset_index as asset_index_module
+from upload_search_materials.asset_index_store import (
+    AssetIndexStore,
+    IndexedFile,
+    IndexIdentity,
+    PathMatchRecord,
+)
+from upload_search_materials.asset_index import (
+    IncrementalAssetIndexer,
+    IndexOptions,
+    NamedRoot,
+    ScanOutcome,
+)
 from upload_search_materials.asset_matching import PathMatch
 
 
@@ -491,4 +504,162 @@ def test_scan_does_not_change_source_file_bytes_size_or_mtime(tmp_path):
     indexer.run("new")
 
     assert source_snapshot(root) == before
+    store.close()
+
+
+def test_candidate_csv_aggregates_active_matches_with_stable_safety_fields(tmp_path):
+    identity = IndexIdentity(
+        str(tmp_path / "products.csv"),
+        "a" * 64,
+        json.dumps(
+            [{"path": str(tmp_path / "root"), "source_system": "model"}],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        2,
+        1000,
+    )
+    store = AssetIndexStore.create(tmp_path / "index.sqlite3", identity)
+    root_id = store.upsert_root("model", str(tmp_path / "root"))
+    partition_id = store.upsert_partition(root_id, "catalog/123")
+    files = tuple(
+        IndexedFile(
+            "model",
+            f"catalog/123/{name}.png",
+            str(tmp_path / f"{name}.png"),
+            ".png",
+            10,
+            index,
+            "catalog/123",
+        )
+        for index, name in enumerate(("a", "b", "name", "inactive"), 1)
+    )
+    file_ids = store.checkpoint_files(partition_id, "scan-1", files)
+    for file_id in (file_ids[0], file_ids[2], file_ids[3]):
+        store.update_file_inspection(
+            file_id,
+            sha256="f" * 64,
+            width=400,
+            height=400,
+            validation_status="valid",
+            reason_codes=("Z_REASON", "A_REASON"),
+        )
+    exact_match = PathMatchRecord(
+        "123", "SKU-1", "Hat", "exact_product_id", "matched_unlicensed", ("B_REASON", "A_REASON")
+    )
+    name_match = PathMatchRecord(
+        "123", "SKU-1", "Hat", "name_candidate", "needs_manual_confirmation", ("NAME_CANDIDATE",)
+    )
+    store.replace_file_matches(file_ids[0], (exact_match,))
+    store.replace_file_matches(file_ids[1], (exact_match,))
+    store.replace_file_matches(file_ids[2], (name_match,))
+    store.replace_file_matches(file_ids[3], (exact_match,))
+    store._connection.execute("UPDATE files SET active=0 WHERE file_id=?", (file_ids[3],))
+    store._connection.commit()
+    output = tmp_path / "match-candidates.csv"
+
+    count = asset_index_module.write_match_candidates(store, output)
+
+    with output.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+        assert stream.encoding == "utf-8-sig"
+    assert count == 2
+    assert list(rows[0]) == [
+        "source_system", "candidate_directory", "product_id", "sku",
+        "product_title", "match_type", "match_status", "image_count",
+        "hashes_complete", "license_status", "reason_codes",
+    ]
+    assert [(row["match_type"], row["image_count"]) for row in rows] == [
+        ("exact_product_id", "2"),
+        ("name_candidate", "1"),
+    ]
+    assert rows[0]["hashes_complete"] == "false"
+    assert rows[0]["license_status"] == "unknown"
+    assert rows[0]["reason_codes"] == "A_REASON;B_REASON;Z_REASON"
+    assert rows[1]["hashes_complete"] == "true"
+    assert rows[1]["match_status"] == "needs_manual_confirmation"
+    assert not (tmp_path / "confirmed-assets.csv").exists()
+    store.close()
+
+
+def test_scan_summary_uses_persisted_statistics_errors_and_exact_resume_command(tmp_path):
+    products = tmp_path / "products table.csv"
+    root = tmp_path / "asset root"
+    output = tmp_path / "output dir"
+    output.mkdir()
+    identity = IndexIdentity(
+        str(products),
+        "b" * 64,
+        json.dumps(
+            [{"path": str(root), "source_system": "model"}],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        3,
+        25,
+    )
+    store = AssetIndexStore.create(output / "asset-index.sqlite3", identity)
+    root_id = store.upsert_root("model", str(root))
+    partition_id = store.upsert_partition(root_id, "catalog/123")
+    (file_id,) = store.checkpoint_files(
+        partition_id,
+        "scan-1",
+        (
+            IndexedFile(
+                "model", "catalog/123/a.png", str(root / "catalog/123/a.png"),
+                ".png", 10, 1, "catalog/123",
+            ),
+        ),
+    )
+    store.update_file_inspection(
+        file_id,
+        sha256="f" * 64,
+        width=400,
+        height=400,
+        validation_status="valid",
+        reason_codes=(),
+    )
+    store.replace_file_matches(
+        file_id,
+        (PathMatchRecord("123", "SKU-1", "Hat", "exact_product_id", "matched_unlicensed", ()),),
+    )
+    store.fail_partition(partition_id, "permission denied")
+    outcome = ScanOutcome(False, True, 99, 98, 97, 96, 1.25)
+
+    summary = asset_index_module.write_scan_summary(
+        store,
+        outcome,
+        output / "scan-summary.json",
+        "resume",
+        "b" * 64,
+    )
+
+    persisted = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+    assert summary == persisted
+    assert persisted["schema_version"] == 1
+    assert persisted["mode"] == "resume"
+    assert persisted["products_sha256"] == "b" * 64
+    assert persisted["complete"] is False and persisted["partial_failure"] is True
+    assert {key: persisted[key] for key in ("discovered", "indexed", "matched", "failed")} == {
+        "discovered": 1,
+        "indexed": 1,
+        "matched": 1,
+        "failed": 1,
+    }
+    assert persisted["database"]["active_files"] == 1
+    assert persisted["database"]["match_candidates"] == 1
+    assert persisted["errors"] == [
+        {
+            "source_system": "model",
+            "candidate_directory": "catalog/123",
+            "error": "permission denied",
+        }
+    ]
+    command = persisted["resume_command"]
+    for expected in (
+        "index-assets", f'--products "{products}"', f'--root "model={root}"',
+        f'--output "{output}"', "--partition-depth 3", "--checkpoint-size 25", "--resume",
+    ):
+        assert expected in command
+    assert persisted["elapsed_seconds"] == 1.25
     store.close()

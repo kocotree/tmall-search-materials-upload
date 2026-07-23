@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -951,3 +952,142 @@ def test_publish_uncertain_pauses_remaining_batch_items(tmp_path, monkeypatch):
     assert repeated_exit == 2
     assert calls == ["MAT-1"]
     assert (run_dir / "upload-results.json").read_text(encoding="utf-8") == first_results
+
+
+def _write_index_products(path: Path, rows=(("123", "SKU-1", "Hat"),)):
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=PRODUCT_HEADERS)
+        writer.writeheader()
+        for product_id, sku, title in rows:
+            writer.writerow(
+                {
+                    "商品ID": product_id,
+                    "商品名称（查找引用）": title,
+                    "货号（查找引用）": sku,
+                    "产品等级": "A",
+                    "链接": "https://example.invalid/product",
+                    "运营": "owner",
+                    "组别": "team",
+                    "品类-公司维度划分": "category",
+                }
+            )
+
+
+def _index_assets_args(products: Path, root: Path, output: Path, *extra: str):
+    return [
+        "index-assets",
+        "--products", str(products),
+        "--root", f"model={root}",
+        "--output", str(output),
+        *extra,
+    ]
+
+
+def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(tmp_path):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    image_dir = root / "catalog" / "123"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (400, 400), color="white").save(image_dir / "a.png")
+    output = tmp_path / "index-output"
+    browser = BrowserSentinel()
+
+    exit_code = main(_index_assets_args(products, root, output), page=browser)
+
+    assert exit_code == 0
+    assert sorted(path.name for path in output.iterdir()) == [
+        "asset-index.sqlite3",
+        "match-candidates.csv",
+        "scan-summary.json",
+    ]
+    summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+    assert summary["complete"] is True
+    assert summary["matched"] == 1
+    assert browser.publish_page_open_count == 0
+
+
+@pytest.mark.parametrize("case", ["duplicate-source", "missing-root", "existing-without-mode"])
+def test_index_assets_cli_rejects_invalid_roots_and_existing_database(tmp_path, case):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    root.mkdir()
+    output = tmp_path / "index-output"
+    args = _index_assets_args(products, root, output)
+    if case == "duplicate-source":
+        args[args.index("--output"):args.index("--output")] = ["--root", f"model={root}"]
+    elif case == "missing-root":
+        args[args.index(f"model={root}")] = f"model={tmp_path / 'missing'}"
+    else:
+        assert main(args) == 0
+
+    assert main(args) == 2
+
+
+def test_index_assets_cli_rejects_resume_refresh_together():
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "index-assets", "--products", "products.csv", "--root", "model=assets",
+                "--output", "output", "--resume", "--refresh",
+            ]
+        )
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("corruption", ["identity", "schema"])
+def test_index_assets_cli_rejects_identity_or_schema_mismatch(tmp_path, corruption):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    root.mkdir()
+    output = tmp_path / "index-output"
+    args = _index_assets_args(products, root, output)
+    assert main(args) == 0
+    database = output / "asset-index.sqlite3"
+    if corruption == "identity":
+        _write_index_products(products, (("123", "SKU-1", "Changed Hat"),))
+    else:
+        connection = sqlite3.connect(database)
+        connection.execute("UPDATE scan_meta SET value='999' WHERE key='schema_version'")
+        connection.commit()
+        connection.close()
+
+    assert main([*args, "--resume"]) == 2
+
+
+def test_index_assets_cli_returns_one_for_partial_partition_failure(tmp_path, monkeypatch):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    (root / "good" / "123").mkdir(parents=True)
+    (root / "bad").mkdir()
+    Image.new("RGB", (400, 400), color="white").save(root / "good" / "123" / "a.png")
+    output = tmp_path / "index-output"
+    real_scandir = cli_module.os.scandir
+
+    def fail_bad(path):
+        if Path(path) == (root / "bad").resolve():
+            raise OSError("partition unavailable")
+        return real_scandir(path)
+
+    monkeypatch.setattr("upload_search_materials.asset_index.os.scandir", fail_bad)
+
+    assert main(_index_assets_args(products, root, output)) == 1
+    summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+    assert summary["partial_failure"] is True
+    assert summary["failed"] == 1
+    assert summary["errors"][0]["error"] == "partition unavailable"
+
+
+def test_index_assets_help_lists_all_options(capsys):
+    with pytest.raises(SystemExit) as error:
+        build_parser().parse_args(["index-assets", "--help"])
+    assert error.value.code == 0
+    help_text = capsys.readouterr().out
+    for option in (
+        "--products", "--root", "--output", "--partition-depth", "--checkpoint-size",
+        "--resume", "--refresh",
+    ):
+        assert option in help_text

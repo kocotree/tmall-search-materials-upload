@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import time
 from typing import Literal, Sequence
 import uuid
@@ -18,6 +21,19 @@ from .assets import IMAGE_EXTENSIONS, inspect_asset
 
 _SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_CANDIDATE_FIELDS = [
+    "source_system",
+    "candidate_directory",
+    "product_id",
+    "sku",
+    "product_title",
+    "match_type",
+    "match_status",
+    "image_count",
+    "hashes_complete",
+    "license_status",
+    "reason_codes",
+]
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,189 @@ class _Discovery:
     errors: dict[tuple[str, str], list[str]]
     roots: dict[str, Path]
     discovered: int = 0
+
+
+def write_match_candidates(store, path: Path) -> int:
+    """Write stable, review-only match groups from the durable index."""
+
+    rows = store._connection.execute(
+        "SELECT files.source_system, files.candidate_directory, files.relative_path, "
+        "files.sha256, files.validation_status, files.reason_codes_json AS file_reasons, "
+        "matches.product_id, matches.sku, matches.product_title, matches.match_type, "
+        "matches.match_status, matches.reason_codes_json AS match_reasons "
+        "FROM files JOIN matches USING(file_id) WHERE files.active=1 "
+        "ORDER BY files.source_system, files.candidate_directory, matches.product_id, "
+        "matches.match_type, files.relative_path"
+    ).fetchall()
+    groups: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for row in rows:
+        key = (
+            str(row["source_system"]),
+            str(row["candidate_directory"]),
+            str(row["product_id"]),
+            str(row["match_type"]),
+        )
+        group = groups.setdefault(
+            key,
+            {
+                "source_system": key[0],
+                "candidate_directory": key[1],
+                "product_id": key[2],
+                "sku": str(row["sku"]),
+                "product_title": str(row["product_title"]),
+                "match_type": key[3],
+                "match_status": str(row["match_status"]),
+                "image_count": 0,
+                "hashes_complete": True,
+                "license_status": "unknown",
+                "reason_codes": set(),
+            },
+        )
+        group["image_count"] = int(group["image_count"]) + 1
+        group["hashes_complete"] = bool(group["hashes_complete"]) and bool(
+            row["sha256"]
+        ) and row["validation_status"] != "not_inspected"
+        reasons = group["reason_codes"]
+        assert isinstance(reasons, set)
+        reasons.update(json.loads(row["file_reasons"]))
+        reasons.update(json.loads(row["match_reasons"]))
+
+    output_rows = []
+    for key in sorted(groups):
+        group = groups[key]
+        output_rows.append(
+            {
+                **group,
+                "hashes_complete": "true" if group["hashes_complete"] else "false",
+                "reason_codes": ";".join(sorted(group["reason_codes"])),
+            }
+        )
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=_CANDIDATE_FIELDS)
+        writer.writeheader()
+        writer.writerows(output_rows)
+    return len(output_rows)
+
+
+def write_scan_summary(
+    store,
+    outcome,
+    path: Path,
+    mode: str,
+    products_sha256: str,
+) -> dict:
+    """Write a stable summary whose counts come from the final SQLite state."""
+
+    connection = store._connection
+    total_files = _count(connection, "SELECT COUNT(*) FROM files")
+    active_files = _count(connection, "SELECT COUNT(*) FROM files WHERE active=1")
+    matched_files = _count(
+        connection,
+        "SELECT COUNT(DISTINCT files.file_id) FROM files JOIN matches USING(file_id) "
+        "WHERE files.active=1",
+    )
+    active_matches = _count(
+        connection,
+        "SELECT COUNT(*) FROM files JOIN matches USING(file_id) WHERE files.active=1",
+    )
+    candidate_groups = _count(
+        connection,
+        "SELECT COUNT(*) FROM (SELECT 1 FROM files JOIN matches USING(file_id) "
+        "WHERE files.active=1 GROUP BY files.source_system, files.candidate_directory, "
+        "matches.product_id, matches.match_type)",
+    )
+    partition_counts = {
+        str(row["status"]): int(row["count"])
+        for row in connection.execute(
+            "SELECT status, COUNT(*) AS count FROM partitions GROUP BY status"
+        ).fetchall()
+    }
+    failed = partition_counts.get("failed", 0)
+    errors = [
+        {
+            "source_system": str(row["source_system"]),
+            "candidate_directory": str(row["candidate_directory"]),
+            "error": str(row["error"]),
+        }
+        for row in connection.execute(
+            "SELECT roots.source_system, partitions.relative_path AS candidate_directory, "
+            "partitions.error FROM partitions JOIN roots USING(root_id) "
+            "WHERE partitions.error<>'' ORDER BY roots.source_system, partitions.relative_path"
+        ).fetchall()
+    ]
+    identity_row = connection.execute(
+        "SELECT value FROM scan_meta WHERE key='identity'"
+    ).fetchone()
+    identity = json.loads(identity_row["value"])
+    roots = [
+        (str(row["source_system"]), str(row["root_path"]))
+        for row in connection.execute(
+            "SELECT source_system, root_path FROM roots ORDER BY source_system"
+        ).fetchall()
+    ]
+    if not roots:
+        roots = [
+            (str(root["source_system"]), str(root["path"]))
+            for root in json.loads(identity["roots_json"])
+        ]
+    path = Path(path)
+    resume_argv = [
+        "tmall-materials",
+        "index-assets",
+        "--products",
+        str(identity["products_path"]),
+    ]
+    for source_system, root_path in roots:
+        resume_argv.extend(("--root", f"{source_system}={root_path}"))
+    resume_argv.extend(
+        (
+            "--output",
+            str(path.parent.resolve()),
+            "--partition-depth",
+            str(identity["partition_depth"]),
+            "--checkpoint-size",
+            str(identity["checkpoint_size"]),
+            "--resume",
+        )
+    )
+    database = {
+        "roots": _count(connection, "SELECT COUNT(*) FROM roots"),
+        "partitions": sum(partition_counts.values()),
+        "partition_status": dict(sorted(partition_counts.items())),
+        "total_files": total_files,
+        "active_files": active_files,
+        "inactive_files": total_files - active_files,
+        "matched_files": matched_files,
+        "active_matches": active_matches,
+        "match_candidates": candidate_groups,
+    }
+    summary = {
+        "schema_version": 1,
+        "mode": mode,
+        "products_sha256": products_sha256,
+        "complete": bool(outcome.complete) and failed == 0,
+        "partial_failure": bool(outcome.partial_failure) or failed > 0,
+        "discovered": active_files,
+        "indexed": total_files,
+        "matched": matched_files,
+        "failed": failed,
+        "database": database,
+        "errors": errors,
+        "elapsed_seconds": outcome.elapsed_seconds,
+        "resume_command": subprocess.list2cmdline(resume_argv),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
+def _count(connection, sql: str) -> int:
+    return int(connection.execute(sql).fetchone()[0])
 
 
 class IncrementalAssetIndexer:

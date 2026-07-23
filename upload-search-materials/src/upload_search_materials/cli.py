@@ -13,6 +13,16 @@ from typing import Sequence
 from urllib.parse import urlencode
 
 from .approval import create_manifest, render_review_html, verify_manifest
+from .asset_index import (
+    IncrementalAssetIndexer,
+    IndexOptions,
+    NamedRoot,
+    ScanOutcome,
+    write_match_candidates,
+    write_scan_summary,
+)
+from .asset_index_store import AssetIndexStore, IndexIdentity, IndexIdentityError
+from .asset_matching import ProductPathMatcher
 from .assets import (
     DirectoryAssetSource,
     ManifestAssetSource,
@@ -33,10 +43,12 @@ from .browser.verifier import verify_remote_item
 from .copywriting import generate_and_validate_copy
 from .eligibility import collect_titles_by_product, evaluate_all, load_monthly_rules
 from .io_tables import (
+    SchemaError,
     read_basic_materials_xlsx,
     read_product_csv,
     read_search_materials_xlsx,
     sha256_file,
+    validate_product_records,
 )
 from .interaction.session import SessionStore
 from .interaction.stages import STAGES
@@ -715,6 +727,115 @@ def _wait_handoff(args) -> int:
     return 0
 
 
+def _index_assets(args) -> int:
+    store = None
+    started = datetime.now(timezone.utc)
+    try:
+        products_path = Path(args.products)
+        if not products_path.is_file():
+            raise ValueError(f"商品表不存在: {products_path}")
+        products_path = products_path.resolve()
+        products = read_product_csv(products_path)
+        validation = validate_product_records(products)
+        if not products or validation.blocking:
+            raise ValueError("商品表校验失败")
+
+        roots = tuple(NamedRoot.parse(value) for value in args.root)
+        source_names = [root.source_system for root in roots]
+        if len(source_names) != len(set(source_names)):
+            raise ValueError("--root 来源名称不得重复")
+        normalized_roots = []
+        for root in roots:
+            resolved = root.path.resolve()
+            if not resolved.is_dir():
+                raise ValueError(f"素材根目录不存在: {root.path}")
+            normalized_roots.append(NamedRoot(root.source_system, resolved))
+        normalized_roots.sort(key=lambda root: root.source_system)
+
+        output = Path(args.output).resolve()
+        if output.exists() and not output.is_dir():
+            raise ValueError(f"输出路径不是目录: {output}")
+        output.mkdir(parents=True, exist_ok=True)
+        database_path = output / "asset-index.sqlite3"
+        requested_mode = "resume" if args.resume else "refresh" if args.refresh else None
+        if database_path.exists() and requested_mode is None:
+            raise ValueError("索引数据库已存在；请明确使用 --resume 或 --refresh")
+        if not database_path.exists() and requested_mode is not None:
+            raise ValueError(f"--{requested_mode} 需要已有索引数据库")
+        mode = requested_mode or "new"
+
+        roots_json = json.dumps(
+            [
+                {"path": str(root.path), "source_system": root.source_system}
+                for root in normalized_roots
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        products_sha256 = sha256_file(products_path)
+        identity = IndexIdentity(
+            products_path=str(products_path),
+            products_sha256=products_sha256,
+            roots_json=roots_json,
+            partition_depth=args.partition_depth,
+            checkpoint_size=args.checkpoint_size,
+        )
+        store = (
+            AssetIndexStore.open(database_path, identity)
+            if database_path.exists()
+            else AssetIndexStore.create(database_path, identity)
+        )
+        matcher = ProductPathMatcher.from_products(products, validation)
+        indexer = IncrementalAssetIndexer(
+            store,
+            matcher,
+            tuple(normalized_roots),
+            IndexOptions(args.partition_depth, args.checkpoint_size),
+        )
+        try:
+            outcome = indexer.run(mode)
+        except KeyboardInterrupt:
+            outcome = ScanOutcome(
+                complete=False,
+                partial_failure=True,
+                discovered=0,
+                indexed=0,
+                matched=0,
+                failed=0,
+                elapsed_seconds=(datetime.now(timezone.utc) - started).total_seconds(),
+            )
+            write_match_candidates(store, output / "match-candidates.csv")
+            summary = write_scan_summary(
+                store,
+                outcome,
+                output / "scan-summary.json",
+                mode,
+                products_sha256,
+            )
+            print(
+                f"索引被中断；checkpoint 已保留。恢复命令: {summary['resume_command']}",
+                file=sys.stderr,
+            )
+            return 1
+
+        write_match_candidates(store, output / "match-candidates.csv")
+        write_scan_summary(
+            store,
+            outcome,
+            output / "scan-summary.json",
+            mode,
+            products_sha256,
+        )
+        return 1 if outcome.partial_failure else 0
+    except (IndexIdentityError, SchemaError, sqlite3.DatabaseError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    finally:
+        if store is not None:
+            store.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmall-materials")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -795,6 +916,18 @@ def build_parser() -> argparse.ArgumentParser:
     wait_handoff.add_argument("--session", required=True)
     wait_handoff.add_argument("--stage", choices=[stage.id for stage in STAGES], required=True)
     wait_handoff.add_argument("--timeout", type=float)
+
+    index_assets = subparsers.add_parser(
+        "index-assets", help="Build or continue the local incremental asset index"
+    )
+    index_assets.add_argument("--products", required=True, metavar="PATH")
+    index_assets.add_argument("--root", action="append", required=True, metavar="SOURCE=PATH")
+    index_assets.add_argument("--output", required=True, metavar="DIR")
+    index_assets.add_argument("--partition-depth", type=int, default=2)
+    index_assets.add_argument("--checkpoint-size", type=int, default=1000)
+    index_mode = index_assets.add_mutually_exclusive_group()
+    index_mode.add_argument("--resume", action="store_true")
+    index_mode.add_argument("--refresh", action="store_true")
     return parser
 
 
@@ -823,6 +956,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _interact(args)
     if args.command == "wait-handoff":
         return _wait_handoff(args)
+    if args.command == "index-assets":
+        return _index_assets(args)
     raise AssertionError(args.command)
 
 
