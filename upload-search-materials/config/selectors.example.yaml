@@ -2,6 +2,11 @@ store_name: "#store"
 human_check: "#human-check"
 export_basic: "#export-basic"
 export_promotion: "#export-search"
+promotion_tab: 'li[role="tab"]:has-text("搜推素材")'
+recommended_filter: '[role="checkbox"]:has-text("推荐补充素材")'
+promotion_rows: "tbody tr"
+promotion_next_page: 'button:has-text("下一页")'
+safe_popup_close: 'button:has-text("稍后再看"), button:has-text("关闭"), button:has-text("知道了"), button:has-text("我知道了"), button:has-text("暂不"), button:has-text("取消"), [aria-label*="Close"], [aria-label*="close"], [aria-label*="关闭"], .next-dialog-close'
 product_search: "#product-search"
 product_id: "#product-id"
 desired_slots: "#desired-slots"

@@ -264,7 +264,8 @@ uv run --directory .\upload-search-materials --locked python -m pytest -q tests\
 - [x] 9 坑样本 `565628742471` 为 9/9，读取 9 个远端素材 ID，但存在“重复或图片有删除”；样本 `903588197784` 为 3/9，读取 3 个远端素材 ID，缺失 6。
 - [x] 非高价值“店铺优选”样本 `1037160921729` 当前读取 1 个远端素材 ID，但页面行未明确目标容量；保持 `TARGET_CAPACITY_NOT_EXPLICIT / needs_manual_review`，不得仅凭分类名称写成 3 坑。
 - [x] 当前页面的“坑位”是发布容量/篇数，不是固定编号槽位；页面没有编号时只记录目标容量、现有素材数和缺失数量，空坑位编号保持未知。
-- [ ] 将生产 `supplement` 选择器和输出字段更新为当前搜推 DOM 契约，并对上述三个商品运行 CLI 回归。
+- [x] `supplement` 已改为默认扫描“推荐补充素材”分页，支持跨页商品 ID 去重、每页原子 CSV/checkpoint、`--max-pages` 小规模验收，以及 `--scan-mode exact --candidates` 异常商品兜底；相关聚焦回归 `72 passed, 1 skipped`，全量回归 `296 passed, 2 skipped, 1 warning`，Node UI-state `9 passed`，Skill validator 与 `uv lock --check` 通过。
+- [ ] 使用仓库外生产 selectors 和已登录 CDP 对真实前 2–3 页运行新版 CLI，核对页面商品数、CSV 行数、检查点页码及 3 个已知样本。
 - [x] 精确商品 ID 自动筛选已验证：输入后失焦并等待表格稳定，`565628742471`、`903588197784` 均只返回 1 行且页面商品 ID 完全一致。
 - [ ] 继续确认普通商品目标 3 篇的页面证据，并补采每篇素材的完整审核状态、内容指纹和页面时间；当前只能确认高价值目标 9 篇、远端素材 ID、缺失数量及部分可见异常。
 - [ ] 错误店铺、验证码或失效选择器安全停止；失效选择器返回 `SELECTOR_INVALID`。

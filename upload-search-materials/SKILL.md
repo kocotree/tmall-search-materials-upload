@@ -36,7 +36,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 1. 阅读 [business-rules.md](references/business-rules.md)、[data-schema.md](references/data-schema.md) 和 [asset-requirements.md](references/asset-requirements.md)。
 2. 通过 `tmall-materials export` 在正确店铺导出基础素材 XLSX。搜推页“导出数据”若保留，只能标记为经营指标，禁止据此判断当前素材数或坑位完整性。推广素材现状通过 `tmall-materials supplement` 按精确商品 ID 读取实时 DOM；目标容量、当前篇数、远端素材 ID 和可见状态必须来自同一页面证据。
 3. 运行 `tmall-materials run`。先排除清仓、UVNO、好物体验、会员日和积分，再应用月度规则。
-4. 对 `supplement-candidates.csv` 运行 `tmall-materials supplement`，只补采 3/9 坑、空坑和审核状态未知的 eligible 商品。
+4. 默认运行 `tmall-materials supplement` 扫描“推荐补充素材”的全部分页，每页增量写入 CSV 和 checkpoint；只对目标容量不明确、解析失败或状态异常的商品，再带 `--scan-mode exact --candidates supplement-candidates.csv` 按精确商品 ID 补采。
 5. 带 `--backend-status`、已人工确认的素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。
 6. 用户选择精确 task ID 后运行 `tmall-materials approve`，生成不可变 `approval-manifest.json`。
 7. 运行 `tmall-materials publish`。发布前重新核对店铺、商品、坑位和批准内容哈希；发布后回查远端状态。

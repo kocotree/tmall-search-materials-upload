@@ -8,6 +8,7 @@ from upload_search_materials.browser.config import SelectorConfigError, load_sel
 from upload_search_materials.browser.export_page import export_reports
 from upload_search_materials.browser.material_page import (
     SelectorInvalidError,
+    scan_recommended_material_status,
     supplement_material_status,
 )
 from upload_search_materials.browser.session import (
@@ -230,6 +231,104 @@ def test_material_status_supplement_reads_exact_product():
             "采集时间": "2026-07-17T10:00:00+08:00",
             "证据": "product=123;rows=2;selector_version=runtime",
         }
+    ]
+
+
+class FakePromotionLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    def click(self):
+        self.page.clicked.append(self.selector)
+        if self.selector == "#next":
+            self.page.page_index += 1
+        elif self.selector == "#recommended":
+            self.page.recommended_checked = True
+
+    def all_inner_texts(self):
+        if self.selector == ".promotion-row":
+            return self.page.pages[self.page.page_index]
+        return []
+
+    def get_attribute(self, name):
+        if self.selector == "#recommended" and name == "aria-checked":
+            return "true" if self.page.recommended_checked else "false"
+        return None
+
+    def is_enabled(self):
+        return self.page.page_index < len(self.page.pages) - 1
+
+
+class FakePromotionPage:
+    def __init__(self, pages):
+        self.pages = pages
+        self.page_index = 0
+        self.recommended_checked = False
+        self.clicked = []
+        self.waited = []
+
+    def locator(self, selector):
+        return FakePromotionLocator(self, selector)
+
+    def wait_for_timeout(self, milliseconds):
+        self.waited.append(milliseconds)
+
+
+def test_recommended_promotion_scan_paginates_deduplicates_and_checkpoints():
+    full_row = (
+        "满坑商品 商品ID 565628742471 "
+        "ID 3468934367960259 重复或图片有删除 "
+        "ID 1539780903132488 ID 3295138149726183 ID 1787739833959372 "
+        "ID 3212796032484488 ID 754653047484578 ID 506129500907 "
+        "ID 461532917400 ID 461356707236 "
+        "该商品为搜推高价值商品，已上调发布坑位到9篇，当前发布9篇。"
+    )
+    missing_row = (
+        "缺口商品 商品ID 903588197784 "
+        "ID 567934680336 ID 515805956420 ID 515848659407 "
+        "该商品为搜推高价值商品，已上调发布坑位到9篇，当前发布3篇。"
+    )
+    unknown_target_row = "普通商品 商品ID 1037160921729 ID 557984331788"
+    page = FakePromotionPage(
+        [
+            ["演示商品 商品ID xxxxxxxxxxxxxxx ID xxxxxxxxxxx1", full_row, missing_row],
+            [missing_row, unknown_target_row],
+        ]
+    )
+    checkpoints = []
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "recommended_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-24T01:57:30+08:00",
+        on_page=lambda page_number, values: checkpoints.append(
+            (page_number, [row["商品ID"] for row in values])
+        ),
+        settle_delay_ms=0,
+    )
+
+    assert page.clicked == ["#promotion", "#recommended", "#next"]
+    assert [row["商品ID"] for row in rows] == [
+        "565628742471",
+        "903588197784",
+        "1037160921729",
+    ]
+    assert rows[0]["目标容量"] == "9"
+    assert rows[0]["现有素材数"] == "9"
+    assert rows[0]["原因码"] == "REMOTE_MATERIAL_WARNING"
+    assert rows[1]["缺失数量"] == "6"
+    assert rows[1]["远端素材ID"] == "567934680336;515805956420;515848659407"
+    assert rows[2]["目标容量"] == ""
+    assert rows[2]["原因码"] == "TARGET_CAPACITY_NOT_EXPLICIT"
+    assert checkpoints == [
+        (1, ["565628742471", "903588197784"]),
+        (2, ["565628742471", "903588197784", "1037160921729"]),
     ]
 
 

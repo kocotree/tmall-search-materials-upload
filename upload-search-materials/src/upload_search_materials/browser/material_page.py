@@ -1,5 +1,5 @@
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 class SelectorInvalidError(RuntimeError):
@@ -8,6 +8,172 @@ class SelectorInvalidError(RuntimeError):
 
 class ProductIdentityError(RuntimeError):
     pass
+
+
+VISIBLE_MATERIAL_WARNINGS = (
+    "重复或图片有删除",
+    "素材获流风险",
+    "标题无意义",
+    "审核不通过",
+)
+
+
+def _settle_safe_popups(
+    page,
+    selectors: dict[str, str],
+    *,
+    delay_ms: int,
+) -> int:
+    selector = str(selectors.get("safe_popup_close", "")).strip()
+    if not selector:
+        return 0
+    closed = 0
+    quiet_checks = 0
+    for _ in range(30):
+        found = False
+        locator = page.locator(selector)
+        for index in range(locator.count()):
+            candidate = locator.nth(index)
+            if not candidate.is_visible():
+                continue
+            candidate.click(force=True, timeout=1500)
+            closed += 1
+            found = True
+            if delay_ms:
+                page.wait_for_timeout(min(delay_ms, 300))
+            break
+        quiet_checks = 0 if found else quiet_checks + 1
+        if quiet_checks >= 3:
+            break
+        if delay_ms:
+            page.wait_for_timeout(delay_ms)
+    return closed
+
+
+def _parse_promotion_row(text: str, *, collected_at: str) -> dict[str, str]:
+    normalized = re.sub(r"\s+", " ", str(text)).strip()
+    product_match = re.search(r"商品ID\s*(\d+)", normalized)
+    if not product_match:
+        raise SelectorInvalidError("promotion_product_id")
+    product_id = product_match.group(1)
+    material_ids = [
+        material_id
+        for material_id in dict.fromkeys(re.findall(r"\bID\s+(\d{6,})", normalized))
+        if material_id != product_id
+    ]
+    target_match = re.search(r"(?:上调)?发布坑位(?:到|为)\s*(3|9)\s*篇", normalized)
+    current_match = re.search(r"当前发布\s*(\d+)\s*篇", normalized)
+    target = int(target_match.group(1)) if target_match else None
+    current = int(current_match.group(1)) if current_match else len(material_ids)
+    missing = max(target - current, 0) if target is not None else None
+    warnings = [value for value in VISIBLE_MATERIAL_WARNINGS if value in normalized]
+
+    if warnings:
+        reason_code = "REMOTE_MATERIAL_WARNING"
+    elif target is None:
+        reason_code = "TARGET_CAPACITY_NOT_EXPLICIT"
+    elif missing:
+        reason_code = "PROMOTION_MATERIALS_MISSING"
+    else:
+        reason_code = ""
+
+    status = "needs_manual_review" if reason_code else "ready_for_review"
+    target_text = "" if target is None else str(target)
+    missing_text = "" if missing is None else str(missing)
+    warning_text = ";".join(warnings)
+    material_id_text = ";".join(material_ids)
+    return {
+        "商品ID": product_id,
+        "目标容量": target_text,
+        "目标坑位": target_text,
+        "现有素材数": str(current),
+        "缺失数量": missing_text,
+        "空坑位": "",
+        "远端素材ID": material_id_text,
+        "素材状态": warning_text,
+        "审核状态": warning_text,
+        "状态完整": "false",
+        "审核状态完整": "false",
+        "状态": status,
+        "原因码": reason_code,
+        "采集时间": collected_at,
+        "证据": (
+            f"product={product_id};source=recommended_promotion_dom;"
+            f"target={target_text or 'unknown'};current={current};"
+            f"remote_ids={material_id_text or 'none'}"
+        ),
+    }
+
+
+def scan_recommended_material_status(
+    page,
+    selectors: dict[str, str],
+    *,
+    collected_at: str,
+    on_page: Callable[[int, list[dict[str, str]]], None] | None = None,
+    max_pages: int | None = None,
+    settle_delay_ms: int = 1000,
+    action_wait_ms: int = 3000,
+) -> list[dict[str, str]]:
+    required = (
+        "promotion_tab",
+        "recommended_filter",
+        "promotion_rows",
+        "promotion_next_page",
+    )
+    missing = [key for key in required if not str(selectors.get(key, "")).strip()]
+    if missing:
+        raise SelectorInvalidError(",".join(missing))
+
+    _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+    page.locator(selectors["promotion_tab"]).click()
+    if action_wait_ms:
+        page.wait_for_timeout(action_wait_ms)
+    _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+
+    recommended = page.locator(selectors["recommended_filter"])
+    checked = recommended.get_attribute("aria-checked")
+    class_name = recommended.get_attribute("class") or ""
+    if checked != "true" and "checked" not in class_name.split():
+        recommended.click()
+        if action_wait_ms:
+            page.wait_for_timeout(action_wait_ms)
+        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+        checked = recommended.get_attribute("aria-checked")
+        class_name = recommended.get_attribute("class") or ""
+    if checked != "true" and "checked" not in class_name.split():
+        raise SelectorInvalidError("recommended_filter")
+
+    output_by_product: dict[str, dict[str, str]] = {}
+    page_number = 0
+    while True:
+        page_number += 1
+        row_texts = [
+            text.strip()
+            for text in page.locator(selectors["promotion_rows"]).all_inner_texts()
+            if text.strip()
+        ]
+        if not row_texts:
+            raise SelectorInvalidError("promotion_rows")
+        for row_text in row_texts:
+            if re.search(r"商品ID\s*x{4,}", row_text, flags=re.IGNORECASE):
+                continue
+            row = _parse_promotion_row(row_text, collected_at=collected_at)
+            output_by_product.setdefault(row["商品ID"], row)
+        values = list(output_by_product.values())
+        if on_page:
+            on_page(page_number, values)
+        if max_pages is not None and page_number >= max_pages:
+            break
+        next_page = page.locator(selectors["promotion_next_page"])
+        if not next_page.is_enabled():
+            break
+        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+        next_page.click()
+        if action_wait_ms:
+            page.wait_for_timeout(action_wait_ms)
+        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+    return list(output_by_product.values())
 
 
 def _required_text(page, selector: str, field_name: str) -> str:

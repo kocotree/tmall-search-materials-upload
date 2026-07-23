@@ -33,7 +33,11 @@ from .assets import (
 )
 from .browser.config import load_selectors
 from .browser.export_page import export_reports
-from .browser.material_page import supplement_material_status
+from .browser.material_page import (
+    SelectorInvalidError,
+    scan_recommended_material_status,
+    supplement_material_status,
+)
 from .browser.session import (
     assert_store_identity,
     detect_human_check,
@@ -661,45 +665,128 @@ def _export(args, page, page_factory=None) -> int:
     return 1 if invalid_reason_codes else 0
 
 
+BACKEND_STATUS_FIELDS = [
+    "商品ID",
+    "目标容量",
+    "目标坑位",
+    "现有素材数",
+    "缺失数量",
+    "空坑位",
+    "远端素材ID",
+    "素材状态",
+    "审核状态",
+    "状态完整",
+    "审核状态完整",
+    "状态",
+    "原因码",
+    "采集时间",
+    "证据",
+]
+
+
+def _write_backend_status(path: Path, rows: list[dict[str, str]]) -> None:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=BACKEND_STATUS_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    temporary.replace(output)
+
+
 def _supplement(args, page, page_factory=None) -> int:
     selectors = load_selectors(Path(args.selectors))
-    with Path(args.candidates).open("r", encoding="utf-8-sig", newline="") as stream:
-        product_ids = [
-            str(row.get("商品ID", "")).strip()
-            for row in csv.DictReader(stream)
-            if str(row.get("商品ID", "")).strip()
-        ]
+    scan_mode = args.scan_mode or ("exact" if args.candidates else "recommended")
+    product_ids: list[str] = []
+    if scan_mode == "exact":
+        if not args.candidates:
+            print("精确补采需要 --candidates", file=sys.stderr)
+            return 2
+        with Path(args.candidates).open(
+            "r", encoding="utf-8-sig", newline=""
+        ) as stream:
+            product_ids = [
+                str(row.get("商品ID", "")).strip()
+                for row in csv.DictReader(stream)
+                if str(row.get("商品ID", "")).strip()
+            ]
+    output = Path(args.output)
+    checkpoint = (
+        Path(args.checkpoint)
+        if args.checkpoint
+        else output.with_suffix(".checkpoint.json")
+    )
+    last_completed_page = 0
+
+    def save_page(page_number: int, values: list[dict[str, str]]) -> None:
+        nonlocal last_completed_page
+        last_completed_page = page_number
+        _write_backend_status(output, values)
+        write_json(
+            checkpoint,
+            {
+                "schema_version": 1,
+                "status": "in_progress",
+                "scan_mode": scan_mode,
+                "last_completed_page": page_number,
+                "row_count": len(values),
+                "collected_at": args.collected_at,
+            },
+        )
+
     try:
         with page_context(page, args.cdp_url, page_factory) as resolved_page:
             assert_store_identity(resolved_page, selectors["store_name"], args.store)
             detect_human_check(resolved_page, selectors["human_check"])
-            rows = supplement_material_status(
-                resolved_page,
-                selectors,
-                product_ids,
-                collected_at=args.collected_at,
-            )
+            if scan_mode == "recommended":
+                rows = scan_recommended_material_status(
+                    resolved_page,
+                    selectors,
+                    collected_at=args.collected_at,
+                    on_page=save_page,
+                    max_pages=args.max_pages,
+                    settle_delay_ms=args.settle_delay_ms,
+                    action_wait_ms=args.action_wait_ms,
+                )
+            else:
+                rows = supplement_material_status(
+                    resolved_page,
+                    selectors,
+                    product_ids,
+                    collected_at=args.collected_at,
+                )
     except BrowserSessionRequired as error:
         print(f"补采被阻断：{error}", file=sys.stderr)
         return 2
-    fieldnames = [
-        "商品ID",
-        "目标坑位",
-        "现有素材数",
-        "空坑位",
-        "审核状态",
-        "审核状态完整",
-        "状态",
-        "原因码",
-        "采集时间",
-        "证据",
-    ]
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    except SelectorInvalidError as error:
+        write_json(
+            checkpoint,
+            {
+                "schema_version": 1,
+                "status": "needs_manual_review",
+                "scan_mode": scan_mode,
+                "last_completed_page": last_completed_page,
+                "reason_code": "SELECTOR_INVALID",
+                "failed_field": str(error),
+                "collected_at": args.collected_at,
+            },
+        )
+        print(f"补采被阻断：SELECTOR_INVALID：{error}", file=sys.stderr)
+        return 1
+
+    _write_backend_status(output, rows)
+    write_json(
+        checkpoint,
+        {
+            "schema_version": 1,
+            "status": "complete",
+            "scan_mode": scan_mode,
+            "last_completed_page": last_completed_page,
+            "row_count": len(rows),
+            "collected_at": args.collected_at,
+        },
+    )
     return 0
 
 
@@ -980,9 +1067,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     supplement.add_argument("--store", required=True)
     supplement.add_argument("--selectors", required=True)
-    supplement.add_argument("--candidates", required=True)
+    supplement.add_argument("--candidates")
     supplement.add_argument("--output", required=True)
     supplement.add_argument("--collected-at", required=True)
+    supplement.add_argument("--scan-mode", choices=("recommended", "exact"))
+    supplement.add_argument("--checkpoint")
+    supplement.add_argument("--max-pages", type=int)
+    supplement.add_argument("--settle-delay-ms", type=int, default=1000)
+    supplement.add_argument("--action-wait-ms", type=int, default=3000)
     supplement.add_argument("--cdp-url")
 
     interact = subparsers.add_parser("interact", help="Serve the local interaction UI")

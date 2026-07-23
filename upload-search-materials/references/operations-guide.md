@@ -86,10 +86,11 @@ uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产se
 
 ```powershell
 uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" --products "<商品总表.csv>" --rules "<月度规则.csv>" --basic "<基础素材.xlsx>" --search "<搜推经营.xlsx>" --output "<首次批次目录>" --started-at "<ISO时间>"
-uv run tmall-materials supplement --store "<店铺名>" --selectors "<生产selectors.yaml>" --candidates "<首次批次目录>\supplement-candidates.csv" --output "<backend-material-status.csv>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
+uv run tmall-materials supplement --store "<店铺名>" --selectors "<生产selectors.yaml>" --output "<promotion-material-status.csv>" --checkpoint "<promotion-material-status.checkpoint.json>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
+uv run tmall-materials supplement --scan-mode exact --store "<店铺名>" --selectors "<生产selectors.yaml>" --candidates "<异常商品.csv>" --output "<exact-material-status.csv>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
 ```
 
-`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `backend-material-status.csv`。任何使用它推断搜推坑位完整性的结果均无效。
+第一条 `supplement` 命令默认选择“素材统计 → 推荐补充素材”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。真实浏览器小规模验收可先加 `--max-pages 3`；正式扫描去掉该参数。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
 
 ## 6. 素材、授权、文案与最终 dry-run
 

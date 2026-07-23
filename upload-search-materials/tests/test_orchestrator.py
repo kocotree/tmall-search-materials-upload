@@ -856,6 +856,67 @@ def test_supplement_command_writes_backend_status_csv(tmp_path):
     assert rows[0]["空坑位"] == "3"
 
 
+def test_supplement_defaults_to_recommended_batch_scan_and_writes_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    import upload_search_materials.cli as cli_module
+
+    first = {
+        "商品ID": "565628742471",
+        "目标容量": "9",
+        "目标坑位": "9",
+        "现有素材数": "9",
+        "缺失数量": "0",
+        "空坑位": "",
+        "远端素材ID": "A;B",
+        "素材状态": "",
+        "审核状态": "",
+        "状态完整": "false",
+        "审核状态完整": "false",
+        "状态": "ready_for_review",
+        "原因码": "",
+        "采集时间": "2026-07-24T01:57:30+08:00",
+        "证据": "page=1",
+    }
+    second = dict(first, 商品ID="903588197784", 现有素材数="3", 缺失数量="6")
+
+    def fake_scan(page, selectors, **kwargs):
+        kwargs["on_page"](1, [first])
+        kwargs["on_page"](2, [first, second])
+        return [first, second]
+
+    monkeypatch.setattr(cli_module, "scan_recommended_material_status", fake_scan)
+    page = CliFakePage()
+    selectors = Path(__file__).parents[1] / "config" / "selectors.example.yaml"
+    output = tmp_path / "promotion-material-status.csv"
+
+    exit_code = main(
+        [
+            "supplement",
+            "--store", "KK Tree",
+            "--selectors", str(selectors),
+            "--output", str(output),
+            "--collected-at", "2026-07-24T01:57:30+08:00",
+            "--scan-mode", "recommended",
+        ],
+        page=page,
+    )
+
+    with output.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    checkpoint = json.loads(
+        output.with_suffix(".checkpoint.json").read_text(encoding="utf-8")
+    )
+
+    assert exit_code == 0
+    assert [row["商品ID"] for row in rows] == ["565628742471", "903588197784"]
+    assert rows[1]["缺失数量"] == "6"
+    assert checkpoint["status"] == "complete"
+    assert checkpoint["last_completed_page"] == 2
+    assert checkpoint["row_count"] == 2
+
+
 def test_resume_partitions_uncertain_item_into_verification_only(tmp_path):
     item = material_item_from_dict(
         {
