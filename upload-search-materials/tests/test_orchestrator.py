@@ -2,8 +2,10 @@ import argparse
 import csv
 import json
 import sqlite3
+import stat
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from openpyxl import Workbook
 from PIL import Image
@@ -1032,20 +1034,20 @@ def test_index_assets_cli_refresh_interrupt_executes_resume_argv_and_keeps_check
     )
     assert main(args) == 0
     capsys.readouterr()
-    real_checkpoint = cli_module.AssetIndexStore.checkpoint_files
+    real_restart = cli_module.AssetIndexStore.restart_partition
     interrupted = False
 
-    def interrupt_before_second_partition(self, partition_id, scan_id, rows, **kwargs):
+    def interrupt_before_second_partition(self, partition_id, scan_id):
         nonlocal interrupted
         partition = self._partition(partition_id)
-        if partition["relative_path"] == "b" and not interrupted and not rows:
+        if partition["relative_path"] == "b" and not interrupted:
             interrupted = True
             raise KeyboardInterrupt
-        return real_checkpoint(self, partition_id, scan_id, rows, **kwargs)
+        return real_restart(self, partition_id, scan_id)
 
     monkeypatch.setattr(
         cli_module.AssetIndexStore,
-        "checkpoint_files",
+        "restart_partition",
         interrupt_before_second_partition,
     )
     interrupted_exit = main([*args, "--refresh"])
@@ -1094,6 +1096,163 @@ def test_index_assets_cli_successful_resume_and_refresh_complete_chains(tmp_path
     summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
     assert summary["mode"] == "refresh"
     assert summary["matched"] == 2
+
+
+def test_index_assets_cli_keeps_row_validation_local_and_persists_evidence(tmp_path):
+    products = tmp_path / "products.csv"
+    rows = [("123", "VALID-SKU", "Valid Hat")]
+    rows.extend(("", f"MISSING-{index}", f"Missing {index}") for index in range(33))
+    rows.extend(("999", f"DUP-{index}", f"Duplicate {index}") for index in range(11))
+    _write_index_products(products, rows)
+    root = tmp_path / "assets"
+    for directory, name in (
+        ("123", "valid.png"),
+        ("999", "duplicate.png"),
+        ("MISSING-0", "missing.png"),
+    ):
+        target = root / directory
+        target.mkdir(parents=True)
+        Image.new("RGB", (40, 40), color="white").save(target / name)
+    output = tmp_path / "index-output"
+
+    exit_code = main(_index_assets_args(products, root, output))
+
+    assert exit_code == 0
+    with (output / "match-candidates.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        candidates = list(csv.DictReader(stream))
+    assert {(row["product_id"], row["image_count"]) for row in candidates} == {
+        ("123", "1")
+    }
+    summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+    validation = summary["product_validation"]
+    assert validation == {
+        "row_count": 45,
+        "eligible_count": 1,
+        "blocked_count": 44,
+        "reason_code_counts": {
+            "DUPLICATE_PRODUCT_ID": 11,
+            "MISSING_PRODUCT_ID": 33,
+        },
+        "blocked_rows": [
+            {
+                "source_row": source_row,
+                "reason_codes": [
+                    "MISSING_PRODUCT_ID"
+                    if source_row <= 35
+                    else "DUPLICATE_PRODUCT_ID"
+                ],
+            }
+            for source_row in range(3, 47)
+        ],
+    }
+    assert summary["database"]["active_files"] == 3
+    assert summary["matched"] == 1
+
+
+def test_index_assets_cli_all_row_blocked_table_still_builds_metadata_index(tmp_path):
+    products = tmp_path / "products.csv"
+    _write_index_products(
+        products,
+        (("", "MISSING-SKU", "Missing ID"), ("bad-id", "BAD-SKU", "Invalid ID")),
+    )
+    root = tmp_path / "assets"
+    root.mkdir()
+    Image.new("RGB", (40, 40), color="white").save(root / "plain.png")
+    output = tmp_path / "index-output"
+
+    assert main(_index_assets_args(products, root, output)) == 0
+
+    summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+    assert summary["product_validation"]["eligible_count"] == 0
+    assert summary["product_validation"]["blocked_count"] == 2
+    assert summary["database"]["active_files"] == 1
+    assert summary["matched"] == 0
+
+
+def test_index_assets_cli_empty_product_table_is_batch_blocking(tmp_path):
+    products = tmp_path / "products.csv"
+    _write_index_products(products, ())
+    root = tmp_path / "assets"
+    root.mkdir()
+    output = tmp_path / "index-output"
+
+    assert main(_index_assets_args(products, root, output)) == 2
+    assert not output.exists()
+
+
+def test_index_assets_new_rejects_any_nonempty_output_without_touching_sentinels(
+    tmp_path,
+):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    root.mkdir()
+    output = tmp_path / "index-output"
+    output.mkdir()
+    sentinel = output / "keep.bin"
+    candidates = output / "match-candidates.csv"
+    summary = output / "scan-summary.json"
+    sentinel.write_bytes(b"\x00keep-me\xff")
+    candidates.write_bytes(b"existing,csv\r\n")
+    summary.write_bytes(b'{"existing":true}\n')
+    (output / "existing-directory").mkdir()
+    before = {
+        path.name: path.read_bytes()
+        for path in (sentinel, candidates, summary)
+    }
+
+    assert main(_index_assets_args(products, root, output)) == 2
+
+    assert {
+        path.name: path.read_bytes()
+        for path in (sentinel, candidates, summary)
+    } == before
+    assert (output / "existing-directory").is_dir()
+    assert not (output / "asset-index.sqlite3").exists()
+
+
+def test_index_assets_cli_rejects_declared_symlink_root_before_output(tmp_path):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    target = tmp_path / "assets"
+    target.mkdir()
+    root = tmp_path / "linked-assets"
+    try:
+        root.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation is not permitted: {error}")
+    output = tmp_path / "index-output"
+
+    assert main(_index_assets_args(products, root, output)) == 2
+    assert not output.exists()
+
+
+def test_index_assets_cli_rejects_declared_reparse_root_before_output(
+    tmp_path, monkeypatch
+):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    root.mkdir()
+    output = tmp_path / "index-output"
+    real_lstat = Path.lstat
+
+    def reparse_lstat(path):
+        if Path(path) == root:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR,
+                st_file_attributes=getattr(
+                    stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                ),
+            )
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    assert main(_index_assets_args(products, root, output)) == 2
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(
@@ -1204,7 +1363,8 @@ def test_index_assets_cli_returns_one_for_partial_partition_failure(tmp_path, mo
     summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
     assert summary["partial_failure"] is True
     assert summary["failed"] == 1
-    assert summary["errors"][0]["error"] == "partition unavailable"
+    assert summary["errors"][0]["code"] == "PARTITION_ENUMERATION_ERROR"
+    assert summary["errors"][0]["detail"] == "partition unavailable"
 
 
 def test_index_assets_help_lists_all_options(capsys):

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 from typing import Sequence
 from urllib.parse import urlencode
@@ -738,8 +739,28 @@ def _index_assets(args) -> int:
         products_path = products_path.resolve()
         products = read_product_csv(products_path)
         validation = validate_product_records(products)
-        if not products or validation.blocking:
+        if not products or validation.batch_blocking:
             raise ValueError("商品表校验失败")
+        reason_code_counts: dict[str, int] = {}
+        blocked_rows = []
+        for source_row, reason_codes in sorted(
+            validation.reason_codes_by_row.items()
+        ):
+            stable_codes = sorted(set(reason_codes))
+            blocked_rows.append(
+                {"source_row": source_row, "reason_codes": stable_codes}
+            )
+            for reason_code in stable_codes:
+                reason_code_counts[reason_code] = (
+                    reason_code_counts.get(reason_code, 0) + 1
+                )
+        product_validation = {
+            "row_count": validation.row_count,
+            "eligible_count": validation.row_count - len(blocked_rows),
+            "blocked_count": len(blocked_rows),
+            "reason_code_counts": dict(sorted(reason_code_counts.items())),
+            "blocked_rows": blocked_rows,
+        }
 
         roots = tuple(NamedRoot.parse(value) for value in args.root)
         source_names = [root.source_system for root in roots]
@@ -747,6 +768,12 @@ def _index_assets(args) -> int:
             raise ValueError("--root 来源名称不得重复")
         normalized_roots = []
         for root in roots:
+            declared_metadata = root.path.lstat()
+            if stat.S_ISLNK(declared_metadata.st_mode) or (
+                getattr(declared_metadata, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            ):
+                raise ValueError(f"素材根目录不得是符号链接或重解析点: {root.path}")
             resolved = root.path.resolve()
             if not resolved.is_dir():
                 raise ValueError(f"素材根目录不存在: {root.path}")
@@ -754,14 +781,19 @@ def _index_assets(args) -> int:
         normalized_roots.sort(key=lambda root: root.source_system)
 
         output = Path(args.output).resolve()
-        if output.exists() and not output.is_dir():
-            raise ValueError(f"输出路径不是目录: {output}")
-        output.mkdir(parents=True, exist_ok=True)
-        database_path = output / "asset-index.sqlite3"
         requested_mode = "resume" if args.resume else "refresh" if args.refresh else None
-        if database_path.exists() and requested_mode is None:
-            raise ValueError("索引数据库已存在；请明确使用 --resume 或 --refresh")
-        if not database_path.exists() and requested_mode is not None:
+        if requested_mode is None:
+            if output.exists():
+                if not output.is_dir():
+                    raise ValueError(f"输出路径不是目录: {output}")
+                if next(output.iterdir(), None) is not None:
+                    raise ValueError("new 模式要求不存在或完全为空的输出目录")
+            else:
+                output.mkdir(parents=True, exist_ok=False)
+        elif not output.is_dir():
+            raise ValueError(f"--{requested_mode} 需要已有输出目录")
+        database_path = output / "asset-index.sqlite3"
+        if requested_mode is not None and not database_path.is_file():
             raise ValueError(f"--{requested_mode} 需要已有索引数据库")
         mode = requested_mode or "new"
 
@@ -813,6 +845,7 @@ def _index_assets(args) -> int:
                 output / "scan-summary.json",
                 mode,
                 products_sha256,
+                product_validation,
             )
             print(
                 f"索引被中断；checkpoint 已保留。恢复命令: {summary['resume_command']}",
@@ -827,6 +860,7 @@ def _index_assets(args) -> int:
             output / "scan-summary.json",
             mode,
             products_sha256,
+            product_validation,
         )
         return 1 if outcome.partial_failure else 0
     except (IndexIdentityError, SchemaError, sqlite3.DatabaseError, OSError, ValueError) as error:

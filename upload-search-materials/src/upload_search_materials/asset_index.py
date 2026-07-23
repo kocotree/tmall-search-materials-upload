@@ -12,7 +12,7 @@ import re
 import stat
 import subprocess
 import time
-from typing import Literal, Sequence
+from typing import Iterable, Iterator, Literal, Sequence
 import uuid
 
 from .asset_index_store import AssetIndexStore, IndexedFile, PathMatchRecord
@@ -72,6 +72,7 @@ class ScanOutcome:
     matched: int
     failed: int
     elapsed_seconds: float
+    scan_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -81,33 +82,141 @@ class _Candidate:
     absolute_path: Path
 
 
-@dataclass
-class _Discovery:
-    candidates: dict[tuple[str, str], list[_Candidate]]
-    errors: dict[tuple[str, str], list[str]]
-    roots: dict[str, Path]
-    discovered: int = 0
+@dataclass(frozen=True)
+class _FileFailure:
+    relative_path: Path
+    code: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class _DirectoryCandidate:
+    relative_path: Path
+    absolute_path: Path
+
+
+@dataclass(frozen=True)
+class _DirectoryFailure:
+    relative_path: Path
+    detail: str
+
+
+class _PartitionWriter:
+    """Bounded, one-pass persistence for a single discovered partition."""
+
+    def __init__(
+        self,
+        indexer: IncrementalAssetIndexer,
+        source_system: str,
+        root_id: int,
+        relative_partition: Path,
+        scan_id: str,
+        mode: str,
+        historical: dict[str, dict[str, object]],
+        encountered: set[str],
+        *,
+        force: bool,
+    ) -> None:
+        self.indexer = indexer
+        self.source_system = source_system
+        self.root_id = root_id
+        self.relative_partition = relative_partition
+        self.relative_key = relative_partition.as_posix()
+        self.scan_id = scan_id
+        self.encountered = encountered
+        prior = historical.get(self.relative_key)
+        self.skipped = prior is not None and indexer._completed_for_resume(
+            prior, scan_id, mode
+        )
+        self.partition_id: str | None = None
+        self.batch: list[_Candidate] = []
+        self.partition_errors: list[str] = []
+        if self.skipped:
+            encountered.add(self.relative_key)
+        elif force:
+            self._start()
+
+    def _start(self) -> str:
+        if self.partition_id is None:
+            self.partition_id = self.indexer.store.upsert_partition(
+                self.root_id, self.relative_key
+            )
+            self.encountered.add(self.relative_key)
+            self.indexer.store.restart_partition(
+                self.partition_id, self.scan_id
+            )
+        return self.partition_id
+
+    def add_candidate(self, candidate: _Candidate) -> None:
+        if self.skipped:
+            return
+        self._start()
+        self.batch.append(candidate)
+        if len(self.batch) >= self.indexer.options.checkpoint_size:
+            self.flush()
+
+    def add_file_failure(self, failure: _FileFailure) -> None:
+        if self.skipped:
+            return
+        partition_id = self._start()
+        self.indexer.store.record_file_error(
+            partition_id,
+            self.scan_id,
+            source_system=self.source_system,
+            relative_path=failure.relative_path.as_posix(),
+            code=failure.code,
+            detail=failure.detail,
+        )
+
+    def note_partition_error(self, detail: str) -> None:
+        if self.skipped:
+            return
+        self._start()
+        if detail not in self.partition_errors:
+            self.partition_errors.append(detail)
+
+    def flush(self) -> None:
+        if self.skipped or not self.batch:
+            return
+        assert self.partition_id is not None
+        self.indexer._process_batch(
+            self.source_system,
+            self.root_id,
+            self.partition_id,
+            self.scan_id,
+            tuple(self.batch),
+        )
+        self.batch.clear()
+
+    def finish(self) -> None:
+        if self.skipped or self.partition_id is None:
+            return
+        self.flush()
+        if self.partition_errors:
+            self.indexer.store.fail_partition(
+                self.partition_id,
+                "; ".join(self.partition_errors),
+                "PARTITION_ENUMERATION_ERROR",
+            )
+        else:
+            self.indexer.store.complete_partition(self.partition_id)
+            self.indexer.store.mark_partition_missing_files_inactive(
+                self.partition_id, self.scan_id
+            )
+        self.indexer.store.sync_root_statistics(self.root_id, self.scan_id)
 
 
 def write_match_candidates(store, path: Path) -> int:
     """Write stable, review-only match groups from the durable index."""
 
-    rows = store._connection.execute(
-        "SELECT files.source_system, files.candidate_directory, files.relative_path, "
-        "files.sha256, files.validation_status, files.reason_codes_json AS file_reasons, "
-        "matches.product_id, matches.sku, matches.product_title, matches.match_type, "
-        "matches.match_status, matches.reason_codes_json AS match_reasons "
-        "FROM files JOIN matches USING(file_id) WHERE files.active=1 "
-        "ORDER BY files.source_system, files.candidate_directory, matches.product_id, "
-        "matches.match_type, files.relative_path"
-    ).fetchall()
+    rows = store.match_candidate_records()
     groups: dict[tuple[str, str, str, str], dict[str, object]] = {}
     for row in rows:
         key = (
-            str(row["source_system"]),
-            str(row["candidate_directory"]),
-            str(row["product_id"]),
-            str(row["match_type"]),
+            row.source_system,
+            row.candidate_directory,
+            row.product_id,
+            row.match_type,
         )
         group = groups.setdefault(
             key,
@@ -115,10 +224,10 @@ def write_match_candidates(store, path: Path) -> int:
                 "source_system": key[0],
                 "candidate_directory": key[1],
                 "product_id": key[2],
-                "sku": str(row["sku"]),
-                "product_title": str(row["product_title"]),
+                "sku": row.sku,
+                "product_title": row.product_title,
                 "match_type": key[3],
-                "match_status": str(row["match_status"]),
+                "match_status": row.match_status,
                 "image_count": 0,
                 "hashes_complete": True,
                 "license_status": "unknown",
@@ -127,12 +236,12 @@ def write_match_candidates(store, path: Path) -> int:
         )
         group["image_count"] = int(group["image_count"]) + 1
         group["hashes_complete"] = bool(group["hashes_complete"]) and bool(
-            row["sha256"]
-        ) and row["validation_status"] != "not_inspected"
+            row.sha256
+        ) and row.validation_status != "not_inspected"
         reasons = group["reason_codes"]
         assert isinstance(reasons, set)
-        reasons.update(json.loads(row["file_reasons"]))
-        reasons.update(json.loads(row["match_reasons"]))
+        reasons.update(row.file_reason_codes)
+        reasons.update(row.match_reason_codes)
 
     output_rows = []
     for key in sorted(groups):
@@ -159,50 +268,30 @@ def write_scan_summary(
     path: Path,
     mode: str,
     products_sha256: str,
+    product_validation: dict[str, object] | None = None,
 ) -> dict:
     """Write a stable summary whose counts come from the final SQLite state."""
 
-    connection = store._connection
-    total_files = _count(connection, "SELECT COUNT(*) FROM files")
-    active_files = _count(connection, "SELECT COUNT(*) FROM files WHERE active=1")
-    matched_files = _count(
-        connection,
-        "SELECT COUNT(DISTINCT files.file_id) FROM files JOIN matches USING(file_id) "
-        "WHERE files.active=1",
-    )
-    active_matches = _count(
-        connection,
-        "SELECT COUNT(*) FROM files JOIN matches USING(file_id) WHERE files.active=1",
-    )
-    candidate_groups = _count(
-        connection,
-        "SELECT COUNT(*) FROM (SELECT 1 FROM files JOIN matches USING(file_id) "
-        "WHERE files.active=1 GROUP BY files.source_system, files.candidate_directory, "
-        "matches.product_id, matches.match_type)",
-    )
-    partition_counts = {
-        str(row["status"]): int(row["count"])
-        for row in connection.execute(
-            "SELECT status, COUNT(*) AS count FROM partitions GROUP BY status"
-        ).fetchall()
-    }
-    failed = partition_counts.get("failed", 0)
-    errors = [
-        {
-            "source_system": str(row["source_system"]),
-            "candidate_directory": str(row["candidate_directory"]),
-            "error": str(row["error"]),
+    database = store.database_statistics()
+    scan_id = outcome.scan_id or store.latest_scan_id()
+    scan = (
+        store.scan_statistics(scan_id)
+        if scan_id is not None
+        else {
+            "scan_id": "",
+            "totals": {
+                "discovered": 0,
+                "indexed": 0,
+                "matched": 0,
+                "failed": 0,
+            },
+            "roots": [],
+            "errors": [],
         }
-        for row in connection.execute(
-            "SELECT roots.source_system, partitions.relative_path AS candidate_directory, "
-            "partitions.error FROM partitions JOIN roots USING(root_id) "
-            "WHERE partitions.error<>'' ORDER BY roots.source_system, partitions.relative_path"
-        ).fetchall()
-    ]
-    identity_row = connection.execute(
-        "SELECT value FROM scan_meta WHERE key='identity'"
-    ).fetchone()
-    identity = json.loads(identity_row["value"])
+    )
+    totals = scan["totals"]
+    failed = int(totals["failed"])
+    identity = store.index_identity()
     roots = [
         (str(root["source_system"]), str(root["path"]))
         for root in json.loads(identity["roots_json"])
@@ -227,29 +316,21 @@ def write_scan_summary(
             "--resume",
         )
     )
-    database = {
-        "roots": _count(connection, "SELECT COUNT(*) FROM roots"),
-        "partitions": sum(partition_counts.values()),
-        "partition_status": dict(sorted(partition_counts.items())),
-        "total_files": total_files,
-        "active_files": active_files,
-        "inactive_files": total_files - active_files,
-        "matched_files": matched_files,
-        "active_matches": active_matches,
-        "match_candidates": candidate_groups,
-    }
     summary = {
         "schema_version": 1,
+        "scan_id": scan["scan_id"],
         "mode": mode,
         "products_sha256": products_sha256,
-        "complete": bool(outcome.complete) and failed == 0,
-        "partial_failure": bool(outcome.partial_failure) or failed > 0,
-        "discovered": active_files,
-        "indexed": total_files,
-        "matched": matched_files,
+        "product_validation": dict(product_validation or {}),
+        "complete": bool(outcome.complete),
+        "partial_failure": bool(outcome.partial_failure),
+        "discovered": int(totals["discovered"]),
+        "indexed": int(totals["indexed"]),
+        "matched": int(totals["matched"]),
         "failed": failed,
         "database": database,
-        "errors": errors,
+        "roots": scan["roots"],
+        "errors": scan["errors"],
         "elapsed_seconds": outcome.elapsed_seconds,
         "resume_command": subprocess.list2cmdline(resume_argv),
     }
@@ -259,10 +340,6 @@ def write_scan_summary(
         encoding="utf-8",
     )
     return summary
-
-
-def _count(connection, sql: str) -> int:
-    return int(connection.execute(sql).fetchone()[0])
 
 
 class IncrementalAssetIndexer:
@@ -314,265 +391,599 @@ class IncrementalAssetIndexer:
                     matched=0,
                     failed=0,
                     elapsed_seconds=0.0,
+                    scan_id=self.store.latest_scan_id() or "",
                 )
             scan_id, effective_mode = active_scan
         self._scan_id = scan_id
 
         started = time.perf_counter()
-        discovery = self._discover()
-        partition_keys = set(discovery.candidates) | set(discovery.errors)
         root_ids = {
-            source_system: self.store.upsert_root(source_system, str(root))
-            for source_system, root in discovery.roots.items()
-        }
-        historical_records: dict[tuple[str, str], dict[str, object]] = {}
-        if mode in {"resume", "refresh"}:
-            for source_system, root_id in root_ids.items():
-                for record in self.store.partitions_for_root(root_id):
-                    key = (source_system, str(record["relative_path"]))
-                    historical_records[key] = record
-                    partition_keys.add(key)
-
-            discovered_errors = tuple(discovery.errors.items())
-            for historical_key in historical_records:
-                source_system, relative_partition = historical_key
-                historical_parts = self._clean_parts(Path(relative_partition))
-                for error_key, errors in discovered_errors:
-                    error_source, error_partition = error_key
-                    error_parts = self._clean_parts(Path(error_partition))
-                    if (
-                        error_source == source_system
-                        and len(error_parts) < len(historical_parts)
-                        and historical_parts[: len(error_parts)] == error_parts
-                    ):
-                        discovery.errors.setdefault(historical_key, []).extend(errors)
-
-        registrations: dict[tuple[str, str], str] = {}
-        records: dict[tuple[str, str], dict[str, object]] = {}
-        for source_system, relative_partition in sorted(partition_keys):
-            root_id = root_ids[source_system]
-            store_partition_id = self.store.upsert_partition(root_id, relative_partition)
-            registrations[(source_system, relative_partition)] = store_partition_id
-            records[(source_system, relative_partition)] = historical_records.get(
-                (source_system, relative_partition),
-                self.store.partition_record(store_partition_id),
+            named_root.source_system: self.store.upsert_root(
+                named_root.source_system, str(named_root.path.resolve())
             )
-
-        indexed = matched = failed = 0
-        for key in sorted(partition_keys):
-            partition_id = registrations[key]
-            prior = records[key]
-            if (
-                mode == "resume"
-                and prior["status"] == "completed"
-                and prior["completed_scan_id"] == scan_id
-            ):
-                continue
-
-            candidates = discovery.candidates.get(key, [])
-            errors = discovery.errors.get(key, [])
-            start_offset = 0
-            if (
-                mode == "resume"
-                and prior["current_scan_id"] == scan_id
-                and prior["status"] in {"in_progress", "failed"}
-            ):
-                start_offset = int(prior["processed_count"])
+            for named_root in self.roots
+        }
+        for root_id in root_ids.values():
+            self.store.prepare_root(root_id, scan_id)
+        for named_root in self.roots:
+            source_system = named_root.source_system
+            root = named_root.path.resolve()
+            root_id = root_ids[source_system]
+            historical = {
+                str(record["relative_path"]): record
+                for record in self.store.partitions_for_root(root_id)
+            }
+            encountered: set[str] = set()
+            self.store.start_root(root_id, scan_id)
             try:
-                self.store.checkpoint_files(
-                    partition_id, scan_id, (), count_progress=False
+                self._walk_scaffold(
+                    source_system,
+                    root_id,
+                    root,
+                    root,
+                    Path("."),
+                    scan_id,
+                    mode,
+                    historical,
+                    encountered,
                 )
-                for offset in range(
-                    start_offset, len(candidates), self.options.checkpoint_size
-                ):
-                    batch = candidates[offset : offset + self.options.checkpoint_size]
-                    file_ids = self.store.checkpoint_files(
-                        partition_id,
-                        scan_id,
-                        tuple(candidate.indexed_file for candidate in batch),
-                        count_progress=False,
-                    )
-                    indexed += len(batch)
-                    for candidate, file_id in zip(batch, file_ids):
-                        matches = self.matcher.match(candidate.relative_path)
-                        if not matches:
-                            continue
-                        matched += 1
-                        persisted = self.store.file_record(file_id)
-                        if (
-                            persisted["validation_status"] != "not_inspected"
-                            and self.store.matches_for(file_id)
-                        ):
-                            continue
-                        primary = matches[0]
-                        inspected = inspect_asset(
-                            candidate.absolute_path,
-                            primary.product_id,
-                            "unknown",
-                            source_system=key[0],
-                            sku=primary.sku,
-                        )
-                        self.store.update_file_inspection(
-                            file_id,
-                            sha256=inspected.sha256,
-                            width=inspected.width,
-                            height=inspected.height,
-                            validation_status=inspected.validation_status,
-                            reason_codes=inspected.reason_codes,
-                        )
-                        self.store.replace_file_matches(
-                            file_id,
-                            tuple(
-                                PathMatchRecord(
-                                    product_id=match.product_id,
-                                    sku=match.sku,
-                                    product_title=match.product_title,
-                                    match_type=match.match_type,
-                                    match_status=match.match_status,
-                                    reason_codes=match.reason_codes,
-                                )
-                                for match in matches
-                            ),
-                        )
-                    self.store.advance_partition_progress(
-                        partition_id, scan_id, len(batch)
-                    )
-                if errors:
-                    raise OSError("; ".join(errors))
-                self.store.complete_partition(partition_id)
-                if effective_mode == "refresh":
-                    self.store.mark_partition_missing_files_inactive(partition_id, scan_id)
             except KeyboardInterrupt:
                 raise
             except OSError as error:
-                self.store.fail_partition(partition_id, str(error))
-                failed += 1
+                for relative_partition, prior in sorted(historical.items()):
+                    if self._completed_for_resume(prior, scan_id, mode):
+                        continue
+                    self._process_partition(
+                        source_system,
+                        root_id,
+                        Path(relative_partition),
+                        (),
+                        [str(error)],
+                        [],
+                        scan_id,
+                        mode,
+                        historical,
+                        encountered,
+                        force=True,
+                    )
+                self.store.fail_root(
+                    root_id, scan_id, "ROOT_ENUMERATION_ERROR", str(error)
+                )
+                continue
+
+            for relative_partition, prior in sorted(historical.items()):
+                if relative_partition in encountered:
+                    continue
+                if self._completed_for_resume(prior, scan_id, mode):
+                    continue
+                self._process_partition(
+                    source_system,
+                    root_id,
+                    Path(relative_partition),
+                    (),
+                    [],
+                    [],
+                    scan_id,
+                    mode,
+                    historical,
+                    encountered,
+                    force=True,
+                )
+            self.store.complete_root(root_id, scan_id)
 
         self._scan_id = scan_id
         if mode == "new":
             self._new_started = True
         elapsed = time.perf_counter() - started
-        if failed == 0:
+        scan = self.store.scan_statistics(scan_id)
+        roots = scan["roots"]
+        partial_failure = any(
+            root["status"] in {"failed", "partial_failure"} for root in roots
+        )
+        if not partial_failure:
             self.store.clear_active_scan(scan_id)
+        totals = scan["totals"]
         return ScanOutcome(
-            complete=failed == 0,
-            partial_failure=failed > 0,
-            discovered=discovery.discovered,
-            indexed=indexed,
-            matched=matched,
-            failed=failed,
+            complete=not partial_failure,
+            partial_failure=partial_failure,
+            discovered=int(totals["discovered"]),
+            indexed=int(totals["indexed"]),
+            matched=int(totals["matched"]),
+            failed=int(totals["failed"]),
             elapsed_seconds=elapsed,
+            scan_id=scan_id,
         )
 
-    def _discover(self) -> _Discovery:
-        discovery = _Discovery(candidates={}, errors={}, roots={})
-        for named_root in self.roots:
-            root = named_root.path.resolve()
-            discovery.roots[named_root.source_system] = root
-            self._walk_directory(
-                discovery,
-                named_root.source_system,
-                root,
-                root,
-                Path("."),
-            )
-        return discovery
-
-    def _walk_directory(
+    def _walk_scaffold(
         self,
-        discovery: _Discovery,
+        source_system: str,
+        root_id: int,
+        root: Path,
+        directory: Path,
+        relative_directory: Path,
+        scan_id: str,
+        mode: str,
+        historical: dict[str, dict[str, object]],
+        encountered: set[str],
+    ) -> None:
+        depth = len(self._clean_parts(relative_directory))
+        relative_partition = self._relative_partition(relative_directory)
+        relative_key = relative_partition.as_posix()
+        prior = historical.get(relative_key)
+        if depth >= self.options.partition_depth and prior is not None:
+            if self._completed_for_resume(prior, scan_id, mode):
+                encountered.add(relative_key)
+                return
+        writer = _PartitionWriter(
+            self,
+            source_system,
+            root_id,
+            relative_partition,
+            scan_id,
+            mode,
+            historical,
+            encountered,
+            force=depth >= self.options.partition_depth
+            or relative_key in historical,
+        )
+        if depth >= self.options.partition_depth:
+            self._scan_partition_directory(
+                source_system,
+                root,
+                directory,
+                relative_directory,
+                writer,
+            )
+            writer.finish()
+            return
+
+        try:
+            with os.scandir(directory) as scanner:
+                for entry in scanner:
+                    discovered = self._classify_entry(
+                        source_system,
+                        root,
+                        entry,
+                        relative_directory,
+                    )
+                    if isinstance(discovered, _Candidate):
+                        writer.add_candidate(discovered)
+                    elif isinstance(discovered, _FileFailure):
+                        writer.add_file_failure(discovered)
+                    elif isinstance(discovered, _DirectoryFailure):
+                        writer.flush()
+                        self._fail_partition_scope(
+                            source_system,
+                            root_id,
+                            discovered.relative_path,
+                            discovered.detail,
+                            scan_id,
+                            mode,
+                            historical,
+                            encountered,
+                        )
+                    elif isinstance(discovered, _DirectoryCandidate):
+                        writer.flush()
+                        self._walk_scaffold(
+                            source_system,
+                            root_id,
+                            root,
+                            discovered.absolute_path,
+                            discovered.relative_path,
+                            scan_id,
+                            mode,
+                            historical,
+                            encountered,
+                        )
+        except OSError as error:
+            if depth == 0:
+                raise
+            writer.note_partition_error(str(error))
+            writer.finish()
+            self._fail_unencountered_descendants(
+                source_system,
+                root_id,
+                relative_directory,
+                relative_key,
+                str(error),
+                scan_id,
+                mode,
+                historical,
+                encountered,
+            )
+            return
+        writer.finish()
+
+    def _scan_partition_directory(
+        self,
         source_system: str,
         root: Path,
         directory: Path,
         relative_directory: Path,
+        writer: _PartitionWriter,
     ) -> None:
-        if len(self._clean_parts(relative_directory)) == self.options.partition_depth:
-            self._partition_candidates(discovery, source_system, relative_directory)
         try:
             with os.scandir(directory) as scanner:
-                entries = sorted(scanner, key=lambda entry: entry.name.casefold())
-        except OSError as error:
-            self._record_error(discovery, source_system, relative_directory, error)
-            return
-
-        for entry in entries:
-            relative_path = relative_directory / entry.name
-            try:
-                if entry.is_symlink():
-                    continue
-                metadata = entry.stat(follow_symlinks=False)
-                if getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT:
-                    continue
-                resolved = Path(entry.path).resolve()
-                if not resolved.is_relative_to(root):
-                    self._record_error(
-                        discovery,
-                        source_system,
-                        relative_path.parent,
-                        OSError("resolved path escapes declared root"),
-                    )
-                    continue
-                if entry.is_dir(follow_symlinks=False):
-                    self._walk_directory(
-                        discovery,
+                for entry in scanner:
+                    discovered = self._classify_entry(
                         source_system,
                         root,
-                        resolved,
-                        relative_path,
+                        entry,
+                        relative_directory,
                     )
-                    continue
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                extension = Path(entry.name).suffix.casefold()
-                if extension not in IMAGE_EXTENSIONS:
-                    continue
-                relative_path = Path(*self._clean_parts(relative_path))
-                partition = self._relative_partition(relative_path.parent)
-                key = (source_system, partition.as_posix())
-                discovery.candidates.setdefault(key, []).append(
-                    _Candidate(
-                        indexed_file=IndexedFile(
-                            source_system=source_system,
-                            relative_path=relative_path.as_posix(),
-                            absolute_path=str(resolved),
-                            extension=extension,
-                            size_bytes=metadata.st_size,
-                            mtime_ns=metadata.st_mtime_ns,
-                            candidate_directory=partition.as_posix(),
-                        ),
-                        relative_path=relative_path,
-                        absolute_path=resolved,
-                    )
-                )
-                discovery.discovered += 1
-            except OSError as error:
-                self._record_error(
-                    discovery,
-                    source_system,
-                    relative_path.parent,
-                    error,
-                )
+                    if isinstance(discovered, _Candidate):
+                        writer.add_candidate(discovered)
+                    elif isinstance(discovered, _FileFailure):
+                        writer.add_file_failure(discovered)
+                    elif isinstance(discovered, _DirectoryFailure):
+                        writer.note_partition_error(discovered.detail)
+                    elif isinstance(discovered, _DirectoryCandidate):
+                        writer.flush()
+                        self._scan_partition_directory(
+                            source_system,
+                            root,
+                            discovered.absolute_path,
+                            discovered.relative_path,
+                            writer,
+                        )
+        except OSError as error:
+            writer.note_partition_error(str(error))
 
-    def _partition_candidates(
+    def _classify_entry(
         self,
-        discovery: _Discovery,
         source_system: str,
+        root: Path,
+        entry: os.DirEntry[str],
         relative_directory: Path,
-    ) -> list[_Candidate]:
-        partition = self._relative_partition(relative_directory)
-        return discovery.candidates.setdefault((source_system, partition.as_posix()), [])
+    ) -> _Candidate | _DirectoryCandidate | _DirectoryFailure | _FileFailure | None:
+        relative_path = relative_directory / entry.name
+        clean_relative = Path(*self._clean_parts(relative_path))
+        is_directory = False
+        try:
+            if entry.is_symlink():
+                return None
+            is_directory = entry.is_dir(follow_symlinks=False)
+            metadata = entry.stat(follow_symlinks=False)
+            if getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT:
+                return None
+            is_file = (
+                False
+                if is_directory
+                else entry.is_file(follow_symlinks=False)
+            )
+            resolved = Path(entry.path).resolve()
+        except (OSError, RuntimeError) as error:
+            if is_directory:
+                return _DirectoryFailure(clean_relative, str(error))
+            return _FileFailure(
+                clean_relative,
+                "FILE_STAT_ERROR",
+                str(error),
+            )
 
-    def _record_error(
+        if not resolved.is_relative_to(root):
+            if is_directory:
+                return _DirectoryFailure(
+                    clean_relative,
+                    "resolved path escapes declared root",
+                )
+            return _FileFailure(
+                clean_relative,
+                "PATH_OUTSIDE_ROOT",
+                "resolved path escapes declared root",
+            )
+        if is_directory:
+            return _DirectoryCandidate(clean_relative, resolved)
+        if not is_file:
+            return None
+        extension = Path(entry.name).suffix.casefold()
+        if extension not in IMAGE_EXTENSIONS:
+            return None
+        return self._candidate(
+            source_system,
+            clean_relative,
+            resolved,
+            extension,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+
+    def _fail_unencountered_descendants(
         self,
-        discovery: _Discovery,
         source_system: str,
+        root_id: int,
         relative_directory: Path,
-        error: OSError,
+        current_partition: str,
+        detail: str,
+        scan_id: str,
+        mode: str,
+        historical: dict[str, dict[str, object]],
+        encountered: set[str],
     ) -> None:
-        partition = self._relative_partition(relative_directory)
-        key = (source_system, partition.as_posix())
-        discovery.candidates.setdefault(key, [])
-        discovery.errors.setdefault(key, []).append(str(error))
+        prefix = self._clean_parts(relative_directory)
+        for relative_partition, prior in sorted(historical.items()):
+            if (
+                relative_partition == current_partition
+                or relative_partition in encountered
+                or self._clean_parts(Path(relative_partition))[: len(prefix)]
+                != prefix
+                or self._completed_for_resume(prior, scan_id, mode)
+            ):
+                continue
+            self._process_partition(
+                source_system,
+                root_id,
+                Path(relative_partition),
+                (),
+                [detail],
+                [],
+                scan_id,
+                mode,
+                historical,
+                encountered,
+                force=True,
+            )
+
+    def _candidate(
+        self,
+        source_system: str,
+        relative_path: Path,
+        resolved: Path,
+        extension: str,
+        size_bytes: int,
+        mtime_ns: int,
+    ) -> _Candidate:
+        relative_path = Path(*self._clean_parts(relative_path))
+        partition = self._relative_partition(relative_path.parent)
+        return _Candidate(
+            indexed_file=IndexedFile(
+                source_system=source_system,
+                relative_path=relative_path.as_posix(),
+                absolute_path=str(resolved),
+                extension=extension,
+                size_bytes=size_bytes,
+                mtime_ns=mtime_ns,
+                candidate_directory=partition.as_posix(),
+            ),
+            relative_path=relative_path,
+            absolute_path=resolved,
+        )
+
+    def _process_partition(
+        self,
+        source_system: str,
+        root_id: int,
+        relative_partition: Path,
+        candidates: Iterable[_Candidate],
+        errors: list[str],
+        file_failures: list[_FileFailure],
+        scan_id: str,
+        mode: str,
+        historical: dict[str, dict[str, object]],
+        encountered: set[str],
+        *,
+        force: bool,
+        consume_when_skipped: bool = False,
+    ) -> None:
+        relative_key = relative_partition.as_posix()
+        prior = historical.get(relative_key)
+        if prior is not None and self._completed_for_resume(
+            prior, scan_id, mode
+        ):
+            encountered.add(relative_key)
+            if consume_when_skipped:
+                for _ in candidates:
+                    pass
+            return
+
+        iterator = iter(candidates)
+        partition_id: str | None = None
+        if force:
+            partition_id = self.store.upsert_partition(root_id, relative_key)
+            encountered.add(relative_key)
+            self.store.restart_partition(partition_id, scan_id)
+        try:
+            first = next(iterator)
+        except StopIteration:
+            first = None
+        if first is None and not errors and not file_failures and not force:
+            return
+
+        if partition_id is None:
+            partition_id = self.store.upsert_partition(root_id, relative_key)
+            encountered.add(relative_key)
+            self.store.restart_partition(partition_id, scan_id)
+        batch: list[_Candidate] = []
+        if first is not None:
+            batch.append(first)
+            if len(batch) >= self.options.checkpoint_size:
+                self._process_batch(
+                    source_system,
+                    root_id,
+                    partition_id,
+                    scan_id,
+                    batch,
+                )
+                batch.clear()
+        for candidate in iterator:
+            batch.append(candidate)
+            if len(batch) >= self.options.checkpoint_size:
+                self._process_batch(
+                    source_system,
+                    root_id,
+                    partition_id,
+                    scan_id,
+                    batch,
+                )
+                batch.clear()
+        if batch:
+            self._process_batch(
+                source_system,
+                root_id,
+                partition_id,
+                scan_id,
+                batch,
+            )
+        for failure in file_failures:
+            self.store.record_file_error(
+                partition_id,
+                scan_id,
+                source_system=source_system,
+                relative_path=failure.relative_path.as_posix(),
+                code=failure.code,
+                detail=failure.detail,
+            )
+        if errors:
+            self.store.fail_partition(
+                partition_id,
+                "; ".join(errors),
+                "PARTITION_ENUMERATION_ERROR",
+            )
+        else:
+            self.store.complete_partition(partition_id)
+            self.store.mark_partition_missing_files_inactive(
+                partition_id, scan_id
+            )
+        self.store.sync_root_statistics(root_id, scan_id)
+
+    def _process_batch(
+        self,
+        source_system: str,
+        root_id: int,
+        partition_id: str,
+        scan_id: str,
+        batch: Sequence[_Candidate],
+    ) -> None:
+        file_ids = self.store.checkpoint_files(
+            partition_id,
+            scan_id,
+            tuple(candidate.indexed_file for candidate in batch),
+            count_progress=False,
+        )
+        matched = 0
+        for candidate, file_id in zip(batch, file_ids):
+            matches = self.matcher.match(candidate.relative_path)
+            if not matches:
+                continue
+            persisted = self.store.file_record(file_id)
+            if (
+                persisted["validation_status"] != "not_inspected"
+                and self.store.matches_for(file_id)
+            ):
+                matched += 1
+                continue
+            primary = matches[0]
+            try:
+                inspected = inspect_asset(
+                    candidate.absolute_path,
+                    primary.product_id,
+                    "unknown",
+                    source_system=source_system,
+                    sku=primary.sku,
+                )
+            except Exception as error:
+                # This is the per-file inspection boundary: malformed decoder
+                # inputs and read/hash failures must not abort sibling files.
+                # Process-control exceptions inherit BaseException and escape.
+                self.store.update_file_inspection(
+                    file_id,
+                    sha256="",
+                    width=None,
+                    height=None,
+                    validation_status="inspection_failed",
+                    reason_codes=("FILE_INSPECTION_ERROR",),
+                )
+                self.store.record_file_error(
+                    partition_id,
+                    scan_id,
+                    source_system=source_system,
+                    relative_path=candidate.relative_path.as_posix(),
+                    code="FILE_INSPECTION_ERROR",
+                    detail=str(error),
+                )
+                continue
+            matched += 1
+            self.store.update_file_inspection(
+                file_id,
+                sha256=inspected.sha256,
+                width=inspected.width,
+                height=inspected.height,
+                validation_status=inspected.validation_status,
+                reason_codes=inspected.reason_codes,
+            )
+            self.store.replace_file_matches(
+                file_id,
+                tuple(
+                    PathMatchRecord(
+                        product_id=match.product_id,
+                        sku=match.sku,
+                        product_title=match.product_title,
+                        match_type=match.match_type,
+                        match_status=match.match_status,
+                        reason_codes=match.reason_codes,
+                    )
+                    for match in matches
+                ),
+            )
+        self.store.advance_partition_progress(
+            partition_id,
+            scan_id,
+            len(batch),
+            discovered=len(batch),
+            indexed=len(batch),
+            matched=matched,
+        )
+        self.store.sync_root_statistics(root_id, scan_id)
+
+    def _fail_partition_scope(
+        self,
+        source_system: str,
+        root_id: int,
+        relative_directory: Path,
+        detail: str,
+        scan_id: str,
+        mode: str,
+        historical: dict[str, dict[str, object]],
+        encountered: set[str],
+    ) -> None:
+        prefix = self._clean_parts(relative_directory)
+        affected = [
+            relative_partition
+            for relative_partition in historical
+            if self._clean_parts(Path(relative_partition))[: len(prefix)] == prefix
+        ]
+        if not affected:
+            affected = [self._relative_partition(relative_directory).as_posix()]
+        for relative_partition in sorted(affected):
+            prior = historical.get(relative_partition)
+            if prior is not None and self._completed_for_resume(
+                prior, scan_id, mode
+            ):
+                encountered.add(relative_partition)
+                continue
+            self._process_partition(
+                source_system,
+                root_id,
+                Path(relative_partition),
+                (),
+                [detail],
+                [],
+                scan_id,
+                mode,
+                historical,
+                encountered,
+                force=True,
+            )
+
+    @staticmethod
+    def _completed_for_resume(
+        prior: dict[str, object], scan_id: str, mode: str
+    ) -> bool:
+        return (
+            mode == "resume"
+            and prior["status"] == "completed"
+            and prior["completed_scan_id"] == scan_id
+        )
 
     def _relative_partition(self, relative_directory: Path) -> Path:
         parts = self._clean_parts(relative_directory)

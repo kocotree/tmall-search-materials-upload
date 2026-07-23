@@ -15,7 +15,7 @@ uv run python -X utf8 $quickValidate .
 
 ## 2. 分片增量图片索引
 
-先校验商品表，再对三个声明的图片来源建立只读索引。以下命令使用占位商品表与隔离输出目录，仅供复制后替换；它们不表示已经扫描真实 NAS。raw indexing 不需要月份、店铺或坑位。
+先校验商品表，再对三个声明的图片来源建立只读索引。只有读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表会阻断整批。缺商品 ID、非法商品 ID、重复商品 ID 是行级 blocked：`scan-summary.json` 保留对应 source row 和 reason codes，这些行不参与 ID、SKU 或名称匹配，其余有效行继续。非空但全部行为行级 blocked 时仍可完成纯 metadata 索引。以下命令使用占位商品表与隔离输出目录，仅供复制后替换；它们不表示已经扫描真实 NAS。raw indexing 不需要月份、店铺或坑位。
 
 首次 new：
 
@@ -58,7 +58,7 @@ uv run tmall-materials index-assets `
   --refresh
 ```
 
-每次运行后检查 `<隔离输出目录>\asset-index\scan-summary.json` 和 `match-candidates.csv`；`asset-index.sqlite3` 保存 checkpoint 与 active/inactive 状态。`scan-summary.json` 也包含等价的恢复命令。ID/SKU 精确候选仍是 `matched_unlicensed`，名称候选是 `needs_manual_confirmation`，所有候选的 `license_status` 都从 `unknown` 开始。索引器不会生成 `confirmed-assets.csv`、批准清单或生产任务，也不会 dry-run、上传或发布。
+每次运行后检查 `<隔离输出目录>\asset-index\scan-summary.json` 和 `match-candidates.csv`；`asset-index.sqlite3` 保存 checkpoint 与 active/inactive 状态。`scan-summary.json` 也包含等价的恢复命令、最小商品校验证据、本轮逐 root/partition 统计，以及 `PATH_OUTSIDE_ROOT`、`FILE_STAT_ERROR`、`FILE_INSPECTION_ERROR` 等稳定错误码。ID/SKU 精确候选仍是 `matched_unlicensed`，名称候选是 `needs_manual_confirmation`，所有候选的 `license_status` 都从 `unknown` 开始。索引器不会生成 `confirmed-assets.csv`、批准清单或生产任务，也不会 dry-run、上传或发布。
 
 原始 NAS 图片只读，视频继续延期。同一个 `asset-index.sqlite3` 同一时刻只能有一个 Agent 或进程执行 new、`--resume`、`--refresh`，禁止并发。人工检查候选并确认逐文件授权后，才能生成或接受 `confirmed-assets.csv`，然后进入素材完整性审查、生产选择器、全量 dry-run 和 1–3 商品生产验收。
 

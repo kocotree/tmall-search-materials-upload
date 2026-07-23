@@ -233,3 +233,55 @@ def test_processed_count_is_reset_for_each_new_scan(tmp_path):
             [IndexedFile("model_nas", "2026/hats/c.jpg", "C:/assets/2026/hats/c.jpg", ".jpg", 10, 20, "2026/hats")],
         )
         assert store.partition_record(partition_id)["processed_count"] == 1
+
+
+def test_restart_partition_resets_progress_and_current_scan_visibility(tmp_path):
+    with make_store(tmp_path) as store:
+        partition_id, first_id = add_file(store, scan_id="scan-1")
+        second_id = store.checkpoint_files(
+            partition_id,
+            "scan-1",
+            [
+                IndexedFile(
+                    "model_nas",
+                    "2026/hats/b.jpg",
+                    "C:/assets/2026/hats/b.jpg",
+                    ".jpg",
+                    10,
+                    20,
+                    "2026/hats",
+                )
+            ],
+        )[0]
+        store.complete_partition(partition_id)
+        store.checkpoint_files(
+            partition_id,
+            "scan-2",
+            [
+                IndexedFile(
+                    "model_nas",
+                    "2026/hats/a.jpg",
+                    "C:/assets/2026/hats/a.jpg",
+                    ".jpg",
+                    10,
+                    20,
+                    "2026/hats",
+                )
+            ],
+        )
+        store.fail_partition(partition_id, "interrupted")
+
+        store.restart_partition(partition_id, "scan-2")
+
+        record = store.partition_record(partition_id)
+        assert record["status"] == "in_progress"
+        assert record["processed_count"] == 0
+        assert record["current_scan_id"] == "scan-2"
+        assert record["completed_scan_id"] is None
+        assert store.file_is_active(first_id) is True
+        assert store.file_is_active(second_id) is True
+        assert store._connection.execute(
+            "SELECT COUNT(*) FROM files "
+            "WHERE partition_id=? AND seen_scan_id='scan-2'",
+            (partition_id,),
+        ).fetchone()[0] == 0

@@ -23,9 +23,9 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 素材阶段按以下顺序执行：
 
-1. 完成环境与商品表预检；商品表有阻断错误时停止。
+1. 完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
 2. 对声明的图片 roots 运行 `index-assets`：首次使用 new；中断、持久 checkpoint 或部分失败后使用 `--resume`；素材新增、修改或删除后使用 `--refresh`。
-3. 检查同一隔离输出目录中的 `scan-summary.json` 和 `match-candidates.csv`；`asset-index.sqlite3` 是可恢复索引数据库。
+3. 检查同一隔离输出目录中的 `scan-summary.json` 和 `match-candidates.csv`；前者包含最小商品校验证据及本轮逐 root/partition 状态、计数和稳定错误码，`asset-index.sqlite3` 是可恢复索引数据库。
 4. 人工确认名称候选和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。ID/SKU 命中仍为 `matched_unlicensed`，名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
 5. 再进入素材完整性可视化审查、生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
 
