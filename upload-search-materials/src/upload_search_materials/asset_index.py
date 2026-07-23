@@ -290,20 +290,20 @@ class IncrementalAssetIndexer:
             raise ValueError(f"unsupported scan mode: {mode}")
         scan_was_started = self.store.scan_started()
         if mode == "new":
-            if self._new_started or not self.store.mark_scan_started():
+            if self._new_started:
                 raise ValueError("new mode requires a new index scan")
             scan_id = uuid.uuid4().hex
-            if not self.store.set_active_scan_id(scan_id):
-                raise ValueError("an active index scan already requires resume")
+            if not self.store.begin_scan("new", scan_id):
+                raise ValueError("new mode requires a new index scan")
+            effective_mode = "new"
         elif mode == "refresh":
-            self.store.mark_scan_started()
             scan_id = uuid.uuid4().hex
-            if not self.store.set_active_scan_id(scan_id):
+            if not self.store.begin_scan("refresh", scan_id):
                 raise ValueError("an active index scan already requires resume")
+            effective_mode = "refresh"
         else:
-            self.store.mark_scan_started()
-            scan_id = self.store.active_scan_id()
-            if scan_id is None:
+            active_scan = self.store.active_scan()
+            if active_scan is None:
                 if not scan_was_started:
                     raise ValueError("resume requires an active or completed index scan")
                 return ScanOutcome(
@@ -315,6 +315,7 @@ class IncrementalAssetIndexer:
                     failed=0,
                     elapsed_seconds=0.0,
                 )
+            scan_id, effective_mode = active_scan
         self._scan_id = scan_id
 
         started = time.perf_counter()
@@ -439,7 +440,7 @@ class IncrementalAssetIndexer:
                 if errors:
                     raise OSError("; ".join(errors))
                 self.store.complete_partition(partition_id)
-                if mode == "refresh":
+                if effective_mode == "refresh":
                     self.store.mark_partition_missing_files_inactive(partition_id, scan_id)
             except KeyboardInterrupt:
                 raise
@@ -452,7 +453,7 @@ class IncrementalAssetIndexer:
             self._new_started = True
         elapsed = time.perf_counter() - started
         if failed == 0:
-            self.store.clear_active_scan_id(scan_id)
+            self.store.clear_active_scan(scan_id)
         return ScanOutcome(
             complete=failed == 0,
             partial_failure=failed > 0,

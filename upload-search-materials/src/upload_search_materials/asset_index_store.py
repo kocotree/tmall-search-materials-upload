@@ -163,28 +163,73 @@ class AssetIndexStore:
             return cursor.rowcount == 1
 
     def active_scan_id(self) -> str | None:
-        row = self._connection.execute(
-            "SELECT value FROM scan_meta WHERE key = 'active_scan_id'"
-        ).fetchone()
-        return None if row is None else str(row["value"])
+        active = self.active_scan()
+        return None if active is None else active[0]
 
-    def set_active_scan_id(self, scan_id: str) -> bool:
+    def active_scan(self) -> tuple[str, str] | None:
+        rows = self._connection.execute(
+            "SELECT key, value FROM scan_meta "
+            "WHERE key IN ('active_scan_id', 'active_scan_mode')"
+        ).fetchall()
+        values = {str(row["key"]): str(row["value"]) for row in rows}
+        if not values:
+            return None
+        if set(values) != {"active_scan_id", "active_scan_mode"}:
+            raise IndexIdentityError("active scan state is incomplete")
+        mode = values["active_scan_mode"]
+        if mode not in {"new", "refresh"}:
+            raise IndexIdentityError("active scan mode is invalid")
+        return values["active_scan_id"], mode
+
+    def begin_scan(self, mode: str, scan_id: str) -> bool:
+        if mode not in {"new", "refresh"}:
+            raise ValueError("scan mode must be new or refresh")
         if not scan_id:
             raise ValueError("active scan identity must not be empty")
         with self._connection:
-            cursor = self._connection.execute(
-                "INSERT OR IGNORE INTO scan_meta(key, value) VALUES ('active_scan_id', ?)",
+            active_keys = self._connection.execute(
+                "SELECT COUNT(*) AS count FROM scan_meta "
+                "WHERE key IN ('active_scan_id', 'active_scan_mode')"
+            ).fetchone()
+            if int(active_keys["count"]) != 0:
+                return False
+            if mode == "new":
+                cursor = self._connection.execute(
+                    "INSERT OR IGNORE INTO scan_meta(key, value) "
+                    "VALUES ('scan_started', '1')"
+                )
+                if cursor.rowcount != 1:
+                    return False
+            else:
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO scan_meta(key, value) "
+                    "VALUES ('scan_started', '1')"
+                )
+            self._connection.execute(
+                "INSERT INTO scan_meta(key, value) VALUES ('active_scan_id', ?)",
                 (scan_id,),
             )
-            return cursor.rowcount == 1
+            self._connection.execute(
+                "INSERT INTO scan_meta(key, value) VALUES ('active_scan_mode', ?)",
+                (mode,),
+            )
+        return True
+
+    def clear_active_scan(self, scan_id: str) -> bool:
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT value FROM scan_meta WHERE key = 'active_scan_id'"
+            ).fetchone()
+            if row is None or row["value"] != scan_id:
+                return False
+            self._connection.execute(
+                "DELETE FROM scan_meta "
+                "WHERE key IN ('active_scan_id', 'active_scan_mode')"
+            )
+        return True
 
     def clear_active_scan_id(self, scan_id: str) -> bool:
-        with self._connection:
-            cursor = self._connection.execute(
-                "DELETE FROM scan_meta WHERE key = 'active_scan_id' AND value = ?",
-                (scan_id,),
-            )
-            return cursor.rowcount == 1
+        return self.clear_active_scan(scan_id)
 
     def upsert_root(self, source_system: str, root_path: str) -> int:
         with self._connection:

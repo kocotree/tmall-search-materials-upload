@@ -448,6 +448,102 @@ def test_refresh_interrupt_with_mixed_partition_scan_ids_resumes_active_scan(
     reopened.close()
 
 
+def test_refresh_resume_deactivates_deleted_file_and_removes_candidate(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    images = {}
+    for directory in ("a", "b"):
+        image = root / directory / "matched" / f"{directory}.png"
+        image.parent.mkdir(parents=True)
+        make_image(image)
+        images[directory] = image
+    store, indexer = make_indexer(tmp_path, root, depth=1, checkpoint_size=1)
+    assert indexer.run("new").complete
+    partition_ids = {
+        row["relative_path"]: row["partition_id"]
+        for row in store._connection.execute(
+            "SELECT relative_path, partition_id FROM partitions"
+        ).fetchall()
+    }
+    file_ids_by_partition = {
+        row["candidate_directory"]: row["file_id"]
+        for row in store._connection.execute(
+            "SELECT candidate_directory, file_id FROM files"
+        ).fetchall()
+    }
+    images["b"].unlink()
+    real_checkpoint = store.checkpoint_files
+    interrupted = False
+
+    def interrupt_before_deleted_partition(partition_id, scan_id, rows, **kwargs):
+        nonlocal interrupted
+        if partition_id == partition_ids["b"] and not interrupted and not rows:
+            interrupted = True
+            raise KeyboardInterrupt
+        return real_checkpoint(partition_id, scan_id, rows, **kwargs)
+
+    monkeypatch.setattr(store, "checkpoint_files", interrupt_before_deleted_partition)
+    with pytest.raises(KeyboardInterrupt):
+        indexer.run("refresh")
+
+    resumed = indexer.run("resume")
+    output = tmp_path / "candidates.csv"
+    asset_index_module.write_match_candidates(store, output)
+    with output.open("r", encoding="utf-8-sig", newline="") as stream:
+        candidates = list(csv.DictReader(stream))
+
+    assert resumed.complete
+    assert store.file_is_active(file_ids_by_partition["a"]) is True
+    assert store.file_is_active(file_ids_by_partition["b"]) is False
+    assert [row["candidate_directory"] for row in candidates] == ["a"]
+    store.close()
+
+
+def test_partial_failure_refresh_keeps_original_mode_for_resume_deactivation(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    partition = root / "b"
+    image = partition / "matched" / "old.png"
+    image.parent.mkdir(parents=True)
+    make_image(image)
+    store, indexer = make_indexer(tmp_path, root, depth=1, checkpoint_size=1)
+    assert indexer.run("new").complete
+    old_file_id = file_ids(store)[0]
+    image.unlink()
+    real_scandir = os.scandir
+
+    def fail_partition(path):
+        if Path(path) == partition.resolve():
+            raise OSError("temporary refresh failure")
+        return real_scandir(path)
+
+    monkeypatch.setattr("upload_search_materials.asset_index.os.scandir", fail_partition)
+    failed = indexer.run("refresh")
+    active_mode = store._connection.execute(
+        "SELECT value FROM scan_meta WHERE key='active_scan_mode'"
+    ).fetchone()
+    store.close()
+
+    monkeypatch.setattr("upload_search_materials.asset_index.os.scandir", real_scandir)
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 1, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    resumed = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(1, 1),
+    ).run("resume")
+
+    assert failed.partial_failure
+    assert active_mode is not None and active_mode[0] == "refresh"
+    assert resumed.complete
+    assert reopened.file_is_active(old_file_id) is False
+    assert reopened.active_scan() is None
+    reopened.close()
+
+
 def test_resume_skips_completed_and_retries_failed_partition(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "completed").mkdir(parents=True)

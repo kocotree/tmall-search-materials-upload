@@ -68,21 +68,41 @@ def test_scan_started_marker_persists_across_reopen(tmp_path):
         assert reopened.scan_started() is True
 
 
-def test_active_scan_identity_is_atomic_persistent_and_conditionally_cleared(tmp_path):
+def test_begin_scan_persists_id_and_original_mode_and_conditionally_clears(tmp_path):
     path = tmp_path / "asset-index.sqlite3"
     store = AssetIndexStore.create(path, IDENTITY)
 
-    assert store.active_scan_id() is None
-    assert store.set_active_scan_id("scan-1") is True
-    assert store.set_active_scan_id("scan-2") is False
+    assert store.active_scan() is None
+    assert store.begin_scan("new", "scan-1") is True
+    assert store.begin_scan("refresh", "scan-2") is False
     store.close()
 
     with AssetIndexStore.open(path, IDENTITY) as reopened:
-        assert reopened.active_scan_id() == "scan-1"
-        assert reopened.clear_active_scan_id("scan-2") is False
-        assert reopened.active_scan_id() == "scan-1"
-        assert reopened.clear_active_scan_id("scan-1") is True
-        assert reopened.active_scan_id() is None
+        assert reopened.active_scan() == ("scan-1", "new")
+        assert reopened.clear_active_scan("scan-2") is False
+        assert reopened.active_scan() == ("scan-1", "new")
+        assert reopened.clear_active_scan("scan-1") is True
+        assert reopened.active_scan() is None
+
+
+def test_begin_scan_sqlite_failure_rolls_back_new_started_marker(tmp_path):
+    store = make_store(tmp_path)
+    store._connection.execute(
+        "CREATE TRIGGER reject_active_scan BEFORE INSERT ON scan_meta "
+        "WHEN NEW.key='active_scan_id' BEGIN SELECT RAISE(ABORT, 'forced active failure'); END"
+    )
+    store._connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced active failure"):
+        store.begin_scan("new", "scan-1")
+
+    assert store.scan_started() is False
+    assert store.active_scan() is None
+    store._connection.execute("DROP TRIGGER reject_active_scan")
+    store._connection.commit()
+    assert store.begin_scan("new", "scan-2") is True
+    assert store.active_scan() == ("scan-2", "new")
+    store.close()
 
 
 def test_checkpoint_upserts_one_file_with_stable_id(tmp_path):
