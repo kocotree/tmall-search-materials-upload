@@ -221,6 +221,78 @@ def test_refresh_root_enumeration_failure_does_not_deactivate_historical_files(
     store.close()
 
 
+def test_refresh_intermediate_error_protects_all_historical_descendants(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    for relative_path in ("a/b/old.png", "a/c/old.png", "x/y/old.png"):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make_image(path)
+    store, indexer = make_indexer(tmp_path, root, depth=2)
+    indexer.run("new")
+    old_ids = file_ids(store)
+    store.close()
+
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 2, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    fresh_indexer = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(2, 1),
+    )
+    real_scandir = os.scandir
+
+    def fail_intermediate(path):
+        if Path(path) == (root / "a").resolve():
+            raise OSError("intermediate offline")
+        return real_scandir(path)
+
+    monkeypatch.setattr(
+        "upload_search_materials.asset_index.os.scandir", fail_intermediate
+    )
+
+    outcome = fresh_indexer.run("refresh")
+
+    assert outcome.partial_failure
+    assert all(reopened.file_is_active(file_id) for file_id in old_ids)
+    for relative_partition in ("a/b", "a/c"):
+        partition_id = fresh_indexer.partition_id_for(
+            "model", Path(relative_partition)
+        )
+        assert reopened.partition_record(partition_id)["status"] == "failed"
+    unrelated_id = fresh_indexer.partition_id_for("model", Path("x/y"))
+    assert reopened.partition_record(unrelated_id)["status"] == "completed"
+    reopened.close()
+
+
+def test_empty_new_scan_is_persistently_rejected_for_fresh_indexer(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    store, indexer = make_indexer(tmp_path, root, depth=1)
+
+    first = indexer.run("new")
+
+    assert first.complete and first.discovered == 0
+    store.close()
+
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 1, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    fresh_indexer = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(1, 1),
+    )
+
+    with pytest.raises(ValueError, match="new mode"):
+        fresh_indexer.run("new")
+    assert fresh_indexer.run("resume").complete
+    assert fresh_indexer.run("refresh").complete
+    reopened.close()
+
+
 def test_keyboard_interrupt_keeps_checkpoint_for_resume(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "matched").mkdir(parents=True)

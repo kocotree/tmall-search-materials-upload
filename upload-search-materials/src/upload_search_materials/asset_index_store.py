@@ -149,6 +149,19 @@ class AssetIndexStore:
         row = self._connection.execute("SELECT value FROM scan_meta WHERE key = 'schema_version'").fetchone()
         return int(row["value"])
 
+    def scan_started(self) -> bool:
+        row = self._connection.execute(
+            "SELECT value FROM scan_meta WHERE key = 'scan_started'"
+        ).fetchone()
+        return row is not None and row["value"] == "1"
+
+    def mark_scan_started(self) -> bool:
+        with self._connection:
+            cursor = self._connection.execute(
+                "INSERT OR IGNORE INTO scan_meta(key, value) VALUES ('scan_started', '1')"
+            )
+            return cursor.rowcount == 1
+
     def upsert_root(self, source_system: str, root_path: str) -> int:
         with self._connection:
             self._connection.execute(

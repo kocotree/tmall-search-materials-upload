@@ -94,8 +94,12 @@ class IncrementalAssetIndexer:
     def run(self, mode: Literal["new", "resume", "refresh"]) -> ScanOutcome:
         if mode not in {"new", "resume", "refresh"}:
             raise ValueError(f"unsupported scan mode: {mode}")
-        if mode == "new" and self._new_started:
-            raise ValueError("new mode requires a new index scan")
+        scan_was_started = self.store.scan_started()
+        if mode == "new":
+            if self._new_started or not self.store.mark_scan_started():
+                raise ValueError("new mode requires a new index scan")
+        else:
+            self.store.mark_scan_started()
 
         started = time.perf_counter()
         discovery = self._discover()
@@ -112,14 +116,19 @@ class IncrementalAssetIndexer:
                     historical_records[key] = record
                     partition_keys.add(key)
 
-            for source_system in root_ids:
-                root_error_key = (source_system, ".")
-                root_errors = tuple(discovery.errors.get(root_error_key, ()))
-                if not root_errors:
-                    continue
-                for key in historical_records:
-                    if key[0] == source_system and key != root_error_key:
-                        discovery.errors.setdefault(key, []).extend(root_errors)
+            discovered_errors = tuple(discovery.errors.items())
+            for historical_key in historical_records:
+                source_system, relative_partition = historical_key
+                historical_parts = self._clean_parts(Path(relative_partition))
+                for error_key, errors in discovered_errors:
+                    error_source, error_partition = error_key
+                    error_parts = self._clean_parts(Path(error_partition))
+                    if (
+                        error_source == source_system
+                        and len(error_parts) < len(historical_parts)
+                        and historical_parts[: len(error_parts)] == error_parts
+                    ):
+                        discovery.errors.setdefault(historical_key, []).extend(errors)
 
         registrations: dict[tuple[str, str], str] = {}
         records: dict[tuple[str, str], dict[str, object]] = {}
@@ -132,7 +141,7 @@ class IncrementalAssetIndexer:
                 self.store.partition_record(store_partition_id),
             )
 
-        scan_id = self._select_scan_id(mode, records)
+        scan_id = self._select_scan_id(mode, records, scan_was_started)
         indexed = matched = failed = 0
         for key in sorted(partition_keys):
             partition_id = registrations[key]
@@ -241,6 +250,7 @@ class IncrementalAssetIndexer:
         self,
         mode: str,
         records: dict[tuple[str, str], dict[str, object]],
+        scan_was_started: bool,
     ) -> str:
         if mode == "refresh":
             return uuid.uuid4().hex
@@ -255,6 +265,8 @@ class IncrementalAssetIndexer:
             for record in records.values()
             if record["current_scan_id"] is not None
         }
+        if not records and scan_was_started:
+            return uuid.uuid4().hex
         if len(scan_ids) != 1:
             raise ValueError("resume requires exactly one incomplete scan identity")
         return scan_ids.pop()

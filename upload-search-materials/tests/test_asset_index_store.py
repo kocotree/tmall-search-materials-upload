@@ -55,6 +55,19 @@ def test_open_rejects_persisted_schema_version_other_than_one(tmp_path):
         AssetIndexStore.open(path, IDENTITY)
 
 
+def test_scan_started_marker_persists_across_reopen(tmp_path):
+    path = tmp_path / "asset-index.sqlite3"
+    store = AssetIndexStore.create(path, IDENTITY)
+
+    assert store.scan_started() is False
+    store.mark_scan_started()
+    assert store.scan_started() is True
+    store.close()
+
+    with AssetIndexStore.open(path, IDENTITY) as reopened:
+        assert reopened.scan_started() is True
+
+
 def test_checkpoint_upserts_one_file_with_stable_id(tmp_path):
     with make_store(tmp_path) as store:
         _, first_id = add_file(store)
