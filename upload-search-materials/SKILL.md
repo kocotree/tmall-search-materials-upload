@@ -21,14 +21,26 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 ## Workflow
 
+素材阶段按以下顺序执行：
+
+1. 完成环境与商品表预检；商品表有阻断错误时停止。
+2. 对声明的图片 roots 运行 `index-assets`：首次使用 new；中断、持久 checkpoint 或部分失败后使用 `--resume`；素材新增、修改或删除后使用 `--refresh`。
+3. 检查同一隔离输出目录中的 `scan-summary.json` 和 `match-candidates.csv`；`asset-index.sqlite3` 是可恢复索引数据库。
+4. 人工确认名称候选和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。ID/SKU 命中仍为 `matched_unlicensed`，名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
+5. 再进入素材完整性可视化审查、生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
+
+可复制的 new、`--resume`、`--refresh` 三源命令见 [operations-guide.md](references/operations-guide.md)。raw indexing 不要求月份、店铺或坑位；这些值只在后续 eligible、完整性和生产阶段使用。原始 NAS 文件保持只读，视频继续延期。索引器只生成审查候选和扫描状态：不生成批准清单，不执行 dry-run、上传或发布。
+
+完成素材阶段后：
+
 1. 阅读 [business-rules.md](references/business-rules.md)、[data-schema.md](references/data-schema.md) 和 [asset-requirements.md](references/asset-requirements.md)。
 2. 通过 `tmall-materials export` 在正确店铺导出两份 XLSX；无法使用浏览器时允许用户提供同格式人工导出文件。
 3. 运行 `tmall-materials run`。先排除清仓、UVNO、好物体验、会员日和积分，再应用月度规则。
 4. 对 `supplement-candidates.csv` 运行 `tmall-materials supplement`，只补采 3/9 坑、空坑和审核状态未知的 eligible 商品。
-5. 带 `--backend-status`、素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。
+5. 带 `--backend-status`、已人工确认的素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。
 6. 用户选择精确 task ID 后运行 `tmall-materials approve`，生成不可变 `approval-manifest.json`。
 7. 运行 `tmall-materials publish`。发布前重新核对店铺、商品、坑位和批准内容哈希；发布后回查远端状态。
-8. 中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
+8. 上传中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
 运行 `uv run tmall-materials --help` 查看参数。所有命令从本 skill 目录执行；使用 `uv sync --extra test` 根据 `.python-version` 和 `uv.lock` 同步 Python 3.11 环境。
 
@@ -53,6 +65,8 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 ## Safety Contract
 
 - 不保存或输出密码、Cookie、Token、短信码、二维码登录数据。
+- 同一个 `asset-index.sqlite3` 同一时刻只能由一个 Agent 或进程运行 new、`--resume` 或 `--refresh`；禁止并发索引同一数据库。
+- 索引时只读声明的原始图片 roots，不修改、移动或删除源文件；视频不进入本阶段。
 - 不调用未公开的天猫内部 API，不绕过登录、验证码、扫码、短信、风控或权限。
 - 当前店铺与目标店铺不一致：整批进入 blocked，任何任务都不得搜索或发布。
 - 批次 blocked 是运行门禁：保留各 item 原状态并标记 held，不把坑位任务强改成不存在于其状态机的 blocked；店铺恢复正确并重新核验后再决定是否解除门禁。

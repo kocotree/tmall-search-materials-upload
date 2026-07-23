@@ -13,7 +13,56 @@ uv run python -X utf8 $quickValidate .
 
 `uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 创建或同步 `.venv`。首次同步需要访问 Python 包索引；后续验收使用 `uv lock --check` 检查锁文件是否与 `pyproject.toml` 一致。不要向系统 Python 或 Conda 基础环境直接安装本项目依赖。
 
-## 2. 启动用户控制的 CDP 浏览器
+## 2. 分片增量图片索引
+
+先校验商品表，再对三个声明的图片来源建立只读索引。以下命令使用占位商品表与隔离输出目录，仅供复制后替换；它们不表示已经扫描真实 NAS。raw indexing 不需要月份、店铺或坑位。
+
+首次 new：
+
+```powershell
+uv run tmall-materials index-assets `
+  --products "<商品总表.csv>" `
+  --root "model_nas=Y:\视觉部\1-模特图" `
+  --root "xhs_taobao=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀" `
+  --root "xhs_buyer=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀" `
+  --output "<隔离输出目录>\asset-index" `
+  --partition-depth 2 `
+  --checkpoint-size 1000
+```
+
+中断、已有持久 checkpoint 或部分失败后，在同一商品表、roots、output 和参数上恢复：
+
+```powershell
+uv run tmall-materials index-assets `
+  --products "<商品总表.csv>" `
+  --root "model_nas=Y:\视觉部\1-模特图" `
+  --root "xhs_taobao=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀" `
+  --root "xhs_buyer=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀" `
+  --output "<隔离输出目录>\asset-index" `
+  --partition-depth 2 `
+  --checkpoint-size 1000 `
+  --resume
+```
+
+图片新增、修改或删除后，在同一索引身份上刷新：
+
+```powershell
+uv run tmall-materials index-assets `
+  --products "<商品总表.csv>" `
+  --root "model_nas=Y:\视觉部\1-模特图" `
+  --root "xhs_taobao=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀" `
+  --root "xhs_buyer=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀" `
+  --output "<隔离输出目录>\asset-index" `
+  --partition-depth 2 `
+  --checkpoint-size 1000 `
+  --refresh
+```
+
+每次运行后检查 `<隔离输出目录>\asset-index\scan-summary.json` 和 `match-candidates.csv`；`asset-index.sqlite3` 保存 checkpoint 与 active/inactive 状态。`scan-summary.json` 也包含等价的恢复命令。ID/SKU 精确候选仍是 `matched_unlicensed`，名称候选是 `needs_manual_confirmation`，所有候选的 `license_status` 都从 `unknown` 开始。索引器不会生成 `confirmed-assets.csv`、批准清单或生产任务，也不会 dry-run、上传或发布。
+
+原始 NAS 图片只读，视频继续延期。同一个 `asset-index.sqlite3` 同一时刻只能有一个 Agent 或进程执行 new、`--resume`、`--refresh`，禁止并发。人工检查候选并确认逐文件授权后，才能生成或接受 `confirmed-assets.csv`，然后进入素材完整性审查、生产选择器、全量 dry-run 和 1–3 商品生产验收。
+
+## 3. 启动用户控制的 CDP 浏览器
 
 关闭正在使用同一 profile 的 Chromium 后，以独立 profile 和仅本机监听的调试端口启动 Chrome 或 Edge。例如将实际可执行文件路径替换进下列命令：
 
@@ -23,7 +72,7 @@ uv run python -X utf8 $quickValidate .
 
 CDP URL 为 `http://127.0.0.1:9222`。用户必须在该窗口自行登录、处理验证码/短信/扫码/风控，并确认页面可见店铺名。不要把 profile、Cookie 或登录信息放入版本库。
 
-## 3. 导出与只读检查
+## 4. 导出与只读检查
 
 所有时间使用带时区 ISO 8601，例如 `2026-07-17T10:00:00+08:00`。导出 `run-id` 使用不可重复的可读值，例如 `20260717T100000+0800-kktree-export`。
 
@@ -32,14 +81,14 @@ uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产se
 uv run tmall-materials inspect-xlsx --basic "<基础素材XLSX>" --search "<搜推经营XLSX>"
 ```
 
-## 4. 首次 dry-run 与 Playwright 补采
+## 5. 首次 dry-run 与 Playwright 补采
 
 ```powershell
 uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" --products "<商品总表.csv>" --rules "<月度规则.csv>" --basic "<基础素材.xlsx>" --search "<搜推经营.xlsx>" --output "<首次批次目录>" --started-at "<ISO时间>"
 uv run tmall-materials supplement --store "<店铺名>" --selectors "<生产selectors.yaml>" --candidates "<首次批次目录>\supplement-candidates.csv" --output "<backend-material-status.csv>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
 ```
 
-## 5. 素材、授权、文案与最终 dry-run
+## 6. 素材、授权、文案与最终 dry-run
 
 目录型素材只搜索 `<asset-root>/<商品ID>/`，其次 `<asset-root>/<货号>/`。`--license-status confirmed` 表示用户确认该批目录中的每个文件均已授权；若授权状态不统一，当前 CLI 不能正式发布，应保持 blocked，待接入逐文件素材清单。当前视频元数据入口也未闭合，视频任务应保持 `VIDEO_METADATA_UNAVAILABLE`。
 
@@ -51,7 +100,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 打开 `review.html`，只选择 `ready_for_review` 的精确 task ID。
 
-## 6. 精确批准、发布与恢复
+## 7. 精确批准、发布与恢复
 
 ```powershell
 uv run tmall-materials approve --run-dir "<最终审核批次目录>" --task-id "<task-id-1>" --confirmed-by "<批准人>" --confirmed-at "<ISO时间>" --valid-until "<ISO时间>"
@@ -67,7 +116,7 @@ uv run tmall-materials report --run-dir "<最终审核批次目录>"
 
 生产前还必须满足 [production-acceptance.md](production-acceptance.md)。示例选择器和示例媒体策略不能直接用于生产。
 
-## 7. 交互式任务执行
+## 8. 交互式任务执行
 
 新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
 

@@ -160,7 +160,7 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --r
 
 ## 阶段 3：素材清单与三处图片来源
 
-**状态：** 进行中（2026-07-21 图片子阶段通过；三处来源综合回归待执行；视频延期）
+**状态：** 阻断（2026-07-23 索引器实现与本地隔离验收完成；真实三源全量索引、人工候选确认、授权和完整性审查待执行；视频延期）
 
 **目标：** 验证目录型或逐文件清单型素材能够进入 dry-run，并按商品安全匹配；本轮只测试图片。
 
@@ -177,9 +177,14 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --r
 - [x] 目录型和 `--asset-manifest` 入口进入 CLI，逐文件授权不被批次级参数覆盖。
 - [x] 含 `confirmed` / `unknown` 的清单返回稳定授权结果。
 - [x] 有商品 ID 的清单行必须精确匹配商品 ID，避免共享 SKU 跨链接取错素材。
+- [x] 分片增量索引器完成本地隔离 new、持久 checkpoint 中断恢复和增删改 refresh 验收；索引候选不自动生成批准清单。
 - [ ] 对上述三处根目录分别生成只读扫描清单，再按商品合并候选；记录来源、匹配方式、命中数量、待确认项和 SHA-256。
 - [ ] 在页面逐商品人工确认名称候选和别名，确认结果保存到当前时间戳任务的 JSON，不修改原图。
+- [ ] 在页面逐商品展示素材完整性审查表，至少包含商品 ID、商品名称、应有坑位、已有坑位、缺失数量、缺失类型、候选素材数量和人工处理结论；用户确认结果保存到当前时间戳任务的 JSON。
+- [ ] 对 `uvno`、清仓、好物体验类、会员日和积分商品显示“排除维护”及具体原因；不得仅从页面隐藏，也不得进入后续补素材候选。
+- [ ] 本轮图片扫描范围仅为上述三处 NAS 根目录；飞书表格/文档图片入口标记为“后续接入，等待路径、导出格式与读取权限确认”，不得视为已验收。
 - [ ] 视频元数据与视频策略检查：`延期`，不得阻断本轮图片测试。
+- [ ] 光合短视频下载入口标记为“视频阶段待确认”，后续需向业务负责人确认入口、授权和下载方式；本轮不得视为已验收。
 - [ ] 比较测试前后原始图片的大小、mtime 和 SHA-256。
 
 ```powershell
@@ -189,6 +194,14 @@ uv run --project .\upload-search-materials --locked tmall-materials run --help |
 ```
 
 **已完成图片子阶段实际结果：** 完整测试当时为 `99 passed, 1 warning`。真实样本使用商品 `887508274682 / KQ25024 / 小芭蕉卷卷帽` 的同一达人 3 张图片，均成功读取为 `854×1280`；授权未知返回 `LICENSE_UNKNOWN`，当前比例策略返回 `ASPECT_RATIO_INVALID`；测试前后大小、mtime 和 SHA-256 一致。
+
+**2026-07-22 三源预检结果：** 隔离会话 `20260722_143048` 已创建。三个根目录均可只读访问；使用 `rg --files` 统计图片共 `413,309` 张，其中 Y 盘模特图 `396,683` 张（2026：`116,262`，2025：`165,937`，2024：`82,031`，2023：`32,453`），小红书 KOC 与淘宝买家秀 `14,042` 张，小红书 KOC 与买家秀 `2,584` 张。三处来源各抽取 1 张图片完成可读性、尺寸和 SHA-256 检查，读取前后大小与 mtime 一致；三张均因尚未确认逐文件授权返回 `LICENSE_UNKNOWN`。仓库已有商品总表 `611` 行、基础素材 `2,158` 行和搜推数据 `808` 行；商品表中 `33` 行缺商品 ID、`11` 行重复商品 ID，必须保持 blocked。样本“小鸟岛针织帽”和“小萌宠滑雪服”命中清仓排除；“花仙子翻翻帽-椰蓉”仅作为 `1009488728622 / KQ26021 / 花仙子翻翻帽` 的待确认别名。`tests/test_assets.py` 为 `13 passed`。
+
+**2026-07-23 索引器本地隔离验收：** 在 `test_evidence/03-assets-video/indexer-acceptance/20260723_101741/` 创建最小商品表和三个本地图片 roots，覆盖 ID 精确候选、SKU 精确候选、名称人工候选和未匹配图片。completed new 生成数据库、候选 CSV 与摘要，结果为 3 roots、4 active files、3 matched files、3 candidate groups；在 1 个 partition 的 checkpoint 已持久化后制造 `KeyboardInterrupt`，中断退出码 `1` 且生成等价恢复命令，实际 `--resume` 退出码 `0` 并完成；图片增、改、删后 `--refresh` 验证 4 active / 1 inactive、修改文件重新哈希、新文件 active、删除文件 inactive，以及 SKU 候选消失、ID 候选图片数变为 2。三源、UTF-8/CSV BOM、`license_status=unknown`、名称 `needs_manual_confirmation`、不生成 `confirmed-assets.csv`、索引前后源文件不被索引器修改均通过；未访问 NAS、未测试视频、未 dry-run、上传或发布。自动验证为 pytest `265 passed, 1 skipped, 1 warning`、Node `9 passed`、`uv lock --check` 与 Skill validator 通过；warning 仍为只读源 XLSX 缺少默认样式。
+
+**当前阻断：** 索引器实现与本地隔离验收已完成，真实三源全量索引仍待执行；完成真实索引后还需人工确认名称候选和逐文件授权，并完成素材完整性可视化审查。月份、准确店铺和后台目标坑位数据不阻断 raw indexing，但仍是后续 eligible/completeness/生产阶段生成逐商品应有/已有/缺失矩阵的必要输入。禁止用目录名称自动冒充精确商品命中。
+
+**本次证据：** 索引器 acceptance 为 `test_evidence/03-assets-video/indexer-acceptance/20260723_101741/acceptance-summary.json`、同目录 `commands-and-results.json`、`new-output/` 和 `interrupt-resume-output/`；既有三源预检证据为 `test_evidence/03-assets-video/runs/20260722_143048/04-asset-matching/preflight.json`、同目录 `input.json`，以及会话根目录的 `session.json`。
 
 **历史证据（保留）：** `test_evidence/02-assets-video/run-help-after-manifest.txt`、`pytest-final-images.txt`、`mixed-license.txt`、`xiaobajiao-assets.csv`、`xiaobajiao-inspection.json`、`xiaobajiao-before.csv`、`xiaobajiao-after.csv`。
 
@@ -209,6 +222,9 @@ uv run --project .\upload-search-materials --locked tmall-materials run --help |
 - [ ] 策略 B：只允许 PNG、3:4、数量 3–5 张；只改 YAML 即改变结果。
 - [ ] 混合比例返回 `MIXED_ASPECT_RATIO`；损坏图片、零高度和超容差不会异常退出或静默通过。
 - [ ] 结合阶段 3 的三处来源，确认小红书常见 `2:3` 图片应直接上传、裁切还是仅作人工候选。
+- [ ] 验证业务坑位规则：三坑商品最终三坑传满，九坑商品最终九坑传满；缺少可用素材时标记 `blocked` 或 `needs_manual_review`，不得以空坑通过。
+- [ ] 本轮纯图片商品优先生成图文任务；视频恢复测试后，再验证三坑为 `1 视频 + 2 图文`、九坑为 `3 视频 + 6 图文`。视频配比在恢复测试前保持“延期”，不得标记通过。
+- [ ] 对需要裁剪的图片展示原图比例、目标比例、裁剪预览和裁剪后尺寸，并由用户确认“直传 / 裁剪 / 仅作候选”；裁剪只能生成派生文件或使用平台裁剪，不得覆盖原图。
 
 ```powershell
 New-Item -ItemType Directory -Force test_evidence\04-image-policy | Out-Null
@@ -252,6 +268,9 @@ uv run --project .\upload-search-materials --locked python -c "from pathlib impo
 - [ ] 记录全部输入的大小、mtime 和 SHA-256。
 - [ ] 完成第一轮 dry-run、只补采候选商品，再用后台状态、逐文件素材清单、媒体策略和文案响应运行最终 dry-run。
 - [ ] 每个输入商品恰有一条资格审计结果，多原因商品保留全部原因。
+- [ ] 资格审计明确覆盖 `uvno`、清仓、好物体验类、会员日和积分五类排除规则；每类至少准备一个命中样本并输出稳定原因码，命中商品不得生成上传任务。
+- [ ] 标题按“KK树 + 年龄或性别 + 品类词 + 卖点词”生成并逐字段校验；缺少必要字段时进入人工审查，不得猜测补全。
+- [ ] AI 卖点描述必须来自可审计的 `TMALL_COPY_RESPONSES`，页面同时展示原始输入、生成描述和人工确认结果；未确认文案不得进入批准清单。视频文案验收随视频测试延期。
 - [ ] `product-tasks.json`、`material-items.json`、`review.html`、`run.sqlite3` 和报告完整。
 - [ ] 不生成 `approval-manifest.json` 或真实发布结果；原始输入 SHA-256 不变。
 
@@ -328,8 +347,8 @@ git diff -- test_plan.md upload-search-materials plan.md
 | --- | --- | --- |
 | 1. 测试环境 | 通过（2026-07-20） | `test_evidence/01-environment/`；历史完整测试 `95 passed`，Skill 校验通过 |
 | 2. 交互页面与任务隔离 | 通过（2026-07-22） | 聚焦 `112 passed`、Node `9 passed`、全量 `203 passed`；版本协议、独占领取、草稿 CAS、wheel 资源及 1440/1024 浏览器与非生产 handoff 验收通过 |
-| 3. 素材清单与三处图片来源 | 进行中 | 历史“小芭蕉卷卷帽”图片证据已保留；三处来源综合扫描待执行；视频延期 |
-| 4. 图片策略 | 未开始 | `test_evidence/04-image-policy/` |
+| 3. 素材清单与三处图片来源 | 阻断（2026-07-23） | 索引器实现与本地隔离 new/resume/refresh 验收完成；三源预检 `413,309` 张证据保留；真实三源全量索引、人工候选确认、授权和完整性审查待执行，飞书与视频入口延期 |
+| 4. 图片策略 | 未开始 | 三/九坑填满、纯图片优先、视频配比延期及裁剪预览待验收；`test_evidence/04-image-policy/` |
 | 5. 生产选择器 | 未开始 | `test_evidence/05-selectors/` |
 | 6. 全量 dry-run | 未开始 | `test_evidence/06-dry-run/` |
 | 7. 1–3 商品生产验收 | 阻断：等待再次授权 | `test_evidence/07-production-pilot/` |
@@ -344,4 +363,4 @@ git diff -- test_plan.md upload-search-materials plan.md
 
 ## 下一步
 
-继续阶段 3：对三处图片来源执行只读综合扫描与人工确认，记录来源、匹配方式、待确认项和 SHA-256；视频测试保持延期。完成素材来源验收后，再进入阶段 4 图片策略，确认小红书常见 `2:3` 图片是允许直传、裁切还是仅作为人工候选。
+解除阶段 3 阻断：使用已验收的索引器对真实三源执行串行只读全量 new 索引，检查 `scan-summary.json` 与 `match-candidates.csv`，再完成人工名称候选确认和逐文件授权；随后确认目标月份、准确店铺与后台目标坑位数据，生成逐商品应有/已有/缺失坑位、候选素材和五类排除原因，完成完整性可视化审查。飞书图片入口与光合视频入口保持延期。完成素材来源验收后，再进入阶段 4 图片策略，确认三/九坑填满规则、纯图片优先，以及小红书常见 `2:3` 图片是允许直传、生成派生裁剪文件还是仅作为人工候选。
