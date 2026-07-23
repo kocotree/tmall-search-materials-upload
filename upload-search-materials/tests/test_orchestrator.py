@@ -747,13 +747,21 @@ def test_page_context_requires_injected_page_or_cdp_url():
             pass
 
 
-def test_export_command_writes_two_hashed_source_records(tmp_path):
+def test_export_command_writes_isolated_manifest_for_basic_and_promotion(tmp_path):
     basic = tmp_path / "basic-source.xlsx"
     search = tmp_path / "search-source.xlsx"
-    basic.write_bytes(b"basic")
-    search.write_bytes(b"search")
+    basic_workbook = Workbook()
+    basic_sheet = basic_workbook.active
+    basic_sheet.append(["商品ID", "商品标题", "商品白底图", "短标题"])
+    basic_sheet.append(["123", "儿童帽", "", ""])
+    basic_workbook.save(basic)
+    search_workbook = Workbook()
+    search_sheet = search_workbook.active
+    search_sheet.append(["商品ID", "素材类型", "素材ID", "审核状态"])
+    search_sheet.append(["123", "图文", "M-1", "审核通过"])
+    search_workbook.save(search)
     page = CliFakePage(
-        [CliFakeDownload(basic, "基础素材.xlsx"), CliFakeDownload(search, "搜推素材.xlsx")]
+        [CliFakeDownload(basic, "基础素材.xlsx"), CliFakeDownload(search, "推广素材.xlsx")]
     )
     selectors = Path(__file__).parents[1] / "config" / "selectors.example.yaml"
     output = tmp_path / "exports"
@@ -766,14 +774,52 @@ def test_export_command_writes_two_hashed_source_records(tmp_path):
             "--output", str(output),
             "--run-id", "RUN-1",
             "--downloaded-at", "2026-07-17T10:00:00+08:00",
+            "--product-status", "售卖中",
+            "--report", "both",
         ],
         page=page,
     )
     records = json.loads((output / "source-files.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output / "export-manifest.json").read_text(encoding="utf-8"))
 
     assert exit_code == 0
     assert len(records) == 2
     assert all(len(record["sha256"]) == 64 for record in records)
+    assert [record["report_type"] for record in records] == ["basic", "promotion"]
+    assert manifest["schema_version"] == 1
+    assert manifest["run_id"] == "RUN-1"
+    assert manifest["store"] == "KK Tree"
+    assert manifest["filters"] == {"product_status": "售卖中"}
+    assert manifest["status"] == "complete"
+    assert manifest["promotion_contract_status"] == "draft"
+    assert manifest["reports"] == records
+
+
+def test_export_command_rejects_nonempty_output_before_browser_use(tmp_path):
+    selectors = Path(__file__).parents[1] / "config" / "selectors.example.yaml"
+    output = tmp_path / "exports"
+    output.mkdir()
+    sentinel = output / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    page = CliFakePage([])
+
+    exit_code = main(
+        [
+            "export",
+            "--store", "KK Tree",
+            "--selectors", str(selectors),
+            "--output", str(output),
+            "--run-id", "RUN-1",
+            "--downloaded-at", "2026-07-17T10:00:00+08:00",
+            "--product-status", "售卖中",
+            "--report", "basic",
+        ],
+        page=page,
+    )
+
+    assert exit_code == 2
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert page.clicked == []
 
 
 def test_supplement_command_writes_backend_status_csv(tmp_path):

@@ -46,6 +46,12 @@ class SourceFile:
     sha256: str
     downloaded_at: str | None = None
     original_name: str | None = None
+    report_type: str = ""
+    row_count: int | None = None
+    schema_valid: bool | None = None
+    contract_status: str = ""
+    status: str = "downloaded"
+    reason_codes: list[str] = field(default_factory=list)
 
 
 @dataclass

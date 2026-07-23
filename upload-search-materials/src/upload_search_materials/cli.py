@@ -604,7 +604,21 @@ def _report(args) -> int:
 
 
 def _export(args, page, page_factory=None) -> int:
+    output = Path(args.output)
+    if output.exists():
+        try:
+            if any(output.iterdir()):
+                print("导出被阻断：输出目录必须不存在或为空", file=sys.stderr)
+                return 2
+        except OSError as error:
+            print(f"导出被阻断：无法检查输出目录：{error}", file=sys.stderr)
+            return 2
     selectors = load_selectors(Path(args.selectors))
+    report_types = (
+        ("basic", "promotion")
+        if args.report == "both"
+        else (args.report,)
+    )
     try:
         with page_context(page, args.cdp_url, page_factory) as resolved_page:
             assert_store_identity(resolved_page, selectors["store_name"], args.store)
@@ -615,12 +629,36 @@ def _export(args, page, page_factory=None) -> int:
                 Path(args.output),
                 run_id=args.run_id,
                 downloaded_at=args.downloaded_at,
+                report_types=report_types,
             )
     except BrowserSessionRequired as error:
         print(f"导出被阻断：{error}", file=sys.stderr)
         return 2
-    write_json(Path(args.output) / "source-files.json", records)
-    return 0
+    invalid_reason_codes = sorted(
+        {
+            reason
+            for record in records
+            for reason in record.reason_codes
+        }
+    )
+    write_json(output / "source-files.json", records)
+    write_json(
+        output / "export-manifest.json",
+        {
+            "schema_version": 1,
+            "run_id": args.run_id,
+            "store": args.store,
+            "downloaded_at": args.downloaded_at,
+            "filters": {"product_status": args.product_status},
+            "status": "needs_manual_review" if invalid_reason_codes else "complete",
+            "reason_codes": invalid_reason_codes,
+            "promotion_contract_status": (
+                "draft" if "promotion" in report_types else "not_requested"
+            ),
+            "reports": records,
+        },
+    )
+    return 1 if invalid_reason_codes else 0
 
 
 def _supplement(args, page, page_factory=None) -> int:
@@ -919,12 +957,21 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_xlsx.add_argument("--basic", required=True)
     inspect_xlsx.add_argument("--search", required=True)
 
-    export = subparsers.add_parser("export", help="Export both Tmall XLSX reports via Playwright")
+    export = subparsers.add_parser(
+        "export",
+        help="Export basic and/or promotion material XLSX reports via Playwright",
+    )
     export.add_argument("--store", required=True)
     export.add_argument("--selectors", required=True)
     export.add_argument("--output", required=True)
     export.add_argument("--run-id", required=True)
     export.add_argument("--downloaded-at", required=True)
+    export.add_argument("--product-status", required=True)
+    export.add_argument(
+        "--report",
+        choices=("basic", "promotion", "both"),
+        default="both",
+    )
     export.add_argument("--cdp-url")
 
     supplement = subparsers.add_parser(

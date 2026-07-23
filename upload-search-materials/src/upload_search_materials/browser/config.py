@@ -7,7 +7,6 @@ REQUIRED_SELECTORS = {
     "store_name",
     "human_check",
     "export_basic",
-    "export_search",
     "product_search",
     "product_id",
     "desired_slots",
@@ -40,6 +39,14 @@ def load_selectors(path: Path) -> dict[str, str]:
     if not isinstance(values, dict):
         raise SelectorConfigError("选择器配置必须是键值映射")
     missing = sorted(key for key in REQUIRED_SELECTORS if not str(values.get(key, "")).strip())
+    promotion_selector = str(
+        values.get("export_promotion") or values.get("export_search") or ""
+    ).strip()
+    if not promotion_selector:
+        missing.append("export_promotion/export_search")
     if missing:
         raise SelectorConfigError("缺少选择器: " + ", ".join(missing))
-    return {str(key): str(value).strip() for key, value in values.items()}
+    normalized = {str(key): str(value).strip() for key, value in values.items()}
+    normalized["export_promotion"] = promotion_selector
+    normalized["export_search"] = promotion_selector
+    return normalized

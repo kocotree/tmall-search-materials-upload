@@ -142,6 +142,30 @@ def test_missing_required_selector_fails_configuration(tmp_path):
         load_selectors(path)
 
 
+def test_promotion_export_selector_accepts_new_name_and_normalizes_legacy_alias(
+    tmp_path,
+):
+    path = tmp_path / "selectors.yaml"
+    values = dict(REQUIRED_SELECTOR_VALUES)
+    values["export_promotion"] = values.pop("export_search")
+    write_selectors(path, values)
+
+    selectors = load_selectors(path)
+
+    assert selectors["export_promotion"] == "#export-search"
+    assert selectors["export_search"] == "#export-search"
+
+
+def test_missing_both_promotion_export_selector_names_fails_configuration(tmp_path):
+    path = tmp_path / "selectors.yaml"
+    values = dict(REQUIRED_SELECTOR_VALUES)
+    values.pop("export_search")
+    write_selectors(path, values)
+
+    with pytest.raises(SelectorConfigError, match="export_promotion"):
+        load_selectors(path)
+
+
 def test_wrong_store_stops_batch():
     page = FakePage()
     page.texts["#store"] = "Other Store"
@@ -212,12 +236,22 @@ def test_material_status_supplement_reads_exact_product():
 def test_export_reports_preserves_both_downloads_and_hashes(tmp_path):
     source_basic = tmp_path / "source-basic.xlsx"
     source_search = tmp_path / "source-search.xlsx"
-    source_basic.write_bytes(b"basic")
-    source_search.write_bytes(b"search")
+    from openpyxl import Workbook
+
+    basic_workbook = Workbook()
+    basic_sheet = basic_workbook.active
+    basic_sheet.append(["商品ID", "商品标题", "商品白底图", "短标题"])
+    basic_sheet.append(["123", "儿童帽", "", ""])
+    basic_workbook.save(source_basic)
+    search_workbook = Workbook()
+    search_sheet = search_workbook.active
+    search_sheet.append(["商品ID", "素材类型", "素材ID", "审核状态"])
+    search_sheet.append(["123", "图文", "M-1", "审核通过"])
+    search_workbook.save(source_search)
     page = FakeExportPage(
         [
             FakeDownload(source_basic, "基础素材.xlsx"),
-            FakeDownload(source_search, "搜推素材.xlsx"),
+            FakeDownload(source_search, "推广素材.xlsx"),
         ]
     )
 
@@ -227,12 +261,73 @@ def test_export_reports_preserves_both_downloads_and_hashes(tmp_path):
         tmp_path / "downloads",
         run_id="RUN-1",
         downloaded_at="2026-07-17T10:00:00+08:00",
+        report_types=("basic", "promotion"),
     )
 
     assert len(records) == 2
     assert all(Path(record.path).exists() for record in records)
     assert all(len(record.sha256) == 64 for record in records)
+    assert [record.report_type for record in records] == ["basic", "promotion"]
+    assert [record.row_count for record in records] == [1, 1]
+    assert all(record.schema_valid for record in records)
+    assert records[0].contract_status == "confirmed"
+    assert records[1].contract_status == "draft"
+    assert Path(records[0].path).parent.name == "basic"
+    assert Path(records[1].path).parent.name == "promotion"
     assert page.clicked == ["#export-basic", "#export-search"]
+
+
+def test_export_reports_can_download_only_basic_materials(tmp_path):
+    from openpyxl import Workbook
+
+    source = tmp_path / "source-basic.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["商品ID", "商品标题", "商品白底图", "短标题"])
+    sheet.append(["123", "儿童帽", "", ""])
+    workbook.save(source)
+    page = FakeExportPage([FakeDownload(source, "基础素材.xlsx")])
+
+    records = export_reports(
+        page,
+        REQUIRED_SELECTOR_VALUES,
+        tmp_path / "downloads",
+        run_id="RUN-1",
+        downloaded_at="2026-07-17T10:00:00+08:00",
+        report_types=("basic",),
+    )
+
+    assert len(records) == 1
+    assert records[0].report_type == "basic"
+    assert records[0].row_count == 1
+    assert records[0].schema_valid is True
+    assert page.clicked == ["#export-basic"]
+
+
+def test_export_reports_keeps_invalid_promotion_download_for_manual_review(tmp_path):
+    from openpyxl import Workbook
+
+    source = tmp_path / "source-promotion.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["商品ID", "未知字段"])
+    sheet.append(["123", "value"])
+    workbook.save(source)
+    page = FakeExportPage([FakeDownload(source, "推广素材.xlsx")])
+
+    records = export_reports(
+        page,
+        REQUIRED_SELECTOR_VALUES,
+        tmp_path / "downloads",
+        run_id="RUN-1",
+        downloaded_at="2026-07-17T10:00:00+08:00",
+        report_types=("promotion",),
+    )
+
+    assert Path(records[0].path).exists()
+    assert records[0].schema_valid is False
+    assert records[0].status == "needs_manual_review"
+    assert records[0].reason_codes == ["PROMOTION_XLSX_SCHEMA_INVALID"]
 
 
 def approved_item(tmp_path):

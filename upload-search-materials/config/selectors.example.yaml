@@ -1,7 +1,7 @@
 store_name: "#store"
 human_check: "#human-check"
 export_basic: "#export-basic"
-export_search: "#export-search"
+export_promotion: "#export-search"
 product_search: "#product-search"
 product_id: "#product-id"
 desired_slots: "#desired-slots"

@@ -77,9 +77,12 @@ CDP URL 为 `http://127.0.0.1:9222`。用户必须在该窗口自行登录、处
 所有时间使用带时区 ISO 8601，例如 `2026-07-17T10:00:00+08:00`。导出 `run-id` 使用不可重复的可读值，例如 `20260717T100000+0800-kktree-export`。
 
 ```powershell
-uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产selectors.yaml>" --output "<导出目录>" --run-id "<导出run-id>" --downloaded-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
+uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产selectors.yaml>" --output "<空的隔离导出目录>" --run-id "<导出run-id>" --downloaded-at "<ISO时间>" --product-status "售卖中" --report basic --cdp-url "http://127.0.0.1:9222"
+uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产selectors.yaml>" --output "<另一个空的隔离导出目录>" --run-id "<导出run-id>" --downloaded-at "<ISO时间>" --product-status "售卖中" --report promotion --cdp-url "http://127.0.0.1:9222"
 uv run tmall-materials inspect-xlsx --basic "<基础素材XLSX>" --search "<搜推经营XLSX>"
 ```
+
+也可使用 `--report both` 在同一隔离目录生成 `basic/` 和 `promotion/`。命令同时生成 `source-files.json` 与 `export-manifest.json`。推广素材内部仍兼容选择器键 `export_search`，新配置优先使用 `export_promotion`。推广字段契约完成讨论前保持 `draft`，不得跳过后续只读补采和人工复核。
 
 ## 5. 首次 dry-run 与 Playwright 补采
 

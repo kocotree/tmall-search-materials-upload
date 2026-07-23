@@ -239,17 +239,24 @@ uv run --directory .\upload-search-materials --locked python -m pytest -q tests\
 
 ---
 
-## 阶段 5：生产选择器
+## 阶段 5：后台导出与生产选择器
 
-**状态：** 未开始
+**状态：** 进行中（2026-07-24 完成基础/推广导出契约和本地模拟下载测试；真实浏览器导出与推广字段确认待执行）
 
-**目标：** 在用户控制的已登录 Chromium 中验证生产选择器，全阶段只读，不上传、不发布。
+**目标：** 在用户控制的已登录 Chromium 中验证基础/推广素材导出和生产选择器，全阶段只读，不上传、不发布。
 
 ### 前置门禁与执行清单
 
 - [ ] 用户确认 `TMALL_STORE`、仓库外的 `TMALL_SELECTOR_CONFIG` 和仅监听 `127.0.0.1` 的 CDP 地址。
 - [ ] 未把 `selectors.example.yaml` 当作生产配置。
-- [ ] 校验所有必需选择器键、准确店铺名、人工验证页面检测、两份 XLSX 导出入口和精确商品 ID 搜索。
+- [x] CLI 支持 `--report basic|promotion|both`，每类报表保存到独立子目录并生成 `source-files.json`、`export-manifest.json`。
+- [x] 下载后校验 XLSX 表头、数据行数和 SHA-256；非空输出目录在浏览器动作前停止。
+- [x] 新选择器键 `export_promotion` 与旧键 `export_search` 兼容；推广字段契约保持 `draft`。
+- [x] 当前真实基础素材 `68075059.xlsx` 只读校验为 627 行、627 个唯一商品 ID；空素材单元格由项目读取器识别为空，SHA-256 为 `4099523b1ff75411d26ef5364c82edaaec198d30e3047de323156d916105d387`。
+- [x] 2026-07-24 自动化验收：导出相关聚焦测试 `145 passed, 1 skipped`，全量回归复跑 `294 passed, 2 skipped, 1 warning`，Node UI-state 测试 `9 passed`；Skill validator 与 `uv lock --check` 通过。唯一 warning 仍为真实基础素材 XLSX 缺少默认样式，不影响只读解析结果。
+- [ ] 在真实已登录浏览器验证准确店铺、人工验证页面检测和基础素材单文件导出。
+- [ ] 讨论并确认推广素材的 3/9 坑、坑位号、远端素材 ID、空坑和审核状态字段，再执行真实推广导出。
+- [ ] 校验精确商品 ID 搜索。
 - [ ] 只读检查目标坑位、素材表、空坑、审核状态、远端素材 ID、指纹和时间。
 - [ ] 错误店铺、验证码或失效选择器安全停止；失效选择器返回 `SELECTOR_INVALID`。
 - [ ] 全过程上传和发布动作均为 0。
