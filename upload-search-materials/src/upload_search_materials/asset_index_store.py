@@ -162,6 +162,30 @@ class AssetIndexStore:
             )
             return cursor.rowcount == 1
 
+    def active_scan_id(self) -> str | None:
+        row = self._connection.execute(
+            "SELECT value FROM scan_meta WHERE key = 'active_scan_id'"
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_active_scan_id(self, scan_id: str) -> bool:
+        if not scan_id:
+            raise ValueError("active scan identity must not be empty")
+        with self._connection:
+            cursor = self._connection.execute(
+                "INSERT OR IGNORE INTO scan_meta(key, value) VALUES ('active_scan_id', ?)",
+                (scan_id,),
+            )
+            return cursor.rowcount == 1
+
+    def clear_active_scan_id(self, scan_id: str) -> bool:
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM scan_meta WHERE key = 'active_scan_id' AND value = ?",
+                (scan_id,),
+            )
+            return cursor.rowcount == 1
+
     def upsert_root(self, source_system: str, root_path: str) -> int:
         with self._connection:
             self._connection.execute(

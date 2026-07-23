@@ -46,6 +46,8 @@ class NamedRoot:
         source_system, separator, path = value.partition("=")
         if not separator or not _SOURCE_PATTERN.fullmatch(source_system):
             raise ValueError("root must use a non-empty source name followed by '='")
+        if not path.strip():
+            raise ValueError("root path must not be empty")
         return cls(source_system, Path(path))
 
 
@@ -202,16 +204,9 @@ def write_scan_summary(
     ).fetchone()
     identity = json.loads(identity_row["value"])
     roots = [
-        (str(row["source_system"]), str(row["root_path"]))
-        for row in connection.execute(
-            "SELECT source_system, root_path FROM roots ORDER BY source_system"
-        ).fetchall()
+        (str(root["source_system"]), str(root["path"]))
+        for root in json.loads(identity["roots_json"])
     ]
-    if not roots:
-        roots = [
-            (str(root["source_system"]), str(root["path"]))
-            for root in json.loads(identity["roots_json"])
-        ]
     path = Path(path)
     resume_argv = [
         "tmall-materials",
@@ -297,8 +292,30 @@ class IncrementalAssetIndexer:
         if mode == "new":
             if self._new_started or not self.store.mark_scan_started():
                 raise ValueError("new mode requires a new index scan")
+            scan_id = uuid.uuid4().hex
+            if not self.store.set_active_scan_id(scan_id):
+                raise ValueError("an active index scan already requires resume")
+        elif mode == "refresh":
+            self.store.mark_scan_started()
+            scan_id = uuid.uuid4().hex
+            if not self.store.set_active_scan_id(scan_id):
+                raise ValueError("an active index scan already requires resume")
         else:
             self.store.mark_scan_started()
+            scan_id = self.store.active_scan_id()
+            if scan_id is None:
+                if not scan_was_started:
+                    raise ValueError("resume requires an active or completed index scan")
+                return ScanOutcome(
+                    complete=True,
+                    partial_failure=False,
+                    discovered=0,
+                    indexed=0,
+                    matched=0,
+                    failed=0,
+                    elapsed_seconds=0.0,
+                )
+        self._scan_id = scan_id
 
         started = time.perf_counter()
         discovery = self._discover()
@@ -340,7 +357,6 @@ class IncrementalAssetIndexer:
                 self.store.partition_record(store_partition_id),
             )
 
-        scan_id = self._select_scan_id(mode, records, scan_was_started)
         indexed = matched = failed = 0
         for key in sorted(partition_keys):
             partition_id = registrations[key]
@@ -435,6 +451,8 @@ class IncrementalAssetIndexer:
         if mode == "new":
             self._new_started = True
         elapsed = time.perf_counter() - started
+        if failed == 0:
+            self.store.clear_active_scan_id(scan_id)
         return ScanOutcome(
             complete=failed == 0,
             partial_failure=failed > 0,
@@ -444,31 +462,6 @@ class IncrementalAssetIndexer:
             failed=failed,
             elapsed_seconds=elapsed,
         )
-
-    def _select_scan_id(
-        self,
-        mode: str,
-        records: dict[tuple[str, str], dict[str, object]],
-        scan_was_started: bool,
-    ) -> str:
-        if mode == "refresh":
-            return uuid.uuid4().hex
-        if mode == "new":
-            if any(record["current_scan_id"] is not None for record in records.values()):
-                raise ValueError("new mode requires an unused index database")
-            return uuid.uuid4().hex
-        if self._scan_id is not None:
-            return self._scan_id
-        scan_ids = {
-            str(record["current_scan_id"])
-            for record in records.values()
-            if record["current_scan_id"] is not None
-        }
-        if not records and scan_was_started:
-            return uuid.uuid4().hex
-        if len(scan_ids) != 1:
-            raise ValueError("resume requires exactly one incomplete scan identity")
-        return scan_ids.pop()
 
     def _discover(self) -> _Discovery:
         discovery = _Discovery(candidates={}, errors={}, roots={})

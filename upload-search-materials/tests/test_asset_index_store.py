@@ -68,6 +68,23 @@ def test_scan_started_marker_persists_across_reopen(tmp_path):
         assert reopened.scan_started() is True
 
 
+def test_active_scan_identity_is_atomic_persistent_and_conditionally_cleared(tmp_path):
+    path = tmp_path / "asset-index.sqlite3"
+    store = AssetIndexStore.create(path, IDENTITY)
+
+    assert store.active_scan_id() is None
+    assert store.set_active_scan_id("scan-1") is True
+    assert store.set_active_scan_id("scan-2") is False
+    store.close()
+
+    with AssetIndexStore.open(path, IDENTITY) as reopened:
+        assert reopened.active_scan_id() == "scan-1"
+        assert reopened.clear_active_scan_id("scan-2") is False
+        assert reopened.active_scan_id() == "scan-1"
+        assert reopened.clear_active_scan_id("scan-1") is True
+        assert reopened.active_scan_id() is None
+
+
 def test_checkpoint_upserts_one_file_with_stable_id(tmp_path):
     with make_store(tmp_path) as store:
         _, first_id = add_file(store)

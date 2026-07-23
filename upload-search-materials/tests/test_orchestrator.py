@@ -983,7 +983,9 @@ def _index_assets_args(products: Path, root: Path, output: Path, *extra: str):
     ]
 
 
-def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(tmp_path):
+def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(
+    tmp_path, monkeypatch
+):
     products = tmp_path / "products.csv"
     _write_index_products(products)
     root = tmp_path / "assets"
@@ -991,9 +993,16 @@ def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(tmp_path
     image_dir.mkdir(parents=True)
     Image.new("RGB", (400, 400), color="white").save(image_dir / "a.png")
     output = tmp_path / "index-output"
-    browser = BrowserSentinel()
+    boundary_calls = []
 
-    exit_code = main(_index_assets_args(products, root, output), page=browser)
+    def forbidden_boundary(*args, **kwargs):
+        boundary_calls.append((args, kwargs))
+        pytest.fail("index-assets must not enter publish or browser boundaries")
+
+    monkeypatch.setattr(cli_module, "_publish", forbidden_boundary)
+    monkeypatch.setattr(cli_module, "open_cdp_page", forbidden_boundary)
+
+    exit_code = main(_index_assets_args(products, root, output), page=object())
 
     assert exit_code == 0
     assert sorted(path.name for path in output.iterdir()) == [
@@ -1004,7 +1013,124 @@ def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(tmp_path
     summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
     assert summary["complete"] is True
     assert summary["matched"] == 1
-    assert browser.publish_page_open_count == 0
+    assert boundary_calls == []
+
+
+def test_index_assets_cli_refresh_interrupt_executes_resume_argv_and_keeps_checkpoint(
+    tmp_path, monkeypatch, capsys
+):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    for directory in ("a", "b"):
+        image_dir = root / directory / "123"
+        image_dir.mkdir(parents=True)
+        Image.new("RGB", (400, 400), color="white").save(image_dir / f"{directory}.png")
+    output = tmp_path / "index-output"
+    args = _index_assets_args(
+        products, root, output, "--partition-depth", "1", "--checkpoint-size", "1"
+    )
+    assert main(args) == 0
+    capsys.readouterr()
+    real_checkpoint = cli_module.AssetIndexStore.checkpoint_files
+    interrupted = False
+
+    def interrupt_before_second_partition(self, partition_id, scan_id, rows, **kwargs):
+        nonlocal interrupted
+        partition = self._partition(partition_id)
+        if partition["relative_path"] == "b" and not interrupted and not rows:
+            interrupted = True
+            raise KeyboardInterrupt
+        return real_checkpoint(self, partition_id, scan_id, rows, **kwargs)
+
+    monkeypatch.setattr(
+        cli_module.AssetIndexStore,
+        "checkpoint_files",
+        interrupt_before_second_partition,
+    )
+    interrupted_exit = main([*args, "--refresh"])
+    interrupted_stderr = capsys.readouterr().err
+    with sqlite3.connect(output / "asset-index.sqlite3") as connection:
+        mixed_scan_ids = {
+            row[0] for row in connection.execute("SELECT current_scan_id FROM partitions")
+        }
+        active_before_resume = connection.execute(
+            "SELECT value FROM scan_meta WHERE key='active_scan_id'"
+        ).fetchone()
+    summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+
+    resumed_exit = main([*args, "--resume"])
+
+    assert interrupted_exit == 1
+    assert "checkpoint" in interrupted_stderr and "--resume" in interrupted_stderr
+    assert summary["resume_command"].count("--root") == 1
+    assert len(mixed_scan_ids) == 2
+    assert active_before_resume is not None
+    assert resumed_exit == 0
+    assert sorted(path.name for path in output.iterdir()) == [
+        "asset-index.sqlite3", "match-candidates.csv", "scan-summary.json",
+    ]
+    with sqlite3.connect(output / "asset-index.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT value FROM scan_meta WHERE key='active_scan_id'"
+        ).fetchone() is None
+
+
+def test_index_assets_cli_successful_resume_and_refresh_complete_chains(tmp_path):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    image_dir = root / "catalog" / "123"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (400, 400), color="white").save(image_dir / "a.png")
+    output = tmp_path / "index-output"
+    args = _index_assets_args(products, root, output)
+
+    assert main(args) == 0
+    assert main([*args, "--resume"]) == 0
+    Image.new("RGB", (400, 400), color="black").save(image_dir / "b.png")
+    assert main([*args, "--refresh"]) == 0
+
+    summary = json.loads((output / "scan-summary.json").read_text(encoding="utf-8"))
+    assert summary["mode"] == "refresh"
+    assert summary["matched"] == 2
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [("--partition-depth", "0"), ("--checkpoint-size", "0")],
+)
+def test_index_assets_positive_options_are_validated_before_output_or_database(
+    tmp_path, option, value
+):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    root.mkdir()
+    output = tmp_path / "index-output"
+
+    assert main(_index_assets_args(products, root, output, option, value)) == 2
+    assert not output.exists()
+    assert not (output / "asset-index.sqlite3").exists()
+
+
+def test_index_assets_empty_root_path_returns_two_without_creating_output(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    output = tmp_path / "index-output"
+
+    exit_code = main(
+        [
+            "index-assets", "--products", str(products), "--root", "model=",
+            "--output", str(output),
+        ]
+    )
+
+    assert exit_code == 2
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("case", ["duplicate-source", "missing-root", "existing-without-mode"])

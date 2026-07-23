@@ -731,6 +731,7 @@ def _index_assets(args) -> int:
     store = None
     started = datetime.now(timezone.utc)
     try:
+        options = IndexOptions(args.partition_depth, args.checkpoint_size)
         products_path = Path(args.products)
         if not products_path.is_file():
             raise ValueError(f"商品表不存在: {products_path}")
@@ -778,8 +779,8 @@ def _index_assets(args) -> int:
             products_path=str(products_path),
             products_sha256=products_sha256,
             roots_json=roots_json,
-            partition_depth=args.partition_depth,
-            checkpoint_size=args.checkpoint_size,
+            partition_depth=options.partition_depth,
+            checkpoint_size=options.checkpoint_size,
         )
         store = (
             AssetIndexStore.open(database_path, identity)
@@ -791,7 +792,7 @@ def _index_assets(args) -> int:
             store,
             matcher,
             tuple(normalized_roots),
-            IndexOptions(args.partition_depth, args.checkpoint_size),
+            options,
         )
         try:
             outcome = indexer.run(mode)

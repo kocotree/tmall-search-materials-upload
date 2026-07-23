@@ -68,6 +68,12 @@ def test_named_root_splits_only_first_equals_and_validates_source():
         NamedRoot.parse("bad source=/assets")
 
 
+@pytest.mark.parametrize("value", ["model=", "model=   "])
+def test_named_root_rejects_empty_root_path(value):
+    with pytest.raises(ValueError, match="path"):
+        NamedRoot.parse(value)
+
+
 def test_unmatched_broken_image_is_fast_indexed_without_inspection(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "unmatched").mkdir(parents=True)
@@ -347,6 +353,98 @@ def test_keyboard_interrupt_keeps_checkpoint_for_resume(tmp_path, monkeypatch):
     assert reopened.partition_record(partition_id)["processed_count"] == 2
     assert reopened.file_count() == 2
     assert sum(len(reopened.matches_for(file_id)) for file_id in file_ids(reopened)) == 2
+    reopened.close()
+
+
+def test_new_discovery_interrupt_persists_active_scan_for_real_resume(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "matched").mkdir(parents=True)
+    make_image(root / "matched" / "a.png")
+    store, indexer = make_indexer(tmp_path, root, checkpoint_size=1)
+    real_discover = indexer._discover
+    calls = 0
+
+    def interrupt_discovery_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyboardInterrupt
+        return real_discover()
+
+    monkeypatch.setattr(indexer, "_discover", interrupt_discovery_once)
+    with pytest.raises(KeyboardInterrupt):
+        indexer.run("new")
+    active_scan_id = store._connection.execute(
+        "SELECT value FROM scan_meta WHERE key='active_scan_id'"
+    ).fetchone()
+    store.close()
+
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 2, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    resumed = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(2, 1),
+    ).run("resume")
+
+    assert active_scan_id is not None
+    assert resumed.complete and reopened.file_count() == 1
+    assert reopened.active_scan_id() is None
+    reopened.close()
+
+
+def test_refresh_interrupt_with_mixed_partition_scan_ids_resumes_active_scan(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    for directory in ("a", "b"):
+        (root / directory).mkdir(parents=True, exist_ok=True)
+        make_image(root / directory / f"{directory}.png")
+    store, indexer = make_indexer(tmp_path, root, depth=1, checkpoint_size=1)
+    assert indexer.run("new").complete
+    partition_ids = {
+        row["relative_path"]: row["partition_id"]
+        for row in store._connection.execute(
+            "SELECT relative_path, partition_id FROM partitions"
+        ).fetchall()
+    }
+    old_scan_id = store.partition_record(partition_ids["b"])["current_scan_id"]
+    real_checkpoint = store.checkpoint_files
+    interrupted = False
+
+    def interrupt_before_second_partition(partition_id, scan_id, rows, **kwargs):
+        nonlocal interrupted
+        if partition_id == partition_ids["b"] and not interrupted and not rows:
+            interrupted = True
+            raise KeyboardInterrupt
+        return real_checkpoint(partition_id, scan_id, rows, **kwargs)
+
+    monkeypatch.setattr(store, "checkpoint_files", interrupt_before_second_partition)
+    with pytest.raises(KeyboardInterrupt):
+        indexer.run("refresh")
+    mixed_ids = {
+        store.partition_record(partition_id)["current_scan_id"]
+        for partition_id in partition_ids.values()
+    }
+    active_scan_id = store._connection.execute(
+        "SELECT value FROM scan_meta WHERE key='active_scan_id'"
+    ).fetchone()
+    store.close()
+
+    identity = IndexIdentity("products.csv", "a" * 64, "[]", 1, 1)
+    reopened = AssetIndexStore.open(tmp_path / "index.sqlite3", identity)
+    resumed = IncrementalAssetIndexer(
+        reopened,
+        Matcher(),
+        (NamedRoot("model", root),),
+        IndexOptions(1, 1),
+    ).run("resume")
+
+    assert old_scan_id in mixed_ids and len(mixed_ids) == 2
+    assert active_scan_id is not None
+    assert resumed.complete
+    assert reopened.active_scan_id() is None
     reopened.close()
 
 
@@ -662,4 +760,35 @@ def test_scan_summary_uses_persisted_statistics_errors_and_exact_resume_command(
     ):
         assert expected in command
     assert persisted["elapsed_seconds"] == 1.25
+    store.close()
+
+
+def test_scan_summary_resume_command_uses_every_immutable_identity_root(tmp_path):
+    products = tmp_path / "products table.csv"
+    roots = [
+        {"path": str(tmp_path / "first root"), "source_system": "first"},
+        {"path": str(tmp_path / "second root"), "source_system": "second"},
+    ]
+    output = tmp_path / "output dir"
+    output.mkdir()
+    identity = IndexIdentity(
+        str(products),
+        "c" * 64,
+        json.dumps(roots, sort_keys=True, separators=(",", ":")),
+        2,
+        10,
+    )
+    store = AssetIndexStore.create(output / "asset-index.sqlite3", identity)
+    store.upsert_root("first", roots[0]["path"])
+
+    summary = asset_index_module.write_scan_summary(
+        store,
+        ScanOutcome(False, True, 0, 0, 0, 0, 0.1),
+        output / "scan-summary.json",
+        "refresh",
+        "c" * 64,
+    )
+
+    assert f'--root "first={roots[0]["path"]}"' in summary["resume_command"]
+    assert f'--root "second={roots[1]["path"]}"' in summary["resume_command"]
     store.close()
