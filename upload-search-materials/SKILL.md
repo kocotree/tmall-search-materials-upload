@@ -12,7 +12,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 - 目标月份和页面可见的准确店铺名。
 - 商品总表 CSV、月度规则 CSV。
-- Playwright 导出的基础素材 XLSX、推广素材（内部兼容旧称“搜推素材”）XLSX，以及同批次 `export-manifest.json`。
+- Playwright 导出的基础素材 XLSX 和同批次 `export-manifest.json`。搜推页的“导出数据”仅是经营指标，不是商品素材与坑位真相源；推广素材现状必须由正确店铺中的实时 DOM 按精确商品 ID 采集。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
 - NAS/本地素材目录或素材清单、逐文件授权状态。
 - AI 文案响应、禁用词政策；视频任务还需要完整视频规格。
@@ -34,7 +34,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 完成素材阶段后：
 
 1. 阅读 [business-rules.md](references/business-rules.md)、[data-schema.md](references/data-schema.md) 和 [asset-requirements.md](references/asset-requirements.md)。
-2. 通过 `tmall-materials export` 在正确店铺按 `basic`、`promotion` 或 `both` 导出 XLSX；一次任务每种报表只接受一个文件。无法使用浏览器时允许用户提供同格式人工导出文件。基础素材契约已确认；推广素材契约仍为 `draft`，字段确认前只允许留证和人工复核。
+2. 通过 `tmall-materials export` 在正确店铺导出基础素材 XLSX。搜推页“导出数据”若保留，只能标记为经营指标，禁止据此判断当前素材数或坑位完整性。推广素材现状通过 `tmall-materials supplement` 按精确商品 ID 读取实时 DOM；目标容量、当前篇数、远端素材 ID 和可见状态必须来自同一页面证据。
 3. 运行 `tmall-materials run`。先排除清仓、UVNO、好物体验、会员日和积分，再应用月度规则。
 4. 对 `supplement-candidates.csv` 运行 `tmall-materials supplement`，只补采 3/9 坑、空坑和审核状态未知的 eligible 商品。
 5. 带 `--backend-status`、已人工确认的素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。

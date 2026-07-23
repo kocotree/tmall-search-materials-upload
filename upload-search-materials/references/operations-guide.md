@@ -78,11 +78,9 @@ CDP URL 为 `http://127.0.0.1:9222`。用户必须在该窗口自行登录、处
 
 ```powershell
 uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产selectors.yaml>" --output "<空的隔离导出目录>" --run-id "<导出run-id>" --downloaded-at "<ISO时间>" --product-status "售卖中" --report basic --cdp-url "http://127.0.0.1:9222"
-uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产selectors.yaml>" --output "<另一个空的隔离导出目录>" --run-id "<导出run-id>" --downloaded-at "<ISO时间>" --product-status "售卖中" --report promotion --cdp-url "http://127.0.0.1:9222"
-uv run tmall-materials inspect-xlsx --basic "<基础素材XLSX>" --search "<搜推经营XLSX>"
 ```
 
-也可使用 `--report both` 在同一隔离目录生成 `basic/` 和 `promotion/`。命令同时生成 `source-files.json` 与 `export-manifest.json`。推广素材内部仍兼容选择器键 `export_search`，新配置优先使用 `export_promotion`。推广字段契约完成讨论前保持 `draft`，不得跳过后续只读补采和人工复核。
+`--report promotion|both` 目前仅作为旧版经营数据导出兼容入口；其结果不是商品素材与坑位真相源，不得据此判定完整或作为生产批准输入。搜推素材现状必须通过 `supplement` 按精确商品 ID 从实时 DOM 采集。生产 `supplement` 尚未更新到 2026-07-24 验证的新 DOM 契约前，停止在阶段 5，不进入全量 dry-run。
 
 ## 5. 首次 dry-run 与 Playwright 补采
 
@@ -90,6 +88,8 @@ uv run tmall-materials inspect-xlsx --basic "<基础素材XLSX>" --search "<搜�
 uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" --products "<商品总表.csv>" --rules "<月度规则.csv>" --basic "<基础素材.xlsx>" --search "<搜推经营.xlsx>" --output "<首次批次目录>" --started-at "<ISO时间>"
 uv run tmall-materials supplement --store "<店铺名>" --selectors "<生产selectors.yaml>" --candidates "<首次批次目录>\supplement-candidates.csv" --output "<backend-material-status.csv>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
 ```
+
+`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `backend-material-status.csv`。任何使用它推断搜推坑位完整性的结果均无效。
 
 ## 6. 素材、授权、文案与最终 dry-run
 
