@@ -2,11 +2,11 @@
 
 ## Task Setup
 
-任务配置 handoff 的用户输入为：`store`、`store_confirmed`、`month`、`product_scope`、可选的 `promotion_max_pages`，以及仅在 `product_scope=selected` 时使用的 `product_ids`。`promotion_max_pages` 只能是 `1–10000` 的整数；Agent 将其映射为 `supplement --max-pages`，`null` 表示不限制并采集全部分页。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
+任务配置 handoff 的用户输入为：`store`、`store_confirmed` 和 `month`。第一阶段不接受 `product_scope`、`product_ids` 或 `promotion_max_pages`；商品范围由第二阶段的“搜推高价值”全量采集结果决定。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
 
 阶段根目录的 `input.json` 与 `handoff.json` 表示当前活动 revision；`revisions/<四位 revision>/input.json` 保存每次草稿或提交快照，正式提交另存同目录 `handoff.json`。草稿无 handoff。活动 handoff 被撤回或输入补充时可以失效，但历史快照不删除。
 
-`asset_manifest`、`historical_basic_xlsx`、`historical_promotion_csv` 和 `user_notes` 均可选。基础素材和推广素材的日常输入不作为 setup 文件路径；它们由 Agent 自动写入当前时间戳任务目录。运行目录由 SessionStore 决定，不接受页面覆盖。
+`asset_manifest`、`historical_basic_xlsx`、`historical_promotion_csv` 和 `user_notes` 均可选。正式流程只自动采集搜推素材并写入当前时间戳任务目录；基础素材字段仅为旧批次离线恢复兼容，不参与本分支范围计算。运行目录由 SessionStore 决定，不接受页面覆盖。
 
 ## 输入表
 
@@ -34,19 +34,19 @@
 
 这里的容量单位是“篇”。页面明确显示高价值商品“已上调发布坑位到 9 篇”时，`目标容量=9`；普通商品页面未明确目标时保持未知，不仅凭分类名称猜成 3。页面没有固定编号坑位时，`空坑位` 保持未知，只计算 `缺失数量=目标容量-现有素材数`。未知值保留未知；缺失选择器不能写成 0 或空列表。`证据` 至少包含商品 ID、目标容量原文、页面可见店铺、远端素材 ID、可见状态、选择器配置版本、失败字段或选择器、采集时间，以及截图或 DOM 摘要文件的路径和 SHA-256。发生 `SELECTOR_INVALID` 时，数值字段保持未知，另记录原因码和受影响商品的 `needs_manual_review` 状态。
 
-分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`last_completed_page`、`row_count` 和 `collected_at`。每完成一页必须先原子更新 CSV，再更新 checkpoint；中断后不得把未完成页写成已完成。若 setup 提供 `promotion_max_pages`，只限制本次测试采集页数，不得把未覆盖的商品标记为完整。
+分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`last_completed_page`、`row_count` 和 `collected_at`。每完成一页必须先原子更新 CSV，再更新 checkpoint；中断后不得把未完成页写成已完成。生产阶段不传 `--max-pages`，必须遍历“搜推高价值”的全部分页；该参数只保留给显式 CLI 诊断测试，测试结果不得作为完整的第二阶段候选集。
 
 ## Completeness Matrix
 
-本轮只上传搜推素材，不审查或补传基础素材。运行 `tmall-materials inspect-completeness`，将商品表、基础素材 XLSX 中的商品状态范围和搜推素材实时采集 CSV 转为第二阶段只读矩阵。基础素材只用于默认筛选 `商品状态=售卖中`，其字段完整度不进入输出和用户结论；商品总表只补充名称与货号，不得把已下架商品重新扩入矩阵。`--product-status all` 仅用于明确的离线审计。输出使用 `contract_version=1`，包含 `summary` 和 `products`。
+本轮只上传搜推素材，不审查或补传基础素材。运行 `tmall-materials inspect-completeness`，将搜推素材实时采集 CSV 转为第二阶段矩阵。矩阵范围严格等于“商品分类 → 搜推高价值”的全量采集结果；商品总表只补充名称与货号，不得扩入其他商品。输出使用 `contract_version=1`、`source_filter=search_recommend_high_value`，包含 `summary` 和 `products`。
 
 每个商品必须包含：
 
 - `product_id`、`sku`、`product_title` 和整体 `status`。
-- `promotion.target_slots/current_count/missing_count`、远端素材 ID、原因码、采集时间和证据；未采集时整体状态为 `needs_backend_collection`，不得根据分类猜测目标容量。
+- `promotion.target_slots/current_count/missing_count`、远端素材 ID、原因码、采集时间和证据；无法识别容量时标记 `needs_manual_review`，不得根据分类猜测目标容量。
 - `candidate_asset_count`；第二阶段尚未完成素材匹配时保持 `null`，页面显示“待素材匹配”，不得伪造为 0。
 
-页面决定写入 `02-completeness/input.json.values`。`confirmed_product_ids` 保存所有已处理商品；普通确认不写覆盖记录。误判、排除候选和需要人工处理写入 `overrides`，每项包含 `product_id`、`action` 和非空 `reason`。页面筛选只改变显示范围，不删除未显示商品的决定。
+页面决定写入 `02-completeness/input.json.values`。`selected_product_ids` 保存用户选择进入下一阶段的商品 ID，至少选择一个才能提交。搜索和状态筛选只改变当前显示范围；“选择当前筛选结果/取消当前筛选结果”批量更新可见商品，不清除其他筛选条件下已经选择的商品。
 
 Agent 返回 `needs_user_input` 或 `blocked` 时，同时保存只读 `review-context.json`。用户增量保存决定会更新 `input.json` revision，但必须继续展示该审查上下文；修改前置阶段时才使后续审查上下文失效。用户不能通过页面修改 `review-context.json`。
 

@@ -69,7 +69,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="setup",
         title="任务配置",
-        description="确认店铺、月份和商品范围；固定输入自动发现，后台数据自动进入时间戳任务目录。",
+        description="确认店铺和月份；后台全量采集“搜推高价值”，商品在第二阶段选择。",
         component="setup_form",
         fields=(
             _field(
@@ -86,19 +86,6 @@ STAGES: tuple[StageDefinition, ...] = (
                 required=True,
             ),
             _field("month", "目标月份", "month", required=True),
-            _field("product_scope", "商品范围", "select", required=True),
-            _field(
-                "product_ids",
-                "指定商品 ID",
-                "multi_select",
-                help_text="仅在商品范围选择“指定商品”时填写，每行一个",
-            ),
-            _field(
-                "promotion_max_pages",
-                "搜推素材采集页数",
-                "number",
-                help_text="可选；留空采集“推荐补充素材”的全部分页",
-            ),
             _field("products_csv", "商品表", "auto_path", required=True),
             _field("rules_csv", "规则表", "auto_path", required=True),
             _field("image_source_labels", "图片源名称", "auto_path_list", required=True),
@@ -127,12 +114,11 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="completeness",
         title="完整度巡检",
-        description="确认搜推素材目标、已有与缺失篇数，记录误判覆盖原因和补充说明。基础素材不属于本轮上传范围。",
+        description="展示“搜推高价值”全量商品；用户可搜索、筛选并批量选择进入下一阶段的商品。基础素材不属于本轮上传范围。",
         component="inspection_matrix",
         previous_stage="setup",
         fields=(
-            _field("confirmed_product_ids", "已确认商品 ID", "multi_select", required=True),
-            _field("overrides", "误判覆盖原因", "table"),
+            _field("selected_product_ids", "选择进入下一阶段的商品 ID", "multi_select", required=True),
             _field("user_notes", "用户备注", "textarea"),
         ),
     ),

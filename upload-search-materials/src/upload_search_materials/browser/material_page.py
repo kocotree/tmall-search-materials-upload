@@ -96,7 +96,12 @@ def _click_with_popup_retries(
     raise SelectorInvalidError(f"{field_name}:popup_blocked") from last_error
 
 
-def _parse_promotion_row(text: str, *, collected_at: str) -> dict[str, str]:
+def _parse_promotion_row(
+    text: str,
+    *,
+    collected_at: str,
+    evidence_source: str = "recommended_promotion_dom",
+) -> dict[str, str]:
     normalized = re.sub(r"\s+", " ", str(text)).strip()
     product_match = re.search(r"商品ID\s*(\d+)", normalized)
     if not product_match:
@@ -144,7 +149,7 @@ def _parse_promotion_row(text: str, *, collected_at: str) -> dict[str, str]:
         "原因码": reason_code,
         "采集时间": collected_at,
         "证据": (
-            f"product={product_id};source=recommended_promotion_dom;"
+            f"product={product_id};source={evidence_source};"
             f"target={target_text or 'unknown'};current={current};"
             f"remote_ids={material_id_text or 'none'}"
         ),
@@ -156,6 +161,7 @@ def scan_recommended_material_status(
     selectors: dict[str, str],
     *,
     collected_at: str,
+    filter_selector_key: str = "recommended_filter",
     on_page: Callable[[int, list[dict[str, str]]], None] | None = None,
     max_pages: int | None = None,
     settle_delay_ms: int = 1000,
@@ -163,7 +169,7 @@ def scan_recommended_material_status(
 ) -> list[dict[str, str]]:
     required = (
         "promotion_tab",
-        "recommended_filter",
+        filter_selector_key,
         "promotion_rows",
         "promotion_next_page",
     )
@@ -182,24 +188,24 @@ def scan_recommended_material_status(
         page.wait_for_timeout(action_wait_ms)
     _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
 
-    recommended = page.locator(selectors["recommended_filter"])
-    checked = recommended.get_attribute("aria-checked")
-    class_name = recommended.get_attribute("class") or ""
+    category_filter = page.locator(selectors[filter_selector_key])
+    checked = category_filter.get_attribute("aria-checked")
+    class_name = category_filter.get_attribute("class") or ""
     if checked != "true" and "checked" not in class_name.split():
         _click_with_popup_retries(
             page,
-            recommended,
+            category_filter,
             selectors,
-            field_name="recommended_filter",
+            field_name=filter_selector_key,
             delay_ms=settle_delay_ms,
         )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
         _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
-        checked = recommended.get_attribute("aria-checked")
-        class_name = recommended.get_attribute("class") or ""
+        checked = category_filter.get_attribute("aria-checked")
+        class_name = category_filter.get_attribute("class") or ""
     if checked != "true" and "checked" not in class_name.split():
-        raise SelectorInvalidError("recommended_filter")
+        raise SelectorInvalidError(filter_selector_key)
 
     output_by_product: dict[str, dict[str, str]] = {}
     page_number = 0
@@ -215,7 +221,15 @@ def scan_recommended_material_status(
         for row_text in row_texts:
             if re.search(r"商品ID\s*x{4,}", row_text, flags=re.IGNORECASE):
                 continue
-            row = _parse_promotion_row(row_text, collected_at=collected_at)
+            row = _parse_promotion_row(
+                row_text,
+                collected_at=collected_at,
+                evidence_source=(
+                    "search_recommend_high_value_dom"
+                    if filter_selector_key == "high_value_filter"
+                    else "recommended_promotion_dom"
+                ),
+            )
             output_by_product.setdefault(row["商品ID"], row)
         values = list(output_by_product.values())
         if on_page:
@@ -232,9 +246,31 @@ def scan_recommended_material_status(
             field_name="promotion_next_page",
             delay_ms=settle_delay_ms,
         )
-        if action_wait_ms:
-            page.wait_for_timeout(action_wait_ms)
         _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+        previous_ids = tuple(
+            match.group(1)
+            for text in row_texts
+            if (match := re.search(r"商品ID\s*(\d+)", text))
+        )
+        poll_ms = 250
+        elapsed_ms = 0
+        while True:
+            next_row_texts = [
+                text.strip()
+                for text in page.locator(selectors["promotion_rows"]).all_inner_texts()
+                if text.strip()
+            ]
+            next_ids = tuple(
+                match.group(1)
+                for text in next_row_texts
+                if (match := re.search(r"商品ID\s*(\d+)", text))
+            )
+            if next_ids and next_ids != previous_ids:
+                break
+            if elapsed_ms >= action_wait_ms:
+                raise SelectorInvalidError("promotion_next_page:rows_unchanged")
+            page.wait_for_timeout(poll_ms)
+            elapsed_ms += poll_ms
     return list(output_by_product.values())
 
 

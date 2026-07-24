@@ -93,14 +93,6 @@ def test_only_unknown_products_are_sent_to_browser_supplement():
 
 def test_completeness_matrix_reports_only_promotion_upload_gaps():
     matrix = build_completeness_matrix(
-        basic_rows=[
-            {
-                "商品ID": "1",
-                "商品标题": "成长太阳镜",
-                "卖点1": "防晒",
-                "商品白底图": "uploaded",
-            }
-        ],
         promotion_rows=[
             {
                 "商品ID": "1",
@@ -132,13 +124,40 @@ def test_completeness_matrix_reports_only_promotion_upload_gaps():
 
 def test_completeness_matrix_never_guesses_missing_backend_target():
     matrix = build_completeness_matrix(
-        basic_rows=[{"商品ID": "2"}],
-        promotion_rows=[],
-        products=[{"商品ID": "2", "商品名称（查找引用）": "未知坑位商品"}],
+        promotion_rows=[
+            {
+                "商品ID": "2",
+                "状态": "needs_manual_review",
+                "证据": "source=recommended_promotion_dom",
+            }
+        ],
+        products=[
+            {"商品ID": "2", "商品名称（查找引用）": "未知坑位商品"},
+            {"商品ID": "3", "商品名称（查找引用）": "不在推荐补充列表"},
+        ],
     )
 
     product = matrix["products"][0]
+    assert [item["product_id"] for item in matrix["products"]] == ["2"]
     assert product["promotion"]["target_slots"] is None
     assert product["promotion"]["missing_count"] is None
-    assert product["status"] == "needs_backend_collection"
-    assert matrix["summary"]["status_counts"] == {"needs_backend_collection": 1}
+    assert product["status"] == "needs_manual_review"
+    assert matrix["summary"]["status_counts"] == {"needs_manual_review": 1}
+    assert matrix["source_filter"] == "search_recommend_high_value"
+
+
+def test_completeness_matrix_marks_zero_gap_product_complete():
+    matrix = build_completeness_matrix(
+        promotion_rows=[
+            {
+                "商品ID": "4",
+                "目标容量": "9",
+                "现有素材数": "9",
+                "缺失数量": "0",
+                "状态": "ready_for_review",
+            }
+        ]
+    )
+
+    assert matrix["products"][0]["status"] == "complete"
+    assert matrix["summary"]["status_counts"] == {"complete": 1}

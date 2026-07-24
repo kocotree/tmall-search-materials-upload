@@ -21,7 +21,7 @@
 
 ## 补采
 
-先选择“素材统计 → 推荐补充素材”，串行扫描全部分页。每页读取商品 ID、明确的目标容量、当前发布篇数、远端素材 ID 和可见状态，跨页按商品 ID 去重，并立即写入 CSV 与 checkpoint。对目标容量不明确、解析失败或状态异常的商品，再按精确商品 ID 搜索补采。素材表容器或字段不存在时返回 `SELECTOR_INVALID`：商品 eligibility 保持 `eligible`，受影响商品进入 `needs_manual_review`，未知字段保持未知。
+先选择“商品分类 → 搜推高价值”，串行扫描全部分页。每页读取商品 ID、明确的目标容量、当前发布篇数、远端素材 ID 和可见状态，跨页按商品 ID 去重，并立即写入 CSV 与 checkpoint。对目标容量不明确、解析失败或状态异常的商品，再按精确商品 ID 搜索补采。素材表容器或字段不存在时返回 `SELECTOR_INVALID`：商品 eligibility 保持 `eligible`，受影响商品进入 `needs_manual_review`，未知字段保持未知。
 
 ## 发布
 

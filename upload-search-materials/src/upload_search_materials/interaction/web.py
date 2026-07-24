@@ -36,6 +36,13 @@ def create_app(
     app = Flask(__name__)
     store = SessionStore(runs_root)
     runtime = runtime_config or load_runtime_config()
+    static_root = Path(app.static_folder or "")
+    static_asset_version = hashlib.sha256(
+        b"".join(
+            (static_root / name).read_bytes()
+            for name in ("app.css", "ui-state.js", "app.js")
+        )
+    ).hexdigest()[:12]
 
     @app.errorhandler(BadRequest)
     def malformed_json(_: BadRequest):
@@ -79,6 +86,7 @@ def create_app(
             runs_root=str(store.runs_root.resolve()),
             task_directory=str(task_directory),
             default_month=date.today().strftime("%Y-%m"),
+            static_asset_version=static_asset_version,
             setup_inputs={
                 "products_csv": str(runtime.products.path or ""),
                 "products_available": bool(runtime.products.path and runtime.products.path.is_file()),
@@ -448,27 +456,6 @@ def _value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, s
             for name in constraint.field_names:
                 errors[name] = message
 
-    overrides = values.get("overrides")
-    if isinstance(overrides, list) and any(
-        not isinstance(item, dict) or not _has_value(item.get("reason")) for item in overrides
-    ):
-        errors["overrides"] = "each override requires a reason"
-    if stage.id == "setup":
-        scope = values.get("product_scope")
-        if scope not in {"all_eligible", "selected"}:
-            errors["product_scope"] = "must be all_eligible or selected"
-        if scope == "selected" and not _has_value(values.get("product_ids")):
-            errors["product_ids"] = "at least one product ID is required"
-        max_pages = values.get("promotion_max_pages")
-        if (
-            max_pages is not None
-            and (
-                isinstance(max_pages, bool)
-                or not isinstance(max_pages, int)
-                or not 1 <= max_pages <= 10_000
-            )
-        ):
-            errors["promotion_max_pages"] = "must be an integer from 1 to 10000"
     return errors
 
 

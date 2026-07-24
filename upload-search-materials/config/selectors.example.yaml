@@ -3,6 +3,7 @@ human_check: "#human-check"
 export_basic: "#export-basic"
 export_promotion: "#export-search"
 promotion_tab: 'li[role="tab"]:has-text("搜推素材")'
+high_value_filter: '[role="checkbox"]:has-text("搜推高价值")'
 recommended_filter: '[role="checkbox"]:has-text("推荐补充素材")'
 promotion_rows: "tbody tr"
 promotion_next_page: 'button:has-text("下一页")'

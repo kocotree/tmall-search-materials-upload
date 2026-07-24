@@ -37,12 +37,11 @@ uv run python -X utf8 $quickValidate .
 
 ## 2. 创建隔离任务
 
-任务配置页让用户确认店铺、月份、商品范围和本次图片源。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。基础素材标记为自动导出，推广素材标记为自动采集。人工图片素材清单、历史基础素材表和历史推广素材状态位于高级设置，日常执行保持为空。
+任务配置页让用户确认店铺、月份和本次图片源，不配置商品范围或搜推采集页数。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。搜推素材标记为“搜推高价值”全量自动采集；本分支不准备基础素材。人工图片素材清单和历史推广素材状态位于高级设置，日常执行保持为空。
 
 Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
 
 - `inputs/`：复制商品表、规则表并生成输入清单与 SHA-256。
-- `exports/basic/`：保存基础素材 XLSX、`source-files.json` 和 `export-manifest.json`。
 - `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint 和页面证据。
 - `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
 
@@ -135,14 +134,13 @@ uv run tmall-materials index-assets `
 ```powershell
 uv run --project .\upload-search-materials --locked tmall-materials inspect-completeness `
   --products <任务目录>\inputs\products.csv `
-  --basic <任务目录>\exports\basic\基础素材.xlsx `
   --promotion-status <任务目录>\promotion\promotion-material-status.csv `
   --output <任务目录>\02-completeness\completeness-matrix.json
 ```
 
-该命令只读输入，不访问图片源、不调用浏览器、不上传。检查输出中未知目标仍为 `null`，且不包含基础素材字段完整度；再将矩阵作为完整度阶段的 Agent 结果写入，用户在页面完成确认或覆盖原因后才进入下一阶段。
+该命令只读输入，不访问图片源、不调用浏览器、不上传。检查输出中未知目标仍为 `null`，且不包含基础素材字段完整度；再将矩阵作为第二阶段的 Agent 结果写入。用户可搜索、筛选、逐项或批量选择商品，提交后从 `selected_product_ids` 读取下一阶段范围。
 
-默认只保留基础素材表中 `商品状态=售卖中` 的商品，并把推广采集结果限制在同一商品 ID 集合。只有明确进行离线全状态审计时才传 `--product-status all`。
+第二阶段商品范围严格等于“商品分类 → 搜推高价值”的全量采集结果。商品总表仅补充商品名称和货号，不扩展范围。
 
 ### 3.4 生成素材候选画廊
 
@@ -192,7 +190,7 @@ uv run tmall-materials supplement --store "<店铺名>" --selectors "<生产sele
 uv run tmall-materials supplement --scan-mode exact --store "<店铺名>" --selectors "<生产selectors.yaml>" --candidates "<异常商品.csv>" --output "<exact-material-status.csv>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
 ```
 
-第一条 `supplement` 命令默认选择“素材统计 → 推荐补充素材”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。任务配置页的“搜推素材采集页数”保存为 `promotion_max_pages`：填写数字时给第一条命令追加 `--max-pages <数字>`，留空时不追加并扫描全部分页。限制页数的测试批次只能证明已完成页，未覆盖商品继续标记为“需后台补采”。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
+第一条 `supplement` 命令默认选择“商品分类 → 搜推高价值”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。生产流程不从任务配置读取页数，也不传 `--max-pages`；该参数只保留给显式 CLI 诊断测试。`--scan-mode recommended` 仅用于兼容旧证据。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
 
 ## 7. 素材、授权、文案与最终 dry-run
 

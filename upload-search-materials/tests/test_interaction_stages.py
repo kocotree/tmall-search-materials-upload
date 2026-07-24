@@ -29,9 +29,6 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "store",
             "store_confirmed",
             "month",
-            "product_scope",
-            "product_ids",
-            "promotion_max_pages",
             "products_csv",
             "rules_csv",
             "image_source_labels",
@@ -41,7 +38,7 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "historical_promotion_csv",
             "user_notes",
         ),
-        "completeness": ("confirmed_product_ids", "overrides", "user_notes"),
+        "completeness": ("selected_product_ids", "user_notes"),
         "scope": ("decisions", "user_notes"),
         "asset_matching": ("image_roots", "source_types", "aliases", "folder_decisions", "license_decisions", "asset_decisions", "include_video", "user_notes"),
         "image_review": ("policy_path", "ratio_tolerance", "decisions", "user_notes"),
@@ -79,13 +76,13 @@ def test_setup_uses_configured_sources_and_keeps_manual_imports_optional():
     assert setup.exactly_one_constraints == ()
     assert setup_fields["products_csv"].component == "auto_path"
     assert setup_fields["rules_csv"].component == "auto_path"
-    assert setup_fields["promotion_max_pages"].component == "number"
-    assert setup_fields["promotion_max_pages"].required is False
     assert setup_fields["image_source_labels"].component == "auto_path_list"
     assert setup_fields["image_roots"].component == "auto_path_list"
     assert setup_fields["asset_manifest"].required is False
     assert setup_fields["historical_basic_xlsx"].required is False
     assert setup_fields["historical_promotion_csv"].required is False
+    assert get_stage("completeness").fields[0].name == "selected_product_ids"
+    assert get_stage("completeness").fields[0].required is True
 
 
 def test_recovery_fields_are_conditionally_enabled_only_for_actionable_exceptions():

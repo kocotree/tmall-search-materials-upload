@@ -470,8 +470,8 @@
     content.appendChild(summary);
   }
 
-  function completenessConfirmedIds() {
-    const control = activeForm()?.querySelector('[name="confirmed_product_ids"]');
+  function completenessSelectedIds() {
+    const control = activeForm()?.querySelector('[name="selected_product_ids"]');
     return new Set(
       String(control?.value || "")
         .split(/\r?\n/)
@@ -480,42 +480,18 @@
     );
   }
 
-  function writeCompletenessConfirmedIds(ids) {
-    const control = activeForm()?.querySelector('[name="confirmed_product_ids"]');
+  function writeCompletenessSelectedIds(ids) {
+    const control = activeForm()?.querySelector('[name="selected_product_ids"]');
     if (!control) return;
     control.value = [...ids].sort((left, right) => left.localeCompare(right, "zh-CN")).join("\n");
     control.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  function completenessOverrides() {
-    return readJsonListControl("overrides").filter((item) => item?.product_id);
-  }
-
-  function persistCompletenessDecision(productId, decision, reason = "") {
-    const confirmed = completenessConfirmedIds();
-    const retained = completenessOverrides()
-      .filter((item) => String(item.product_id) !== String(productId));
-    if (decision === "pending") {
-      confirmed.delete(String(productId));
-    } else {
-      confirmed.add(String(productId));
-      if (decision !== "confirmed") {
-        retained.push({
-          product_id: String(productId),
-          action: decision,
-          reason: String(reason || "").trim(),
-        });
-      }
-    }
-    writeCompletenessConfirmedIds(confirmed);
-    writeJsonListControl("overrides", retained);
-  }
-
   function completenessStatusLabel(status) {
     return ({
       needs_supplement: "待补充",
-      needs_backend_collection: "需后台补采",
       needs_manual_review: "需人工确认",
+      complete: "已完整",
       complete: "完整",
       excluded: "排除候选",
       abnormal: "异常",
@@ -534,21 +510,21 @@
     content.replaceChildren();
 
     const locked = ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
-    const confirmed = completenessConfirmedIds();
-    const overrideByProduct = new Map(
-      completenessOverrides().map((item) => [String(item.product_id), item]),
-    );
+    const selected = completenessSelectedIds();
     const statusCounts = view.result?.data?.summary?.status_counts || {};
     const summary = element("div", "inspection-summary");
+    let selectedCount;
     [
       ["全部商品", products.length],
       ["待补充", statusCounts.needs_supplement || 0],
-      ["需后台补采", statusCounts.needs_backend_collection || 0],
-      ["完整", statusCounts.complete || 0],
-      ["已处理", confirmed.size],
+      ["需人工确认", statusCounts.needs_manual_review || 0],
+      ["已完整", statusCounts.complete || 0],
+      ["已选择", selected.size],
     ].forEach(([label, count]) => {
       const card = element("div", "inspection-stat");
-      card.append(element("span", "", label), element("strong", "", String(count)));
+      const countElement = element("strong", "", String(count));
+      if (label === "已选择") selectedCount = countElement;
+      card.append(element("span", "", label), countElement);
       summary.appendChild(card);
     });
     content.appendChild(summary);
@@ -563,10 +539,8 @@
     [
       ["all", "全部"],
       ["needs_supplement", "待补充"],
-      ["needs_backend_collection", "需后台补采"],
       ["needs_manual_review", "需人工确认"],
-      ["complete", "完整"],
-      ["excluded", "排除候选"],
+      ["complete", "已完整"],
       ["abnormal", "异常"],
     ].forEach(([value, label]) => {
       const option = document.createElement("option");
@@ -574,10 +548,13 @@
       option.textContent = label;
       filter.appendChild(option);
     });
-    const bulkConfirm = element("button", "secondary-button", "确认当前筛选结果");
-    bulkConfirm.type = "button";
-    bulkConfirm.disabled = locked;
-    toolbar.append(search, filter, bulkConfirm);
+    const bulkSelect = element("button", "secondary-button", "选择当前筛选结果");
+    bulkSelect.type = "button";
+    bulkSelect.disabled = locked;
+    const bulkClear = element("button", "secondary-button", "取消当前筛选结果");
+    bulkClear.type = "button";
+    bulkClear.disabled = locked;
+    toolbar.append(search, filter, bulkSelect, bulkClear);
     content.appendChild(toolbar);
 
     const list = element("div", "inspection-list");
@@ -603,9 +580,6 @@
       }
       visible.forEach((product) => {
         const productId = String(product.product_id || "");
-        const existingOverride = overrideByProduct.get(productId);
-        const decisionValue = existingOverride?.action
-          || (confirmed.has(productId) ? "confirmed" : "pending");
         const card = element("article", "inspection-row");
         card.dataset.status = product.status || "needs_manual_review";
 
@@ -641,35 +615,20 @@
         }
 
         const controls = element("div", "inspection-controls");
-        const decision = document.createElement("select");
-        decision.disabled = locked;
-        decision.setAttribute("aria-label", `商品 ${productId} 的巡检结论`);
-        [
-          ["pending", "待处理"],
-          ["confirmed", "确认巡检结果"],
-          ["false_positive", "标记误判"],
-          ["exclude", "排除候选"],
-          ["manual_review", "需要人工处理"],
-        ].forEach(([value, label]) => {
-          const option = document.createElement("option");
-          option.value = value;
-          option.textContent = label;
-          option.selected = decisionValue === value;
-          decision.appendChild(option);
-        });
-        const reason = document.createElement("input");
-        reason.type = "text";
-        reason.placeholder = "误判、排除或人工处理原因（必填）";
-        reason.value = existingOverride?.reason || "";
-        reason.disabled = locked || ["pending", "confirmed"].includes(decisionValue);
-        controls.append(decision, reason);
-        decision.addEventListener("change", () => {
-          reason.disabled = locked || ["pending", "confirmed"].includes(decision.value);
-          persistCompletenessDecision(productId, decision.value, reason.value);
-          if (!reason.disabled) reason.focus();
-        });
-        reason.addEventListener("input", () => {
-          persistCompletenessDecision(productId, decision.value, reason.value);
+        const choice = document.createElement("label");
+        choice.className = "inspection-choice";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selected.has(productId);
+        checkbox.disabled = locked;
+        checkbox.setAttribute("aria-label", `选择商品 ${productId} 进入下一阶段`);
+        choice.append(checkbox, document.createTextNode("选择进入下一阶段"));
+        controls.append(choice);
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) selected.add(productId);
+          else selected.delete(productId);
+          writeCompletenessSelectedIds(selected);
+          if (selectedCount) selectedCount.textContent = String(selected.size);
         });
         card.append(identity, promotion, controls);
         list.appendChild(card);
@@ -678,25 +637,23 @@
 
     search.addEventListener("input", draw);
     filter.addEventListener("change", draw);
-    bulkConfirm.addEventListener("click", () => {
+    bulkSelect.addEventListener("click", () => {
       visibleProducts().forEach((product) => {
-        persistCompletenessDecision(String(product.product_id), "confirmed");
+        selected.add(String(product.product_id));
       });
-      renderInspectionMatrix(view);
+      writeCompletenessSelectedIds(selected);
+      if (selectedCount) selectedCount.textContent = String(selected.size);
+      draw();
+    });
+    bulkClear.addEventListener("click", () => {
+      visibleProducts().forEach((product) => {
+        selected.delete(String(product.product_id));
+      });
+      writeCompletenessSelectedIds(selected);
+      if (selectedCount) selectedCount.textContent = String(selected.size);
+      draw();
     });
     draw();
-  }
-
-  function syncSetupProductScope() {
-    const form = document.querySelector('[data-stage-form="setup"]');
-    const scope = form?.querySelector('[name="product_scope"]');
-    const field = form?.querySelector("[data-product-ids-field]");
-    const productIds = form?.querySelector('[name="product_ids"]');
-    if (!scope || !field || !productIds) return;
-    const selected = scope.value === "selected";
-    field.hidden = !selected;
-    productIds.disabled = !selected;
-    if (!selected) productIds.value = "";
   }
 
   function readJsonListControl(name) {
@@ -1151,7 +1108,6 @@
         submission: payload.submission,
       });
       if (payload.input) hydrateForm(activeForm(), payload.input.values);
-      if (requestedStageId === "setup") syncSetupProductScope();
       renderStatus();
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
@@ -1360,10 +1316,9 @@
   railButtons.forEach((button) => {
     button.addEventListener("click", () => activateStage(button.dataset.stageId));
   });
-  document.querySelector('[data-stage-form="setup"] [name="product_scope"]')
-    ?.addEventListener("change", syncSetupProductScope);
   panels.forEach((panel) => {
-    panel.addEventListener("input", () => {
+    panel.addEventListener("input", (event) => {
+      if (!event.target?.getAttribute?.("name")) return;
       if (panel.dataset.stagePanel === currentStageId) {
         uiState = UiState.markDirty(uiState);
         renderStatus();
@@ -1381,6 +1336,5 @@
 
   setInterval(pollStage, 2000);
   initializeImageSourceConfig();
-  syncSetupProductScope();
   activateStage(currentStageId);
 })();

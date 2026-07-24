@@ -132,7 +132,7 @@ def test_edit_increments_revision_and_invalidates_current_and_downstream_state(t
         summary="setup complete",
     )
     completeness = store.save_input(
-        session.session_id, "completeness", {"confirmed_product_ids": ["p1"]}
+        session.session_id, "completeness", {"selected_product_ids": ["p1"]}
     )
     store.write_result(
         session.session_id,
@@ -466,7 +466,7 @@ def test_save_draft_invalidates_current_handoff_and_downstream_state(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()
     setup_handoff = store.save_input(session.session_id, "setup", {"store": "submitted"})
-    store.save_input(session.session_id, "completeness", {"confirmed_product_ids": ["1"]})
+    store.save_input(session.session_id, "completeness", {"selected_product_ids": ["1"]})
     store.write_result(
         session.session_id,
         "setup",

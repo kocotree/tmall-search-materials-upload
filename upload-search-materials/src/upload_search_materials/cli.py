@@ -711,7 +711,7 @@ def _write_backend_status(path: Path, rows: list[dict[str, str]]) -> None:
 
 def _supplement(args, page, page_factory=None) -> int:
     selectors = load_selectors(Path(args.selectors))
-    scan_mode = args.scan_mode or ("exact" if args.candidates else "recommended")
+    scan_mode = args.scan_mode or ("exact" if args.candidates else "high-value")
     product_ids: list[str] = []
     if scan_mode == "exact":
         if not args.candidates:
@@ -753,11 +753,16 @@ def _supplement(args, page, page_factory=None) -> int:
         with page_context(page, args.cdp_url, page_factory) as resolved_page:
             assert_store_identity(resolved_page, selectors["store_name"], args.store)
             detect_human_check(resolved_page, selectors["human_check"])
-            if scan_mode == "recommended":
+            if scan_mode in {"high-value", "recommended"}:
                 rows = scan_recommended_material_status(
                     resolved_page,
                     selectors,
                     collected_at=args.collected_at,
+                    filter_selector_key=(
+                        "high_value_filter"
+                        if scan_mode == "high-value"
+                        else "recommended_filter"
+                    ),
                     on_page=save_page,
                     max_pages=args.max_pages,
                     settle_delay_ms=args.settle_delay_ms,
@@ -824,23 +829,8 @@ def _inspect_xlsx(args) -> int:
 
 def _inspect_completeness(args) -> int:
     products = read_product_csv(Path(args.products))
-    basic = read_basic_materials_xlsx(Path(args.basic))
-    if args.product_status != "all":
-        if basic and not any("商品状态" in row for row in basic):
-            raise SchemaError("基础素材表缺少商品状态，无法确定性筛选巡检范围")
-        basic = [
-            row for row in basic
-            if str(row.get("商品状态", "")).strip() == args.product_status
-        ]
     promotion = _read_backend_status(args.promotion_status)
-    if args.product_status != "all":
-        included_ids = {str(row.get("商品ID", "")).strip() for row in basic}
-        promotion = [
-            row for row in promotion
-            if str(row.get("商品ID", "")).strip() in included_ids
-        ]
     data = build_completeness_matrix(
-        basic,
         promotion,
         products=[record.raw for record in products],
     )
@@ -1251,13 +1241,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build the read-only stage-02 completeness matrix",
     )
     inspect_completeness.add_argument("--products", required=True)
-    inspect_completeness.add_argument("--basic", required=True)
     inspect_completeness.add_argument("--promotion-status", required=True)
-    inspect_completeness.add_argument(
-        "--product-status",
-        default="售卖中",
-        help="Basic-material workbook status to include; use 'all' only for offline audit",
-    )
     inspect_completeness.add_argument("--output", required=True)
 
     export = subparsers.add_parser(
@@ -1286,7 +1270,14 @@ def build_parser() -> argparse.ArgumentParser:
     supplement.add_argument("--candidates")
     supplement.add_argument("--output", required=True)
     supplement.add_argument("--collected-at", required=True)
-    supplement.add_argument("--scan-mode", choices=("recommended", "exact"))
+    supplement.add_argument(
+        "--scan-mode",
+        choices=("high-value", "recommended", "exact"),
+        help=(
+            "high-value (default) scans 商品分类 → 搜推高价值; "
+            "recommended is retained for historical compatibility"
+        ),
+    )
     supplement.add_argument("--checkpoint")
     supplement.add_argument("--max-pages", type=int)
     supplement.add_argument("--settle-delay-ms", type=int, default=1000)

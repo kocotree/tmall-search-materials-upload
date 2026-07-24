@@ -81,6 +81,7 @@ def test_root_renders_ten_stage_left_rail(client):
     assert html.count('data-stage-id="') == 10
     assert "完整度巡检" in html
     assert "生产确认" in html
+    assert re.search(r"/static/app\.js\?v=[0-9a-f]{12}", html)
 
 
 def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports(client):
@@ -89,15 +90,13 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert "业务配置" in html
     assert "自动准备项" in html
     assert "高级设置 · 导入已有文件" in html
-    assert "基础素材" in html and "自动导出到当前任务目录" in html
-    assert "搜推素材" in html and "按页采集到当前任务目录" in html
-    assert "搜推素材采集页数" in html
-    assert 'name="promotion_max_pages"' in html
-    assert "留空表示采集全部分页" in html
+    assert "搜推素材" in html and "全量自动采集" in html
+    assert "搜推高价值" in html
+    assert 'name="promotion_max_pages"' not in html
+    assert 'name="product_scope"' not in html
     assert "别名" in html and "在文件夹归属审查中逐步积累" in html
     assert "视频" in html and "本轮延期" in html
     assert f'value="{date.today():%Y-%m}"' in html
-    assert '<option value="all_eligible" selected>' in html
     assert 'name="products_csv"' in html and 'type="hidden"' in html
     assert 'name="rules_csv"' in html
     assert html.count('name="image_roots"') >= 3
@@ -216,7 +215,7 @@ def test_stage_submission_requires_previous_stage_completion(tmp_path):
 
     response = client.post(
         f"/api/sessions/{session_id}/stages/completeness/submit",
-        json={"values": {"confirmed_product_ids": ["1"]}},
+        json={"values": {"selected_product_ids": ["1"]}},
     )
 
     assert response.status_code == 422
@@ -232,8 +231,6 @@ def test_unclaimed_submission_can_be_withdrawn_but_processing_cannot(
         "store": "test",
         "store_confirmed": True,
         "month": "2026-07",
-        "product_scope": "all_eligible",
-        "product_ids": [],
         "products_csv": str(readable),
         "rules_csv": str(readable),
         "image_source_labels": ["source"],
@@ -320,22 +317,20 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
 
     assert "搜推素材完整度" in html
     assert "目标 / 已有 / 缺失 / 证据" in html
-    assert 'data-field="confirmed_product_ids"' in html
-    assert 'data-field="overrides"' in html
-    assert html.count("interaction-data-field") >= 2
+    assert 'data-field="selected_product_ids"' in html
+    assert html.count("interaction-data-field") >= 1
 
     script = client.get("/static/app.js").get_data(as_text=True)
     for text in (
         "搜索商品 ID、货号或名称",
-        "确认当前筛选结果",
-        "确认巡检结果",
-        "标记误判",
-        "排除候选",
-        "需要人工处理",
+        "选择当前筛选结果",
+        "取消当前筛选结果",
+        "选择进入下一阶段",
         "查看后台证据",
     ):
         assert text in script
     assert 'element("small", "", "基础素材")' not in script
+    assert 'if (!event.target?.getAttribute?.("name")) return;' in script
 
 
 def test_page_uses_explicit_empty_states_without_fabricated_counts(client):
@@ -779,23 +774,18 @@ def test_submit_rejects_stale_revision(client, session_id):
     }
 
 
-def test_validation_requires_override_reasons_and_enum_values(client, session_id):
-    overrides = client.post(
+def test_validation_requires_selected_products_and_enum_values(client, session_id):
+    selection = client.post(
         f"/api/sessions/{session_id}/stages/completeness/submit",
-        json={
-            "values": {
-                "confirmed_product_ids": ["887508274682"],
-                "overrides": [{"product_id": "887508274682", "reason": ""}],
-            }
-        },
+        json={"values": {"selected_product_ids": []}},
     )
     decision = client.post(
         f"/api/sessions/{session_id}/stages/dry_run/submit",
         json={"values": {"decision": ["confirm"]}},
     )
 
-    assert overrides.status_code == 422
-    assert "overrides" in overrides.json["field_errors"]
+    assert selection.status_code == 422
+    assert "selected_product_ids" in selection.json["field_errors"]
     assert decision.status_code == 422
     assert "decision" in decision.json["field_errors"]
 
@@ -890,7 +880,7 @@ def test_completeness_review_context_survives_incremental_decision_drafts(
 ):
     submitted = client.post(
         f"/api/sessions/{session_id}/stages/completeness/submit",
-        json={"values": {"confirmed_product_ids": ["1"], "overrides": []}},
+        json={"values": {"selected_product_ids": ["1"]}},
     )
     SessionStore(tmp_path).write_result(
         session_id,
@@ -906,7 +896,7 @@ def test_completeness_review_context_survives_incremental_decision_drafts(
         f"/api/sessions/{session_id}/stages/completeness/draft",
         json={
             "revision": submitted.json["revision"],
-            "values": {"confirmed_product_ids": ["1", "2"], "overrides": []},
+            "values": {"selected_product_ids": ["1", "2"]},
         },
     )
     current = client.get(f"/api/sessions/{session_id}/stages/completeness")
@@ -1083,7 +1073,7 @@ def test_validation_enforces_paths_lists_dates_and_boolean_confirmation(client, 
     assert {"task_ids", "confirmed_at", "acknowledgement"} <= response.json["field_errors"].keys()
 
 
-def test_setup_validation_requires_store_confirmation_and_selected_product_ids(
+def test_setup_validation_requires_store_confirmation(
     client, session_id, tmp_path
 ):
     readable = tmp_path / "readable.txt"
@@ -1092,8 +1082,6 @@ def test_setup_validation_requires_store_confirmation_and_selected_product_ids(
         "store": "测试店铺",
         "store_confirmed": False,
         "month": "2026-07",
-        "product_scope": "selected",
-        "product_ids": [],
         "products_csv": str(readable),
         "rules_csv": str(readable),
         "image_roots": [str(tmp_path)],
@@ -1107,69 +1095,6 @@ def test_setup_validation_requires_store_confirmation_and_selected_product_ids(
 
     assert response.status_code == 422
     assert response.json["field_errors"]["store_confirmed"] == "must be confirmed"
-    assert "product_ids" in response.json["field_errors"]
-
-
-def test_setup_accepts_and_persists_promotion_max_pages(client, session_id, tmp_path):
-    readable = tmp_path / "readable.txt"
-    readable.write_text("ok", encoding="utf-8")
-    values = {
-        "store": "测试店铺",
-        "store_confirmed": True,
-        "month": "2026-07",
-        "product_scope": "all_eligible",
-        "product_ids": [],
-        "promotion_max_pages": 5,
-        "products_csv": str(readable),
-        "rules_csv": str(readable),
-        "image_source_labels": ["本地测试"],
-        "image_roots": [str(tmp_path)],
-        "asset_manifest": "",
-        "historical_basic_xlsx": "",
-        "historical_promotion_csv": "",
-        "user_notes": "",
-    }
-
-    response = client.post(
-        f"/api/sessions/{session_id}/stages/setup/draft",
-        json={"values": values, "revision": 0},
-    )
-    current = client.get(f"/api/sessions/{session_id}/stages/setup")
-
-    assert response.status_code == 200
-    assert current.json["input"]["values"]["promotion_max_pages"] == 5
-
-
-@pytest.mark.parametrize("value", [0, -1, 1.5, 10001, "3"])
-def test_setup_rejects_invalid_promotion_max_pages(
-    client, session_id, tmp_path, value
-):
-    readable = tmp_path / "readable.txt"
-    readable.write_text("ok", encoding="utf-8")
-    values = {
-        "store": "测试店铺",
-        "store_confirmed": True,
-        "month": "2026-07",
-        "product_scope": "all_eligible",
-        "product_ids": [],
-        "promotion_max_pages": value,
-        "products_csv": str(readable),
-        "rules_csv": str(readable),
-        "image_source_labels": ["本地测试"],
-        "image_roots": [str(tmp_path)],
-        "asset_manifest": "",
-        "historical_basic_xlsx": "",
-        "historical_promotion_csv": "",
-        "user_notes": "",
-    }
-
-    response = client.post(
-        f"/api/sessions/{session_id}/stages/setup/submit",
-        json={"values": values, "revision": 0},
-    )
-
-    assert response.status_code == 422
-    assert "promotion_max_pages" in response.json["field_errors"]
 
 
 def test_source_code_never_imports_execution_modules():

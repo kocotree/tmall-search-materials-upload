@@ -276,6 +276,30 @@ class FakePromotionPage:
         self.waited.append(milliseconds)
 
 
+class DelayedPromotionLocator(FakePromotionLocator):
+    def click(self, **_kwargs):
+        if self.selector == "#next":
+            self.page.clicked.append(self.selector)
+            self.page.pending_next = True
+            return
+        super().click(**_kwargs)
+
+
+class DelayedPromotionPage(FakePromotionPage):
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.pending_next = False
+
+    def locator(self, selector):
+        return DelayedPromotionLocator(self, selector)
+
+    def wait_for_timeout(self, milliseconds):
+        super().wait_for_timeout(milliseconds)
+        if self.pending_next:
+            self.page_index += 1
+            self.pending_next = False
+
+
 class FakePopupLocator:
     def __init__(self, page, selector):
         self.page = page
@@ -424,6 +448,32 @@ def test_recommended_promotion_scan_paginates_deduplicates_and_checkpoints():
         (1, ["565628742471", "903588197784"]),
         (2, ["565628742471", "903588197784", "1037160921729"]),
     ]
+
+
+def test_promotion_scan_waits_until_next_page_product_ids_change():
+    page = DelayedPromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇、当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇、当前发布 1 篇"],
+        ]
+    )
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-24T01:57:30+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=1000,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200"]
+    assert 250 in page.waited
 
 
 def test_export_reports_preserves_both_downloads_and_hashes(tmp_path):

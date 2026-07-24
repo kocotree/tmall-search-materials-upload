@@ -96,12 +96,6 @@ def test_inspect_completeness_cli_writes_stage_two_contract(tmp_path):
                 "品类-公司维度划分": "测试",
             }
         )
-    basic = tmp_path / "basic.xlsx"
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["商品ID", "商品标题", "商品白底图", "商家短标题", "商品状态"])
-    sheet.append(["1", "测试商品", "uploaded", "短标题", "售卖中"])
-    workbook.save(basic)
     promotion = tmp_path / "promotion.csv"
     with promotion.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(
@@ -125,7 +119,6 @@ def test_inspect_completeness_cli_writes_stage_two_contract(tmp_path):
         [
             "inspect-completeness",
             "--products", str(products),
-            "--basic", str(basic),
             "--promotion-status", str(promotion),
             "--output", str(output),
         ]
@@ -956,7 +949,7 @@ def test_supplement_command_writes_backend_status_csv(tmp_path):
     assert rows[0]["空坑位"] == "3"
 
 
-def test_supplement_defaults_to_recommended_batch_scan_and_writes_checkpoint(
+def test_supplement_defaults_to_high_value_batch_scan_and_writes_checkpoint(
     tmp_path,
     monkeypatch,
 ):
@@ -982,6 +975,7 @@ def test_supplement_defaults_to_recommended_batch_scan_and_writes_checkpoint(
     second = dict(first, 商品ID="903588197784", 现有素材数="3", 缺失数量="6")
 
     def fake_scan(page, selectors, **kwargs):
+        assert kwargs["filter_selector_key"] == "high_value_filter"
         kwargs["on_page"](1, [first])
         kwargs["on_page"](2, [first, second])
         return [first, second]
@@ -998,7 +992,6 @@ def test_supplement_defaults_to_recommended_batch_scan_and_writes_checkpoint(
             "--selectors", str(selectors),
             "--output", str(output),
             "--collected-at", "2026-07-24T01:57:30+08:00",
-            "--scan-mode", "recommended",
         ],
         page=page,
     )
@@ -1015,6 +1008,7 @@ def test_supplement_defaults_to_recommended_batch_scan_and_writes_checkpoint(
     assert checkpoint["status"] == "complete"
     assert checkpoint["last_completed_page"] == 2
     assert checkpoint["row_count"] == 2
+    assert checkpoint["scan_mode"] == "high-value"
 
 
 def test_resume_partitions_uncertain_item_into_verification_only(tmp_path):

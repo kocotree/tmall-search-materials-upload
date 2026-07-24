@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>素材上新工作台</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v=static_asset_version) }}">
 </head>
 <body>
   <div class="app-shell" data-component="AppShell" data-session-id="{{ session_id }}" data-runs-root="{{ runs_root }}">
@@ -151,26 +151,6 @@
                 <p class="help-text">默认当前月份，可按实际推品周期修改。</p>
                 <p class="field-error" id="setup-month-error" data-field-error="month" aria-live="polite"></p>
               </div>
-              <div class="field" data-field="product_scope">
-                <label for="setup-product-scope">商品范围<span class="required" aria-label="必填">*</span></label>
-                <select id="setup-product-scope" name="product_scope" required aria-describedby="setup-product_scope-error">
-                  <option value="all_eligible" selected>全部符合当月规则的商品</option>
-                  <option value="selected">指定商品 ID</option>
-                </select>
-                <p class="help-text">默认不扩大范围，只处理当月规则筛选后的商品。</p>
-                <p class="field-error" id="setup-product_scope-error" data-field-error="product_scope" aria-live="polite"></p>
-              </div>
-              <div class="field field-wide" data-field="product_ids" data-product-ids-field hidden>
-                <label for="setup-product-ids">指定商品 ID</label>
-                <textarea id="setup-product-ids" name="product_ids" rows="3" data-value-kind="line-list" placeholder="每行一个商品 ID" aria-describedby="setup-product_ids-error" disabled></textarea>
-                <p class="field-error" id="setup-product_ids-error" data-field-error="product_ids" aria-live="polite"></p>
-              </div>
-              <div class="field" data-field="promotion_max_pages">
-                <label for="setup-promotion-max-pages">搜推素材采集页数</label>
-                <input id="setup-promotion-max-pages" name="promotion_max_pages" type="number" min="1" max="10000" step="1" data-value-kind="number" placeholder="全部分页" aria-describedby="setup-promotion_max_pages-error">
-                <p class="help-text" id="setup-promotion_max_pages-help">留空表示采集全部分页；测试时可填写 1、3、5 等页数。</p>
-                <p class="field-error" id="setup-promotion_max_pages-error" data-field-error="promotion_max_pages" aria-live="polite"></p>
-              </div>
               <div class="field field-wide" data-field="store_confirmed">
                 <label class="check-control">
                   <input id="setup-store-confirmed" name="store_confirmed" type="checkbox" data-value-kind="boolean" required aria-describedby="setup-store_confirmed-error">
@@ -199,12 +179,8 @@
                   <p class="field-error" id="setup-rules_csv-error" data-field-error="rules_csv" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card" data-ready="pending">
-                  <span>基础素材</span><strong>自动导出</strong>
-                  <p>自动导出到当前任务目录，不要求用户选择 XLSX。</p>
-                </article>
-                <article class="setup-status-card" data-ready="pending">
-                  <span>搜推素材</span><strong>按配置自动采集</strong>
-                  <p>从“推荐补充素材”按页采集到当前任务目录，不使用经营数据导出。</p>
+                  <span>搜推素材</span><strong>全量自动采集</strong>
+                  <p>选择“商品分类 → 搜推高价值”，遍历全部分页并写入当前任务目录。</p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
                   <span>图片源配置</span><strong data-image-source-summary>{{ image_sources|length }} 个图片源</strong>
@@ -297,7 +273,7 @@
             </div>
             <div class="field-grid">
               {% for field in stage.fields %}
-              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'multi_select'] %} field-wide{% endif %}{% if stage.id == 'completeness' and field.name in ['confirmed_product_ids', 'overrides'] %} interaction-data-field{% endif %}" data-field="{{ field.name }}">
+              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'multi_select'] %} field-wide{% endif %}{% if stage.id == 'completeness' and field.name == 'selected_product_ids' %} interaction-data-field{% endif %}" data-field="{{ field.name }}">
                 {% if field.component == "path_list" and field.name == "image_roots" %}
                 <fieldset class="path-list" data-field-group="image_roots">
                   <legend>
@@ -385,7 +361,7 @@
   </div>
 
   <script id="stage-registry" type="application/json">{{ stage_registry|tojson }}</script>
-  <script src="{{ url_for('static', filename='ui-state.js') }}" defer></script>
-  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='ui-state.js', v=static_asset_version) }}" defer></script>
+  <script src="{{ url_for('static', filename='app.js', v=static_asset_version) }}" defer></script>
 </body>
 </html>
