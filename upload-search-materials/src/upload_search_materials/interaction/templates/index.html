@@ -200,12 +200,14 @@
                   <span>推广素材</span><strong>自动采集</strong>
                   <p>自动采集到当前任务目录，不使用经营数据导出。</p>
                 </article>
-                <article class="setup-status-card setup-status-card-wide" data-ready="true">
-                  <span>三处图片根目录</span><strong>共享配置已载入</strong>
+                <article class="setup-status-card setup-status-card-wide" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
+                  <span>图片根目录</span><strong>{{ "本机配置已载入" if setup_inputs.image_sources_configured else "本机尚未配置" }}</strong>
                   <ul>
                     {% for source in image_sources %}
                     <li><b>{{ source.label }}</b><code>{{ source.path }}</code></li>
                     <input name="image_roots" type="hidden" value="{{ source.path }}" data-value-kind="list" aria-describedby="setup-image_roots-error">
+                    {% else %}
+                    <li>请在 <code>upload-search-materials/config/local-paths.json</code> 配置当前电脑可访问的共享目录。</li>
                     {% endfor %}
                   </ul>
                   <p class="field-error" id="setup-image_roots-error" data-field-error="image_roots" aria-live="polite"></p>

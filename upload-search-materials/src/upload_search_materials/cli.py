@@ -75,6 +75,7 @@ from .reporting import (
     write_summary,
     write_supplement_candidates,
 )
+from .runtime_config import load_runtime_config
 from .state_store import StateStore
 from .tasks import build_material_items, build_product_tasks
 
@@ -851,15 +852,8 @@ def _prepare_gallery(args) -> int:
 
 
 def _interact(args) -> int:
-    runs_root = args.runs_root
-    if runs_root is None:
-        runs_root = os.environ.get("TMALL_RUNS_ROOT")
-    if not runs_root:
-        print(
-            "interact requires --runs-root or TMALL_RUNS_ROOT",
-            file=sys.stderr,
-        )
-        return 2
+    runtime = load_runtime_config(args.config)
+    runs_root = args.runs_root or runtime.runs_root
 
     store = SessionStore(Path(runs_root))
     if args.session:
@@ -868,7 +862,7 @@ def _interact(args) -> int:
     else:
         session_id = store.create_session().session_id
 
-    app = create_app(Path(runs_root))
+    app = create_app(Path(runs_root), runtime_config=runtime)
     query = urlencode({"session_id": session_id})
     print(f"http://127.0.0.1:{args.port}/?{query}", flush=True)
     app.run(
@@ -1210,6 +1204,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     interact = subparsers.add_parser("interact", help="Serve the local interaction UI")
     interact.add_argument("--runs-root")
+    interact.add_argument("--config", help="Machine-local runtime path configuration JSON")
     interact.add_argument("--session")
     interact.add_argument("--port", type=int, default=8765)
 

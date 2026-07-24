@@ -73,6 +73,14 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 ## Safety Contract
 
+### 跨电脑路径解析
+
+- 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、项目内 `config/local-paths.json` 的顺序读取本机配置；该本机文件不得提交到仓库。
+- 未显式配置商品表或规则表时，从项目根目录的 `docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
+- 共享图片目录只从本机配置读取，不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。目录未配置或当前不可访问时仍允许交互页面启动，但依赖素材源的阶段必须停在待配置状态。
+- `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用项目根目录下的 `runs/`。所有任务继续按时间戳目录隔离。
+- 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。
+
 - 不保存或输出密码、Cookie、Token、短信码、二维码登录数据。
 - 同一个 `asset-index.sqlite3` 同一时刻只能由一个 Agent 或进程运行 new、`--resume` 或 `--refresh`；禁止并发索引同一数据库。
 - 文件夹索引是默认入口：只保存目录元数据，不读取、哈希或统计所有图片。只有用户确认文件夹归属后，才按需读取该文件夹中的图片。

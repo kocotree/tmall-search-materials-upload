@@ -160,6 +160,8 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --r
 
 **2026-07-24 任务配置精简验收：** 页面主配置只保留店铺确认、默认当前月份和默认“全部符合当月规则的商品”；商品表、规则表、三处图片源与运行目录只读展示，基础素材为自动导出、推广素材为自动采集。人工素材清单和两类历史文件位于高级设置。隔离会话 `20260724_135211` 保存草稿后只持久化新契约的 11 个键、3 个共享图片根目录和 `product_scope=all_eligible`，旧 `basic_xlsx/search_xlsx/asset_root/runs_root` 均未进入 `input.json`。证据见 `test_evidence/04-interaction-ui/setup-config/20260724_135007/acceptance.json`、`setup-default.png`、`setup-advanced.png` 和对应 `runs/20260724_135211/01-setup/input.json`。
 
+**2026-07-24 跨电脑路径验收：** 商品表和规则表改为从项目根目录 `docs/` 按受控模式唯一匹配；共享图片目录只从 Git 忽略的 `config/local-paths.json` 或显式配置读取；运行目录默认使用项目 `runs/`。无共享盘配置、表格缺失或盘符不同均不得阻止交互页面启动，歧义文件不得自动选择。源码防回归测试禁止写入个人用户名和 `Y:`/`Z:` 固定盘符。
+
 **通过标准：** 最终自动化回归、JSON 绑定、重启恢复、跨阶段竞态和真实浏览器视觉检查全部通过；页面始终不执行上传或发布。
 
 ---

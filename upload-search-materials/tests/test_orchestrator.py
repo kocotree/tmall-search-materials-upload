@@ -95,7 +95,7 @@ def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, 
             calls["load"].append(session_id)
 
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
-    monkeypatch.setattr(cli_module, "create_app", lambda runs_root: app)
+    monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
 
     code = main(["interact", "--runs-root", str(tmp_path), "--port", "9123"])
 
@@ -126,7 +126,7 @@ def test_interact_resumes_explicit_session_without_creating_another(
             return {"session_id": session_id}
 
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
-    monkeypatch.setattr(cli_module, "create_app", lambda runs_root: app)
+    monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
 
     code = main(
         [
@@ -158,12 +158,35 @@ def test_interact_uses_environment_only_when_runs_root_is_absent(
 
     monkeypatch.setenv("TMALL_RUNS_ROOT", str(environment_root))
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
-    monkeypatch.setattr(cli_module, "create_app", lambda runs_root: app)
+    monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
 
     assert main(["interact"]) == 0
     assert main(["interact", "--runs-root", str(explicit_root)]) == 0
 
     assert roots == [environment_root, explicit_root]
+
+
+def test_interact_defaults_to_runtime_project_runs_root(tmp_path, monkeypatch):
+    roots = []
+    app = InteractionAppSentinel()
+    runtime = SimpleNamespace(runs_root=tmp_path / "runs")
+
+    class FakeStore:
+        def __init__(self, runs_root):
+            roots.append(Path(runs_root))
+
+        def create_session(self):
+            return type("Session", (), {"session_id": "20260724_180000"})()
+
+    monkeypatch.delenv("TMALL_RUNS_ROOT", raising=False)
+    monkeypatch.setattr(cli_module, "load_runtime_config", lambda config=None: runtime)
+    monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
+    monkeypatch.setattr(
+        cli_module, "create_app", lambda runs_root, runtime_config=None: app
+    )
+
+    assert main(["interact"]) == 0
+    assert roots == [tmp_path / "runs"]
 
 
 def test_wait_handoff_prints_validated_submission(tmp_path, capsys):

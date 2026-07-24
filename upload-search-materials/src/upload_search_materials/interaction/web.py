@@ -11,38 +11,22 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
+from ..runtime_config import RuntimeConfig, load_runtime_config
 from .session import InteractionConflict, InteractionPathError, SessionStore
 from .stages import STAGES, FieldDefinition, StageDefinition, get_stage
 
 
-IMAGE_SOURCES: tuple[dict[str, str], ...] = (
-    {"label": "视觉部 · 模特图", "path": r"Y:\视觉部\1-模特图"},
-    {
-        "label": "小红书 KOC 置换 · 淘宝买家秀",
-        "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀",
-    },
-    {
-        "label": "小红书 KOC 置换 · 买家秀",
-        "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
-    },
-)
-
-WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_PRODUCTS_CSV = (
-    WORKSPACE_ROOT / "docs" / "天猫商品信息表_产品数据表_数据总表.csv"
-)
-DEFAULT_RULES_CSV = (
-    WORKSPACE_ROOT / "docs" / "天猫商品信息表_每月推品规则（合并）_Grid View.csv"
-)
-
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
 
 
-def create_app(runs_root: Path) -> Flask:
+def create_app(
+    runs_root: Path, runtime_config: RuntimeConfig | None = None
+) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
     app = Flask(__name__)
     store = SessionStore(runs_root)
+    runtime = runtime_config or load_runtime_config()
 
     @app.errorhandler(BadRequest)
     def malformed_json(_: BadRequest):
@@ -82,15 +66,18 @@ def create_app(runs_root: Path) -> Flask:
             stages=STAGES,
             stage_registry=stage_registry,
             session_id=session_id,
-            image_sources=IMAGE_SOURCES,
+            image_sources=runtime.image_sources,
             runs_root=str(store.runs_root.resolve()),
             task_directory=str(task_directory),
             default_month=date.today().strftime("%Y-%m"),
             setup_inputs={
-                "products_csv": str(DEFAULT_PRODUCTS_CSV),
-                "products_available": DEFAULT_PRODUCTS_CSV.is_file(),
-                "rules_csv": str(DEFAULT_RULES_CSV),
-                "rules_available": DEFAULT_RULES_CSV.is_file(),
+                "products_csv": str(runtime.products.path or ""),
+                "products_available": bool(runtime.products.path and runtime.products.path.is_file()),
+                "products_status": runtime.products.status,
+                "rules_csv": str(runtime.rules.path or ""),
+                "rules_available": bool(runtime.rules.path and runtime.rules.path.is_file()),
+                "rules_status": runtime.rules.status,
+                "image_sources_configured": bool(runtime.image_sources),
             },
         )
 

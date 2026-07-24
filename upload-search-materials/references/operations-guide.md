@@ -13,6 +13,26 @@ uv run python -X utf8 $quickValidate .
 
 `uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 创建或同步 `.venv`。首次同步需要访问 Python 包索引；后续验收使用 `uv lock --check` 检查锁文件是否与 `pyproject.toml` 一致。不要向系统 Python 或 Conda 基础环境直接安装本项目依赖。
 
+### 1.1 每台电脑只配置一次路径
+
+复制 `config/local-paths.example.json` 为 `config/local-paths.json`，再修改当前电脑可访问的共享图片目录。`local-paths.json` 已被 Git 忽略，不会影响其他电脑。
+
+项目内输入默认无需配置：程序先定位包含 `docs/` 与 `upload-search-materials/` 的项目根目录，再在 `docs/` 中按以下受控模式查找：
+
+- 商品表：`天猫商品信息表*产品数据表*数据总表.csv`
+- 规则表：`天猫商品信息表*每月推品规则*Grid View.csv`
+
+只有唯一命中才会自动采用。没有命中时页面显示“未找到”；多个命中时显示歧义并等待显式配置，不按时间或文件名猜测。共享盘不执行全盘扫描；盘符或 UNC 路径只从本机配置读取。
+
+解析优先级与覆盖入口：
+
+1. `tmall-materials interact --config <配置.json>` 指定配置文件。
+2. `TMALL_CONFIG_FILE` 指定配置文件；`TMALL_WORKSPACE_ROOT`、`TMALL_PRODUCTS_CSV`、`TMALL_RULES_CSV`、`TMALL_RUNS_ROOT` 可单项覆盖。
+3. 项目内 `upload-search-materials/config/local-paths.json`。
+4. 项目结构自动发现；运行目录默认使用 `<项目根目录>/runs/`。
+
+路径未配置不会导致交互页面崩溃；只有实际依赖该输入的阶段会保持待配置。不要把个人用户名、桌面绝对路径或本机盘符写回 `SKILL.md`、Python 源码或已提交的配置。
+
 ## 2. 创建隔离任务
 
 任务配置页默认只让用户确认店铺、月份和商品范围。商品表、规则表、三处图片根目录及运行目录来自共享配置并只读展示；基础素材标记为自动导出，推广素材标记为自动采集。人工图片素材清单、历史基础素材表和历史推广素材状态位于高级设置，日常执行保持为空。
@@ -189,7 +209,7 @@ uv run tmall-materials report --run-dir "<最终审核批次目录>"
 新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
 
 ```powershell
-uv run --project .\upload-search-materials --locked tmall-materials interact --runs-root .\runs
+uv run --project .\upload-search-materials --locked tmall-materials interact
 uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --runs-root .\runs --session 20260721_143025 --stage asset_matching
 ```
 

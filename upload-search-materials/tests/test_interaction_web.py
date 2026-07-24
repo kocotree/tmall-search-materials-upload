@@ -12,11 +12,36 @@ from PIL import Image
 from upload_search_materials.interaction.web import create_app
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.interaction.stages import STAGES
+from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
 @pytest.fixture
 def client(tmp_path):
-    return create_app(tmp_path).test_client()
+    workspace = Path(__file__).parents[2]
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(
+            workspace / "docs" / "天猫商品信息表_产品数据表_数据总表.csv",
+            "discovered",
+        ),
+        rules=DiscoveredPath(
+            workspace / "docs" / "天猫商品信息表_每月推品规则（合并）_Grid View.csv",
+            "discovered",
+        ),
+        image_sources=(
+            {"label": "视觉部 · 模特图", "path": r"Y:\视觉部\1-模特图"},
+            {
+                "label": "小红书 KOC 置换 · 淘宝买家秀",
+                "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀",
+            },
+            {
+                "label": "小红书 KOC 置换 · 买家秀",
+                "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
+            },
+        ),
+        runs_root=tmp_path,
+    )
+    return create_app(tmp_path, runtime_config=runtime).test_client()
 
 
 @pytest.fixture
@@ -85,6 +110,24 @@ def test_setup_page_shows_fixed_input_files_and_three_shared_image_sources(clien
         r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
     ):
         assert root in html
+
+
+def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_path):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    response = create_app(tmp_path / "runs", runtime_config=runtime).test_client().get("/")
+    html = html_module.unescape(response.get_data(as_text=True))
+
+    assert response.status_code == 200
+    assert "本机尚未配置" in html
+    assert "local-paths.json" in html
+    assert 'name="image_roots"' not in html
 
 
 def test_api_is_json_service_description(client):

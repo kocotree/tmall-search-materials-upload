@@ -1,0 +1,20 @@
+{
+  "workspace_root": "../..",
+  "products_csv": "docs/天猫商品信息表_产品数据表_数据总表.csv",
+  "rules_csv": "docs/天猫商品信息表_每月推品规则（合并）_Grid View.csv",
+  "runs_root": "runs",
+  "image_sources": [
+    {
+      "label": "视觉部 · 模特图",
+      "path": "Y:\\视觉部\\1-模特图"
+    },
+    {
+      "label": "小红书 KOC 置换 · 淘宝买家秀",
+      "path": "Z:\\浙江酷趣\\运营中心\\营销板块\\小红书koc置换&淘宝买家秀\\优质买家秀"
+    },
+    {
+      "label": "小红书 KOC 置换 · 买家秀",
+      "path": "Z:\\浙江酷趣\\运营中心\\营销板块\\小红书koc置换&买家秀\\优质买家秀"
+    }
+  ]
+}
