@@ -2,7 +2,7 @@
 
 ## Task Setup
 
-任务配置 handoff 的用户输入为：`store`、`store_confirmed`、`month`、`product_scope`，以及仅在 `product_scope=selected` 时使用的 `product_ids`。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
+任务配置 handoff 的用户输入为：`store`、`store_confirmed`、`month`、`product_scope`、可选的 `promotion_max_pages`，以及仅在 `product_scope=selected` 时使用的 `product_ids`。`promotion_max_pages` 只能是 `1–10000` 的整数；Agent 将其映射为 `supplement --max-pages`，`null` 表示不限制并采集全部分页。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
 
 阶段根目录的 `input.json` 与 `handoff.json` 表示当前活动 revision；`revisions/<四位 revision>/input.json` 保存每次草稿或提交快照，正式提交另存同目录 `handoff.json`。草稿无 handoff。活动 handoff 被撤回或输入补充时可以失效，但历史快照不删除。
 
@@ -34,7 +34,7 @@
 
 这里的容量单位是“篇”。页面明确显示高价值商品“已上调发布坑位到 9 篇”时，`目标容量=9`；普通商品页面未明确目标时保持未知，不仅凭分类名称猜成 3。页面没有固定编号坑位时，`空坑位` 保持未知，只计算 `缺失数量=目标容量-现有素材数`。未知值保留未知；缺失选择器不能写成 0 或空列表。`证据` 至少包含商品 ID、目标容量原文、页面可见店铺、远端素材 ID、可见状态、选择器配置版本、失败字段或选择器、采集时间，以及截图或 DOM 摘要文件的路径和 SHA-256。发生 `SELECTOR_INVALID` 时，数值字段保持未知，另记录原因码和受影响商品的 `needs_manual_review` 状态。
 
-分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`last_completed_page`、`row_count` 和 `collected_at`。每完成一页必须先原子更新 CSV，再更新 checkpoint；中断后不得把未完成页写成已完成。
+分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`last_completed_page`、`row_count` 和 `collected_at`。每完成一页必须先原子更新 CSV，再更新 checkpoint；中断后不得把未完成页写成已完成。若 setup 提供 `promotion_max_pages`，只限制本次测试采集页数，不得把未覆盖的商品标记为完整。
 
 ## Completeness Matrix
 

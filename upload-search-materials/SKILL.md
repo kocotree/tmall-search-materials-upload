@@ -10,7 +10,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 ## Required Inputs
 
-- 用户只需确认页面可见的准确店铺名、目标月份和商品范围；月份默认当前月，商品范围默认全部符合当月规则的商品。
+- 用户只需确认页面可见的准确店铺名、目标月份和商品范围；月份默认当前月，商品范围默认全部符合当月规则的商品。可选填写 `promotion_max_pages` 限制本次搜推素材采集页数；留空表示采集全部分页。
 - 商品总表和月度规则从项目目录自动发现。图片源在任务配置页维护，可配置 1–50 个“来源名称 + 根路径”并保存为本机配置。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
 - 本轮上传范围仅为搜推素材。基础素材由 Playwright 自动导出后只用于确定 `商品状态=售卖中` 的商品范围，不审查、不补传其字段。搜推页的“导出数据”仅是经营指标；搜推素材现状必须从正确店铺的实时 DOM 自动采集到任务目录。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
@@ -23,7 +23,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 素材阶段按以下顺序执行：
 
-1. 用户提交任务配置后创建或复用精确时间戳会话。把自动发现的商品表、规则表复制为本次任务输入快照；基础素材自动导出、推广素材自动采集，全部结果只写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
+1. 用户提交任务配置后创建或复用精确时间戳会话。把自动发现的商品表、规则表复制为本次任务输入快照；基础素材自动导出，搜推素材使用 `supplement` 自动采集，全部结果只写入当前任务目录。读取 setup 的 `promotion_max_pages`：正整数映射为 `supplement --max-pages <值>`，空值不传 `--max-pages` 并采集全部分页。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
 2. 默认先对声明的图片 roots 运行 `index-folders`，只记录文件夹名称、路径和商品匹配，不读取图片内容。素材目录变化后使用 `--refresh`；只调整名称、货号或别名匹配规则时使用 `--rematch-only`，不得重新扫描 NAS。
 3. 检查 `folder-scan-summary.json` 和 `folder-candidates.csv`，再运行 `prepare-folder-review` 生成文件夹归属审查数据。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；用户逐项选择“确认归属 / 确认并记录别名 / 排除”，决定写入当前时间戳会话的 `folder_decisions`。只对已确认文件夹按需枚举图片、读取尺寸并计算 SHA-256。全量 `index-assets` 仅作为离线审计选项，不再阻断 1–3 商品试跑。
 4. 人工确认名称/别名候选、同货号不同名称文件夹和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
@@ -43,7 +43,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 完成素材阶段后：
 
 1. 阅读 [business-rules.md](references/business-rules.md)、[data-schema.md](references/data-schema.md) 和 [asset-requirements.md](references/asset-requirements.md)。
-2. 通过 `tmall-materials export` 在正确店铺导出基础素材 XLSX。搜推页“导出数据”若保留，只能标记为经营指标，禁止据此判断当前素材数或坑位完整性。推广素材现状通过 `tmall-materials supplement` 按精确商品 ID 读取实时 DOM；目标容量、当前篇数、远端素材 ID 和可见状态必须来自同一页面证据。
+2. 通过 `tmall-materials export` 在正确店铺导出基础素材 XLSX。搜推页“导出数据”若保留，只能标记为经营指标，禁止据此判断当前素材数或坑位完整性。搜推素材现状通过 `tmall-materials supplement` 扫描“推荐补充素材”分页读取实时 DOM；目标容量、当前篇数、远端素材 ID 和可见状态必须来自同一页面证据。
 3. 运行 `tmall-materials run`。先排除清仓、UVNO、好物体验、会员日和积分，再应用月度规则。
 4. 默认运行 `tmall-materials supplement` 扫描“推荐补充素材”的全部分页，每页增量写入 CSV 和 checkpoint；只对目标容量不明确、解析失败或状态异常的商品，再带 `--scan-mode exact --candidates supplement-candidates.csv` 按精确商品 ID 补采。
 5. 带 `--backend-status`、已人工确认的素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。
@@ -59,7 +59,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 1. 先解析用户指定的精确 `session_id`；不得默认选择 `runs` 中最新的会话。
 2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
-3. 任务配置页要求店铺确认、月份、商品范围和图片源配置。商品表、规则表和运行目录只读展示；图片源组件允许新增、删除、检测并保存任意 1–50 个来源，人工素材清单与历史文件只放在高级设置。
+3. 任务配置页要求店铺确认、月份、商品范围和图片源配置，并提供可选的搜推素材采集页数。商品表、规则表和运行目录只读展示；图片源组件允许新增、删除、检测并保存任意 1–50 个来源，人工素材清单与历史文件只放在高级设置。
 4. 启动仅监听 `localhost` 的交互页面。
 5. 等待该会话“当前阶段”的精确 `handoff.json`。
 6. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。

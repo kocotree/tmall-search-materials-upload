@@ -90,7 +90,10 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert "自动准备项" in html
     assert "高级设置 · 导入已有文件" in html
     assert "基础素材" in html and "自动导出到当前任务目录" in html
-    assert "推广素材" in html and "自动采集到当前任务目录" in html
+    assert "搜推素材" in html and "按页采集到当前任务目录" in html
+    assert "搜推素材采集页数" in html
+    assert 'name="promotion_max_pages"' in html
+    assert "留空表示采集全部分页" in html
     assert "别名" in html and "在文件夹归属审查中逐步积累" in html
     assert "视频" in html and "本轮延期" in html
     assert f'value="{date.today():%Y-%m}"' in html
@@ -1105,6 +1108,68 @@ def test_setup_validation_requires_store_confirmation_and_selected_product_ids(
     assert response.status_code == 422
     assert response.json["field_errors"]["store_confirmed"] == "must be confirmed"
     assert "product_ids" in response.json["field_errors"]
+
+
+def test_setup_accepts_and_persists_promotion_max_pages(client, session_id, tmp_path):
+    readable = tmp_path / "readable.txt"
+    readable.write_text("ok", encoding="utf-8")
+    values = {
+        "store": "测试店铺",
+        "store_confirmed": True,
+        "month": "2026-07",
+        "product_scope": "all_eligible",
+        "product_ids": [],
+        "promotion_max_pages": 5,
+        "products_csv": str(readable),
+        "rules_csv": str(readable),
+        "image_source_labels": ["本地测试"],
+        "image_roots": [str(tmp_path)],
+        "asset_manifest": "",
+        "historical_basic_xlsx": "",
+        "historical_promotion_csv": "",
+        "user_notes": "",
+    }
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft",
+        json={"values": values, "revision": 0},
+    )
+    current = client.get(f"/api/sessions/{session_id}/stages/setup")
+
+    assert response.status_code == 200
+    assert current.json["input"]["values"]["promotion_max_pages"] == 5
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, 10001, "3"])
+def test_setup_rejects_invalid_promotion_max_pages(
+    client, session_id, tmp_path, value
+):
+    readable = tmp_path / "readable.txt"
+    readable.write_text("ok", encoding="utf-8")
+    values = {
+        "store": "测试店铺",
+        "store_confirmed": True,
+        "month": "2026-07",
+        "product_scope": "all_eligible",
+        "product_ids": [],
+        "promotion_max_pages": value,
+        "products_csv": str(readable),
+        "rules_csv": str(readable),
+        "image_source_labels": ["本地测试"],
+        "image_roots": [str(tmp_path)],
+        "asset_manifest": "",
+        "historical_basic_xlsx": "",
+        "historical_promotion_csv": "",
+        "user_notes": "",
+    }
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={"values": values, "revision": 0},
+    )
+
+    assert response.status_code == 422
+    assert "promotion_max_pages" in response.json["field_errors"]
 
 
 def test_source_code_never_imports_execution_modules():

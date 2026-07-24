@@ -459,6 +459,16 @@ def _value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, s
             errors["product_scope"] = "must be all_eligible or selected"
         if scope == "selected" and not _has_value(values.get("product_ids")):
             errors["product_ids"] = "at least one product ID is required"
+        max_pages = values.get("promotion_max_pages")
+        if (
+            max_pages is not None
+            and (
+                isinstance(max_pages, bool)
+                or not isinstance(max_pages, int)
+                or not 1 <= max_pages <= 10_000
+            )
+        ):
+            errors["promotion_max_pages"] = "must be an integer from 1 to 10000"
     return errors
 
 
@@ -510,6 +520,8 @@ def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | Non
         return None
 
     if field.component == "number":
+        if value is None and not field.required:
+            return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return "must be a number"
         return None

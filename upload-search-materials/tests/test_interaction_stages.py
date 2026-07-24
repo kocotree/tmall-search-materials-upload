@@ -31,6 +31,7 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "month",
             "product_scope",
             "product_ids",
+            "promotion_max_pages",
             "products_csv",
             "rules_csv",
             "image_source_labels",
@@ -78,6 +79,8 @@ def test_setup_uses_configured_sources_and_keeps_manual_imports_optional():
     assert setup.exactly_one_constraints == ()
     assert setup_fields["products_csv"].component == "auto_path"
     assert setup_fields["rules_csv"].component == "auto_path"
+    assert setup_fields["promotion_max_pages"].component == "number"
+    assert setup_fields["promotion_max_pages"].required is False
     assert setup_fields["image_source_labels"].component == "auto_path_list"
     assert setup_fields["image_roots"].component == "auto_path_list"
     assert setup_fields["asset_manifest"].required is False

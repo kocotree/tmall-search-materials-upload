@@ -192,7 +192,7 @@ uv run tmall-materials supplement --store "<店铺名>" --selectors "<生产sele
 uv run tmall-materials supplement --scan-mode exact --store "<店铺名>" --selectors "<生产selectors.yaml>" --candidates "<异常商品.csv>" --output "<exact-material-status.csv>" --collected-at "<ISO时间>" --cdp-url "http://127.0.0.1:9222"
 ```
 
-第一条 `supplement` 命令默认选择“素材统计 → 推荐补充素材”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。真实浏览器小规模验收可先加 `--max-pages 3`；正式扫描去掉该参数。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
+第一条 `supplement` 命令默认选择“素材统计 → 推荐补充素材”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。任务配置页的“搜推素材采集页数”保存为 `promotion_max_pages`：填写数字时给第一条命令追加 `--max-pages <数字>`，留空时不追加并扫描全部分页。限制页数的测试批次只能证明已完成页，未覆盖商品继续标记为“需后台补采”。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
 
 ## 7. 素材、授权、文案与最终 dry-run
 

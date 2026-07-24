@@ -93,6 +93,12 @@ STAGES: tuple[StageDefinition, ...] = (
                 "multi_select",
                 help_text="仅在商品范围选择“指定商品”时填写，每行一个",
             ),
+            _field(
+                "promotion_max_pages",
+                "搜推素材采集页数",
+                "number",
+                help_text="可选；留空采集“推荐补充素材”的全部分页",
+            ),
             _field("products_csv", "商品表", "auto_path", required=True),
             _field("rules_csv", "规则表", "auto_path", required=True),
             _field("image_source_labels", "图片源名称", "auto_path_list", required=True),
