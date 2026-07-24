@@ -11,8 +11,8 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 ## Required Inputs
 
 - 用户只需确认页面可见的准确店铺名、目标月份和商品范围；月份默认当前月，商品范围默认全部符合当月规则的商品。
-- 商品总表、月度规则和三处图片根目录从共享配置自动发现。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
-- 基础素材由 Playwright 自动导出到任务目录并生成 `export-manifest.json`。搜推页的“导出数据”仅是经营指标；推广素材现状必须从正确店铺的实时 DOM 自动采集到任务目录。
+- 商品总表和月度规则从项目目录自动发现。图片源在任务配置页维护，可配置 1–50 个“来源名称 + 根路径”并保存为本机配置。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
+- 本轮上传范围仅为搜推素材。基础素材由 Playwright 自动导出后只用于确定 `商品状态=售卖中` 的商品范围，不审查、不补传其字段。搜推页的“导出数据”仅是经营指标；搜推素材现状必须从正确店铺的实时 DOM 自动采集到任务目录。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
 - 人工图片素材清单、历史基础素材表和历史推广素材状态都是高级可选导入，不是日常任务必填项。
 - AI 文案响应、禁用词政策；视频任务还需要完整视频规格。
@@ -27,7 +27,8 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 2. 默认先对声明的图片 roots 运行 `index-folders`，只记录文件夹名称、路径和商品匹配，不读取图片内容。素材目录变化后使用 `--refresh`；只调整名称、货号或别名匹配规则时使用 `--rematch-only`，不得重新扫描 NAS。
 3. 检查 `folder-scan-summary.json` 和 `folder-candidates.csv`，再运行 `prepare-folder-review` 生成文件夹归属审查数据。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；用户逐项选择“确认归属 / 确认并记录别名 / 排除”，决定写入当前时间戳会话的 `folder_decisions`。只对已确认文件夹按需枚举图片、读取尺寸并计算 SHA-256。全量 `index-assets` 仅作为离线审计选项，不再阻断 1–3 商品试跑。
 4. 人工确认名称/别名候选、同货号不同名称文件夹和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
-5. 再进入素材完整性可视化审查、生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
+5. 基础素材导出和搜推素材实时采集完成后，运行 `tmall-materials inspect-completeness --products <商品表> --basic <基础素材.xlsx> --promotion-status <promotion-material-status.csv> --output <任务目录>/02-completeness/completeness-matrix.json`。基础素材只限定售卖中范围；把 JSON 写入当前 revision 的 `result.json.data`，页面只展示搜推素材目标/已有/缺失篇数、候选素材状态和后台证据。未知目标保持未知；用户通过页面确认、标记误判、排除或要求人工处理，禁止要求用户直接编辑 JSON。
+6. 完成素材完整性可视化审查后，再进入生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
 
 可复制的文件夹索引、`--refresh`、`--rematch-only` 与可选全量图片索引命令见 [operations-guide.md](references/operations-guide.md)。raw folder indexing 不要求月份、店铺或坑位；这些值只在后续 eligible、完整性和生产阶段使用。原始 NAS 文件保持只读，视频继续延期。索引器只生成审查候选和扫描状态：不生成批准清单，不执行 dry-run、上传或发布。
 
@@ -35,7 +36,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 推广素材状态采集完成后，使用 `tmall-materials prepare-gallery` 将 `asset-index.sqlite3` 与 `promotion-material-status.csv` 合并为页面所需的候选 JSON。每个商品的选择数量按 `缺失篇数 × 每篇图片数` 计算；候选按匹配可信度、来源、路径和 SHA-256 稳定排序，不随机抽取。
 
-首次进入“素材匹配”阶段时可以只提交三处图片根目录，由 Agent 生成文件夹候选。页面先执行文件夹归属审查，决定保存到 `folder_decisions`；未确认的文件夹不得展开为图片候选。确认后页面才展示缩略图、来源、匹配方式、授权确认、采用选择和“换一批”。“换一批”使用不重叠的稳定分片；用户也可以先取消一张再选择另一张。授权与素材选择分别写入当前时间戳会话的 `license_decisions` 和 `asset_decisions`，保存草稿或提交后才落盘到该阶段 `input.json`。
+首次进入“素材匹配”阶段时提交本次配置的一个或多个图片根目录，由 Agent 生成文件夹候选。页面先执行文件夹归属审查，决定保存到 `folder_decisions`；未确认的文件夹不得展开为图片候选。确认后页面才展示缩略图、来源、匹配方式、授权确认、采用选择和“换一批”。“换一批”使用不重叠的稳定分片；用户也可以先取消一张再选择另一张。授权与素材选择分别写入当前时间戳会话的 `license_decisions` 和 `asset_decisions`，保存草稿或提交后才落盘到该阶段 `input.json`。
 
 本地重复使用 SHA-256 排除，同一任务内同一图片不得跨商品重复选择。只有提供后台已有图片指纹时才可声称远端去重完成；后台仅提供素材 ID 而没有图片指纹时，页面必须显示“远端去重未完成”，最终上传前继续保持人工核对门禁。名称候选在别名归属确认前不可选择，逐文件授权未确认的候选也不可选择。
 
@@ -58,7 +59,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 1. 先解析用户指定的精确 `session_id`；不得默认选择 `runs` 中最新的会话。
 2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
-3. 任务配置页只要求店铺确认、月份和商品范围。固定商品表、规则表、三处图片源和运行目录只读展示；人工素材清单与历史文件只放在高级设置。
+3. 任务配置页要求店铺确认、月份、商品范围和图片源配置。商品表、规则表和运行目录只读展示；图片源组件允许新增、删除、检测并保存任意 1–50 个来源，人工素材清单与历史文件只放在高级设置。
 4. 启动仅监听 `localhost` 的交互页面。
 5. 等待该会话“当前阶段”的精确 `handoff.json`。
 6. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
@@ -67,7 +68,19 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 9. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
 10. 根据结果停止，或明确进入下一阶段。
 
+提交前允许编辑并在停止输入约 1 秒后自动保存草稿；草稿不得生成 handoff 或触发 Agent。正式提交后冻结该阶段的全部配置。只有状态仍为 `ready_for_agent`、尚未被 Agent 认领时，用户才能显式撤回并继续修改；`processing` 和 `completed` 禁止覆盖。`needs_user_input` 或 `blocked` 才重新开放输入。每次草稿和正式提交都保存到阶段目录的 `revisions/<revision>/`，活动 `handoff.json` 只代表当前可认领提交。
+
+图片源行提供“选择文件夹”，仅由用户点击后打开本机原生目录窗口并回填完整路径；仍保留手工输入用于 UNC、远程或无界面环境。选择目录时不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
+
+提交前允许编辑并在停止输入约 1 秒后自动保存草稿；草稿不得生成 handoff 或触发 Agent。正式提交后冻结该阶段的全部配置。只有状态仍为 `ready_for_agent`、尚未被 Agent 认领时，用户才能显式撤回并继续修改；`processing` 和 `completed` 禁止覆盖。`needs_user_input` 或 `blocked` 才重新开放输入。每次草稿和正式提交都保存到阶段目录的 `revisions/<revision>/`，活动 `handoff.json` 只代表当前可认领提交。
+
+图片源行提供“选择文件夹”，仅由用户点击后打开本机原生目录窗口并回填完整路径；仍保留手工输入用于 UNC、远程或无界面环境。选择目录时不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
+
 页面无 Agent 心跳或 Codex 任务已结束时，告知用户把页面显示的恢复指令粘贴到新建或当前 Codex 任务。不得声称 Agent 仍在后台执行，也不得声称页面能够唤醒已结束的任务。
+
+恢复指令必须包含 `runs_root`、精确 `session_id`、`stage_id` 和 revision，并要求校验 `handoff.json.input_sha256`；禁止按目录新旧猜测 session。前一阶段未写入 `completed` 结果时，不得提交下一阶段。
+
+恢复指令必须包含 `runs_root`、精确 `session_id`、`stage_id` 和 revision，并要求校验 `handoff.json.input_sha256`；禁止按目录新旧猜测 session。前一阶段未写入 `completed` 结果时，不得提交下一阶段。
 
 页面阶段 08/09 只产生输入和 handoff；`approve` 与 `publish` 是分开的、由 Agent 控制的 CLI 动作。对 1–3 个商品的生产测试必须在当前对话获得显式授权；素材改变后，旧批准永远不得授权发布。可复制的启动和等待命令见 [operations-guide.md](references/operations-guide.md)。
 
@@ -77,7 +90,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 - 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、项目内 `config/local-paths.json` 的顺序读取本机配置；该本机文件不得提交到仓库。
 - 未显式配置商品表或规则表时，从项目根目录的 `docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
-- 共享图片目录只从本机配置读取，不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。目录未配置或当前不可访问时仍允许交互页面启动，但依赖素材源的阶段必须停在待配置状态。
+- 共享图片目录从前端配置页读取，并可保存到本机配置；不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。必须至少配置 1 个名称与路径均非空且不重复的来源。目录未配置或当前不可访问时仍允许交互页面启动，但依赖素材源的阶段必须停在待配置状态。
 - `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用项目根目录下的 `runs/`。所有任务继续按时间戳目录隔离。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。
 

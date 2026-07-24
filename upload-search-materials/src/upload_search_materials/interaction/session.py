@@ -142,6 +142,7 @@ class SessionStore:
             }
             input_path = stage_path / "input.json"
             self._write_json_atomic(input_path, input_document)
+            self._write_revision_snapshot(stage_path, revision, "input", input_document)
             handoff = {
                 "schema_version": SCHEMA_VERSION,
                 "status": "ready_for_agent",
@@ -152,6 +153,7 @@ class SessionStore:
                 "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
             }
             self._write_json_atomic(stage_path / "handoff.json", handoff)
+            self._write_revision_snapshot(stage_path, revision, "handoff", handoff)
             stage_state["revision"] = revision
             stage_state["status"] = "ready_for_agent"
             state["current_stage"] = stage_id
@@ -200,6 +202,7 @@ class SessionStore:
                 "user_notes": user_notes,
             }
             self._write_json_atomic(stage_path / "input.json", document)
+            self._write_revision_snapshot(stage_path, revision, "input", document)
             stage_state["revision"] = revision
             stage_state["status"] = "draft"
             state["current_stage"] = stage_id
@@ -212,6 +215,35 @@ class SessionStore:
                 revision=revision,
             )
             return document
+
+    def withdraw_handoff(
+        self, session_id: str, stage_id: str, *, expected_revision: int
+    ) -> dict[str, Any]:
+        """Revoke an unclaimed handoff and reopen its exact input as a draft."""
+
+        self._stage_index(stage_id)
+        with self._session_lock(session_id):
+            stage_path = self._stage_path(session_id, stage_id)
+            state = self.load_session(session_id)
+            stage_state = state["stages"][stage_id]
+            if stage_state["status"] != "ready_for_agent":
+                raise InteractionConflict("only an unclaimed handoff can be withdrawn")
+            if expected_revision != stage_state["revision"]:
+                raise InteractionConflict("expected revision is stale")
+            handoff_path = stage_path / "handoff.json"
+            handoff = self._read_json(handoff_path, "handoff")
+            self._validate_handoff(session_id, stage_id, stage_path, handoff)
+            handoff_path.unlink()
+            stage_state["status"] = "draft"
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "handoff_withdrawn",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=expected_revision,
+            )
+            return {"status": "draft", "revision": expected_revision}
 
     def write_result(
         self,
@@ -269,6 +301,11 @@ class SessionStore:
                     raise InteractionConflict("result data must be an object")
                 result["data"] = data
             self._write_json_atomic(stage_path / "result.json", result)
+            review_context_path = stage_path / "review-context.json"
+            if stage_id == "completeness" and status in {"needs_user_input", "blocked"}:
+                self._write_json_atomic(review_context_path, result)
+            elif status == "completed" and review_context_path.is_file():
+                review_context_path.unlink()
             state["stages"][stage_id]["status"] = status
             self._write_session_state(session_id, state)
             self._append_event(
@@ -330,18 +367,37 @@ class SessionStore:
         """Describe the durable files an agent must inspect before recovering work."""
 
         stage_path = self._stage_path(session_id, stage_id)
+        state = self.load_session(session_id)
+        revision = state["stages"][stage_id]["revision"]
         return (
-            f"Recover stage '{stage_id}' from {stage_path.parent.resolve()}. "
+            "Continue upload-search-materials without creating a new session. "
+            f"Use session_id='{session_id}', stage_id='{stage_id}', revision={revision}, "
+            f"runs_root='{self._runs_root}'. "
             f"Read {stage_path / 'handoff.json'} and verify its input_sha256 against "
-            f"the exact bytes of {stage_path / 'input.json'} before continuing."
+            f"the exact bytes of {stage_path / 'input.json'} before continuing. "
+            "Do not select another session by recency."
         )
+
+    def _write_revision_snapshot(
+        self,
+        stage_path: Path,
+        revision: int,
+        document_name: str,
+        document: dict[str, Any],
+    ) -> None:
+        revision_path = stage_path / "revisions" / f"{revision:04d}"
+        revision_path.mkdir(parents=True, exist_ok=True)
+        target = revision_path / f"{document_name}.json"
+        if target.exists():
+            raise InteractionConflict("revision snapshot already exists")
+        self._write_json_atomic(target, document)
 
     def read_optional_stage_document(
         self, session_id: str, stage_id: str, document_name: str
     ) -> dict[str, Any] | None:
         """Read a versioned protocol document, or return ``None`` when absent."""
 
-        if document_name not in {"input", "handoff", "result"}:
+        if document_name not in {"input", "handoff", "result", "review-context"}:
             raise KeyError(document_name)
         path = self._stage_path(session_id, stage_id) / f"{document_name}.json"
         if not path.is_file():
@@ -385,6 +441,7 @@ class SessionStore:
             if stage.id != stage_id or remove_current_handoff:
                 artifact_names = ("handoff.json", *artifact_names)
             if stage.id != stage_id:
+                artifact_names = ("review-context.json", *artifact_names)
                 state["stages"][stage.id]["status"] = "draft"
             stage_path = self._safe_path(
                 session_path / self._stage_directory_name(offset, stage.id)

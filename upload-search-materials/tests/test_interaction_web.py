@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from upload_search_materials.interaction.web import create_app
+import upload_search_materials.interaction.web as web_module
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.interaction.stages import STAGES
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
@@ -41,7 +42,9 @@ def client(tmp_path):
         ),
         runs_root=tmp_path,
     )
-    return create_app(tmp_path, runtime_config=runtime).test_client()
+    return create_app(
+        tmp_path, runtime_config=runtime, enforce_stage_order=False
+    ).test_client()
 
 
 @pytest.fixture
@@ -99,7 +102,7 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
         assert f'name="{removed}"' not in html
 
 
-def test_setup_page_shows_fixed_input_files_and_three_shared_image_sources(client):
+def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(client):
     html = html_module.unescape(client.get("/").get_data(as_text=True))
 
     assert "天猫商品信息表_产品数据表_数据总表.csv" in html
@@ -110,6 +113,11 @@ def test_setup_page_shows_fixed_input_files_and_three_shared_image_sources(clien
         r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
     ):
         assert root in html
+    assert 'data-component="ImageSourceConfig"' in html
+    assert "添加图片源" in html
+    assert "检测路径" in html
+    assert "保存为本机配置" in html
+    assert html.count('name="image_source_labels"') >= 3
 
 
 def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_path):
@@ -125,9 +133,136 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
     html = html_module.unescape(response.get_data(as_text=True))
 
     assert response.status_code == 200
-    assert "本机尚未配置" in html
-    assert "local-paths.json" in html
-    assert 'name="image_roots"' not in html
+    assert "0 个图片源" in html
+    assert "添加图片源" in html
+    assert html.count('name="image_roots"') >= 1
+
+
+def test_runtime_image_source_api_saves_checks_and_reloads_multiple_roots(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "upload-search-materials" / "config").mkdir(parents=True)
+    available = workspace / "available"
+    available.mkdir()
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=workspace / "runs",
+    )
+    client = create_app(workspace / "runs", runtime_config=runtime).test_client()
+    sources = [
+        {"label": "可访问", "path": str(available)},
+        {"label": "待挂载", "path": str(workspace / "missing")},
+    ]
+
+    checked = client.post("/api/runtime/image-sources/check", json={"image_sources": sources})
+    saved = client.put("/api/runtime/image-sources", json={"image_sources": sources})
+    loaded = client.get("/api/runtime/image-sources")
+
+    assert checked.status_code == 200
+    assert [item["status"] for item in checked.json["image_sources"]] == [
+        "available", "unavailable"
+    ]
+    assert saved.status_code == 200 and saved.json["saved"] is True
+    assert len(loaded.json["image_sources"]) == 2
+    config = workspace / "upload-search-materials" / "config" / "local-paths.json"
+    assert config.is_file()
+
+
+def test_runtime_image_source_api_rejects_zero_or_duplicate_roots(tmp_path):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+    client = create_app(tmp_path / "runs", runtime_config=runtime).test_client()
+
+    empty = client.put("/api/runtime/image-sources", json={"image_sources": []})
+    duplicate = client.put(
+        "/api/runtime/image-sources",
+        json={"image_sources": [
+            {"label": "A", "path": str(tmp_path)},
+            {"label": "B", "path": str(tmp_path)},
+        ]},
+    )
+
+    assert empty.status_code == 422
+    assert duplicate.status_code == 422
+
+
+def test_folder_picker_api_returns_only_user_selected_directory(
+    client, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(web_module, "choose_directory", lambda initial: str(tmp_path))
+
+    response = client.post(
+        "/api/runtime/folder-picker", json={"initial_path": str(tmp_path)}
+    )
+
+    assert response.status_code == 200
+    assert response.json == {"cancelled": False, "path": str(tmp_path)}
+
+
+def test_stage_submission_requires_previous_stage_completion(tmp_path):
+    app = create_app(tmp_path, enforce_stage_order=True)
+    client = app.test_client()
+    session_id = client.post("/api/sessions", json={}).json["session_id"]
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/submit",
+        json={"values": {"confirmed_product_ids": ["1"]}},
+    )
+
+    assert response.status_code == 422
+    assert "setup" in response.json["field_errors"]["stage"]
+
+
+def test_unclaimed_submission_can_be_withdrawn_but_processing_cannot(
+    client, session_id, tmp_path
+):
+    readable = tmp_path / "table.csv"
+    readable.write_text("ok", encoding="utf-8")
+    values = {
+        "store": "test",
+        "store_confirmed": True,
+        "month": "2026-07",
+        "product_scope": "all_eligible",
+        "product_ids": [],
+        "products_csv": str(readable),
+        "rules_csv": str(readable),
+        "image_source_labels": ["source"],
+        "image_roots": [str(tmp_path)],
+        "asset_manifest": "",
+        "historical_basic_xlsx": "",
+        "historical_promotion_csv": "",
+        "user_notes": "",
+    }
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={"values": values},
+    )
+    withdrawn = client.post(
+        f"/api/sessions/{session_id}/stages/setup/withdraw",
+        json={"revision": submitted.json["revision"]},
+    )
+
+    assert withdrawn.status_code == 200
+    assert withdrawn.json["status"] == "draft"
+
+    submitted_again = client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={"values": {**values, "store": "test again"}},
+    )
+    SessionStore(tmp_path).wait_for_handoff(session_id, "setup", timeout_seconds=0.1)
+    rejected = client.post(
+        f"/api/sessions/{session_id}/stages/setup/withdraw",
+        json={"revision": submitted_again.json["revision"]},
+    )
+
+    assert rejected.status_code == 409
 
 
 def test_api_is_json_service_description(client):
@@ -175,6 +310,29 @@ def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
         assert f'data-component="{component}"' in html
     for label in ("商品 ID 命中", "SKU 命中", "已确认别名", "名称候选 · 待确认"):
         assert label in html
+
+
+def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_ui(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert "搜推素材完整度" in html
+    assert "目标 / 已有 / 缺失 / 证据" in html
+    assert 'data-field="confirmed_product_ids"' in html
+    assert 'data-field="overrides"' in html
+    assert html.count("interaction-data-field") >= 2
+
+    script = client.get("/static/app.js").get_data(as_text=True)
+    for text in (
+        "搜索商品 ID、货号或名称",
+        "确认当前筛选结果",
+        "确认巡检结果",
+        "标记误判",
+        "排除候选",
+        "需要人工处理",
+        "查看后台证据",
+    ):
+        assert text in script
+    assert 'element("small", "", "基础素材")' not in script
 
 
 def test_page_uses_explicit_empty_states_without_fabricated_counts(client):
@@ -249,6 +407,24 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
         assert "upload" not in endpoint.lower()
     assert "subprocess" not in javascript.lower()
     assert "playwright" not in javascript.lower()
+
+
+def test_javascript_supports_dynamic_image_source_configuration(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    for expected in (
+        "appendImageSource",
+        "hydrateImageSources",
+        "configuredImageSources",
+        "/api/runtime/image-sources/check",
+        "/api/runtime/folder-picker",
+        'method: "PUT"',
+        "每个图片源都必须填写来源名称和根路径",
+        "scheduleAutoSave",
+        "setFormLocked",
+        "/withdraw",
+    ):
+        assert expected in javascript
 
 
 def test_javascript_selects_result_renderers_by_schema_component(client):
@@ -367,7 +543,7 @@ def test_results_recovery_rechecks_status_inside_save_lock(
     responses = []
 
     def submit_recovery():
-        with create_app(tmp_path).test_client() as client:
+        with create_app(tmp_path, enforce_stage_order=False).test_client() as client:
             responses.append(
                 client.post(
                     f"/api/sessions/{session.session_id}/stages/results/submit",
@@ -443,7 +619,10 @@ def test_draft_is_saved_without_handoff(client, session_id, tmp_path):
     assert response.status_code == 200
     assert response.json["status"] == "draft"
     assert response.json["revision"] == 1
-    assert not list(tmp_path.glob(f"{session_id}/**/handoff.json"))
+    stage_path = tmp_path / session_id / "01-setup"
+    assert not (stage_path / "handoff.json").exists()
+    assert (stage_path / "revisions" / "0001" / "input.json").is_file()
+    assert not (stage_path / "revisions" / "0001" / "handoff.json").exists()
 
 
 def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
@@ -468,7 +647,7 @@ def test_submit_rejects_unknown_values_without_persisting_sensitive_input(client
     assert not list(tmp_path.glob(f"{session_id}/**/input.json"))
 
 
-def test_draft_after_submit_invalidates_its_handoff_and_marks_stage_draft(client, session_id, tmp_path):
+def test_draft_after_submit_is_rejected_until_handoff_is_withdrawn(client, session_id, tmp_path):
     submitted = client.post(
         f"/api/sessions/{session_id}/stages/production_confirmation/submit",
         json={"values": valid_production_confirmation()},
@@ -479,12 +658,14 @@ def test_draft_after_submit_invalidates_its_handoff_and_marks_stage_draft(client
     )
 
     assert submitted.status_code == 202
-    assert drafted.status_code == 200
+    assert drafted.status_code == 409
     assert client.get(f"/api/sessions/{session_id}/stages/production_confirmation/status").json == {
-        "revision": 2,
-        "status": "draft",
+        "revision": 1,
+        "status": "ready_for_agent",
     }
-    assert not list(tmp_path.glob(f"{session_id}/**/handoff.json"))
+    stage_path = tmp_path / session_id / "09-production-confirmation"
+    assert (stage_path / "handoff.json").is_file()
+    assert (stage_path / "revisions" / "0001" / "handoff.json").is_file()
     input_path = next(tmp_path.glob(f"{session_id}/**/input.json"))
     assert '"password"' not in input_path.read_text(encoding="utf-8")
 
@@ -654,7 +835,7 @@ def test_stage_read_exposes_only_current_handoff_submission_time(
         json={"values": {"store": "updated store"}, "revision": 1},
     )
     draft = client.get(f"/api/sessions/{session_id}/stages/production_confirmation")
-    assert drafted.status_code == 200
+    assert drafted.status_code == 409
     assert draft.json["submission"] is None
 
 
@@ -699,6 +880,40 @@ def test_stage_read_exposes_current_agent_result_for_schema_renderer(
 
     assert stale.status_code == 200
     assert stale.json["result"] is None
+
+
+def test_completeness_review_context_survives_incremental_decision_drafts(
+    client, session_id, tmp_path
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/submit",
+        json={"values": {"confirmed_product_ids": ["1"], "overrides": []}},
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "completeness",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="needs_user_input",
+        summary="搜推素材完整度待确认",
+        data={"contract_version": 1, "products": [{"product_id": "1"}]},
+    )
+
+    drafted = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/draft",
+        json={
+            "revision": submitted.json["revision"],
+            "values": {"confirmed_product_ids": ["1", "2"], "overrides": []},
+        },
+    )
+    current = client.get(f"/api/sessions/{session_id}/stages/completeness")
+
+    assert drafted.status_code == 200
+    assert current.json["state"]["status"] == "draft"
+    assert current.json["result"]["summary"] == "搜推素材完整度待确认"
+    stage_path = tmp_path / session_id / "02-completeness"
+    assert not (stage_path / "result.json").exists()
+    assert (stage_path / "review-context.json").is_file()
 
 
 def test_asset_gallery_serves_only_current_result_candidate_images(

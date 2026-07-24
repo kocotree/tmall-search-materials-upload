@@ -79,6 +79,64 @@ def test_interaction_commands_are_exposed_with_registry_stage_choices():
     assert tuple(stage_action.choices) == tuple(stage.id for stage in STAGES)
 
 
+def test_inspect_completeness_cli_writes_stage_two_contract(tmp_path):
+    products = tmp_path / "products.csv"
+    with products.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=PRODUCT_HEADERS)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "商品ID": "1",
+                "商品名称（查找引用）": "测试商品",
+                "货号（查找引用）": "KQ001",
+                "产品等级": "A",
+                "链接": "https://example.invalid/1",
+                "运营": "tester",
+                "组别": "test",
+                "品类-公司维度划分": "测试",
+            }
+        )
+    basic = tmp_path / "basic.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["商品ID", "商品标题", "商品白底图", "商家短标题", "商品状态"])
+    sheet.append(["1", "测试商品", "uploaded", "短标题", "售卖中"])
+    workbook.save(basic)
+    promotion = tmp_path / "promotion.csv"
+    with promotion.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["商品ID", "目标容量", "现有素材数", "缺失数量", "状态", "证据"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "商品ID": "1",
+                "目标容量": "3",
+                "现有素材数": "1",
+                "缺失数量": "2",
+                "状态": "needs_manual_review",
+                "证据": "source=test",
+            }
+        )
+    output = tmp_path / "completeness.json"
+
+    code = main(
+        [
+            "inspect-completeness",
+            "--products", str(products),
+            "--basic", str(basic),
+            "--promotion-status", str(promotion),
+            "--output", str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["contract_version"] == 1
+    assert payload["products"][0]["promotion"]["missing_count"] == 2
+
+
 def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, capsys):
     app = InteractionAppSentinel()
     calls = {"create": 0, "load": []}
@@ -164,6 +222,25 @@ def test_interact_uses_environment_only_when_runs_root_is_absent(
     assert main(["interact", "--runs-root", str(explicit_root)]) == 0
 
     assert roots == [environment_root, explicit_root]
+
+
+def test_interact_rejects_occupied_port_before_creating_session(
+    tmp_path, monkeypatch, capsys
+):
+    created = []
+
+    class StoreMustNotStart:
+        def __init__(self, runs_root):
+            created.append(Path(runs_root))
+
+    monkeypatch.setattr(cli_module, "_port_is_available", lambda port: False)
+    monkeypatch.setattr(cli_module, "_port_owner_pid", lambda port: 4321)
+    monkeypatch.setattr(cli_module, "SessionStore", StoreMustNotStart)
+
+    assert main(["interact", "--runs-root", str(tmp_path), "--port", "8768"]) == 2
+    assert created == []
+    error = capsys.readouterr().err
+    assert "8768" in error and "PID 4321" in error
 
 
 def test_interact_defaults_to_runtime_project_runs_root(tmp_path, monkeypatch):

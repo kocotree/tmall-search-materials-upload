@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 PRODUCTS_PATTERN = "天猫商品信息表*产品数据表*数据总表.csv"
 RULES_PATTERN = "天猫商品信息表*每月推品规则*Grid View.csv"
 LOCAL_CONFIG_RELATIVE = Path("upload-search-materials/config/local-paths.json")
+MAX_IMAGE_SOURCES = 50
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,6 @@ def load_runtime_config(
             document.get("workspace_root"), selected_config, preliminary_root
         )
     )
-
     products = _resolve_table(
         env.get("TMALL_PRODUCTS_CSV") or document.get("products_csv"),
         workspace_root,
@@ -79,6 +79,76 @@ def load_runtime_config(
         config_path=selected_config,
     )
 
+
+def normalize_image_sources(
+    value: object, workspace_root: Path
+) -> tuple[dict[str, str], ...]:
+    """Validate and normalize one or more user-configured image roots."""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError("image_sources must be a list")
+    if not 1 <= len(value) <= MAX_IMAGE_SOURCES:
+        raise ValueError(f"image_sources must contain 1-{MAX_IMAGE_SOURCES} items")
+    sources: list[dict[str, str]] = []
+    labels: set[str] = set()
+    paths: set[str] = set()
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"image_sources[{index}] must be an object")
+        label = str(item.get("label", "")).strip()
+        raw_path = str(item.get("path", "")).strip()
+        if not label or len(label) > 100:
+            raise ValueError(f"image_sources[{index}].label is required")
+        if not raw_path or len(raw_path) > 1000 or "\x00" in raw_path:
+            raise ValueError(f"image_sources[{index}].path is required")
+        normalized_path = str(_resolve_configured_path(raw_path, workspace_root))
+        label_key = label.casefold()
+        path_key = normalized_path.casefold().rstrip("\\/")
+        if label_key in labels:
+            raise ValueError(f"duplicate image source label: {label}")
+        if path_key in paths:
+            raise ValueError(f"duplicate image source path: {normalized_path}")
+        labels.add(label_key)
+        paths.add(path_key)
+        sources.append({"label": label, "path": normalized_path})
+    return tuple(sources)
+
+
+def save_image_sources(
+    runtime: RuntimeConfig, value: object
+) -> RuntimeConfig:
+    """Persist image roots to the machine-local JSON without changing tracked files."""
+
+    sources = normalize_image_sources(value, runtime.workspace_root)
+    target = runtime.config_path or runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    document = _read_config(target) if target.is_file() else {}
+    document["image_sources"] = list(sources)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+    return replace(runtime, image_sources=sources, config_path=target)
+
+
+def inspect_image_sources(
+    runtime: RuntimeConfig, value: object
+) -> tuple[dict[str, str], ...]:
+    """Return read-only reachability status for configured directories."""
+
+    sources = normalize_image_sources(value, runtime.workspace_root)
+    inspected: list[dict[str, str]] = []
+    for source in sources:
+        try:
+            available = Path(source["path"]).is_dir()
+        except OSError:
+            available = False
+        inspected.append(
+            {**source, "status": "available" if available else "unavailable"}
+        )
+    return tuple(inspected)
 
 def _find_workspace_root(configured: str | None, *, start: Path | None) -> Path:
     if configured:
@@ -157,7 +227,7 @@ def _resolve_configured_path(value: object, workspace_root: Path) -> Path:
 def _image_sources(value: object, workspace_root: Path) -> tuple[dict[str, str], ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
-    sources: list[dict[str, str]] = []
+    raw_sources: list[dict[str, str]] = []
     for item in value:
         if not isinstance(item, Mapping):
             continue
@@ -165,7 +235,7 @@ def _image_sources(value: object, workspace_root: Path) -> tuple[dict[str, str],
         raw_path = str(item.get("path", "")).strip()
         if not label or not raw_path:
             continue
-        sources.append(
-            {"label": label, "path": str(_resolve_configured_path(raw_path, workspace_root))}
-        )
-    return tuple(sources)
+        raw_sources.append({"label": label, "path": raw_path})
+    if not raw_sources:
+        return ()
+    return normalize_image_sources(raw_sources, workspace_root)

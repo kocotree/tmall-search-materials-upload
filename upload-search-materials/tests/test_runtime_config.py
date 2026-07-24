@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from upload_search_materials.runtime_config import load_runtime_config
+from upload_search_materials.runtime_config import (
+    inspect_image_sources,
+    load_runtime_config,
+    normalize_image_sources,
+    save_image_sources,
+)
 
 
 PRODUCT_NAME = "天猫商品信息表_产品数据表_数据总表.csv"
@@ -77,6 +82,41 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
 def test_missing_explicit_config_fails_with_precise_error(tmp_path):
     with pytest.raises(FileNotFoundError, match="runtime config not found"):
         load_runtime_config(tmp_path / "missing.json", environ={}, start=tmp_path)
+
+
+def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
+    workspace = make_workspace(tmp_path)
+    runtime = load_runtime_config(environ={}, start=workspace)
+    first = workspace / "media" / "model"
+    second = workspace / "media" / "buyer"
+    first.mkdir(parents=True)
+
+    updated = save_image_sources(
+        runtime,
+        [
+            {"label": "模特图", "path": str(first)},
+            {"label": "买家秀", "path": str(second)},
+        ],
+    )
+
+    assert updated.config_path == workspace / "upload-search-materials/config/local-paths.json"
+    saved = json.loads(updated.config_path.read_text(encoding="utf-8"))
+    assert [item["label"] for item in saved["image_sources"]] == ["模特图", "买家秀"]
+    statuses = inspect_image_sources(updated, saved["image_sources"])
+    assert [item["status"] for item in statuses] == ["available", "unavailable"]
+
+
+def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):
+    with pytest.raises(ValueError, match="1-50"):
+        normalize_image_sources([], tmp_path)
+    with pytest.raises(ValueError, match="duplicate image source path"):
+        normalize_image_sources(
+            [
+                {"label": "A", "path": str(tmp_path)},
+                {"label": "B", "path": str(tmp_path)},
+            ],
+            tmp_path,
+        )
 
 
 def test_runtime_source_contains_no_machine_specific_drive_or_username():

@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import socket
 import stat
+import subprocess
 import sys
 from typing import Sequence
 from urllib.parse import urlencode
@@ -65,7 +67,11 @@ from .io_tables import (
 from .interaction.session import SessionStore
 from .interaction.stages import STAGES
 from .interaction.web import create_app
-from .material_state import merge_material_state, products_requiring_supplement
+from .material_state import (
+    build_completeness_matrix,
+    merge_material_state,
+    products_requiring_supplement,
+)
 from .models import MaterialStatus, make_run_id
 from .reporting import (
     material_item_from_dict,
@@ -816,6 +822,32 @@ def _inspect_xlsx(args) -> int:
     return 0
 
 
+def _inspect_completeness(args) -> int:
+    products = read_product_csv(Path(args.products))
+    basic = read_basic_materials_xlsx(Path(args.basic))
+    if args.product_status != "all":
+        if basic and not any("商品状态" in row for row in basic):
+            raise SchemaError("基础素材表缺少商品状态，无法确定性筛选巡检范围")
+        basic = [
+            row for row in basic
+            if str(row.get("商品状态", "")).strip() == args.product_status
+        ]
+    promotion = _read_backend_status(args.promotion_status)
+    if args.product_status != "all":
+        included_ids = {str(row.get("商品ID", "")).strip() for row in basic}
+        promotion = [
+            row for row in promotion
+            if str(row.get("商品ID", "")).strip() in included_ids
+        ]
+    data = build_completeness_matrix(
+        basic,
+        promotion,
+        products=[record.raw for record in products],
+    )
+    write_json(Path(args.output), data)
+    return 0
+
+
 def _prepare_gallery(args) -> int:
     with Path(args.status).open(
         "r",
@@ -855,6 +887,16 @@ def _interact(args) -> int:
     runtime = load_runtime_config(args.config)
     runs_root = args.runs_root or runtime.runs_root
 
+    if not _port_is_available(args.port):
+        owner = _port_owner_pid(args.port)
+        owner_text = f" by PID {owner}" if owner is not None else ""
+        print(
+            f"interact port {args.port} is already in use{owner_text}; "
+            "stop the old service or choose --port <other-port>",
+            file=sys.stderr,
+        )
+        return 2
+
     store = SessionStore(Path(runs_root))
     if args.session:
         store.load_session(args.session)
@@ -872,6 +914,41 @@ def _interact(args) -> int:
         use_reloader=False,
     )
     return 0
+
+
+def _port_is_available(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            probe.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+
+
+def _port_owner_pid(port: int) -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    suffix = f":{port}"
+    for line in completed.stdout.splitlines():
+        columns = line.split()
+        if len(columns) >= 5 and columns[1].endswith(suffix) and columns[3] == "LISTENING":
+            try:
+                return int(columns[4])
+            except ValueError:
+                return None
+    return None
 
 
 def _wait_handoff(args) -> int:
@@ -1169,6 +1246,20 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_xlsx.add_argument("--basic", required=True)
     inspect_xlsx.add_argument("--search", required=True)
 
+    inspect_completeness = subparsers.add_parser(
+        "inspect-completeness",
+        help="Build the read-only stage-02 completeness matrix",
+    )
+    inspect_completeness.add_argument("--products", required=True)
+    inspect_completeness.add_argument("--basic", required=True)
+    inspect_completeness.add_argument("--promotion-status", required=True)
+    inspect_completeness.add_argument(
+        "--product-status",
+        default="售卖中",
+        help="Basic-material workbook status to include; use 'all' only for offline audit",
+    )
+    inspect_completeness.add_argument("--output", required=True)
+
     export = subparsers.add_parser(
         "export",
         help="Export basic and/or promotion material XLSX reports via Playwright",
@@ -1284,6 +1375,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _report(args)
     if args.command == "inspect-xlsx":
         return _inspect_xlsx(args)
+    if args.command == "inspect-completeness":
+        return _inspect_completeness(args)
     if args.command == "export":
         return _export(args, page, page_factory)
     if args.command == "supplement":

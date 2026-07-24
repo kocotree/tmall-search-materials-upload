@@ -95,7 +95,8 @@ STAGES: tuple[StageDefinition, ...] = (
             ),
             _field("products_csv", "商品表", "auto_path", required=True),
             _field("rules_csv", "规则表", "auto_path", required=True),
-            _field("image_roots", "三处图片根目录", "auto_path_list", required=True),
+            _field("image_source_labels", "图片源名称", "auto_path_list", required=True),
+            _field("image_roots", "图片源根目录", "auto_path_list", required=True),
             _field(
                 "asset_manifest",
                 "人工图片素材清单",
@@ -120,7 +121,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="completeness",
         title="完整度巡检",
-        description="确认基础与推广素材矩阵，记录误判覆盖原因和补充说明。",
+        description="确认搜推素材目标、已有与缺失篇数，记录误判覆盖原因和补充说明。基础素材不属于本轮上传范围。",
         component="inspection_matrix",
         previous_stage="setup",
         fields=(

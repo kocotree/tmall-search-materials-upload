@@ -136,3 +136,130 @@ def products_requiring_supplement(snapshots: Iterable[MaterialSnapshot]) -> list
         or snapshot.empty_slot_indexes is None
         or snapshot.review_states_complete is False
     ]
+
+
+def build_completeness_matrix(
+    basic_rows: Iterable[Mapping[str, str]],
+    promotion_rows: Iterable[Mapping[str, str]],
+    *,
+    products: Iterable[Mapping[str, str]] = (),
+    candidate_counts: Mapping[str, int] | None = None,
+) -> dict:
+    """Build the stable data contract rendered by interaction stage 02.
+
+    Missing source rows remain explicit ``unknown``/``needs_backend_collection``
+    states.  The matrix never infers a 3/9 target from a category label.
+    """
+
+    basic_by_id = {
+        str(row.get("商品ID", "")).strip(): row
+        for row in basic_rows
+        if str(row.get("商品ID", "")).strip()
+    }
+    promotion_by_id = {
+        str(row.get("商品ID", "")).strip(): row
+        for row in promotion_rows
+        if str(row.get("商品ID", "")).strip()
+    }
+    product_by_id = {}
+    for row in products:
+        product_id = str(row.get("商品ID", row.get("product_id", ""))).strip()
+        if product_id:
+            product_by_id[product_id] = row
+
+    product_ids = []
+    for product_id in [*basic_by_id, *promotion_by_id]:
+        if product_id not in product_ids:
+            product_ids.append(product_id)
+
+    counts = candidate_counts or {}
+    records = []
+    for product_id in product_ids:
+        product = product_by_id.get(product_id, {})
+        basic = basic_by_id.get(product_id)
+        promotion = promotion_by_id.get(product_id)
+
+        target_slots = _promotion_int(promotion, "目标容量", "目标坑位")
+        current_count = _promotion_int(promotion, "现有素材数")
+        missing_count = _promotion_int(promotion, "缺失数量")
+        if missing_count is None and target_slots is not None and current_count is not None:
+            missing_count = max(target_slots - current_count, 0)
+        reason_codes = _split_tokens(promotion.get("原因码", "")) if promotion else []
+        remote_ids = _split_tokens(promotion.get("远端素材ID", "")) if promotion else []
+        promotion_status = (
+            str(promotion.get("状态", "")).strip() or "needs_manual_review"
+            if promotion
+            else "needs_backend_collection"
+        )
+
+        if promotion is None:
+            overall_status = "needs_backend_collection"
+        elif promotion_status in {"error", "blocked", "abnormal"}:
+            overall_status = "abnormal"
+        elif (missing_count or 0) > 0:
+            overall_status = "needs_supplement"
+        elif missing_count == 0:
+            overall_status = "complete"
+        else:
+            overall_status = "needs_manual_review"
+
+        records.append(
+            {
+                "product_id": product_id,
+                "sku": str(
+                    product.get("货号（查找引用）", product.get("sku", ""))
+                ).strip(),
+                "product_title": str(
+                    product.get("商品名称（查找引用）", product.get("product_title", ""))
+                    or (basic or {}).get("商品标题", "")
+                ).strip(),
+                "status": overall_status,
+                "promotion": {
+                    "status": promotion_status,
+                    "target_slots": target_slots,
+                    "current_count": current_count,
+                    "missing_count": missing_count,
+                    "empty_slot_indexes": _parse_indexes(
+                        promotion.get("空坑位", "") if promotion else ""
+                    ),
+                    "remote_material_ids": remote_ids,
+                    "reason_codes": reason_codes,
+                    "collected_at": str(
+                        promotion.get("采集时间", "") if promotion else ""
+                    ).strip(),
+                    "evidence": str(promotion.get("证据", "") if promotion else "").strip(),
+                },
+                "candidate_asset_count": (
+                    int(counts[product_id]) if product_id in counts else None
+                ),
+            }
+        )
+
+    status_counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        status_counts[record["status"]] += 1
+    return {
+        "contract_version": 1,
+        "products": records,
+        "summary": {
+            "product_count": len(records),
+            "status_counts": dict(sorted(status_counts.items())),
+        },
+    }
+
+
+def _promotion_int(row: Mapping[str, str] | None, *names: str) -> int | None:
+    if row is None:
+        return None
+    for name in names:
+        value = str(row.get(name, "")).strip()
+        if value:
+            try:
+                return int(float(value))
+            except ValueError:
+                return None
+    return None
+
+
+def _split_tokens(value: object) -> list[str]:
+    return [item.strip() for item in re.split(r"[;,，；|]+", str(value or "")) if item.strip()]

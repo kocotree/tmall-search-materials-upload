@@ -13,6 +13,7 @@
   const saveButton = document.querySelector("[data-save-draft]");
   const submitButton = document.querySelector("[data-submit-stage]");
   const recoveryButton = document.querySelector("[data-copy-recovery]");
+  const withdrawButton = document.querySelector("[data-withdraw-submission]");
   const offlinePanel = document.querySelector("[data-offline-panel]");
   const statusBadge = document.querySelector("[data-current-status]");
   const handoffStatus = document.querySelector("[data-handoff-status]");
@@ -23,12 +24,15 @@
   const lastSubmittedLabel = document.querySelector("[data-last-submitted]");
   const taskDirectoryLabel = document.querySelector("[data-task-directory]");
   const connectionLabel = document.querySelector("[data-connection-label]");
+  const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
 
   let sessionId = shell.dataset.sessionId || "";
   let currentStageId = railButtons[0]?.dataset.stageId || "setup";
   let revision = 0;
   let uiState = UiState.createState(currentStageId);
   let stageGeneration = 0;
+  let autoSaveTimer = null;
+  let persistenceInFlight = false;
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -61,6 +65,163 @@
       throw error;
     }
     return payload;
+  }
+
+  function imageSourceRows() {
+    return imageSourceConfig
+      ? [...imageSourceConfig.querySelectorAll("[data-image-source-row]")]
+      : [];
+  }
+
+  function updateImageSourceConfig() {
+    if (!imageSourceConfig) return;
+    const rows = imageSourceRows();
+    const validCount = rows.filter((row) =>
+      row.querySelector('[name="image_source_labels"]')?.value.trim()
+      && row.querySelector('[name="image_roots"]')?.value.trim()
+    ).length;
+    imageSourceConfig.querySelector("[data-image-source-summary]").textContent = `${rows.length} 个图片源`;
+    imageSourceConfig.dataset.ready = validCount === rows.length && rows.length > 0 ? "true" : "false";
+    rows.forEach((row) => {
+      row.querySelector("[data-remove-image-source]").disabled = rows.length <= 1;
+    });
+  }
+
+  function appendImageSource(label = "", path = "") {
+    if (!imageSourceConfig) return null;
+    const template = imageSourceConfig.querySelector("[data-image-source-template]");
+    const row = template.content.firstElementChild.cloneNode(true);
+    row.querySelector('[name="image_source_labels"]').value = label;
+    row.querySelector('[name="image_roots"]').value = path;
+    imageSourceConfig.querySelector("[data-image-source-list]").appendChild(row);
+    updateImageSourceConfig();
+    return row;
+  }
+
+  function configuredImageSources() {
+    const sources = imageSourceRows().map((row) => ({
+      label: row.querySelector('[name="image_source_labels"]').value.trim(),
+      path: row.querySelector('[name="image_roots"]').value.trim(),
+    }));
+    if (!sources.length || sources.some((source) => !source.label || !source.path)) {
+      throw new Error("每个图片源都必须填写来源名称和根路径");
+    }
+    return sources;
+  }
+
+  function hydrateImageSources(labels, paths) {
+    if (!imageSourceConfig || !Array.isArray(paths) || !paths.length) return;
+    const safeLabels = Array.isArray(labels) ? labels : [];
+    const configuredLabels = new Map(
+      imageSourceRows().map((row) => [
+        row.querySelector('[name="image_roots"]').value.trim(),
+        row.querySelector('[name="image_source_labels"]').value.trim(),
+      ]),
+    );
+    const list = imageSourceConfig.querySelector("[data-image-source-list]");
+    list.replaceChildren();
+    paths.forEach((path, index) => {
+      const textPath = String(path || "");
+      appendImageSource(
+        safeLabels[index] || configuredLabels.get(textPath) || `图片源 ${index + 1}`,
+        textPath,
+      );
+    });
+    updateImageSourceConfig();
+  }
+
+  async function checkImageSources() {
+    const feedback = imageSourceConfig.querySelector("[data-image-source-feedback]");
+    feedback.textContent = "正在检测图片源路径…";
+    try {
+      const payload = await fetchJson("/api/runtime/image-sources/check", {
+        method: "POST",
+        body: JSON.stringify({ image_sources: configuredImageSources() }),
+      });
+      imageSourceRows().forEach((row, index) => {
+        const status = payload.image_sources[index]?.status || "unavailable";
+        const node = row.querySelector("[data-image-source-state]");
+        node.dataset.status = status;
+        node.textContent = status === "available" ? "路径可访问" : "当前不可访问";
+      });
+      const available = payload.image_sources.filter((source) => source.status === "available").length;
+      feedback.textContent = `检测完成：${available} / ${payload.image_sources.length} 个路径可访问。`;
+    } catch (error) {
+      feedback.textContent = error.message;
+    }
+  }
+
+  async function saveImageSources() {
+    const feedback = imageSourceConfig.querySelector("[data-image-source-feedback]");
+    feedback.textContent = "正在保存本机配置…";
+    try {
+      const payload = await fetchJson("/api/runtime/image-sources", {
+        method: "PUT",
+        body: JSON.stringify({ image_sources: configuredImageSources() }),
+      });
+      feedback.textContent = `已保存 ${payload.image_sources.length} 个图片源到本机配置。`;
+      updateImageSourceConfig();
+    } catch (error) {
+      feedback.textContent = error.message;
+    }
+  }
+
+  async function pickImageSource(row) {
+    const pathInput = row.querySelector('[name="image_roots"]');
+    const state = row.querySelector("[data-image-source-state]");
+    state.textContent = "正在打开选择窗口…";
+    try {
+      const payload = await fetchJson("/api/runtime/folder-picker", {
+        method: "POST",
+        body: JSON.stringify({ initial_path: pathInput.value.trim() }),
+      });
+      if (!payload.cancelled) {
+        pathInput.value = payload.path;
+        pathInput.dispatchEvent(new Event("input", { bubbles: true }));
+        state.textContent = "已选择，等待检测";
+      } else {
+        state.textContent = "已取消选择";
+      }
+    } catch (error) {
+      state.textContent = "选择窗口不可用";
+      imageSourceConfig.querySelector("[data-image-source-feedback]").textContent = error.message;
+    }
+  }
+
+  function initializeImageSourceConfig() {
+    if (!imageSourceConfig) return;
+    imageSourceConfig.querySelector("[data-add-image-source]").addEventListener("click", () => {
+      const next = imageSourceRows().length + 1;
+      appendImageSource(`图片源 ${next}`, "")?.querySelector('[name="image_roots"]')?.focus();
+      uiState = UiState.markDirty(uiState);
+      renderStatus();
+      scheduleAutoSave();
+    });
+    imageSourceConfig.querySelector("[data-image-source-list]").addEventListener("click", (event) => {
+      const picker = event.target.closest("[data-pick-image-source]");
+      if (picker) {
+        pickImageSource(picker.closest("[data-image-source-row]"));
+        return;
+      }
+      const button = event.target.closest("[data-remove-image-source]");
+      if (!button || imageSourceRows().length <= 1) return;
+      button.closest("[data-image-source-row]").remove();
+      updateImageSourceConfig();
+      uiState = UiState.markDirty(uiState);
+      renderStatus();
+      scheduleAutoSave();
+    });
+    imageSourceConfig.addEventListener("input", (event) => {
+      if (event.target.matches('[name="image_source_labels"], [name="image_roots"]')) {
+        event.target.closest("[data-image-source-row]")
+          ?.querySelector("[data-image-source-state]")
+          ?.removeAttribute("data-status");
+        updateImageSourceConfig();
+      }
+    });
+    imageSourceConfig.querySelector("[data-check-image-sources]").addEventListener("click", checkImageSources);
+    imageSourceConfig.querySelector("[data-save-image-sources]").addEventListener("click", saveImageSources);
+    updateImageSourceConfig();
   }
 
   async function ensureSession() {
@@ -141,6 +302,9 @@
   }
 
   function hydrateForm(form, values) {
+    if (form.dataset.stageForm === "setup") {
+      hydrateImageSources(values?.image_source_labels, values?.image_roots);
+    }
     Object.entries(values || {}).forEach(([name, value]) => {
       const controls = [...form.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
       if (!controls.length) return;
@@ -177,7 +341,32 @@
       && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
     submitButton.disabled = lockedByServer;
     saveButton.disabled = lockedByServer;
+    withdrawButton.hidden = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;
+    withdrawButton.disabled = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;
+    setFormLocked(uiState.serverStatus);
     updateResultsRecovery(UiState.recoveryView(uiState));
+  }
+
+  function setFormLocked(status) {
+    const form = activeForm();
+    if (!form) return;
+    const locked = ["ready_for_agent", "processing", "completed"].includes(status);
+    form.querySelectorAll("input, textarea, select, button").forEach((control) => {
+      if (locked && !control.disabled) {
+        control.disabled = true;
+        control.dataset.taskLocked = "true";
+      } else if (!locked && control.dataset.taskLocked === "true") {
+        control.disabled = false;
+        delete control.dataset.taskLocked;
+      }
+    });
+  }
+
+  function scheduleAutoSave() {
+    window.clearTimeout(autoSaveTimer);
+    if (!["draft", "needs_user_input", "blocked"].includes(uiState.serverStatus)) return;
+    actionMessage.textContent = "有未保存更改；停止输入后将自动保存草稿。";
+    autoSaveTimer = window.setTimeout(() => persistStage("draft", { automatic: true }), 1000);
   }
 
   function renderSubmission() {
@@ -279,6 +468,223 @@
       summary.appendChild(action);
     }
     content.appendChild(summary);
+  }
+
+  function completenessConfirmedIds() {
+    const control = activeForm()?.querySelector('[name="confirmed_product_ids"]');
+    return new Set(
+      String(control?.value || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+  }
+
+  function writeCompletenessConfirmedIds(ids) {
+    const control = activeForm()?.querySelector('[name="confirmed_product_ids"]');
+    if (!control) return;
+    control.value = [...ids].sort((left, right) => left.localeCompare(right, "zh-CN")).join("\n");
+    control.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function completenessOverrides() {
+    return readJsonListControl("overrides").filter((item) => item?.product_id);
+  }
+
+  function persistCompletenessDecision(productId, decision, reason = "") {
+    const confirmed = completenessConfirmedIds();
+    const retained = completenessOverrides()
+      .filter((item) => String(item.product_id) !== String(productId));
+    if (decision === "pending") {
+      confirmed.delete(String(productId));
+    } else {
+      confirmed.add(String(productId));
+      if (decision !== "confirmed") {
+        retained.push({
+          product_id: String(productId),
+          action: decision,
+          reason: String(reason || "").trim(),
+        });
+      }
+    }
+    writeCompletenessConfirmedIds(confirmed);
+    writeJsonListControl("overrides", retained);
+  }
+
+  function completenessStatusLabel(status) {
+    return ({
+      needs_supplement: "待补充",
+      needs_backend_collection: "需后台补采",
+      needs_manual_review: "需人工确认",
+      complete: "完整",
+      excluded: "排除候选",
+      abnormal: "异常",
+    })[status] || "需人工确认";
+  }
+
+  function renderInspectionMatrix(view) {
+    if (view.mode === "empty") return;
+    const products = Array.isArray(view.result?.data?.products)
+      ? view.result.data.products
+      : [];
+    if (!products.length) return;
+    const module = document.querySelector('[data-component="InspectionMatrix"]');
+    const content = module?.querySelector("[data-result-content]");
+    if (!content) return;
+    content.replaceChildren();
+
+    const locked = ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
+    const confirmed = completenessConfirmedIds();
+    const overrideByProduct = new Map(
+      completenessOverrides().map((item) => [String(item.product_id), item]),
+    );
+    const statusCounts = view.result?.data?.summary?.status_counts || {};
+    const summary = element("div", "inspection-summary");
+    [
+      ["全部商品", products.length],
+      ["待补充", statusCounts.needs_supplement || 0],
+      ["需后台补采", statusCounts.needs_backend_collection || 0],
+      ["完整", statusCounts.complete || 0],
+      ["已处理", confirmed.size],
+    ].forEach(([label, count]) => {
+      const card = element("div", "inspection-stat");
+      card.append(element("span", "", label), element("strong", "", String(count)));
+      summary.appendChild(card);
+    });
+    content.appendChild(summary);
+
+    const toolbar = element("div", "inspection-toolbar");
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "搜索商品 ID、货号或名称";
+    search.setAttribute("aria-label", "搜索完整度巡检商品");
+    const filter = document.createElement("select");
+    filter.setAttribute("aria-label", "筛选完整度状态");
+    [
+      ["all", "全部"],
+      ["needs_supplement", "待补充"],
+      ["needs_backend_collection", "需后台补采"],
+      ["needs_manual_review", "需人工确认"],
+      ["complete", "完整"],
+      ["excluded", "排除候选"],
+      ["abnormal", "异常"],
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      filter.appendChild(option);
+    });
+    const bulkConfirm = element("button", "secondary-button", "确认当前筛选结果");
+    bulkConfirm.type = "button";
+    bulkConfirm.disabled = locked;
+    toolbar.append(search, filter, bulkConfirm);
+    content.appendChild(toolbar);
+
+    const list = element("div", "inspection-list");
+    content.appendChild(list);
+
+    const visibleProducts = () => {
+      const needle = search.value.trim().toLocaleLowerCase("zh-CN");
+      return products.filter((product) => {
+        const matchesFilter = filter.value === "all" || product.status === filter.value;
+        const haystack = [product.product_id, product.sku, product.product_title]
+          .join(" ")
+          .toLocaleLowerCase("zh-CN");
+        return matchesFilter && (!needle || haystack.includes(needle));
+      });
+    };
+
+    const draw = () => {
+      list.replaceChildren();
+      const visible = visibleProducts();
+      if (!visible.length) {
+        list.appendChild(element("p", "inspection-no-results", "没有符合当前筛选条件的商品。"));
+        return;
+      }
+      visible.forEach((product) => {
+        const productId = String(product.product_id || "");
+        const existingOverride = overrideByProduct.get(productId);
+        const decisionValue = existingOverride?.action
+          || (confirmed.has(productId) ? "confirmed" : "pending");
+        const card = element("article", "inspection-row");
+        card.dataset.status = product.status || "needs_manual_review";
+
+        const identity = element("div", "inspection-identity");
+        identity.append(
+          element("strong", "", product.product_title || `商品 ${productId}`),
+          element("span", "", `商品 ID ${productId} · 货号 ${product.sku || "未知"}`),
+          element("span", "inspection-status", completenessStatusLabel(product.status)),
+        );
+
+        const promotion = element("div", "inspection-cell");
+        const target = product.promotion?.target_slots;
+        const current = product.promotion?.current_count;
+        const missing = product.promotion?.missing_count;
+        promotion.append(
+          element("small", "", "搜推素材"),
+          element("strong", "", target == null || current == null ? "坑位待补采" : `${current} / ${target} 篇`),
+          element("span", "", missing == null ? "缺失数未知" : `缺失 ${missing} 篇`),
+          element(
+            "span",
+            "",
+            product.candidate_asset_count == null
+              ? "候选图片：待素材匹配"
+              : `候选图片 ${product.candidate_asset_count} 张`,
+          ),
+        );
+        if (product.promotion?.evidence) {
+          const evidence = document.createElement("details");
+          const evidenceSummary = document.createElement("summary");
+          evidenceSummary.textContent = "查看后台证据";
+          evidence.append(evidenceSummary, element("code", "", product.promotion.evidence));
+          promotion.appendChild(evidence);
+        }
+
+        const controls = element("div", "inspection-controls");
+        const decision = document.createElement("select");
+        decision.disabled = locked;
+        decision.setAttribute("aria-label", `商品 ${productId} 的巡检结论`);
+        [
+          ["pending", "待处理"],
+          ["confirmed", "确认巡检结果"],
+          ["false_positive", "标记误判"],
+          ["exclude", "排除候选"],
+          ["manual_review", "需要人工处理"],
+        ].forEach(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          option.selected = decisionValue === value;
+          decision.appendChild(option);
+        });
+        const reason = document.createElement("input");
+        reason.type = "text";
+        reason.placeholder = "误判、排除或人工处理原因（必填）";
+        reason.value = existingOverride?.reason || "";
+        reason.disabled = locked || ["pending", "confirmed"].includes(decisionValue);
+        controls.append(decision, reason);
+        decision.addEventListener("change", () => {
+          reason.disabled = locked || ["pending", "confirmed"].includes(decision.value);
+          persistCompletenessDecision(productId, decision.value, reason.value);
+          if (!reason.disabled) reason.focus();
+        });
+        reason.addEventListener("input", () => {
+          persistCompletenessDecision(productId, decision.value, reason.value);
+        });
+        card.append(identity, promotion, controls);
+        list.appendChild(card);
+      });
+    };
+
+    search.addEventListener("input", draw);
+    filter.addEventListener("change", draw);
+    bulkConfirm.addEventListener("click", () => {
+      visibleProducts().forEach((product) => {
+        persistCompletenessDecision(String(product.product_id), "confirmed");
+      });
+      renderInspectionMatrix(view);
+    });
+    draw();
   }
 
   function syncSetupProductScope() {
@@ -720,6 +1126,7 @@
       renderFolderOwnershipReview(view);
       renderAssetMatchGallery(view);
     }
+    if (schemaComponent === "inspection_matrix") renderInspectionMatrix(view);
   }
 
   async function loadStage() {
@@ -754,17 +1161,25 @@
     }
   }
 
-  async function persistStage(mode) {
+  async function persistStage(mode, { automatic = false } = {}) {
+    if (persistenceInFlight) return;
+    if (["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus)) return;
+    persistenceInFlight = true;
+    if (mode === "submit") window.clearTimeout(autoSaveTimer);
     const requestedStageId = currentStageId;
     const requestedGeneration = stageGeneration;
     const form = activeForm();
-    if (!form) return;
+    if (!form) {
+      persistenceInFlight = false;
+      return;
+    }
     clearFieldErrors(form);
     let values;
     try {
       values = serializeForm(form);
     } catch (error) {
       actionMessage.textContent = error.message;
+      persistenceInFlight = false;
       return;
     }
 
@@ -812,13 +1227,17 @@
         uiState = UiState.receiveStage(uiState, {
           stageId: requestedStageId,
           status: "draft",
-          result: null,
+          result: requestedStageId === "completeness" ? uiState.result : null,
           submission: null,
         });
         renderStatus();
         renderSubmission();
-        renderStageResult(stages.get(requestedStageId).component);
-        actionMessage.textContent = "草稿已保存；不会创建 Agent 交接。";
+        if (requestedStageId !== "completeness") {
+          renderStageResult(stages.get(requestedStageId).component);
+        }
+        actionMessage.textContent = automatic
+          ? `草稿已自动保存 · ${new Date().toLocaleTimeString()}`
+          : "草稿已保存；不会创建 Agent 交接。";
       }
       revisionLabel.textContent = String(revision);
     } catch (error) {
@@ -833,6 +1252,25 @@
       actionMessage.textContent = error.message;
       uiState = UiState.markDirty(uiState);
       renderStatus();
+    } finally {
+      persistenceInFlight = false;
+    }
+  }
+
+  async function withdrawSubmission() {
+    if (!sessionId || uiState.serverStatus !== "ready_for_agent") return;
+    withdrawButton.disabled = true;
+    actionMessage.textContent = "正在撤回尚未被 Agent 认领的提交…";
+    try {
+      await fetchJson(apiPath(`/stages/${currentStageId}/withdraw`), {
+        method: "POST",
+        body: JSON.stringify({ revision }),
+      });
+      await loadStage();
+      actionMessage.textContent = "提交已撤回，可以继续修改。";
+    } catch (error) {
+      actionMessage.textContent = error.message;
+      await loadStage();
     }
   }
 
@@ -842,7 +1280,11 @@
     try {
       const payload = await fetchJson(apiPath(`/stages/${stageId}/recovery`));
       uiState = UiState.receiveRecovery(uiState, stageId, payload.instruction);
-      if (currentStageId === stageId && uiState.recoveryInstruction) {
+      if (
+        currentStageId === stageId
+        && uiState.recoveryInstruction
+        && ["ready_for_agent", "processing", "needs_user_input", "blocked"].includes(uiState.serverStatus)
+      ) {
         recoveryButton.disabled = false;
       }
     } catch (error) {
@@ -887,6 +1329,7 @@
   function activateStage(stageId) {
     if (!stages.has(stageId)) return;
     stageGeneration += 1;
+    window.clearTimeout(autoSaveTimer);
     currentStageId = stageId;
     uiState = UiState.switchStage(uiState, stageId);
     recoveryButton.disabled = true;
@@ -924,17 +1367,20 @@
       if (panel.dataset.stagePanel === currentStageId) {
         uiState = UiState.markDirty(uiState);
         renderStatus();
+        scheduleAutoSave();
       }
     });
   });
   saveButton.addEventListener("click", () => persistStage("draft"));
   submitButton.addEventListener("click", () => persistStage("submit"));
   recoveryButton.addEventListener("click", copyRecoveryInstruction);
+  withdrawButton.addEventListener("click", withdrawSubmission);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) pollStage();
   });
 
   setInterval(pollStage, 2000);
+  initializeImageSourceConfig();
   syncSetupProductScope();
   activateStage(currentStageId);
 })();

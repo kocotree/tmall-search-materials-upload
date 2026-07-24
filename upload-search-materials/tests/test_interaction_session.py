@@ -496,6 +496,55 @@ def test_save_draft_invalidates_current_handoff_and_downstream_state(tmp_path):
     assert state["stages"]["completeness"]["status"] == "draft"
 
 
+def test_submitted_and_draft_revisions_keep_immutable_snapshots(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    handoff = store.save_input(session.session_id, "setup", {"store": "submitted"})
+    draft = store.save_draft(
+        session.session_id,
+        "setup",
+        {"store": "revised draft"},
+        expected_revision=handoff["revision"],
+    )
+
+    first = session.path / "01-setup" / "revisions" / "0001"
+    second = session.path / "01-setup" / "revisions" / "0002"
+    assert json.loads((first / "input.json").read_text(encoding="utf-8"))["values"] == {
+        "store": "submitted"
+    }
+    assert (first / "handoff.json").is_file()
+    assert json.loads((second / "input.json").read_text(encoding="utf-8"))["values"] == {
+        "store": "revised draft"
+    }
+    assert not (second / "handoff.json").exists()
+    assert draft["revision"] == 2
+
+
+def test_only_unclaimed_handoff_can_be_withdrawn(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(session.session_id, "setup", {"store": "one"})
+
+    withdrawn = store.withdraw_handoff(
+        session.session_id, "setup", expected_revision=handoff["revision"]
+    )
+
+    assert withdrawn == {"status": "draft", "revision": 1}
+    assert not (session.path / "01-setup" / "handoff.json").exists()
+    assert store.load_session(session.session_id)["stages"]["setup"]["status"] == "draft"
+    assert (session.path / "01-setup" / "revisions" / "0001" / "handoff.json").is_file()
+
+    submitted_again = store.save_input(session.session_id, "setup", {"store": "two"})
+    store.wait_for_handoff(session.session_id, "setup", timeout_seconds=0.1)
+    with pytest.raises(InteractionConflict, match="unclaimed"):
+        store.withdraw_handoff(
+            session.session_id,
+            "setup",
+            expected_revision=submitted_again["revision"],
+        )
+
+
 def test_wait_claims_each_handoff_revision_only_once_sequentially(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()

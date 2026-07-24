@@ -15,7 +15,9 @@ uv run python -X utf8 $quickValidate .
 
 ### 1.1 每台电脑只配置一次路径
 
-复制 `config/local-paths.example.json` 为 `config/local-paths.json`，再修改当前电脑可访问的共享图片目录。`local-paths.json` 已被 Git 忽略，不会影响其他电脑。
+首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。也可以复制 `config/local-paths.example.json` 为 `config/local-paths.json` 后手工修改。`local-paths.json` 已被 Git 忽略，不会影响其他电脑。
+
+每个图片源行的“选择文件夹”由用户点击后打开 Windows 原生目录选择窗口，只回填完整路径，不扫描图片；UNC 或无界面环境可继续手工粘贴路径。
 
 项目内输入默认无需配置：程序先定位包含 `docs/` 与 `upload-search-materials/` 的项目根目录，再在 `docs/` 中按以下受控模式查找：
 
@@ -35,7 +37,7 @@ uv run python -X utf8 $quickValidate .
 
 ## 2. 创建隔离任务
 
-任务配置页默认只让用户确认店铺、月份和商品范围。商品表、规则表、三处图片根目录及运行目录来自共享配置并只读展示；基础素材标记为自动导出，推广素材标记为自动采集。人工图片素材清单、历史基础素材表和历史推广素材状态位于高级设置，日常执行保持为空。
+任务配置页让用户确认店铺、月份、商品范围和本次图片源。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。基础素材标记为自动导出，推广素材标记为自动采集。人工图片素材清单、历史基础素材表和历史推广素材状态位于高级设置，日常执行保持为空。
 
 Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
 
@@ -45,6 +47,8 @@ Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入�
 - `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
 
 共享文件夹索引数据库、选择器与策略配置不重复复制；NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
+
+编辑时页面停止输入约 1 秒会自动保存草稿。草稿只写当前任务，不通知 Agent；“保存为本机配置”只更新当前电脑默认图片源；“提交给 Agent”才生成可认领 handoff。提交后表单冻结。Agent 尚未认领时可撤回；进入处理中后不可撤回或覆盖。阶段目录的 `revisions/<revision>/` 保留输入和正式 handoff 快照。
 
 ## 3. 文件夹索引优先
 
@@ -126,7 +130,21 @@ uv run tmall-materials index-assets `
 
 原始 NAS 图片只读，视频继续延期。同一个 `asset-index.sqlite3` 同一时刻只能有一个 Agent 或进程执行 new、`--resume`、`--refresh`，禁止并发。人工检查候选并确认逐文件授权后，才能生成或接受 `confirmed-assets.csv`，然后进入素材完整性审查、生产选择器、全量 dry-run 和 1–3 商品生产验收。
 
-### 3.3 生成素材候选画廊
+### 3.3 生成第二阶段完整度矩阵
+
+```powershell
+uv run --project .\upload-search-materials --locked tmall-materials inspect-completeness `
+  --products <任务目录>\inputs\products.csv `
+  --basic <任务目录>\exports\basic\基础素材.xlsx `
+  --promotion-status <任务目录>\promotion\promotion-material-status.csv `
+  --output <任务目录>\02-completeness\completeness-matrix.json
+```
+
+该命令只读输入，不访问图片源、不调用浏览器、不上传。检查输出中未知目标仍为 `null`，且不包含基础素材字段完整度；再将矩阵作为完整度阶段的 Agent 结果写入，用户在页面完成确认或覆盖原因后才进入下一阶段。
+
+默认只保留基础素材表中 `商品状态=售卖中` 的商品，并把推广采集结果限制在同一商品 ID 集合。只有明确进行离线全状态审计时才传 `--product-status all`。
+
+### 3.4 生成素材候选画廊
 
 先完成推广素材状态扫描，再把缺失篇数与索引候选合并：
 

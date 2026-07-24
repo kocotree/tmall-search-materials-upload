@@ -11,7 +11,13 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
-from ..runtime_config import RuntimeConfig, load_runtime_config
+from ..runtime_config import (
+    RuntimeConfig,
+    inspect_image_sources,
+    load_runtime_config,
+    save_image_sources,
+)
+from .folder_picker import choose_directory
 from .session import InteractionConflict, InteractionPathError, SessionStore
 from .stages import STAGES, FieldDefinition, StageDefinition, get_stage
 
@@ -20,7 +26,10 @@ RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
 
 
 def create_app(
-    runs_root: Path, runtime_config: RuntimeConfig | None = None
+    runs_root: Path,
+    runtime_config: RuntimeConfig | None = None,
+    *,
+    enforce_stage_order: bool = True,
 ) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
@@ -78,12 +87,67 @@ def create_app(
                 "rules_available": bool(runtime.rules.path and runtime.rules.path.is_file()),
                 "rules_status": runtime.rules.status,
                 "image_sources_configured": bool(runtime.image_sources),
+                "image_config_path": str(
+                    runtime.config_path
+                    or runtime.workspace_root
+                    / "upload-search-materials"
+                    / "config"
+                    / "local-paths.json"
+                ),
             },
         )
 
     @app.get("/api")
     def api_index():
         return jsonify(service="upload-search-materials interaction API")
+
+    @app.get("/api/runtime/image-sources")
+    def get_runtime_image_sources():
+        return jsonify(
+            image_sources=runtime.image_sources,
+            config_path=str(
+                runtime.config_path
+                or runtime.workspace_root
+                / "upload-search-materials"
+                / "config"
+                / "local-paths.json"
+            ),
+        )
+
+    @app.post("/api/runtime/image-sources/check")
+    def check_runtime_image_sources():
+        payload = _json_object()
+        try:
+            sources = inspect_image_sources(runtime, payload.get("image_sources"))
+        except ValueError as error:
+            return _validation_error({"image_sources": str(error)})
+        return jsonify(image_sources=sources)
+
+    @app.put("/api/runtime/image-sources")
+    def put_runtime_image_sources():
+        nonlocal runtime
+        payload = _json_object()
+        try:
+            runtime = save_image_sources(runtime, payload.get("image_sources"))
+        except (OSError, ValueError) as error:
+            return _validation_error({"image_sources": str(error)})
+        return jsonify(
+            image_sources=runtime.image_sources,
+            config_path=str(runtime.config_path),
+            saved=True,
+        )
+
+    @app.post("/api/runtime/folder-picker")
+    def open_runtime_folder_picker():
+        payload = _json_object()
+        initial_path = payload.get("initial_path")
+        if initial_path is not None and not isinstance(initial_path, str):
+            return _validation_error({"initial_path": "must be a string"})
+        try:
+            selected = choose_directory(initial_path)
+        except (OSError, RuntimeError) as error:
+            return _error(f"folder picker unavailable: {error}", 503)
+        return jsonify(cancelled=selected is None, path=selected or "")
 
     @app.post("/api/sessions")
     def create_session():
@@ -111,8 +175,14 @@ def create_app(
     def save_draft(session_id: str, stage_id: str):
         payload = _json_object()
         values = _values(payload)
-        store.load_session(session_id)
+        state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        if state["stages"][stage_id]["status"] not in {
+            "draft",
+            "needs_user_input",
+            "blocked",
+        }:
+            raise InteractionConflict("submitted stage is frozen; withdraw it before editing")
         field_errors = _unknown_value_errors(stage, values)
         if field_errors:
             return _validation_error(field_errors)
@@ -132,8 +202,22 @@ def create_app(
     def submit(session_id: str, stage_id: str):
         payload = _json_object()
         values = _values(payload)
-        store.load_session(session_id)
+        state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        if state["stages"][stage_id]["status"] not in {
+            "draft",
+            "needs_user_input",
+            "blocked",
+        }:
+            raise InteractionConflict("stage status does not allow a new submission")
+        if (
+            enforce_stage_order
+            and stage.previous_stage
+            and state["stages"][stage.previous_stage]["status"] != "completed"
+        ):
+            return _validation_error(
+                {"stage": f"complete previous stage '{stage.previous_stage}' first"}
+            )
         field_errors = _unknown_value_errors(stage, values) | _value_errors(stage, values)
         if field_errors:
             return _validation_error(field_errors)
@@ -159,6 +243,18 @@ def create_app(
             input_sha256=handoff["input_sha256"],
             created_at=handoff["created_at"],
         ), 202
+
+    @app.post("/api/sessions/<session_id>/stages/<stage_id>/withdraw")
+    def withdraw_submission(session_id: str, stage_id: str):
+        payload = _json_object()
+        get_stage(stage_id)
+        expected_revision = payload.get("revision")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            return _validation_error({"revision": "must be an integer"})
+        result = store.withdraw_handoff(
+            session_id, stage_id, expected_revision=expected_revision
+        )
+        return jsonify(result)
 
     @app.get("/api/sessions/<session_id>/stages/<stage_id>/status")
     def status(session_id: str, stage_id: str):
@@ -230,21 +326,29 @@ def _current_result(
 
     try:
         result = store.read_optional_stage_document(session_id, stage_id, "result")
-        if result is None:
-            return None
-        input_sha256 = hashlib.sha256(
-            (store._stage_path(session_id, stage_id) / "input.json").read_bytes()
-        ).hexdigest()
+        if result is not None:
+            input_sha256 = hashlib.sha256(
+                (store._stage_path(session_id, stage_id) / "input.json").read_bytes()
+            ).hexdigest()
+            if (
+                result.get("session_id") == session_id
+                and result.get("stage_id") == stage_id
+                and result.get("revision") == state["stages"][stage_id]["revision"]
+                and result.get("input_sha256") == input_sha256
+            ):
+                return result
     except (FileNotFoundError, OSError):
+        pass
+    if stage_id != "completeness":
         return None
+    context = store.read_optional_stage_document(session_id, stage_id, "review-context")
     if (
-        result.get("session_id") != session_id
-        or result.get("stage_id") != stage_id
-        or result.get("revision") != state["stages"][stage_id]["revision"]
-        or result.get("input_sha256") != input_sha256
+        context is None
+        or context.get("session_id") != session_id
+        or context.get("stage_id") != stage_id
     ):
         return None
-    return result
+    return context
 
 
 def _current_input(

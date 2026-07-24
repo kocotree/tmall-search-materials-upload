@@ -1,4 +1,5 @@
 from upload_search_materials.material_state import (
+    build_completeness_matrix,
     calculate_gap,
     merge_material_state,
     products_requiring_supplement,
@@ -88,3 +89,56 @@ def test_only_unknown_products_are_sent_to_browser_supplement():
     )
 
     assert products_requiring_supplement(snapshots) == ["2"]
+
+
+def test_completeness_matrix_reports_only_promotion_upload_gaps():
+    matrix = build_completeness_matrix(
+        basic_rows=[
+            {
+                "商品ID": "1",
+                "商品标题": "成长太阳镜",
+                "卖点1": "防晒",
+                "商品白底图": "uploaded",
+            }
+        ],
+        promotion_rows=[
+            {
+                "商品ID": "1",
+                "目标容量": "9",
+                "现有素材数": "3",
+                "缺失数量": "6",
+                "远端素材ID": "a;b;c",
+                "状态": "needs_manual_review",
+                "原因码": "PROMOTION_MATERIALS_MISSING",
+                "证据": "source=recommended_promotion_dom",
+            }
+        ],
+        products=[
+            {"商品ID": "1", "货号（查找引用）": "KQ001", "商品名称（查找引用）": "分龄成长太阳镜"}
+        ],
+        candidate_counts={"1": 18},
+    )
+
+    product = matrix["products"][0]
+    assert product["product_title"] == "分龄成长太阳镜"
+    assert "basic" not in product
+    assert product["promotion"]["target_slots"] == 9
+    assert product["promotion"]["current_count"] == 3
+    assert product["promotion"]["missing_count"] == 6
+    assert product["promotion"]["remote_material_ids"] == ["a", "b", "c"]
+    assert product["candidate_asset_count"] == 18
+    assert product["status"] == "needs_supplement"
+
+
+def test_completeness_matrix_never_guesses_missing_backend_target():
+    matrix = build_completeness_matrix(
+        basic_rows=[{"商品ID": "2"}],
+        promotion_rows=[],
+        products=[{"商品ID": "2", "商品名称（查找引用）": "未知坑位商品"}],
+    )
+
+    product = matrix["products"][0]
+    assert product["promotion"]["target_slots"] is None
+    assert product["promotion"]["missing_count"] is None
+    assert product["status"] == "needs_backend_collection"
+    assert matrix["summary"]["status_counts"] == {"needs_backend_collection": 1}
