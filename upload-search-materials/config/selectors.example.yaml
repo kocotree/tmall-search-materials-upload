@@ -6,6 +6,8 @@ promotion_tab: 'li[role="tab"]:has-text("搜推素材")'
 recommended_filter: '[role="checkbox"]:has-text("推荐补充素材")'
 promotion_rows: "tbody tr"
 promotion_next_page: 'button:has-text("下一页")'
+safe_popup_progress: '[id^="react-joyride-step-"] :text-is("下一步"), [id^="react-joyride-step-"] :text-is("完成"), [id^="react-joyride-step-"] :text-is("知道了"), #react-joyride-portal :text-is("下一步"), #react-joyride-portal :text-is("完成"), #react-joyride-portal :text-is("知道了")'
+safe_popup_close_priority: '.next-overlay-wrapper.opened .next-dialog-close, .next-overlay-wrapper.opened [aria-label*="关闭"], .next-overlay-wrapper.v2.opened svg.next-icon-remote, #react-joyride-portal [class*="GuideBalloon_"][class*="close"], #react-joyride-portal [class*="GuideBalloon_"][class*="Close"], #react-joyride-portal [data-test-id="button-close"], #react-joyride-portal button[aria-label="Close"], #react-joyride-portal [data-test-id="button-skip"]'
 safe_popup_close: 'button:has-text("稍后再看"), button:has-text("关闭"), button:has-text("知道了"), button:has-text("我知道了"), button:has-text("暂不"), button:has-text("取消"), [aria-label*="Close"], [aria-label*="close"], [aria-label*="关闭"], .next-dialog-close'
 product_search: "#product-search"
 product_id: "#product-id"

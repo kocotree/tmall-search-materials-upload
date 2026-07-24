@@ -255,6 +255,58 @@ def test_write_result_binds_identity_and_updates_session(tmp_path):
     assert store.load_session(session.session_id)["stages"]["setup"]["status"] == "needs_user_input"
 
 
+def test_write_result_persists_structured_asset_gallery_data(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id,
+        "asset_matching",
+        {
+            "image_roots": [str(tmp_path)],
+            "source_types": ["image"],
+            "license_decisions": [{"asset_id": "A", "status": "confirmed"}],
+            "asset_decisions": [{"asset_id": "A", "decision": "selected"}],
+        },
+    )
+    data = {
+        "requirements": [
+            {
+                "product_id": "123",
+                "product_title": "测试商品",
+                "missing_materials": 1,
+                "images_per_material": 3,
+            }
+        ],
+        "asset_candidates": [
+            {
+                "asset_id": "A",
+                "product_id": "123",
+                "source_path": str(tmp_path / "a.jpg"),
+                "sha256": "a" * 64,
+            }
+        ],
+        "remote_dedupe_status": "not_available",
+    }
+
+    result = store.write_result(
+        session.session_id,
+        "asset_matching",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="needs_user_input",
+        summary="请选择素材",
+        data=data,
+    )
+
+    assert result["data"] == data
+    persisted = json.loads(
+        (session.path / "04-asset-matching" / "result.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted["data"]["asset_candidates"][0]["asset_id"] == "A"
+
+
 def test_recovery_instruction_names_absolute_session_path_and_stage(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()

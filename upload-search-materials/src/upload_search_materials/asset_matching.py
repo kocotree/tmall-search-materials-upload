@@ -71,10 +71,20 @@ class ProductPathMatcher:
             )
 
         folded_components = {component.casefold() for component in directory_components}
+        folded_tokens = {
+            token
+            for component in directory_components
+            for token in _SEPARATORS.split(component.casefold())
+            if token
+        }
         sku_matches = [
             product
             for product in self._products
-            if product.sku and product.sku.casefold() in folded_components
+            if product.sku
+            and (
+                product.sku.casefold() in folded_components
+                or product.sku.casefold() in folded_tokens
+            )
         ]
         if sku_matches:
             return self._build_matches(

@@ -10,11 +10,11 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 ## Required Inputs
 
-- 目标月份和页面可见的准确店铺名。
-- 商品总表 CSV、月度规则 CSV。
-- Playwright 导出的基础素材 XLSX 和同批次 `export-manifest.json`。搜推页的“导出数据”仅是经营指标，不是商品素材与坑位真相源；推广素材现状必须由正确店铺中的实时 DOM 按精确商品 ID 采集。
+- 用户只需确认页面可见的准确店铺名、目标月份和商品范围；月份默认当前月，商品范围默认全部符合当月规则的商品。
+- 商品总表、月度规则和三处图片根目录从共享配置自动发现。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
+- 基础素材由 Playwright 自动导出到任务目录并生成 `export-manifest.json`。搜推页的“导出数据”仅是经营指标；推广素材现状必须从正确店铺的实时 DOM 自动采集到任务目录。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
-- NAS/本地素材目录或素材清单、逐文件授权状态。
+- 人工图片素材清单、历史基础素材表和历史推广素材状态都是高级可选导入，不是日常任务必填项。
 - AI 文案响应、禁用词政策；视频任务还需要完整视频规格。
 
 缺少信息时保留明确 blocked/needs_manual_review 结果，不猜测、不静默跳过。
@@ -23,13 +23,21 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 素材阶段按以下顺序执行：
 
-1. 完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
-2. 对声明的图片 roots 运行 `index-assets`：首次使用 new；中断、持久 checkpoint 或部分失败后使用 `--resume`；素材新增、修改或删除后使用 `--refresh`。
-3. 检查同一隔离输出目录中的 `scan-summary.json` 和 `match-candidates.csv`；前者包含最小商品校验证据及本轮逐 root/partition 状态、计数和稳定错误码，`asset-index.sqlite3` 是可恢复索引数据库。
-4. 人工确认名称候选和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。ID/SKU 命中仍为 `matched_unlicensed`，名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
+1. 用户提交任务配置后创建或复用精确时间戳会话。把自动发现的商品表、规则表复制为本次任务输入快照；基础素材自动导出、推广素材自动采集，全部结果只写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
+2. 默认先对声明的图片 roots 运行 `index-folders`，只记录文件夹名称、路径和商品匹配，不读取图片内容。素材目录变化后使用 `--refresh`；只调整名称、货号或别名匹配规则时使用 `--rematch-only`，不得重新扫描 NAS。
+3. 检查 `folder-scan-summary.json` 和 `folder-candidates.csv`，再运行 `prepare-folder-review` 生成文件夹归属审查数据。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；用户逐项选择“确认归属 / 确认并记录别名 / 排除”，决定写入当前时间戳会话的 `folder_decisions`。只对已确认文件夹按需枚举图片、读取尺寸并计算 SHA-256。全量 `index-assets` 仅作为离线审计选项，不再阻断 1–3 商品试跑。
+4. 人工确认名称/别名候选、同货号不同名称文件夹和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
 5. 再进入素材完整性可视化审查、生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
 
-可复制的 new、`--resume`、`--refresh` 三源命令见 [operations-guide.md](references/operations-guide.md)。raw indexing 不要求月份、店铺或坑位；这些值只在后续 eligible、完整性和生产阶段使用。原始 NAS 文件保持只读，视频继续延期。索引器只生成审查候选和扫描状态：不生成批准清单，不执行 dry-run、上传或发布。
+可复制的文件夹索引、`--refresh`、`--rematch-only` 与可选全量图片索引命令见 [operations-guide.md](references/operations-guide.md)。raw folder indexing 不要求月份、店铺或坑位；这些值只在后续 eligible、完整性和生产阶段使用。原始 NAS 文件保持只读，视频继续延期。索引器只生成审查候选和扫描状态：不生成批准清单，不执行 dry-run、上传或发布。
+
+### 素材可视化选择
+
+推广素材状态采集完成后，使用 `tmall-materials prepare-gallery` 将 `asset-index.sqlite3` 与 `promotion-material-status.csv` 合并为页面所需的候选 JSON。每个商品的选择数量按 `缺失篇数 × 每篇图片数` 计算；候选按匹配可信度、来源、路径和 SHA-256 稳定排序，不随机抽取。
+
+首次进入“素材匹配”阶段时可以只提交三处图片根目录，由 Agent 生成文件夹候选。页面先执行文件夹归属审查，决定保存到 `folder_decisions`；未确认的文件夹不得展开为图片候选。确认后页面才展示缩略图、来源、匹配方式、授权确认、采用选择和“换一批”。“换一批”使用不重叠的稳定分片；用户也可以先取消一张再选择另一张。授权与素材选择分别写入当前时间戳会话的 `license_decisions` 和 `asset_decisions`，保存草稿或提交后才落盘到该阶段 `input.json`。
+
+本地重复使用 SHA-256 排除，同一任务内同一图片不得跨商品重复选择。只有提供后台已有图片指纹时才可声称远端去重完成；后台仅提供素材 ID 而没有图片指纹时，页面必须显示“远端去重未完成”，最终上传前继续保持人工核对门禁。名称候选在别名归属确认前不可选择，逐文件授权未确认的候选也不可选择。
 
 完成素材阶段后：
 
@@ -50,13 +58,14 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 1. 先解析用户指定的精确 `session_id`；不得默认选择 `runs` 中最新的会话。
 2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
-3. 启动仅监听 `localhost` 的交互页面。
-4. 等待该会话“当前阶段”的精确 `handoff.json`。
-5. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
-6. 将该阶段标记为 `processing`。
-7. 只执行该 `stage_id` 允许的动作。
-8. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
-9. 根据结果停止，或明确进入下一阶段。
+3. 任务配置页只要求店铺确认、月份和商品范围。固定商品表、规则表、三处图片源和运行目录只读展示；人工素材清单与历史文件只放在高级设置。
+4. 启动仅监听 `localhost` 的交互页面。
+5. 等待该会话“当前阶段”的精确 `handoff.json`。
+6. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
+7. 将该阶段标记为 `processing`。
+8. 只执行该 `stage_id` 允许的动作。
+9. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
+10. 根据结果停止，或明确进入下一阶段。
 
 页面无 Agent 心跳或 Codex 任务已结束时，告知用户把页面显示的恢复指令粘贴到新建或当前 Codex 任务。不得声称 Agent 仍在后台执行，也不得声称页面能够唤醒已结束的任务。
 
@@ -66,6 +75,8 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 - 不保存或输出密码、Cookie、Token、短信码、二维码登录数据。
 - 同一个 `asset-index.sqlite3` 同一时刻只能由一个 Agent 或进程运行 new、`--resume` 或 `--refresh`；禁止并发索引同一数据库。
+- 文件夹索引是默认入口：只保存目录元数据，不读取、哈希或统计所有图片。只有用户确认文件夹归属后，才按需读取该文件夹中的图片。
+- 文件夹归属决定必须绑定 `folder_id + product_id + source_system + folder_path`；仅货号命中也要检查同货号异名、主副链接和历史目录，不能自动批准。
 - 索引时只读声明的原始图片 roots，不修改、移动或删除源文件；视频不进入本阶段。
 - 不调用未公开的天猫内部 API，不绕过登录、验证码、扫码、短信、风控或权限。
 - 当前店铺与目标店铺不一致：整批进入 blocked，任何任务都不得搜索或发布。

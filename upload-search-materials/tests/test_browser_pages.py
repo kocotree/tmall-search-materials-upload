@@ -8,6 +8,7 @@ from upload_search_materials.browser.config import SelectorConfigError, load_sel
 from upload_search_materials.browser.export_page import export_reports
 from upload_search_materials.browser.material_page import (
     SelectorInvalidError,
+    _settle_safe_popups,
     scan_recommended_material_status,
     supplement_material_status,
 )
@@ -239,7 +240,7 @@ class FakePromotionLocator:
         self.page = page
         self.selector = selector
 
-    def click(self):
+    def click(self, **_kwargs):
         self.page.clicked.append(self.selector)
         if self.selector == "#next":
             self.page.page_index += 1
@@ -273,6 +274,99 @@ class FakePromotionPage:
 
     def wait_for_timeout(self, milliseconds):
         self.waited.append(milliseconds)
+
+
+class FakePopupLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    def count(self):
+        return 1 if self.page.overlay_open else 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return self.page.overlay_open
+
+    def click(self, **_kwargs):
+        self.page.clicked.append(self.selector)
+        if self.selector == "#guide-next":
+            self.page.guide_steps -= 1
+            if self.page.guide_steps == 0:
+                self.page.overlay_open = False
+            return
+        if self.page.click_races and self.selector == "#opened-overlay-close":
+            self.page.click_races -= 1
+            raise PlaywrightTimeoutError("popup rerendered")
+        if self.selector == "#opened-overlay-close":
+            self.page.overlay_open = False
+
+
+class FakePopupPage:
+    def __init__(self, *, click_races=0, guide_steps=0):
+        self.overlay_open = True
+        self.click_races = click_races
+        self.guide_steps = guide_steps
+        self.clicked = []
+        self.waited = []
+
+    def locator(self, selector):
+        return FakePopupLocator(self, selector)
+
+    def wait_for_timeout(self, milliseconds):
+        self.waited.append(milliseconds)
+
+
+def test_popup_settle_prioritizes_open_overlay_close_control():
+    page = FakePopupPage()
+
+    closed = _settle_safe_popups(
+        page,
+        {
+            "safe_popup_close_priority": "#opened-overlay-close",
+            "safe_popup_close": "#generic-close",
+        },
+        delay_ms=0,
+    )
+
+    assert closed == 1
+    assert page.clicked == ["#opened-overlay-close"]
+
+
+def test_popup_settle_retries_when_overlay_rerenders_during_click():
+    page = FakePopupPage(click_races=1)
+
+    closed = _settle_safe_popups(
+        page,
+        {
+            "safe_popup_close_priority": "#opened-overlay-close",
+        },
+        delay_ms=0,
+    )
+
+    assert closed == 1
+    assert page.clicked == [
+        "#opened-overlay-close",
+        "#opened-overlay-close",
+    ]
+
+
+def test_popup_settle_advances_all_seven_scoped_guide_steps():
+    page = FakePopupPage(guide_steps=7)
+
+    closed = _settle_safe_popups(
+        page,
+        {
+            "safe_popup_progress": "#guide-next",
+            "safe_popup_close_priority": "#opened-overlay-close",
+        },
+        delay_ms=0,
+    )
+
+    assert closed == 7
+    assert page.clicked == ["#guide-next"] * 7
 
 
 def test_recommended_promotion_scan_paginates_deduplicates_and_checkpoints():

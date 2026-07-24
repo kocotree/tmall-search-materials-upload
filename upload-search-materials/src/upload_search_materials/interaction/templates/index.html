@@ -90,11 +90,11 @@
           </section>
           {% elif stage.id == "asset_matching" %}
           <section class="result-module" data-component="AssetMatchGallery">
-            <div class="module-heading"><div><p class="eyebrow">ASSET MATCH</p><h3>素材候选画廊</h3></div><span>来源 / 授权 / 匹配依据</span></div>
+            <div class="module-heading"><div><p class="eyebrow">ASSET MATCH</p><h3>文件夹归属与素材候选</h3></div><span>先确认文件夹，再读取图片</span></div>
             <div class="match-legend" aria-label="匹配标签">
               <span>商品 ID 命中</span><span>SKU 命中</span><span>已确认别名</span><span class="is-pending">名称候选 · 待确认</span>
             </div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>真实候选图片、来源和匹配依据将在 Agent 扫描后出现。</p></div></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>Agent 会先返回候选文件夹；确认归属后才读取图片候选。</p></div></div>
           </section>
           {% elif stage.id == "image_review" %}
           <section class="result-module" data-component="CropDecision">
@@ -133,6 +133,127 @@
           {% endif %}
 
           <form class="schema-form" data-stage-form="{{ stage.id }}" novalidate{% if stage.id == "results" %} data-results-recovery hidden{% endif %}>
+            {% if stage.id == "setup" %}
+            <div class="form-heading">
+              <div><p class="eyebrow">TASK SETUP</p><h3>业务配置</h3></div>
+              <span>只确认本次任务边界</span>
+            </div>
+            <div class="setup-business-grid">
+              <div class="field" data-field="store">
+                <label for="setup-store">目标店铺<span class="required" aria-label="必填">*</span></label>
+                <input id="setup-store" name="store" type="text" required aria-describedby="setup-store-error" placeholder="等待 Agent 从已登录页面识别">
+                <p class="help-text">Agent 读取页面可见店铺名后，用户在下方确认。</p>
+                <p class="field-error" id="setup-store-error" data-field-error="store" aria-live="polite"></p>
+              </div>
+              <div class="field" data-field="month">
+                <label for="setup-month">目标月份<span class="required" aria-label="必填">*</span></label>
+                <input id="setup-month" name="month" type="month" value="{{ default_month }}" required aria-describedby="setup-month-error">
+                <p class="help-text">默认当前月份，可按实际推品周期修改。</p>
+                <p class="field-error" id="setup-month-error" data-field-error="month" aria-live="polite"></p>
+              </div>
+              <div class="field" data-field="product_scope">
+                <label for="setup-product-scope">商品范围<span class="required" aria-label="必填">*</span></label>
+                <select id="setup-product-scope" name="product_scope" required aria-describedby="setup-product_scope-error">
+                  <option value="all_eligible" selected>全部符合当月规则的商品</option>
+                  <option value="selected">指定商品 ID</option>
+                </select>
+                <p class="help-text">默认不扩大范围，只处理当月规则筛选后的商品。</p>
+                <p class="field-error" id="setup-product_scope-error" data-field-error="product_scope" aria-live="polite"></p>
+              </div>
+              <div class="field field-wide" data-field="product_ids" data-product-ids-field hidden>
+                <label for="setup-product-ids">指定商品 ID</label>
+                <textarea id="setup-product-ids" name="product_ids" rows="3" data-value-kind="line-list" placeholder="每行一个商品 ID" aria-describedby="setup-product_ids-error" disabled></textarea>
+                <p class="field-error" id="setup-product_ids-error" data-field-error="product_ids" aria-live="polite"></p>
+              </div>
+              <div class="field field-wide" data-field="store_confirmed">
+                <label class="check-control">
+                  <input id="setup-store-confirmed" name="store_confirmed" type="checkbox" data-value-kind="boolean" required aria-describedby="setup-store_confirmed-error">
+                  <span>我已确认当前页面店铺与目标店铺一致</span>
+                </label>
+                <p class="field-error" id="setup-store_confirmed-error" data-field-error="store_confirmed" aria-live="polite"></p>
+              </div>
+            </div>
+
+            <section class="setup-auto-section" aria-labelledby="setup-auto-title">
+              <div class="form-heading compact-heading">
+                <div><p class="eyebrow">AUTOMATIC INPUTS</p><h3 id="setup-auto-title">自动准备项</h3></div>
+                <span>不需要手填路径</span>
+              </div>
+              <div class="setup-status-grid">
+                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.products_available else 'false' }}">
+                  <span>商品表</span><strong>{{ "已找到" if setup_inputs.products_available else "未找到" }}</strong>
+                  <code>{{ setup_inputs.products_csv }}</code>
+                  <input name="products_csv" type="hidden" value="{{ setup_inputs.products_csv }}" aria-describedby="setup-products_csv-error">
+                  <p class="field-error" id="setup-products_csv-error" data-field-error="products_csv" aria-live="polite"></p>
+                </article>
+                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.rules_available else 'false' }}">
+                  <span>规则表</span><strong>{{ "已找到" if setup_inputs.rules_available else "未找到" }}</strong>
+                  <code>{{ setup_inputs.rules_csv }}</code>
+                  <input name="rules_csv" type="hidden" value="{{ setup_inputs.rules_csv }}" aria-describedby="setup-rules_csv-error">
+                  <p class="field-error" id="setup-rules_csv-error" data-field-error="rules_csv" aria-live="polite"></p>
+                </article>
+                <article class="setup-status-card" data-ready="pending">
+                  <span>基础素材</span><strong>自动导出</strong>
+                  <p>自动导出到当前任务目录，不要求用户选择 XLSX。</p>
+                </article>
+                <article class="setup-status-card" data-ready="pending">
+                  <span>推广素材</span><strong>自动采集</strong>
+                  <p>自动采集到当前任务目录，不使用经营数据导出。</p>
+                </article>
+                <article class="setup-status-card setup-status-card-wide" data-ready="true">
+                  <span>三处图片根目录</span><strong>共享配置已载入</strong>
+                  <ul>
+                    {% for source in image_sources %}
+                    <li><b>{{ source.label }}</b><code>{{ source.path }}</code></li>
+                    <input name="image_roots" type="hidden" value="{{ source.path }}" data-value-kind="list" aria-describedby="setup-image_roots-error">
+                    {% endfor %}
+                  </ul>
+                  <p class="field-error" id="setup-image_roots-error" data-field-error="image_roots" aria-live="polite"></p>
+                </article>
+                <article class="setup-status-card">
+                  <span>运行目录</span><strong>自动隔离</strong>
+                  <code data-setup-task-directory>{{ task_directory }}</code>
+                  <p>新任务按时间戳创建，页面不允许修改根目录。</p>
+                </article>
+                <article class="setup-status-card">
+                  <span>视频</span><strong>本轮延期</strong>
+                  <p>不阻断当前图片测试。</p>
+                </article>
+                <article class="setup-status-card">
+                  <span>别名</span><strong>按审查积累</strong>
+                  <p>在文件夹归属审查中逐步积累。</p>
+                </article>
+              </div>
+            </section>
+
+            <details class="setup-advanced">
+              <summary>高级设置 · 导入已有文件</summary>
+              <p>日常任务保持为空；仅用于人工清单、历史恢复或离线测试。</p>
+              <div class="field-grid">
+                <div class="field field-wide" data-field="asset_manifest">
+                  <label for="setup-asset-manifest">人工图片素材清单</label>
+                  <input id="setup-asset-manifest" name="asset_manifest" type="text" aria-describedby="setup-asset_manifest-error">
+                  <p class="help-text">可选；导入逐文件商品归属和授权状态。</p>
+                  <p class="field-error" id="setup-asset_manifest-error" data-field-error="asset_manifest" aria-live="polite"></p>
+                </div>
+                <div class="field" data-field="historical_basic_xlsx">
+                  <label for="setup-historical-basic">历史基础素材表</label>
+                  <input id="setup-historical-basic" name="historical_basic_xlsx" type="text" aria-describedby="setup-historical_basic_xlsx-error">
+                  <p class="field-error" id="setup-historical_basic_xlsx-error" data-field-error="historical_basic_xlsx" aria-live="polite"></p>
+                </div>
+                <div class="field" data-field="historical_promotion_csv">
+                  <label for="setup-historical-promotion">历史推广素材状态</label>
+                  <input id="setup-historical-promotion" name="historical_promotion_csv" type="text" aria-describedby="setup-historical_promotion_csv-error">
+                  <p class="field-error" id="setup-historical_promotion_csv-error" data-field-error="historical_promotion_csv" aria-live="polite"></p>
+                </div>
+                <div class="field field-wide" data-field="user_notes">
+                  <label for="setup-user-notes">用户备注</label>
+                  <textarea id="setup-user-notes" name="user_notes" rows="3" aria-describedby="setup-user_notes-error"></textarea>
+                  <p class="field-error" id="setup-user_notes-error" data-field-error="user_notes" aria-live="polite"></p>
+                </div>
+              </div>
+            </details>
+            {% else %}
             <div class="form-heading">
               <div><p class="eyebrow">USER INPUT</p><h3>{{ "恢复处理" if stage.id == "results" else "本阶段输入" }}</h3></div>
               <span>字段由阶段 Schema 生成</span>
@@ -193,6 +314,7 @@
               </div>
               {% endfor %}
             </div>
+            {% endif %}
           </form>
         </section>
         {% endfor %}

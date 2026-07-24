@@ -1,0 +1,419 @@
+"""Lightweight, read-only folder index for large NAS media roots."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import stat
+from typing import Sequence
+import uuid
+
+from .asset_index import NamedRoot
+
+
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_SCHEMA = """
+CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE folders (
+  folder_id TEXT PRIMARY KEY,
+  source_system TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  absolute_path TEXT NOT NULL,
+  folder_name TEXT NOT NULL,
+  parent_relative_path TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  last_seen_scan_id TEXT NOT NULL,
+  UNIQUE(source_system, relative_path)
+);
+CREATE TABLE matches (
+  folder_id TEXT NOT NULL REFERENCES folders(folder_id) ON DELETE CASCADE,
+  product_id TEXT NOT NULL,
+  sku TEXT NOT NULL,
+  product_title TEXT NOT NULL,
+  match_type TEXT NOT NULL,
+  match_status TEXT NOT NULL,
+  reason_codes_json TEXT NOT NULL,
+  PRIMARY KEY(folder_id, product_id, match_type)
+);
+"""
+
+
+def _folder_id(source_system: str, relative_path: str) -> str:
+    return hashlib.sha256(
+        f"{source_system}\0{relative_path}".encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _identity(products_sha256: str, roots: Sequence[NamedRoot]) -> str:
+    value = {
+        "products_sha256": products_sha256,
+        "roots": [
+            {"source_system": root.source_system, "path": str(root.path)}
+            for root in roots
+        ],
+    }
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _open_database(
+    path: Path,
+    *,
+    identity: str,
+    refresh: bool,
+) -> sqlite3.Connection:
+    if path.exists():
+        if not refresh:
+            raise ValueError("new 文件夹索引要求空输出目录")
+        connection = sqlite3.connect(path)
+        stored = connection.execute(
+            "SELECT value FROM metadata WHERE key='identity'"
+        ).fetchone()
+        if stored is None or stored[0] != identity:
+            connection.close()
+            raise ValueError("文件夹索引身份与当前商品表或 roots 不一致")
+        return connection
+    if refresh:
+        raise ValueError("--refresh 需要已有 folder-index.sqlite3")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.executescript(_SCHEMA)
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('schema_version', '1')"
+    )
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('identity', ?)", (identity,)
+    )
+    connection.commit()
+    return connection
+
+
+def _walk_directories(root: Path):
+    pending = [(root, Path("."))]
+    while pending:
+        directory, relative = pending.pop()
+        try:
+            with os.scandir(directory) as scanner:
+                children = []
+                for entry in scanner:
+                    try:
+                        if entry.is_symlink() or not entry.is_dir(
+                            follow_symlinks=False
+                        ):
+                            continue
+                        metadata = entry.stat(follow_symlinks=False)
+                        if (
+                            getattr(metadata, "st_file_attributes", 0)
+                            & _REPARSE_POINT
+                        ):
+                            continue
+                    except OSError as error:
+                        yield None, relative / entry.name, str(error)
+                        continue
+                    child_relative = relative / entry.name
+                    child = Path(entry.path)
+                    yield child, child_relative, ""
+                    children.append((child, child_relative))
+                pending.extend(reversed(children))
+        except OSError as error:
+            yield None, relative, str(error)
+
+
+def build_folder_index(
+    *,
+    database_path: Path,
+    products_sha256: str,
+    roots: Sequence[NamedRoot],
+    matcher,
+    refresh: bool = False,
+    checkpoint_size: int = 1000,
+) -> dict[str, object]:
+    """Index directory names only; never open or hash image files."""
+
+    if checkpoint_size < 1:
+        raise ValueError("checkpoint_size must be positive")
+    normalized_roots = tuple(
+        sorted(
+            (
+                NamedRoot(root.source_system, root.path.resolve())
+                for root in roots
+            ),
+            key=lambda item: item.source_system,
+        )
+    )
+    identity = _identity(products_sha256, normalized_roots)
+    connection = _open_database(
+        Path(database_path), identity=identity, refresh=refresh
+    )
+    connection.execute("PRAGMA foreign_keys=ON")
+    scan_id = uuid.uuid4().hex
+    discovered = 0
+    matched = 0
+    errors = []
+    pending = 0
+    completed_sources = []
+    try:
+        for named_root in normalized_roots:
+            root = named_root.path
+            source_completed = True
+            for absolute_path, relative_path, error in _walk_directories(root):
+                relative_key = Path(
+                    *(part for part in relative_path.parts if part not in {"", "."})
+                ).as_posix()
+                if error:
+                    source_completed = False
+                    errors.append(
+                        {
+                            "source_system": named_root.source_system,
+                            "relative_path": relative_key or ".",
+                            "reason_code": "FOLDER_ENUMERATION_ERROR",
+                            "detail": error,
+                        }
+                    )
+                    continue
+                assert absolute_path is not None
+                discovered += 1
+                folder_id = _folder_id(named_root.source_system, relative_key)
+                parent = Path(relative_key).parent.as_posix()
+                connection.execute(
+                    "INSERT INTO folders(folder_id, source_system, relative_path, absolute_path, folder_name, parent_relative_path, active, last_seen_scan_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?) "
+                    "ON CONFLICT(source_system, relative_path) DO UPDATE SET "
+                    "absolute_path=excluded.absolute_path, folder_name=excluded.folder_name, "
+                    "parent_relative_path=excluded.parent_relative_path, active=1, "
+                    "last_seen_scan_id=excluded.last_seen_scan_id",
+                    (
+                        folder_id,
+                        named_root.source_system,
+                        relative_key,
+                        str(absolute_path),
+                        absolute_path.name,
+                        parent,
+                        scan_id,
+                    ),
+                )
+                # Match the folder's own name only. Ancestor matches remain
+                # represented by their own folder record and must not make
+                # generic descendants such as "KV" or "1" duplicate candidates.
+                matches = matcher.match(Path(absolute_path.name) / "__folder__.jpg")
+                connection.execute(
+                    "DELETE FROM matches WHERE folder_id=?", (folder_id,)
+                )
+                for item in matches:
+                    connection.execute(
+                        "INSERT INTO matches(folder_id, product_id, sku, product_title, match_type, match_status, reason_codes_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            folder_id,
+                            item.product_id,
+                            item.sku,
+                            item.product_title,
+                            item.match_type,
+                            item.match_status,
+                            json.dumps(list(item.reason_codes)),
+                        ),
+                    )
+                if matches:
+                    matched += 1
+                pending += 1
+                if pending >= checkpoint_size:
+                    connection.commit()
+                    pending = 0
+            if source_completed:
+                completed_sources.append(named_root.source_system)
+                connection.execute(
+                    "UPDATE folders SET active=0 WHERE source_system=? AND last_seen_scan_id<>?",
+                    (named_root.source_system, scan_id),
+                )
+            connection.commit()
+        summary = {
+            "schema_version": 1,
+            "scan_id": scan_id,
+            "mode": "refresh" if refresh else "new",
+            "complete": not errors,
+            "folders_discovered": discovered,
+            "matched_folders": matched,
+            "completed_sources": completed_sources,
+            "errors": errors,
+        }
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES ('last_summary', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps(summary, ensure_ascii=False),),
+        )
+        connection.commit()
+        return summary
+    finally:
+        connection.close()
+
+
+def write_folder_candidates(database_path: Path, output_path: Path) -> int:
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        "SELECT folders.folder_id, folders.source_system, folders.absolute_path, "
+        "folders.relative_path, folders.folder_name, matches.product_id, matches.sku, "
+        "matches.product_title, matches.match_type, matches.match_status "
+        "FROM folders JOIN matches USING(folder_id) WHERE folders.active=1 "
+        "ORDER BY matches.product_id, folders.source_system, folders.relative_path"
+    ).fetchall()
+    connection.close()
+    fields = [
+        "folder_id",
+        "source_system",
+        "absolute_path",
+        "relative_path",
+        "folder_name",
+        "product_id",
+        "sku",
+        "product_title",
+        "match_type",
+        "match_status",
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(dict(row) for row in rows)
+    return len(rows)
+
+
+def rematch_folder_index(
+    *,
+    database_path: Path,
+    products_sha256: str,
+    roots: Sequence[NamedRoot],
+    matcher,
+) -> dict[str, object]:
+    """Recompute product matches from stored folder names without touching NAS."""
+
+    normalized_roots = tuple(
+        sorted(
+            (
+                NamedRoot(root.source_system, root.path.resolve())
+                for root in roots
+            ),
+            key=lambda item: item.source_system,
+        )
+    )
+    connection = sqlite3.connect(database_path)
+    stored = connection.execute(
+        "SELECT value FROM metadata WHERE key='identity'"
+    ).fetchone()
+    if stored is None or stored[0] != _identity(products_sha256, normalized_roots):
+        connection.close()
+        raise ValueError("文件夹索引身份与当前商品表或 roots 不一致")
+    rows = connection.execute(
+        "SELECT folder_id, folder_name FROM folders WHERE active=1 "
+        "ORDER BY source_system, relative_path"
+    ).fetchall()
+    matched_folders = 0
+    candidate_rows = 0
+    try:
+        for folder_id, folder_name in rows:
+            matches = matcher.match(Path(folder_name) / "__folder__.jpg")
+            connection.execute("DELETE FROM matches WHERE folder_id=?", (folder_id,))
+            for item in matches:
+                connection.execute(
+                    "INSERT INTO matches(folder_id, product_id, sku, product_title, match_type, match_status, reason_codes_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        folder_id,
+                        item.product_id,
+                        item.sku,
+                        item.product_title,
+                        item.match_type,
+                        item.match_status,
+                        json.dumps(list(item.reason_codes)),
+                    ),
+                )
+            if matches:
+                matched_folders += 1
+                candidate_rows += len(matches)
+        connection.commit()
+        return {
+            "schema_version": 1,
+            "mode": "rematch_only",
+            "complete": True,
+            "folders_discovered": len(rows),
+            "matched_folders": matched_folders,
+            "candidate_rows": candidate_rows,
+            "errors": [],
+        }
+    finally:
+        connection.close()
+
+
+def build_folder_review_data(
+    candidates_path: Path,
+    *,
+    decisions: Sequence[dict[str, object]] = (),
+) -> dict[str, object]:
+    """Build deterministic UI data from folder candidates and saved decisions."""
+
+    with Path(candidates_path).open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        candidates = list(csv.DictReader(stream))
+    decision_by_key = {
+        (str(item.get("product_id", "")), str(item.get("folder_id", ""))): dict(
+            item
+        )
+        for item in decisions
+        if item.get("product_id") and item.get("folder_id")
+    }
+    rows = []
+    for candidate in candidates:
+        product_id = str(candidate.get("product_id", "")).strip()
+        folder_id = str(candidate.get("folder_id", "")).strip()
+        if not product_id or not folder_id:
+            continue
+        decision = decision_by_key.get((product_id, folder_id), {})
+        rows.append(
+            {
+                "folder_id": folder_id,
+                "product_id": product_id,
+                "product_title": str(candidate.get("product_title", "")).strip(),
+                "sku": str(candidate.get("sku", "")).strip(),
+                "source_system": str(
+                    candidate.get("source_system", "")
+                ).strip(),
+                "folder_name": str(candidate.get("folder_name", "")).strip(),
+                "folder_path": str(candidate.get("absolute_path", "")).strip(),
+                "match_type": str(candidate.get("match_type", "")).strip(),
+                "match_status": str(candidate.get("match_status", "")).strip(),
+                "decision": str(decision.get("decision", "pending")),
+                "alias": str(decision.get("alias", "")),
+                "note": str(decision.get("note", "")),
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            item["product_id"],
+            item["source_system"],
+            item["folder_path"],
+            item["folder_id"],
+        )
+    )
+    product_groups = []
+    for product_id in sorted({str(row["product_id"]) for row in rows}):
+        group = [row for row in rows if row["product_id"] == product_id]
+        product_groups.append(
+            {
+                "product_id": product_id,
+                "product_title": str(group[0]["product_title"]),
+                "sku": str(group[0]["sku"]),
+                "candidate_count": len(group),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "review_type": "folder_ownership",
+        "safety_status": "folders_only",
+        "folder_candidates": rows,
+        "folder_products": product_groups,
+        "next_action": "确认或排除每个候选文件夹；确认前不读取图片。",
+    }

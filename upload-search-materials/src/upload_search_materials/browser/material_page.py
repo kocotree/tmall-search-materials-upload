@@ -1,6 +1,8 @@
 import re
 from typing import Callable, Iterable
 
+from playwright.sync_api import Error as PlaywrightError
+
 
 class SelectorInvalidError(RuntimeError):
     pass
@@ -24,30 +26,74 @@ def _settle_safe_popups(
     *,
     delay_ms: int,
 ) -> int:
-    selector = str(selectors.get("safe_popup_close", "")).strip()
-    if not selector:
+    progress_selector = str(
+        selectors.get("safe_popup_progress", "")
+    ).strip()
+    fallback_selector = str(selectors.get("safe_popup_close", "")).strip()
+    priority_selector = str(
+        selectors.get("safe_popup_close_priority", "")
+    ).strip()
+    popup_selectors = [
+        value
+        for value in (
+            progress_selector,
+            priority_selector,
+            fallback_selector,
+        )
+        if value
+    ]
+    if not popup_selectors:
         return 0
     closed = 0
     quiet_checks = 0
     for _ in range(30):
         found = False
-        locator = page.locator(selector)
-        for index in range(locator.count()):
-            candidate = locator.nth(index)
-            if not candidate.is_visible():
-                continue
-            candidate.click(force=True, timeout=1500)
-            closed += 1
-            found = True
-            if delay_ms:
-                page.wait_for_timeout(min(delay_ms, 300))
-            break
+        for popup_selector in popup_selectors:
+            locator = page.locator(popup_selector)
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                try:
+                    visible = candidate.is_visible()
+                except PlaywrightError:
+                    continue
+                if not visible:
+                    continue
+                try:
+                    candidate.click(force=True, timeout=1500)
+                except PlaywrightError:
+                    continue
+                closed += 1
+                found = True
+                if delay_ms:
+                    page.wait_for_timeout(min(delay_ms, 300))
+                break
+            if found:
+                break
         quiet_checks = 0 if found else quiet_checks + 1
         if quiet_checks >= 3:
             break
         if delay_ms:
             page.wait_for_timeout(delay_ms)
     return closed
+
+
+def _click_with_popup_retries(
+    page,
+    locator,
+    selectors: dict[str, str],
+    *,
+    field_name: str,
+    delay_ms: int,
+) -> None:
+    last_error = None
+    for _ in range(5):
+        _settle_safe_popups(page, selectors, delay_ms=delay_ms)
+        try:
+            locator.click(timeout=3000)
+            return
+        except PlaywrightError as error:
+            last_error = error
+    raise SelectorInvalidError(f"{field_name}:popup_blocked") from last_error
 
 
 def _parse_promotion_row(text: str, *, collected_at: str) -> dict[str, str]:
@@ -125,8 +171,13 @@ def scan_recommended_material_status(
     if missing:
         raise SelectorInvalidError(",".join(missing))
 
-    _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
-    page.locator(selectors["promotion_tab"]).click()
+    _click_with_popup_retries(
+        page,
+        page.locator(selectors["promotion_tab"]),
+        selectors,
+        field_name="promotion_tab",
+        delay_ms=settle_delay_ms,
+    )
     if action_wait_ms:
         page.wait_for_timeout(action_wait_ms)
     _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
@@ -135,7 +186,13 @@ def scan_recommended_material_status(
     checked = recommended.get_attribute("aria-checked")
     class_name = recommended.get_attribute("class") or ""
     if checked != "true" and "checked" not in class_name.split():
-        recommended.click()
+        _click_with_popup_retries(
+            page,
+            recommended,
+            selectors,
+            field_name="recommended_filter",
+            delay_ms=settle_delay_ms,
+        )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
         _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
@@ -168,8 +225,13 @@ def scan_recommended_material_status(
         next_page = page.locator(selectors["promotion_next_page"])
         if not next_page.is_enabled():
             break
-        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
-        next_page.click()
+        _click_with_popup_retries(
+            page,
+            next_page,
+            selectors,
+            field_name="promotion_next_page",
+            delay_ms=settle_delay_ms,
+        )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
         _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)

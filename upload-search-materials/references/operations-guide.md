@@ -13,7 +13,51 @@ uv run python -X utf8 $quickValidate .
 
 `uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 创建或同步 `.venv`。首次同步需要访问 Python 包索引；后续验收使用 `uv lock --check` 检查锁文件是否与 `pyproject.toml` 一致。不要向系统 Python 或 Conda 基础环境直接安装本项目依赖。
 
-## 2. 分片增量图片索引
+## 2. 创建隔离任务
+
+任务配置页默认只让用户确认店铺、月份和商品范围。商品表、规则表、三处图片根目录及运行目录来自共享配置并只读展示；基础素材标记为自动导出，推广素材标记为自动采集。人工图片素材清单、历史基础素材表和历史推广素材状态位于高级设置，日常执行保持为空。
+
+Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
+
+- `inputs/`：复制商品表、规则表并生成输入清单与 SHA-256。
+- `exports/basic/`：保存基础素材 XLSX、`source-files.json` 和 `export-manifest.json`。
+- `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint 和页面证据。
+- `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
+
+共享文件夹索引数据库、选择器与策略配置不重复复制；NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
+
+## 3. 文件夹索引优先
+
+默认先建立三源文件夹级索引，只保存目录名称、完整路径和商品匹配，不打开或哈希图片：
+
+```powershell
+uv run tmall-materials index-folders `
+  --products "<商品总表.csv>" `
+  --root "model_nas=Y:\视觉部\1-模特图" `
+  --root "xhs_taobao=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀" `
+  --root "xhs_buyer=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀" `
+  --output "<隔离输出目录>\folder-index"
+```
+
+检查 `folder-scan-summary.json` 和 `folder-candidates.csv`。目录新增、删除或改名后使用相同参数加 `--refresh`；只调整名称、货号或别名匹配规则时加 `--rematch-only`，后者只读取本地 SQLite，不重新遍历 NAS。
+
+候选只按文件夹自身名称匹配，父目录命中不会让 `KV`、`合成`、`1` 等普通子目录重复成为候选。包含完整 SKU 的组合名称（例如 `KQ23002-商品名`）可视为货号命中；同货号异名、名称候选和主副链接关系仍需用户确认。确认文件夹归属后，才按需枚举其中图片、读取尺寸并计算 SHA-256。
+
+### 3.1 生成文件夹归属审查
+
+把候选转换成素材匹配页面可读取的数据：
+
+```powershell
+uv run tmall-materials prepare-folder-review `
+  --candidates "<隔离输出目录>\folder-index\folder-candidates.csv" `
+  --output "<隔离输出目录>\folder-review.json"
+```
+
+把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面此时只展示目录元数据，不预览、统计或哈希图片。用户选择“确认归属”“确认归属并记录别名”或“排除该文件夹”后，保存草稿或提交会把决定写入同一阶段 `input.json.values.folder_decisions`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定。
+
+只有 `confirmed` 或 `confirmed_alias` 的文件夹可进入按需图片枚举；`pending` 和 `rejected` 都不得读取其中图片。货号命中也不得跳过人工检查，尤其要核对同货号异名、主副链接和历史目录。
+
+## 3.2 可选：分片增量图片索引
 
 先校验商品表，再对三个声明的图片来源建立只读索引。只有读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表会阻断整批。缺商品 ID、非法商品 ID、重复商品 ID 是行级 blocked：`scan-summary.json` 保留对应 source row 和 reason codes，这些行不参与 ID、SKU 或名称匹配，其余有效行继续。非空但全部行为行级 blocked 时仍可完成纯 metadata 索引。以下命令使用占位商品表与隔离输出目录，仅供复制后替换；它们不表示已经扫描真实 NAS。raw indexing 不需要月份、店铺或坑位。
 
@@ -62,7 +106,27 @@ uv run tmall-materials index-assets `
 
 原始 NAS 图片只读，视频继续延期。同一个 `asset-index.sqlite3` 同一时刻只能有一个 Agent 或进程执行 new、`--resume`、`--refresh`，禁止并发。人工检查候选并确认逐文件授权后，才能生成或接受 `confirmed-assets.csv`，然后进入素材完整性审查、生产选择器、全量 dry-run 和 1–3 商品生产验收。
 
-## 3. 启动用户控制的 CDP 浏览器
+### 3.3 生成素材候选画廊
+
+先完成推广素材状态扫描，再把缺失篇数与索引候选合并：
+
+```powershell
+uv run tmall-materials prepare-gallery `
+  --index "<隔离输出目录>\asset-index\asset-index.sqlite3" `
+  --status "<隔离输出目录>\promotion-material-status.csv" `
+  --output "<隔离输出目录>\asset-gallery.json" `
+  --images-per-material 3 `
+  --license-decisions "<逐文件授权决定.json>" `
+  --alias-decisions "<名称候选归属决定.json>"
+```
+
+`--license-decisions`、`--alias-decisions` 和 `--remote-fingerprints` 均为可选输入。首次审查可以不提供，让页面先展示候选并由用户确认；确认后重新生成结果。候选顺序固定，不随机。“换一批”按固定窗口取下一批，单张替换通过先取消再采用另一张完成。
+
+把 `asset-gallery.json` 的对象作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面只允许预览该结果列出的、且位于当前 `image_roots` 下的图片；保存草稿或提交后，授权和选择分别进入当前阶段 `input.json` 的 `license_decisions` 与 `asset_decisions`。
+
+当后台已有素材只有远端素材 ID、没有图片 SHA-256 或等价内容指纹时，不传 `--remote-fingerprints`。此时输出和页面必须保持 `remote_dedupe_status=not_available`，不得声称已经排除与远端重复；生产上传前仍需人工核对。提供可信远端指纹后，已命中的候选才会被自动排除。
+
+## 4. 启动用户控制的 CDP 浏览器
 
 关闭正在使用同一 profile 的 Chromium 后，以独立 profile 和仅本机监听的调试端口启动 Chrome 或 Edge。例如将实际可执行文件路径替换进下列命令：
 
@@ -72,7 +136,7 @@ uv run tmall-materials index-assets `
 
 CDP URL 为 `http://127.0.0.1:9222`。用户必须在该窗口自行登录、处理验证码/短信/扫码/风控，并确认页面可见店铺名。不要把 profile、Cookie 或登录信息放入版本库。
 
-## 4. 导出与只读检查
+## 5. 导出与只读检查
 
 所有时间使用带时区 ISO 8601，例如 `2026-07-17T10:00:00+08:00`。导出 `run-id` 使用不可重复的可读值，例如 `20260717T100000+0800-kktree-export`。
 
@@ -82,7 +146,7 @@ uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产se
 
 `--report promotion|both` 目前仅作为旧版经营数据导出兼容入口；其结果不是商品素材与坑位真相源，不得据此判定完整或作为生产批准输入。搜推素材现状必须通过 `supplement` 按精确商品 ID 从实时 DOM 采集。生产 `supplement` 尚未更新到 2026-07-24 验证的新 DOM 契约前，停止在阶段 5，不进入全量 dry-run。
 
-## 5. 首次 dry-run 与 Playwright 补采
+## 6. 首次 dry-run 与 Playwright 补采
 
 ```powershell
 uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" --products "<商品总表.csv>" --rules "<月度规则.csv>" --basic "<基础素材.xlsx>" --search "<搜推经营.xlsx>" --output "<首次批次目录>" --started-at "<ISO时间>"
@@ -92,7 +156,7 @@ uv run tmall-materials supplement --scan-mode exact --store "<店铺名>" --sele
 
 第一条 `supplement` 命令默认选择“素材统计 → 推荐补充素材”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。真实浏览器小规模验收可先加 `--max-pages 3`；正式扫描去掉该参数。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
 
-## 6. 素材、授权、文案与最终 dry-run
+## 7. 素材、授权、文案与最终 dry-run
 
 目录型素材只搜索 `<asset-root>/<商品ID>/`，其次 `<asset-root>/<货号>/`。`--license-status confirmed` 表示用户确认该批目录中的每个文件均已授权；若授权状态不统一，当前 CLI 不能正式发布，应保持 blocked，待接入逐文件素材清单。当前视频元数据入口也未闭合，视频任务应保持 `VIDEO_METADATA_UNAVAILABLE`。
 
@@ -104,7 +168,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 打开 `review.html`，只选择 `ready_for_review` 的精确 task ID。
 
-## 7. 精确批准、发布与恢复
+## 8. 精确批准、发布与恢复
 
 ```powershell
 uv run tmall-materials approve --run-dir "<最终审核批次目录>" --task-id "<task-id-1>" --confirmed-by "<批准人>" --confirmed-at "<ISO时间>" --valid-until "<ISO时间>"
@@ -120,7 +184,7 @@ uv run tmall-materials report --run-dir "<最终审核批次目录>"
 
 生产前还必须满足 [production-acceptance.md](production-acceptance.md)。示例选择器和示例媒体策略不能直接用于生产。
 
-## 8. 交互式任务执行
+## 9. 交互式任务执行
 
 新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
 

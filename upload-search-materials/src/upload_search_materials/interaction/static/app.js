@@ -74,7 +74,11 @@
     document.querySelectorAll("[data-session-label]").forEach((node) => {
       node.textContent = sessionId;
     });
-    taskDirectoryLabel.textContent = `${shell.dataset.runsRoot}\\${sessionId}`;
+    const taskDirectory = `${shell.dataset.runsRoot}\\${sessionId}`;
+    taskDirectoryLabel.textContent = taskDirectory;
+    document.querySelectorAll("[data-setup-task-directory]").forEach((node) => {
+      node.textContent = taskDirectory;
+    });
     const url = new URL(window.location.href);
     url.searchParams.set("session_id", sessionId);
     window.history.replaceState({}, "", url);
@@ -277,11 +281,445 @@
     content.appendChild(summary);
   }
 
+  function syncSetupProductScope() {
+    const form = document.querySelector('[data-stage-form="setup"]');
+    const scope = form?.querySelector('[name="product_scope"]');
+    const field = form?.querySelector("[data-product-ids-field]");
+    const productIds = form?.querySelector('[name="product_ids"]');
+    if (!scope || !field || !productIds) return;
+    const selected = scope.value === "selected";
+    field.hidden = !selected;
+    productIds.disabled = !selected;
+    if (!selected) productIds.value = "";
+  }
+
+  function readJsonListControl(name) {
+    const control = activeForm()?.querySelector(`[name="${CSS.escape(name)}"]`);
+    if (!control?.value.trim()) return [];
+    try {
+      const value = JSON.parse(control.value);
+      return Array.isArray(value) ? value : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function writeJsonListControl(name, values) {
+    const control = activeForm()?.querySelector(`[name="${CSS.escape(name)}"]`);
+    if (!control) return;
+    control.value = JSON.stringify(values, null, 2);
+    control.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function assetSortKey(candidate) {
+    const matchRank = {
+      exact_product_id: "0",
+      exact_sku: "1",
+      confirmed_alias: "2",
+      name_candidate: "3",
+    };
+    return [
+      matchRank[candidate.match_type] || "9",
+      candidate.source_system || "",
+      candidate.source_path || "",
+      candidate.sha256 || "",
+      candidate.asset_id || "",
+    ].join("\u0000").toLocaleLowerCase("zh-CN");
+  }
+
+  function uniqueSortedCandidates(candidates) {
+    const seen = new Set();
+    return [...candidates]
+      .sort((left, right) => assetSortKey(left).localeCompare(assetSortKey(right), "zh-CN"))
+      .filter((candidate) => {
+        const fingerprint = String(candidate.sha256 || "");
+        if (!fingerprint || seen.has(fingerprint)) return false;
+        seen.add(fingerprint);
+        return true;
+      });
+  }
+
+  function confirmedLicenseIds() {
+    return new Set(
+      readJsonListControl("license_decisions")
+        .filter((item) => item?.status === "confirmed")
+        .map((item) => String(item.asset_id || "")),
+    );
+  }
+
+  function selectedAssetDecisions() {
+    return readJsonListControl("asset_decisions")
+      .filter((item) => item?.decision === "selected" && item.asset_id);
+  }
+
+  function candidateIsSelectable(candidate, licenses) {
+    const confirmedMatch = ["matched_unlicensed", "confirmed", "confirmed_alias"]
+      .includes(candidate.match_status);
+    return candidate.validation_status === "valid"
+      && confirmedMatch
+      && !candidate.remote_duplicate
+      && (candidate.license_status === "confirmed" || licenses.has(String(candidate.asset_id)));
+  }
+
+  function persistSelectedCandidates(productId, selected, imagesPerMaterial = 3) {
+    const otherProducts = selectedAssetDecisions()
+      .filter((item) => String(item.product_id) !== String(productId));
+    const selectedRows = selected.map((candidate, index) => ({
+      product_id: String(productId),
+      asset_id: String(candidate.asset_id),
+      sha256: String(candidate.sha256),
+      source_system: String(candidate.source_system || ""),
+      source_path: String(candidate.source_path || ""),
+      decision: "selected",
+      group_index: Math.floor(index / imagesPerMaterial) + 1,
+      position: (index % imagesPerMaterial) + 1,
+    }));
+    writeJsonListControl("asset_decisions", [...otherProducts, ...selectedRows]);
+  }
+
+  function persistLicense(assetId, confirmed) {
+    const retained = readJsonListControl("license_decisions")
+      .filter((item) => String(item.asset_id) !== String(assetId));
+    if (confirmed) retained.push({ asset_id: String(assetId), status: "confirmed" });
+    writeJsonListControl("license_decisions", retained);
+  }
+
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function folderDecisions() {
+    return readJsonListControl("folder_decisions")
+      .filter((item) => item?.folder_id && item?.product_id);
+  }
+
+  function persistFolderDecision(candidate, decision, alias = "", note = "") {
+    const folderId = String(candidate.folder_id || "");
+    const productId = String(candidate.product_id || "");
+    const retained = folderDecisions().filter(
+      (item) => String(item.folder_id) !== folderId
+        || String(item.product_id) !== productId,
+    );
+    if (decision !== "pending") {
+      retained.push({
+        folder_id: folderId,
+        product_id: productId,
+        source_system: String(candidate.source_system || ""),
+        folder_path: String(candidate.folder_path || ""),
+        decision,
+        alias: decision === "confirmed_alias" ? String(alias || "").trim() : "",
+        note: String(note || "").trim(),
+      });
+    }
+    writeJsonListControl("folder_decisions", retained);
+  }
+
+  function renderFolderOwnershipReview(view) {
+    if (view.mode === "empty") return;
+    const data = view.result?.data;
+    const candidates = Array.isArray(data?.folder_candidates) ? data.folder_candidates : [];
+    if (!candidates.length) return;
+    const module = document.querySelector('[data-component="AssetMatchGallery"]');
+    const content = module?.querySelector("[data-result-content]");
+    if (!content) return;
+
+    const review = element("section", "folder-review");
+    const safety = element("div", "asset-safety");
+    safety.dataset.status = "checked";
+    safety.append(
+      element("strong", "", "当前只审查文件夹"),
+      element("span", "", "确认归属前不会读取、统计或哈希文件夹中的图片。"),
+    );
+    review.appendChild(safety);
+
+    const decisionsByKey = new Map(
+      folderDecisions().map((item) => [
+        `${item.product_id}\u0000${item.folder_id}`,
+        item,
+      ]),
+    );
+    const productIds = [...new Set(candidates.map((item) => String(item.product_id || "")))]
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+
+    productIds.forEach((productId) => {
+      const productCandidates = candidates.filter(
+        (item) => String(item.product_id || "") === productId,
+      );
+      const group = element("section", "folder-product");
+      const heading = element("div", "asset-product-heading");
+      const headingText = element("div");
+      headingText.append(
+        element("strong", "", productCandidates[0]?.product_title || `商品 ${productId}`),
+        element(
+          "span",
+          "",
+          `商品 ID ${productId} · 货号 ${productCandidates[0]?.sku || "未知"} · ${productCandidates.length} 个候选文件夹`,
+        ),
+      );
+      const progress = element("span", "folder-review-progress");
+      heading.append(headingText, progress);
+      group.appendChild(heading);
+      const list = element("div", "folder-list");
+      group.appendChild(list);
+      review.appendChild(group);
+
+      const updateProgress = () => {
+        const current = folderDecisions();
+        const decided = productCandidates.filter((candidate) => current.some(
+          (item) => String(item.product_id) === productId
+            && String(item.folder_id) === String(candidate.folder_id),
+        )).length;
+        progress.textContent = `已处理 ${decided} / ${productCandidates.length}`;
+      };
+
+      productCandidates.forEach((candidate) => {
+        const key = `${productId}\u0000${candidate.folder_id}`;
+        const saved = decisionsByKey.get(key) || {};
+        const card = element("article", "folder-card");
+        const identity = element("div", "folder-card-identity");
+        identity.append(
+          element("strong", "", candidate.folder_name || "未命名文件夹"),
+          element(
+            "span",
+            "folder-match-badge",
+            candidate.match_type === "exact_sku" ? "货号命中" : "名称候选",
+          ),
+          element("small", "", candidate.source_system || "未知来源"),
+          element("code", "", candidate.folder_path || ""),
+        );
+        const controls = element("div", "folder-card-controls");
+        const decision = document.createElement("select");
+        decision.setAttribute("aria-label", `${candidate.folder_name} 归属决定`);
+        [
+          ["pending", "待确认"],
+          ["confirmed", "确认归属"],
+          ["confirmed_alias", "确认归属并记录别名"],
+          ["rejected", "排除该文件夹"],
+        ].forEach(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          decision.appendChild(option);
+        });
+        decision.value = saved.decision || candidate.decision || "pending";
+        const alias = document.createElement("input");
+        alias.type = "text";
+        alias.placeholder = "记录文件夹别名";
+        alias.value = saved.alias || candidate.alias || candidate.folder_name || "";
+        const note = document.createElement("input");
+        note.type = "text";
+        note.placeholder = "备注（可选）";
+        note.value = saved.note || candidate.note || "";
+        const warning = element(
+          "span",
+          "asset-warning",
+          candidate.match_type === "exact_sku"
+            ? "货号命中仍需核对同货号异名或主副链接"
+            : "名称候选必须人工确认归属",
+        );
+        controls.append(decision, alias, note, warning);
+        card.append(identity, controls);
+        list.appendChild(card);
+
+        const sync = () => {
+          alias.disabled = decision.value !== "confirmed_alias";
+          card.dataset.decision = decision.value;
+          if (decision.value === "confirmed_alias" && !alias.value.trim()) {
+            alias.value = candidate.folder_name || "";
+          }
+          persistFolderDecision(
+            candidate,
+            decision.value,
+            alias.value,
+            note.value,
+          );
+          updateProgress();
+        };
+        decision.addEventListener("change", sync);
+        alias.addEventListener("change", sync);
+        note.addEventListener("change", sync);
+        alias.disabled = decision.value !== "confirmed_alias";
+        card.dataset.decision = decision.value;
+      });
+      updateProgress();
+    });
+    content.appendChild(review);
+  }
+
+  function renderAssetMatchGallery(view) {
+    if (view.mode === "empty") return;
+    const data = view.result?.data;
+    const candidates = Array.isArray(data?.asset_candidates) ? data.asset_candidates : [];
+    const requirements = Array.isArray(data?.requirements) ? data.requirements : [];
+    if (!candidates.length && !requirements.length) return;
+    const module = document.querySelector('[data-component="AssetMatchGallery"]');
+    const content = module?.querySelector("[data-result-content]");
+    if (!content) return;
+
+    const safety = element("div", "asset-safety");
+    const remoteChecked = data.remote_dedupe_status === "checked";
+    safety.dataset.status = remoteChecked ? "checked" : "pending";
+    safety.append(
+      element("strong", "", remoteChecked ? "远端去重已检查" : "远端去重未完成"),
+      element(
+        "span",
+        "",
+        remoteChecked
+          ? "已知远端指纹会从候选中排除。"
+          : "后台仅有素材 ID，尚无图片指纹；最终上传前必须再次核对。",
+      ),
+    );
+    content.appendChild(safety);
+
+    requirements.forEach((requirement) => {
+      const productId = String(requirement.product_id || "");
+      const imagesPerMaterial = Number(requirement.images_per_material || 3);
+      const missingMaterials = Number(requirement.missing_materials || 0);
+      const requiredImages = Math.max(0, imagesPerMaterial * missingMaterials);
+      const productCandidates = uniqueSortedCandidates(
+        candidates.filter((candidate) => String(candidate.product_id) === productId),
+      );
+      const product = element("section", "asset-product");
+      const heading = element("div", "asset-product-heading");
+      const title = element("div");
+      title.append(
+        element("strong", "", requirement.product_title || `商品 ${productId}`),
+        element(
+          "span",
+          "",
+          `商品 ID ${productId} · 缺 ${missingMaterials} 篇 · 每篇 ${imagesPerMaterial} 张 · 共需 ${requiredImages} 张`,
+        ),
+      );
+      const batchButton = element("button", "secondary-button asset-change-batch", "换一批");
+      batchButton.type = "button";
+      heading.append(title, batchButton);
+      product.appendChild(heading);
+
+      const selectionSummary = element("p", "asset-selection-summary");
+      product.appendChild(selectionSummary);
+      const grid = element("div", "asset-grid");
+      product.appendChild(grid);
+      content.appendChild(product);
+
+      const draw = (requestedBatch = null) => {
+        const licenses = confirmedLicenseIds();
+        const currentDecisions = selectedAssetDecisions();
+        const hashesUsedElsewhere = new Set(
+          currentDecisions
+            .filter((item) => String(item.product_id) !== productId)
+            .map((item) => String(item.sha256 || "")),
+        );
+        const eligible = productCandidates.filter(
+          (candidate) => candidateIsSelectable(candidate, licenses)
+            && !hashesUsedElsewhere.has(String(candidate.sha256 || "")),
+        );
+        const previousForProduct = currentDecisions
+          .filter((item) => String(item.product_id) === productId);
+        let selectedIds = new Set(previousForProduct.map((item) => String(item.asset_id)));
+        let batchIndex = Number(product.dataset.batchIndex || 0);
+        if (requestedBatch != null) {
+          batchIndex = requestedBatch;
+          const start = batchIndex * requiredImages;
+          const batch = eligible.slice(start, start + requiredImages);
+          if (!batch.length && batchIndex > 0) {
+            batchIndex = 0;
+            selectedIds = new Set(eligible.slice(0, requiredImages).map((item) => String(item.asset_id)));
+          } else {
+            selectedIds = new Set(batch.map((item) => String(item.asset_id)));
+          }
+          persistSelectedCandidates(
+            productId,
+            productCandidates.filter((item) => selectedIds.has(String(item.asset_id))),
+            imagesPerMaterial,
+          );
+        }
+        product.dataset.batchIndex = String(batchIndex);
+        grid.replaceChildren();
+
+        productCandidates.forEach((candidate) => {
+          const assetId = String(candidate.asset_id || "");
+          const selectable = candidateIsSelectable(candidate, licenses)
+            && !hashesUsedElsewhere.has(String(candidate.sha256 || ""));
+          const card = element("article", "asset-card");
+          if (selectedIds.has(assetId)) card.classList.add("is-selected");
+          const image = document.createElement("img");
+          image.loading = "lazy";
+          image.alt = `${requirement.product_title || productId} 候选图片`;
+          image.src = apiPath(
+            `/stages/asset_matching/assets/${encodeURIComponent(assetId)}`,
+          );
+          const meta = element("div", "asset-card-meta");
+          meta.append(
+            element("strong", "", candidate.source_system || "未知来源"),
+            element("span", "", candidate.match_type || "未知匹配"),
+            element("small", "", candidate.source_path || ""),
+          );
+          const controls = element("div", "asset-card-controls");
+          const licenseLabel = element("label", "asset-check");
+          const license = document.createElement("input");
+          license.type = "checkbox";
+          license.checked = candidate.license_status === "confirmed" || licenses.has(assetId);
+          licenseLabel.append(license, document.createTextNode("授权已确认"));
+          const selectLabel = element("label", "asset-check");
+          const select = document.createElement("input");
+          select.type = "checkbox";
+          select.checked = selectedIds.has(assetId);
+          select.disabled = !selectable;
+          selectLabel.append(select, document.createTextNode("采用"));
+          controls.append(licenseLabel, selectLabel);
+          if (candidate.match_status === "needs_manual_confirmation") {
+            controls.appendChild(element("span", "asset-warning", "名称候选需先确认归属"));
+          } else if (candidate.remote_duplicate) {
+            controls.appendChild(element("span", "asset-warning", "与已上传素材重复"));
+          } else if (candidate.validation_status !== "valid") {
+            controls.appendChild(element("span", "asset-warning", "图片校验未通过"));
+          }
+          card.append(image, meta, controls);
+          grid.appendChild(card);
+
+          license.addEventListener("change", () => {
+            persistLicense(assetId, license.checked);
+            draw();
+          });
+          select.addEventListener("change", () => {
+            if (select.checked && selectedIds.size >= requiredImages) {
+              select.checked = false;
+              actionMessage.textContent = `商品 ${productId} 已选满 ${requiredImages} 张，请先取消一张再替换。`;
+              return;
+            }
+            if (select.checked) selectedIds.add(assetId);
+            else selectedIds.delete(assetId);
+            persistSelectedCandidates(
+              productId,
+              productCandidates.filter((item) => selectedIds.has(String(item.asset_id))),
+              imagesPerMaterial,
+            );
+            draw();
+          });
+        });
+        selectionSummary.textContent = `已选 ${selectedIds.size} / ${requiredImages} 张；按顺序每 ${imagesPerMaterial} 张组成一篇图文素材。`;
+        batchButton.disabled = eligible.length <= requiredImages;
+      };
+
+      batchButton.addEventListener("click", () => {
+        draw(Number(product.dataset.batchIndex || 0) + 1);
+      });
+      draw();
+    });
+  }
+
   function renderStageResult(schemaComponent) {
     const view = UiState.resultView(uiState);
     (resultRenderers[schemaComponent] || []).forEach((rendererName) => {
       renderResult(rendererName, view);
     });
+    if (schemaComponent === "asset_match_gallery") {
+      renderFolderOwnershipReview(view);
+      renderAssetMatchGallery(view);
+    }
   }
 
   async function loadStage() {
@@ -306,6 +744,7 @@
         submission: payload.submission,
       });
       if (payload.input) hydrateForm(activeForm(), payload.input.values);
+      if (requestedStageId === "setup") syncSetupProductScope();
       renderStatus();
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
@@ -478,6 +917,8 @@
   railButtons.forEach((button) => {
     button.addEventListener("click", () => activateStage(button.dataset.stageId));
   });
+  document.querySelector('[data-stage-form="setup"] [name="product_scope"]')
+    ?.addEventListener("change", syncSetupProductScope);
   panels.forEach((panel) => {
     panel.addEventListener("input", () => {
       if (panel.dataset.stagePanel === currentStageId) {
@@ -494,5 +935,6 @@
   });
 
   setInterval(pollStage, 2000);
+  syncSetupProductScope();
   activateStage(currentStageId);
 })();

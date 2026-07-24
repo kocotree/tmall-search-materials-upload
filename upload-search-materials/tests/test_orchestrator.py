@@ -1125,6 +1125,59 @@ def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(
     assert boundary_calls == []
 
 
+def test_prepare_gallery_cli_reads_index_and_material_gap_without_browser(
+    tmp_path,
+):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "assets"
+    image_dir = root / "catalog" / "123"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (300, 400), color="white").save(image_dir / "a.png")
+    index_output = tmp_path / "index-output"
+    assert main(_index_assets_args(products, root, index_output)) == 0
+    status_path = tmp_path / "promotion-status.csv"
+    with status_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["商品ID", "缺失数量"],
+        )
+        writer.writeheader()
+        writer.writerow({"商品ID": "123", "缺失数量": "2"})
+    gallery_path = tmp_path / "asset-gallery.json"
+
+    exit_code = main(
+        [
+            "prepare-gallery",
+            "--index",
+            str(index_output / "asset-index.sqlite3"),
+            "--status",
+            str(status_path),
+            "--output",
+            str(gallery_path),
+        ],
+        page=object(),
+    )
+
+    gallery = json.loads(gallery_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert gallery["selection_mode"] == "deterministic"
+    assert gallery["remote_dedupe_status"] == "not_available"
+    assert gallery["requirements"] == [
+        {
+            "product_id": "123",
+            "product_title": "Hat",
+            "missing_materials": 2,
+            "images_per_material": 3,
+            "required_images": 6,
+        }
+    ]
+    assert gallery["asset_candidates"][0]["source_path"] == str(
+        (image_dir / "a.png").resolve()
+    )
+    assert gallery["asset_candidates"][0]["license_status"] == "unknown"
+
+
 def test_index_assets_cli_refresh_interrupt_executes_resume_argv_and_keeps_checkpoint(
     tmp_path, monkeypatch, capsys
 ):

@@ -3,9 +3,11 @@ import json
 import re
 import subprocess
 import threading
+from datetime import date
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from upload_search_materials.interaction.web import create_app
 from upload_search_materials.interaction.session import SessionStore
@@ -51,6 +53,38 @@ def test_root_renders_ten_stage_left_rail(client):
     assert html.count('data-stage-id="') == 10
     assert "完整度巡检" in html
     assert "生产确认" in html
+
+
+def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports(client):
+    html = html_module.unescape(client.get("/").get_data(as_text=True))
+
+    assert "业务配置" in html
+    assert "自动准备项" in html
+    assert "高级设置 · 导入已有文件" in html
+    assert "基础素材" in html and "自动导出到当前任务目录" in html
+    assert "推广素材" in html and "自动采集到当前任务目录" in html
+    assert "别名" in html and "在文件夹归属审查中逐步积累" in html
+    assert "视频" in html and "本轮延期" in html
+    assert f'value="{date.today():%Y-%m}"' in html
+    assert '<option value="all_eligible" selected>' in html
+    assert 'name="products_csv"' in html and 'type="hidden"' in html
+    assert 'name="rules_csv"' in html
+    assert html.count('name="image_roots"') >= 3
+    for removed in ("basic_xlsx", "search_xlsx", "asset_root", "runs_root"):
+        assert f'name="{removed}"' not in html
+
+
+def test_setup_page_shows_fixed_input_files_and_three_shared_image_sources(client):
+    html = html_module.unescape(client.get("/").get_data(as_text=True))
+
+    assert "天猫商品信息表_产品数据表_数据总表.csv" in html
+    assert "天猫商品信息表_每月推品规则（合并）_Grid View.csv" in html
+    for root in (
+        r"Y:\视觉部\1-模特图",
+        r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀",
+        r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
+    ):
+        assert root in html
 
 
 def test_api_is_json_service_description(client):
@@ -128,7 +162,13 @@ def test_asset_matching_prefills_three_editable_labeled_image_roots(client):
     source_labels = re.findall(r'data-source-label="([^"]+)"', decoded)
     assert len(source_labels) == 3
     assert len(set(source_labels)) == 3
-    assert decoded.count('name="image_roots"') == 3
+    asset_group = re.search(
+        r'<fieldset[^>]+data-field-group="image_roots"[^>]*>(.*?)</fieldset>',
+        decoded,
+        re.DOTALL,
+    )
+    assert asset_group is not None
+    assert asset_group.group(1).count('name="image_roots"') == 3
 
 
 def test_video_control_is_visible_disabled_and_deferred(client):
@@ -618,6 +658,93 @@ def test_stage_read_exposes_current_agent_result_for_schema_renderer(
     assert stale.json["result"] is None
 
 
+def test_asset_gallery_serves_only_current_result_candidate_images(
+    client, session_id, tmp_path
+):
+    image_path = tmp_path / "candidate.png"
+    Image.new("RGB", (20, 30), "red").save(image_path)
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "source_types": ["image"],
+                "license_decisions": [{"asset_id": "A", "status": "confirmed"}],
+                "asset_decisions": [{"asset_id": "A", "decision": "selected"}],
+            }
+        },
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "asset_matching",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="needs_user_input",
+        summary="请选择素材",
+        data={
+            "requirements": [
+                {
+                    "product_id": "123",
+                    "product_title": "测试商品",
+                    "missing_materials": 1,
+                    "images_per_material": 3,
+                }
+            ],
+            "asset_candidates": [
+                {
+                    "asset_id": "A",
+                    "product_id": "123",
+                    "source_path": str(image_path),
+                    "sha256": "a" * 64,
+                    "source_system": "model_nas",
+                    "match_type": "exact_product_id",
+                    "match_status": "matched_unlicensed",
+                    "license_status": "confirmed",
+                    "validation_status": "valid",
+                }
+            ],
+            "remote_dedupe_status": "not_available",
+        },
+    )
+
+    stage = client.get(f"/api/sessions/{session_id}/stages/asset_matching")
+    preview = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/A"
+    )
+    missing = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/UNKNOWN"
+    )
+
+    assert stage.json["result"]["data"]["asset_candidates"][0]["asset_id"] == "A"
+    assert preview.status_code == 200
+    assert preview.mimetype == "image/png"
+    assert missing.status_code == 404
+
+
+def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    for expected in (
+        "换一批",
+        "授权已确认",
+        "远端去重未完成",
+        "asset_decisions",
+        "license_decisions",
+        "folder_decisions",
+        "确认归属并记录别名",
+        "排除该文件夹",
+        "当前只审查文件夹",
+    ):
+        assert expected in source
+
+
 def test_generic_result_renderer_includes_optional_agent_actions_as_safe_text():
     source = (
         Path(__file__).parents[1]
@@ -695,26 +822,31 @@ def test_validation_enforces_paths_lists_dates_and_boolean_confirmation(client, 
     assert {"task_ids", "confirmed_at", "acknowledgement"} <= response.json["field_errors"].keys()
 
 
-def test_setup_validation_requires_readable_paths_and_exactly_one_asset_source(client, session_id, tmp_path):
+def test_setup_validation_requires_store_confirmation_and_selected_product_ids(
+    client, session_id, tmp_path
+):
     readable = tmp_path / "readable.txt"
     readable.write_text("ok", encoding="utf-8")
     values = {
         "store": "测试店铺",
+        "store_confirmed": False,
         "month": "2026-07",
-        "product_scope": "single",
+        "product_scope": "selected",
+        "product_ids": [],
         "products_csv": str(readable),
         "rules_csv": str(readable),
-        "basic_xlsx": str(readable),
-        "search_xlsx": str(readable),
-        "runs_root": str(tmp_path),
-        "asset_root": str(tmp_path),
-        "asset_manifest": str(readable),
+        "image_roots": [str(tmp_path)],
+        "asset_manifest": "",
+        "historical_basic_xlsx": "",
+        "historical_promotion_csv": "",
+        "user_notes": "",
     }
 
     response = client.post(f"/api/sessions/{session_id}/stages/setup/submit", json={"values": values})
 
     assert response.status_code == 422
-    assert "asset_root" in response.json["field_errors"]
+    assert response.json["field_errors"]["store_confirmed"] == "must be confirmed"
+    assert "product_ids" in response.json["field_errors"]
 
 
 def test_source_code_never_imports_execution_modules():

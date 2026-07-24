@@ -1,5 +1,8 @@
 .worktrees/
 .venv/
+.superpowers/
+.uv-cache*/
+.agent-tmp-*/
 test_evidence/
 .pytest-task-*/
 build/

@@ -24,6 +24,7 @@ from .asset_index import (
 )
 from .asset_index_store import AssetIndexStore, IndexIdentity, IndexIdentityError
 from .asset_matching import ProductPathMatcher
+from .asset_selection import build_gallery_data
 from .assets import (
     DirectoryAssetSource,
     ManifestAssetSource,
@@ -47,6 +48,12 @@ from .browser.upload_page import upload_approved_item
 from .browser.verifier import verify_remote_item
 from .copywriting import generate_and_validate_copy
 from .eligibility import collect_titles_by_product, evaluate_all, load_monthly_rules
+from .folder_index import (
+    build_folder_review_data,
+    build_folder_index,
+    rematch_folder_index,
+    write_folder_candidates,
+)
 from .io_tables import (
     SchemaError,
     read_basic_materials_xlsx,
@@ -808,6 +815,41 @@ def _inspect_xlsx(args) -> int:
     return 0
 
 
+def _prepare_gallery(args) -> int:
+    with Path(args.status).open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as stream:
+        status_rows = list(csv.DictReader(stream))
+    license_decisions = (
+        read_json(Path(args.license_decisions))
+        if args.license_decisions
+        else []
+    )
+    alias_decisions = (
+        read_json(Path(args.alias_decisions))
+        if args.alias_decisions
+        else []
+    )
+    remote_fingerprints = (
+        read_json(Path(args.remote_fingerprints))
+        if args.remote_fingerprints
+        else None
+    )
+    with AssetIndexStore.open_readonly(Path(args.index)) as store:
+        data = build_gallery_data(
+            store.match_candidate_records(),
+            status_rows,
+            images_per_material=args.images_per_material,
+            license_decisions=license_decisions,
+            alias_decisions=alias_decisions,
+            remote_sha256_by_product=remote_fingerprints,
+        )
+    write_json(Path(args.output), data)
+    return 0
+
+
 def _interact(args) -> int:
     runs_root = args.runs_root
     if runs_root is None:
@@ -996,6 +1038,95 @@ def _index_assets(args) -> int:
             store.close()
 
 
+def _index_folders(args) -> int:
+    try:
+        products_path = Path(args.products)
+        if not products_path.is_file():
+            raise ValueError(f"商品表不存在: {products_path}")
+        products_path = products_path.resolve()
+        products = read_product_csv(products_path)
+        validation = validate_product_records(products)
+        if not products or validation.batch_blocking:
+            raise ValueError("商品表校验失败")
+
+        roots = tuple(NamedRoot.parse(value) for value in args.root)
+        source_names = [root.source_system for root in roots]
+        if len(source_names) != len(set(source_names)):
+            raise ValueError("--root 来源名称不得重复")
+        normalized_roots = []
+        for root in roots:
+            declared_metadata = root.path.lstat()
+            if stat.S_ISLNK(declared_metadata.st_mode) or (
+                getattr(declared_metadata, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            ):
+                raise ValueError(f"素材根目录不得是符号链接或重解析点: {root.path}")
+            resolved = root.path.resolve()
+            if not resolved.is_dir():
+                raise ValueError(f"素材根目录不存在: {root.path}")
+            normalized_roots.append(NamedRoot(root.source_system, resolved))
+
+        output = Path(args.output).resolve()
+        database_path = output / "folder-index.sqlite3"
+        if args.refresh or args.rematch_only:
+            if not database_path.is_file():
+                mode_name = "--refresh" if args.refresh else "--rematch-only"
+                raise ValueError(f"{mode_name} 需要已有 folder-index.sqlite3")
+        elif output.exists():
+            if not output.is_dir():
+                raise ValueError(f"输出路径不是目录: {output}")
+            if next(output.iterdir(), None) is not None:
+                raise ValueError("new 文件夹索引要求不存在或完全为空的输出目录")
+        else:
+            output.mkdir(parents=True)
+
+        matcher = ProductPathMatcher.from_products(products, validation)
+        products_sha256 = sha256_file(products_path)
+        if args.rematch_only:
+            summary = rematch_folder_index(
+                database_path=database_path,
+                products_sha256=products_sha256,
+                roots=tuple(normalized_roots),
+                matcher=matcher,
+            )
+        else:
+            summary = build_folder_index(
+                database_path=database_path,
+                products_sha256=products_sha256,
+                roots=tuple(normalized_roots),
+                matcher=matcher,
+                refresh=args.refresh,
+                checkpoint_size=args.checkpoint_size,
+            )
+        candidate_count = write_folder_candidates(
+            database_path, output / "folder-candidates.csv"
+        )
+        summary["candidate_rows"] = candidate_count
+        write_json(output / "folder-scan-summary.json", summary)
+        return 0 if summary["complete"] else 1
+    except (SchemaError, sqlite3.DatabaseError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
+def _prepare_folder_review(args) -> int:
+    try:
+        decisions = (
+            read_json(Path(args.decisions)) if args.decisions else []
+        )
+        if not isinstance(decisions, list):
+            raise ValueError("文件夹决定 JSON 必须是数组")
+        data = build_folder_review_data(
+            Path(args.candidates),
+            decisions=decisions,
+        )
+        write_json(Path(args.output), data)
+        return 0
+    except (OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmall-materials")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1102,6 +1233,42 @@ def build_parser() -> argparse.ArgumentParser:
     index_mode = index_assets.add_mutually_exclusive_group()
     index_mode.add_argument("--resume", action="store_true")
     index_mode.add_argument("--refresh", action="store_true")
+    index_folders = subparsers.add_parser(
+        "index-folders",
+        help="Build or refresh a lightweight directory-only media index",
+    )
+    index_folders.add_argument("--products", required=True, metavar="PATH")
+    index_folders.add_argument(
+        "--root", action="append", required=True, metavar="SOURCE=PATH"
+    )
+    index_folders.add_argument("--output", required=True, metavar="DIR")
+    index_folders.add_argument("--checkpoint-size", type=int, default=1000)
+    folder_index_mode = index_folders.add_mutually_exclusive_group()
+    folder_index_mode.add_argument("--refresh", action="store_true")
+    folder_index_mode.add_argument("--rematch-only", action="store_true")
+    folder_review = subparsers.add_parser(
+        "prepare-folder-review",
+        help="Build visual folder-ownership review data",
+    )
+    folder_review.add_argument("--candidates", required=True, metavar="CSV")
+    folder_review.add_argument("--output", required=True, metavar="JSON")
+    folder_review.add_argument("--decisions", metavar="JSON")
+    prepare_gallery = subparsers.add_parser(
+        "prepare-gallery",
+        help="Build deterministic visual-review candidates from an asset index",
+    )
+    prepare_gallery.add_argument("--index", required=True, metavar="PATH")
+    prepare_gallery.add_argument("--status", required=True, metavar="CSV")
+    prepare_gallery.add_argument("--output", required=True, metavar="JSON")
+    prepare_gallery.add_argument(
+        "--images-per-material",
+        type=int,
+        choices=range(3, 10),
+        default=3,
+    )
+    prepare_gallery.add_argument("--license-decisions", metavar="JSON")
+    prepare_gallery.add_argument("--alias-decisions", metavar="JSON")
+    prepare_gallery.add_argument("--remote-fingerprints", metavar="JSON")
     return parser
 
 
@@ -1132,6 +1299,12 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _wait_handoff(args)
     if args.command == "index-assets":
         return _index_assets(args)
+    if args.command == "index-folders":
+        return _index_folders(args)
+    if args.command == "prepare-folder-review":
+        return _prepare_folder_review(args)
+    if args.command == "prepare-gallery":
+        return _prepare_gallery(args)
     raise AssertionError(args.command)
 
 

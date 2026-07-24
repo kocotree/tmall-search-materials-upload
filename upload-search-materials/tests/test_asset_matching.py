@@ -70,6 +70,16 @@ def test_sku_is_case_insensitive_but_requires_a_complete_directory_component():
     assert partial == ()
 
 
+def test_sku_token_at_start_of_composite_folder_name_is_exact():
+    matcher = matcher_for(
+        [product("772459134667", sku="KQ23002", title="完全不相关商品")]
+    )
+
+    matches = matcher.match(Path("防晒款/KQ23002-缤纷夏日防晒冰袖/photo.jpg"))
+
+    assert [match.match_type for match in matches] == ["exact_sku"]
+
+
 def test_creator_folder_with_full_product_name_is_only_a_manual_candidate():
     matcher = matcher_for([product("123456", title="花仙子翻翻帽")])
 

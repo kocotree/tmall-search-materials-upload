@@ -225,6 +225,7 @@ class SessionStore:
         blocking_reasons: tuple[str, ...] | list[str] = (),
         evidence: tuple[Any, ...] | list[Any] = (),
         next_action: str | None = None,
+        data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist an agent-owned result bound to the current user handoff."""
 
@@ -263,6 +264,10 @@ class SessionStore:
                 "created_at": completed_at,
                 "completed_at": completed_at,
             }
+            if data is not None:
+                if not isinstance(data, dict):
+                    raise InteractionConflict("result data must be an object")
+                result["data"] = data
             self._write_json_atomic(stage_path / "result.json", result)
             state["stages"][stage_id]["status"] = status
             self._write_session_state(session_id, state)

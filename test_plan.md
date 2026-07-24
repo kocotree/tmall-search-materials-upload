@@ -107,7 +107,7 @@ uv run --project .\upload-search-materials --locked python -X utf8 $quickValidat
 
 ## 阶段 2：交互页面与任务隔离
 
-**状态：** 通过（2026-07-22；自动化、真实浏览器与非生产 handoff 均已验收）
+**状态：** 通过（2026-07-24；任务配置精简、自动输入状态、任务隔离、真实浏览器与非生产 handoff 已验收）
 
 **目标：** 验证十阶段交互向导、时间戳任务隔离、JSON 交接、CLI 等待和恢复提示；任何页面动作都不得直接上传或发布。
 
@@ -141,6 +141,10 @@ uv run --project .\upload-search-materials --locked tmall-materials wait-handoff
 - [x] handoff 在会话锁内独占领取；同一 revision 的顺序或并发 waiter 不会重复启动 Agent 工作。
 - [x] 草稿保存使用 revision compare-and-swap；旧页面不能覆盖较新的提交或结果，前端以服务端返回 revision 为准。
 - [x] 页面不包含上传/发布调用；阶段 08/09 仅交接 Agent 和展示结果。
+- [x] 任务配置主界面只保留店铺确认、目标月份和商品范围；月份默认当前月，商品范围默认全部符合当月规则的商品。
+- [x] 商品表、规则表和三处图片源从共享配置载入并只读展示；基础素材显示自动导出，推广素材显示自动采集，运行目录由系统创建且不可编辑。
+- [x] 人工图片素材清单、历史基础素材表和历史推广素材状态只在高级设置中作为可选导入；视频延期、别名在文件夹审查中积累。
+- [x] 任务目录只保存输入快照、自动导出/采集、当前候选、用户决定、dry-run、批准和结果；NAS 原图及共享文件夹索引不重复复制。
 
 ### 本地服务与浏览器视觉验收
 
@@ -154,13 +158,15 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --r
 
 **浏览器与 handoff 证据：** 最终本地会话 `20260722_114534` 在阶段 04 提交三处图片源；页面显示 revision `1` 和持久化提交时间。`wait-handoff` 返回 SHA-256 `868fdb9fd2e9af15dfca298c246dd4877655de36a10addaf5f2f85d65ef88cb2`，与 `input.json` 实算一致。通过 `SessionStore.write_result` 写入非生产结果后，页面正确展示摘要、证据、阻塞原因和“进入图片策略人工审查，不执行上传”；全程未调用上传或发布。
 
+**2026-07-24 任务配置精简验收：** 页面主配置只保留店铺确认、默认当前月份和默认“全部符合当月规则的商品”；商品表、规则表、三处图片源与运行目录只读展示，基础素材为自动导出、推广素材为自动采集。人工素材清单和两类历史文件位于高级设置。隔离会话 `20260724_135211` 保存草稿后只持久化新契约的 11 个键、3 个共享图片根目录和 `product_scope=all_eligible`，旧 `basic_xlsx/search_xlsx/asset_root/runs_root` 均未进入 `input.json`。证据见 `test_evidence/04-interaction-ui/setup-config/20260724_135007/acceptance.json`、`setup-default.png`、`setup-advanced.png` 和对应 `runs/20260724_135211/01-setup/input.json`。
+
 **通过标准：** 最终自动化回归、JSON 绑定、重启恢复、跨阶段竞态和真实浏览器视觉检查全部通过；页面始终不执行上传或发布。
 
 ---
 
 ## 阶段 3：素材清单与三处图片来源
 
-**状态：** 阻断（2026-07-23 索引器实现与本地隔离验收完成；真实三源全量索引、人工候选确认、授权和完整性审查待执行；视频延期）
+**状态：** 阻断（2026-07-24 文件夹索引、真实候选归属审查页面和素材候选画廊 MVP 已完成；用户尚未完成 11 个真实候选的业务确认，按需图片候选、授权和完整性审查待执行；视频延期）
 
 **目标：** 验证目录型或逐文件清单型素材能够进入 dry-run，并按商品安全匹配；本轮只测试图片。
 
@@ -178,8 +184,17 @@ uv run --project .\upload-search-materials --locked tmall-materials interact --r
 - [x] 含 `confirmed` / `unknown` 的清单返回稳定授权结果。
 - [x] 有商品 ID 的清单行必须精确匹配商品 ID，避免共享 SKU 跨链接取错素材。
 - [x] 分片增量索引器完成本地隔离 new、持久 checkpoint 中断恢复和增删改 refresh 验收；索引候选不自动生成批准清单。
+- [x] 默认改为文件夹一级索引：三处真实根目录共记录 `5,279` 个文件夹，耗时约 `225.7` 秒，三源完成且错误为 0；不读取或哈希图片内容。
+- [x] 文件夹候选只按自身名称匹配，不把父目录命中传播到 `KV/合成/1/2/3/4` 等普通子目录；真实候选由 22 条降为 11 条。
+- [x] 文件夹索引支持 `--refresh` 更新增删改，支持 `--rematch-only` 在不重新遍历 NAS 的情况下重算名称、货号和别名匹配。
+- [x] `prepare-folder-review` 将真实候选转换为 `folders_only` 审查数据；页面显示商品 ID、货号、来源、命中类型、文件夹名和完整路径，且明确确认前不读取图片。
+- [x] 页面预留“确认归属 / 确认归属并记录别名 / 排除”及备注输入，决定绑定文件夹与商品并保存到当前时间戳会话的 `folder_decisions`。
+- [x] `prepare-gallery` 可将只读索引与推广素材状态合并，按“缺失篇数 × 每篇图片数”生成逐商品候选和应选图片数。
+- [x] 页面可展示候选缩略图、三处来源、匹配方式、授权状态和采用状态；图片预览仅允许当前结果中且位于当前 `image_roots` 下的文件。
+- [x] 候选使用稳定排序和固定分片，“换一批”不随机；支持先取消一张再选择另一张，并将结果保存到当前时间戳任务 JSON。
+- [x] 当前任务内使用 SHA-256 排除本地/跨商品重复；缺少后台图片指纹时明确显示“远端去重未完成”，不得声称远端已去重。
 - [ ] 对上述三处根目录分别生成只读扫描清单，再按商品合并候选；记录来源、匹配方式、命中数量、待确认项和 SHA-256。
-- [ ] 在页面逐商品人工确认名称候选和别名，确认结果保存到当前时间戳任务的 JSON，不修改原图。
+- [ ] 由用户在页面完成全部 11 个真实候选的业务确认；交互与保存机制已验收，但自动验收中的 3 条示例决定不视为用户批准，也不用于读取真实图片。
 - [ ] 在页面逐商品展示素材完整性审查表，至少包含商品 ID、商品名称、应有坑位、已有坑位、缺失数量、缺失类型、候选素材数量和人工处理结论；用户确认结果保存到当前时间戳任务的 JSON。
 - [ ] 对 `uvno`、清仓、好物体验类、会员日和积分商品显示“排除维护”及具体原因；不得仅从页面隐藏，也不得进入后续补素材候选。
 - [ ] 本轮图片扫描范围仅为上述三处 NAS 根目录；飞书表格/文档图片入口标记为“后续接入，等待路径、导出格式与读取权限确认”，不得视为已验收。
@@ -203,9 +218,15 @@ uv run --project .\upload-search-materials --locked tmall-materials run --help |
 
 **最终修复自动验证：** Python 全量回归 `289 passed, 2 skipped, 1 warning`；聚焦索引器回归 `100 passed, 2 skipped`；Node UI 状态测试 `9 passed`；`uv lock --check` 与 Skill validator 均通过。最终故障注入补充验证了“未见文件失活 + 分片完成”使用同一 SQLite 事务，以及 root/partition 在同步窗口中断时仍生成一致的本轮统计；独立完整分支复审为 `READY`，Critical/Important 均为 0。唯一 warning 仍为只读源 XLSX 缺少默认样式。Skill 文档使用两个独立 fresh-context Agent 完成 RED/GREEN：旧文档无法确认 33/11 行级错误可继续，修复后明确只有 schema/batch/空表阻断整批，行级 blocked 留证并排除。
 
-**当前阻断：** 索引器实现与本地隔离验收已完成，真实三源全量索引仍待执行；完成真实索引后还需人工确认名称候选和逐文件授权，并完成素材完整性可视化审查。月份、准确店铺和后台目标坑位数据不阻断 raw indexing，但仍是后续 eligible/completeness/生产阶段生成逐商品应有/已有/缺失矩阵的必要输入。禁止用目录名称自动冒充精确商品命中。
+**2026-07-24 素材候选画廊 MVP：** 新增 `prepare-gallery`，从 `asset-index.sqlite3` 与 `promotion-material-status.csv` 生成确定性候选数据；页面实现逐商品缺失量、候选缩略图、来源、匹配方式、授权确认、采用、单张替换和“换一批”，决定保存到当前时间戳会话 JSON。隔离视觉验收会话 `20260724_040238` 从 `ASSET-01/02/03` 稳定切换到 `ASSET-07/08/04` 并保存草稿；本地 SHA-256 去重生效，后台图片指纹不可用时页面明确显示“远端去重未完成”。该验收使用本地模拟三源图片，不代表真实 NAS 授权、真实名称候选或远端内容去重已完成。
 
-**本次证据：** 最终修复 acceptance 为 `test_evidence/03-assets-video/indexer-acceptance/20260723_165014/acceptance-summary.json`、同目录 `commands-and-results.json`、`new-output/` 和 `interrupt-resume-output/`；历史索引器 acceptance 为 `test_evidence/03-assets-video/indexer-acceptance/20260723_101741/`；既有三源预检证据为 `test_evidence/03-assets-video/runs/20260722_143048/04-asset-matching/preflight.json`、同目录 `input.json`，以及会话根目录的 `session.json`。
+**2026-07-24 真实文件夹归属审查页面：** 新增 `prepare-folder-review` 和素材匹配阶段 `folder_decisions`。真实三源的 11 个候选按 3 个商品分组展示，页面包含文件夹名、完整路径、来源、货号/名称命中、处理进度、确认、别名确认、排除和备注接口，并显示“确认归属前不会读取、统计或哈希图片”。隔离验收会话 `20260724_111144` 验证 11 张文件夹卡片全部显示，并以 1 条确认、1 条别名确认、1 条排除验证 JSON 落盘；这些决定仅为 UI 自动验收样例，不代表用户业务批准。
+
+**本次自动验证：** Python 全量回归 `318 passed, 2 skipped, 1 warning`；文件夹审查相关定向回归 `79 passed`；Node UI 状态测试 `9 passed`，`app.js` 语法检查、`uv lock --check` 与 Skill validator 均通过。唯一 warning 仍为只读真实 XLSX 缺少默认样式。真实文件夹索引与重新匹配证据位于 `test_evidence/03-assets-video/folder-index-real/20260724_092758/`。
+
+**当前阻断：** 真实三源文件夹索引和归属审查页面已完成；下一步由用户在页面确认 11 个真实候选文件夹的归属，特别是 `KQ23002-呼吸冰袖` 的同货号异名，以及“椰椰小岛两栖泳衣三件套”与副链接的别名关系。确认后才按需读取这些文件夹中的图片、计算 SHA-256、确认逐文件授权并进入真实素材完整性审查。后台当前仅采集到远端素材 ID，缺少可用于内容去重的图片指纹，因此生产上传前仍须人工核对重复。完整逐图片索引改为可选离线审计，不再阻断 1–3 商品试跑。
+
+**本次证据：** 真实文件夹归属页面验收为 `test_evidence/03-assets-video/folder-review/20260724_110859/visual-acceptance.json`、`folder-review-before.png`、`folder-review-after.png` 和 `runs/20260724_111144/04-asset-matching/input.json`；真实候选源数据为 `test_evidence/03-assets-video/folder-index-real/20260724_092758/folder-review.json`。画廊视觉验收为 `test_evidence/06-asset-gallery/visual-acceptance.json`、`gallery-before.png`、`gallery-after-change.png` 和 `runs/20260724_040238/04-asset-matching/input.json`。最终索引器修复 acceptance 为 `test_evidence/03-assets-video/indexer-acceptance/20260723_165014/acceptance-summary.json`、同目录 `commands-and-results.json`、`new-output/` 和 `interrupt-resume-output/`；历史索引器 acceptance 为 `test_evidence/03-assets-video/indexer-acceptance/20260723_101741/`；既有三源预检证据为 `test_evidence/03-assets-video/runs/20260722_143048/04-asset-matching/preflight.json`、同目录 `input.json`，以及会话根目录的 `session.json`。
 
 **历史证据（保留）：** `test_evidence/02-assets-video/run-help-after-manifest.txt`、`pytest-final-images.txt`、`mixed-license.txt`、`xiaobajiao-assets.csv`、`xiaobajiao-inspection.json`、`xiaobajiao-before.csv`、`xiaobajiao-after.csv`。
 
@@ -368,7 +389,7 @@ git diff -- test_plan.md upload-search-materials plan.md
 | --- | --- | --- |
 | 1. 测试环境 | 通过（2026-07-20） | `test_evidence/01-environment/`；历史完整测试 `95 passed`，Skill 校验通过 |
 | 2. 交互页面与任务隔离 | 通过（2026-07-22） | 聚焦 `112 passed`、Node `9 passed`、全量 `203 passed`；版本协议、独占领取、草稿 CAS、wheel 资源及 1440/1024 浏览器与非生产 handoff 验收通过 |
-| 3. 素材清单与三处图片来源 | 阻断（2026-07-23） | 索引器实现与本地隔离 new/resume/refresh 验收完成；三源预检 `413,309` 张证据保留；真实三源全量索引、人工候选确认、授权和完整性审查待执行，飞书与视频入口延期 |
+| 3. 素材清单与三处图片来源 | 阻断（2026-07-24） | 真实三源文件夹索引完成：`5,279` 文件夹、11 个去层级重复候选、错误 0；真实归属审查页面与候选画廊 MVP 已验收。待用户完成 11 个归属决定，再生成按需图片候选、确认逐文件授权和完整性，飞书与视频入口延期 |
 | 4. 图片策略 | 未开始 | 三/九坑填满、纯图片优先、视频配比延期及裁剪预览待验收；`test_evidence/04-image-policy/` |
 | 5. 生产选择器 | 未开始 | `test_evidence/05-selectors/` |
 | 6. 全量 dry-run | 未开始 | `test_evidence/06-dry-run/` |
@@ -384,4 +405,4 @@ git diff -- test_plan.md upload-search-materials plan.md
 
 ## 下一步
 
-解除阶段 3 阻断：使用已验收的索引器对真实三源执行串行只读全量 new 索引，检查 `scan-summary.json` 与 `match-candidates.csv`，再完成人工名称候选确认和逐文件授权；随后确认目标月份、准确店铺与后台目标坑位数据，生成逐商品应有/已有/缺失坑位、候选素材和五类排除原因，完成完整性可视化审查。飞书图片入口与光合视频入口保持延期。完成素材来源验收后，再进入阶段 4 图片策略，确认三/九坑填满规则、纯图片优先，以及小红书常见 `2:3` 图片是允许直传、生成派生裁剪文件还是仅作为人工候选。
+解除阶段 3 阻断：打开已验收的文件夹归属页面，由用户完成真实 11 个候选的“确认 / 别名确认 / 排除”；只对确认文件夹按需读取图片、计算 SHA-256 并确认授权，再结合后台缺失状态生成逐商品应有/已有/缺失坑位、候选素材和五类排除原因。完整逐图片索引保留为可选离线审计。飞书图片入口与光合视频入口保持延期。完成素材来源验收后，再进入阶段 4 图片策略，确认三/九坑填满规则、纯图片优先，以及小红书常见 `2:3` 图片是允许直传、生成派生裁剪文件还是仅作为人工候选。

@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
 from .session import InteractionConflict, InteractionPathError, SessionStore
@@ -25,6 +25,14 @@ IMAGE_SOURCES: tuple[dict[str, str], ...] = (
         "label": "小红书 KOC 置换 · 买家秀",
         "path": r"Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀",
     },
+)
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_PRODUCTS_CSV = (
+    WORKSPACE_ROOT / "docs" / "天猫商品信息表_产品数据表_数据总表.csv"
+)
+DEFAULT_RULES_CSV = (
+    WORKSPACE_ROOT / "docs" / "天猫商品信息表_每月推品规则（合并）_Grid View.csv"
 )
 
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
@@ -63,13 +71,27 @@ def create_app(runs_root: Path) -> Flask:
     @app.get("/")
     def index():
         stage_registry = [asdict(stage) for stage in STAGES]
+        session_id = request.args.get("session_id", "")
+        task_directory = (
+            store.runs_root.resolve() / session_id
+            if session_id
+            else store.runs_root.resolve()
+        )
         return render_template(
             "index.html",
             stages=STAGES,
             stage_registry=stage_registry,
-            session_id=request.args.get("session_id", ""),
+            session_id=session_id,
             image_sources=IMAGE_SOURCES,
             runs_root=str(store.runs_root.resolve()),
+            task_directory=str(task_directory),
+            default_month=date.today().strftime("%Y-%m"),
+            setup_inputs={
+                "products_csv": str(DEFAULT_PRODUCTS_CSV),
+                "products_available": DEFAULT_PRODUCTS_CSV.is_file(),
+                "rules_csv": str(DEFAULT_RULES_CSV),
+                "rules_available": DEFAULT_RULES_CSV.is_file(),
+            },
         )
 
     @app.get("/api")
@@ -161,6 +183,52 @@ def create_app(runs_root: Path) -> Flask:
     def recovery(session_id: str, stage_id: str):
         get_stage(stage_id)
         return jsonify(instruction=store.recovery_instruction(session_id, stage_id))
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/asset_matching/assets/<asset_id>"
+    )
+    def asset_preview(session_id: str, asset_id: str):
+        state = store.load_session(session_id)
+        stage = get_stage("asset_matching")
+        result = _current_result(
+            store,
+            session_id,
+            "asset_matching",
+            state,
+        )
+        current_input = _current_input(store, session_id, stage, state)
+        if result is None or current_input is None:
+            raise NotFound()
+        candidates = (result.get("data") or {}).get("asset_candidates")
+        roots = current_input["values"].get("image_roots")
+        if not isinstance(candidates, list) or not isinstance(roots, list):
+            raise NotFound()
+        candidate = next(
+            (
+                value
+                for value in candidates
+                if isinstance(value, dict)
+                and str(value.get("asset_id", "")) == asset_id
+            ),
+            None,
+        )
+        if candidate is None:
+            raise NotFound()
+        try:
+            source_path = Path(str(candidate.get("source_path", ""))).resolve()
+            allowed_roots = [Path(str(root)).resolve() for root in roots]
+            if (
+                source_path.suffix.casefold()
+                not in {".jpg", ".jpeg", ".png", ".webp"}
+                or not source_path.is_file()
+                or not any(source_path.is_relative_to(root) for root in allowed_roots)
+            ):
+                raise NotFound()
+        except (OSError, RuntimeError, ValueError):
+            raise NotFound() from None
+        response = send_file(source_path, conditional=True, max_age=0)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     return app
 
@@ -294,6 +362,12 @@ def _value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, s
         not isinstance(item, dict) or not _has_value(item.get("reason")) for item in overrides
     ):
         errors["overrides"] = "each override requires a reason"
+    if stage.id == "setup":
+        scope = values.get("product_scope")
+        if scope not in {"all_eligible", "selected"}:
+            errors["product_scope"] = "must be all_eligible or selected"
+        if scope == "selected" and not _has_value(values.get("product_ids")):
+            errors["product_ids"] = "at least one product ID is required"
     return errors
 
 
@@ -315,7 +389,16 @@ def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | Non
     if not present:
         return "is required" if field.required else None
 
-    if field.component in {"text", "textarea", "select", "radio", "month", "datetime", "date"}:
+    if field.component in {
+        "text",
+        "textarea",
+        "select",
+        "radio",
+        "month",
+        "datetime",
+        "date",
+        "auto_path",
+    }:
         if not isinstance(value, str) or (field.required and not value.strip()):
             return "must be a non-empty string" if field.required else "must be a string"
         if not value.strip():
@@ -347,7 +430,7 @@ def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | Non
             return "must be a readable path"
         return None
 
-    if field.component in {"multi_select", "path_list", "table"}:
+    if field.component in {"multi_select", "path_list", "auto_path_list", "table"}:
         if not isinstance(value, list):
             return "must be a list"
         if field.required and not value:

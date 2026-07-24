@@ -25,10 +25,23 @@ def test_video_field_is_present_and_deferred():
 
 def test_each_stage_declares_its_exact_fields_and_dependency():
     expected_fields = {
-        "setup": ("store", "month", "product_scope", "products_csv", "rules_csv", "basic_xlsx", "search_xlsx", "asset_root", "asset_manifest", "runs_root"),
+        "setup": (
+            "store",
+            "store_confirmed",
+            "month",
+            "product_scope",
+            "product_ids",
+            "products_csv",
+            "rules_csv",
+            "image_roots",
+            "asset_manifest",
+            "historical_basic_xlsx",
+            "historical_promotion_csv",
+            "user_notes",
+        ),
         "completeness": ("confirmed_product_ids", "overrides", "user_notes"),
         "scope": ("decisions", "user_notes"),
-        "asset_matching": ("image_roots", "source_types", "aliases", "license_decisions", "asset_decisions", "include_video", "user_notes"),
+        "asset_matching": ("image_roots", "source_types", "aliases", "folder_decisions", "license_decisions", "asset_decisions", "include_video", "user_notes"),
         "image_review": ("policy_path", "ratio_tolerance", "decisions", "user_notes"),
         "slots_copy": ("slot_assignments", "copy_edits", "user_notes"),
         "dry_run": ("decision", "warning_notes"),
@@ -57,21 +70,17 @@ def test_stages_have_rendering_metadata_with_chinese_copy():
         assert isinstance(stage.read_only, bool)
 
 
-def test_asset_source_contract_requires_one_exclusive_input_before_matching():
+def test_setup_uses_configured_sources_and_keeps_manual_imports_optional():
     setup = get_stage("setup")
     setup_fields = {field.name: field for field in setup.fields}
-    constraint, = setup.exactly_one_constraints
 
-    assert constraint.field_names == ("asset_root", "asset_manifest")
-    assert constraint.required_before_stage == "asset_matching"
-    for name, other_name in (
-        ("asset_root", "asset_manifest"),
-        ("asset_manifest", "asset_root"),
-    ):
-        field = setup_fields[name]
-        assert field.required is False
-        assert field.exclusive_with == (other_name,)
-        assert field.required_before_stage is None
+    assert setup.exactly_one_constraints == ()
+    assert setup_fields["products_csv"].component == "auto_path"
+    assert setup_fields["rules_csv"].component == "auto_path"
+    assert setup_fields["image_roots"].component == "auto_path_list"
+    assert setup_fields["asset_manifest"].required is False
+    assert setup_fields["historical_basic_xlsx"].required is False
+    assert setup_fields["historical_promotion_csv"].required is False
 
 
 def test_recovery_fields_are_conditionally_enabled_only_for_actionable_exceptions():

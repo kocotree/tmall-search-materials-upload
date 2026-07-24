@@ -1,5 +1,11 @@
 # 数据结构
 
+## Task Setup
+
+任务配置 handoff 的用户输入为：`store`、`store_confirmed`、`month`、`product_scope`，以及仅在 `product_scope=selected` 时使用的 `product_ids`。`products_csv`、`rules_csv` 和 `image_roots` 由共享配置自动写入 handoff，不由用户手填。
+
+`asset_manifest`、`historical_basic_xlsx`、`historical_promotion_csv` 和 `user_notes` 均可选。基础素材和推广素材的日常输入不作为 setup 文件路径；它们由 Agent 自动写入当前时间戳任务目录。运行目录由 SessionStore 决定，不接受页面覆盖。
+
 ## 输入表
 
 商品总表 CSV 必需字段：`商品ID`、`商品名称（查找引用）`、`货号（查找引用）`、`产品等级`、`链接`、`运营`、`组别`、`品类-公司维度划分`。
@@ -28,11 +34,49 @@
 
 分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`last_completed_page`、`row_count` 和 `collected_at`。每完成一页必须先原子更新 CSV，再更新 checkpoint；中断后不得把未完成页写成已完成。
 
+## Folder Index
+
+`folder-index.sqlite3` 只保存文件夹记录，不保存图片内容：
+
+- `folder_id`：由来源与相对路径生成的稳定标识。
+- `source_system`、`absolute_path`、`relative_path`、`folder_name`、`parent_relative_path`。
+- `active`、`last_seen_scan_id`：用于 `--refresh` 标记新增、保留和已删除目录。
+- 匹配表保存商品 ID、货号、商品名称、`match_type` 与 `match_status`。
+
+`folder-candidates.csv` 只输出当前 active 且命中商品的文件夹。候选按文件夹自身名称匹配，不继承父目录命中；`--rematch-only` 只使用本地文件夹记录重新计算匹配。确认文件夹归属前，不读取文件夹中的图片，也不计算图片 SHA-256。
+
+`prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、来源、文件夹名、完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数和已处理数。
+
+用户决定写入同一时间戳会话的 `input.json.values.folder_decisions`。每项必须包含：
+
+- `folder_id`、`product_id`、`source_system`、`folder_path`，用于绑定明确目录和商品。
+- `decision`：`confirmed`、`confirmed_alias` 或 `rejected`；未处理项不写入决定数组。
+- `alias`：只在 `confirmed_alias` 时保存；其余决定保持空字符串。
+- `note`：可选人工说明。
+
+只有确认决定可以驱动后续按需图片枚举；保存决定本身不读取图片。
+
 ## Asset Record
 
 字段：`asset_id`、`product_id`、`sku`、`asset_type`、`source_system`、`source_path`、`license_status`、`sha256`、`width`、`height`、`duration`、`validation_status`、`reason_codes`。
 
 目录型素材默认只在 `<asset-root>/<商品ID>/` 查找，其次在 `<asset-root>/<货号>/` 查找。逐文件授权必须由素材清单表示；批次级 `--license-status confirmed` 只能用于该目录内所有文件已由用户确认同一授权状态的情形。
+
+## Asset Gallery Result
+
+素材匹配阶段的 `result.json.data` 包含：
+
+- `requirements`：逐商品 `product_id`、`product_title`、`missing_materials`、`images_per_material`、`required_images`。
+- `asset_candidates`：逐候选 `asset_id`、商品、来源、绝对只读路径、SHA-256、尺寸、匹配类型、匹配状态、授权状态、校验状态与远端重复标记。
+- `remote_dedupe_status`：仅在提供可信远端内容指纹并完成比对时为 `checked`；后台只有素材 ID 时为 `not_available`。
+- `reason_codes`：包含远端指纹不可用等批次级原因。
+
+用户决定写入同一时间戳会话素材匹配阶段的 `input.json.values`：
+
+- `license_decisions`：`asset_id` 与 `status=confirmed`。
+- `asset_decisions`：`product_id`、`asset_id`、`sha256`、来源、`decision=selected`、`group_index`、`position`。
+
+候选选择按稳定顺序和固定窗口执行，不保存随机种子，也不随机抽样。本地与当前批次重复以 SHA-256 排除；远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。
 
 ## AI 文案响应
 

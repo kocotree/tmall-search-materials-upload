@@ -49,7 +49,10 @@ class MatchCandidateRecord:
     source_system: str
     candidate_directory: str
     relative_path: str
+    absolute_path: str
     sha256: str
+    width: int | None
+    height: int | None
     validation_status: str
     file_reason_codes: tuple[str, ...]
     product_id: str
@@ -171,6 +174,28 @@ class AssetIndexStore:
             actual = store._connection.execute("SELECT value FROM scan_meta WHERE key = 'identity'").fetchone()
             if actual is None or actual["value"] != _identity_json(identity):
                 raise IndexIdentityError("index identity does not match this database")
+        except Exception:
+            store.close()
+            raise
+        return store
+
+    @classmethod
+    def open_readonly(cls, path: Path) -> "AssetIndexStore":
+        resolved = Path(path).resolve()
+        store = cls(
+            sqlite3.connect(
+                f"{resolved.as_uri()}?mode=ro",
+                uri=True,
+            )
+        )
+        try:
+            version = store._connection.execute(
+                "SELECT value FROM scan_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if version is None or int(version["value"]) != SCHEMA_VERSION:
+                raise IndexIdentityError(
+                    "schema version does not match this store"
+                )
         except Exception:
             store.close()
             raise
@@ -778,7 +803,8 @@ class AssetIndexStore:
     def match_candidate_records(self) -> tuple[MatchCandidateRecord, ...]:
         rows = self._connection.execute(
             "SELECT files.source_system, files.candidate_directory, "
-            "files.relative_path, files.sha256, files.validation_status, "
+            "files.relative_path, files.absolute_path, files.sha256, "
+            "files.width, files.height, files.validation_status, "
             "files.reason_codes_json AS file_reasons, matches.product_id, "
             "matches.sku, matches.product_title, matches.match_type, "
             "matches.match_status, matches.reason_codes_json AS match_reasons "
@@ -791,7 +817,14 @@ class AssetIndexStore:
                 source_system=str(row["source_system"]),
                 candidate_directory=str(row["candidate_directory"]),
                 relative_path=str(row["relative_path"]),
+                absolute_path=str(row["absolute_path"]),
                 sha256=str(row["sha256"]),
+                width=(
+                    None if row["width"] is None else int(row["width"])
+                ),
+                height=(
+                    None if row["height"] is None else int(row["height"])
+                ),
                 validation_status=str(row["validation_status"]),
                 file_reason_codes=tuple(json.loads(row["file_reasons"])),
                 product_id=str(row["product_id"]),
