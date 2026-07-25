@@ -95,7 +95,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 7. 运行 `tmall-materials publish`。发布前重新核对店铺、商品、坑位和批准内容哈希；发布后回查远端状态。
 8. 上传中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
-运行 `uv run tmall-materials --help` 查看参数。所有命令从本 skill 目录执行；使用 `uv sync --extra test` 根据 `.python-version` 和 `uv.lock` 同步 Python 3.11 环境。
+运行 `uv run tmall-materials --help` 查看参数。所有命令从本 skill 目录执行；首次使用优先运行 `scripts/bootstrap.cmd`。启动器支持官方源及显式选择的 HTTPS 镜像、项目内缓存、已有 Python 3.11/3.12 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
 
 首次使用先按 [operations-guide.md](references/operations-guide.md) 完成安装、CDP 浏览器启动和六阶段命令。所有时间参数必须是带时区的 ISO 8601。
 

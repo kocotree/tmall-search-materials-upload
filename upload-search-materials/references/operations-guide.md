@@ -22,8 +22,7 @@ uv run tmall-materials migrate-deterministic-selection --runs-root <runs目录> 
 在本 skill 目录使用 `uv` 管理 Python 3.11、锁文件和虚拟环境：
 
 ```powershell
-uv sync --extra test
-uv run tmall-materials --help
+.\scripts\bootstrap.cmd -Mirror official -WithTests
 $quickValidate = Join-Path $env:USERPROFILE ".codex\skills\.system\skill-creator\scripts\quick_validate.py"
 uv run python -X utf8 $quickValidate .
 ```
@@ -31,6 +30,14 @@ uv run python -X utf8 $quickValidate .
 `uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 创建或同步 `.venv`。首次同步需要访问 Python 包索引；后续验收使用 `uv lock --check` 检查锁文件是否与 `pyproject.toml` 一致。不要向系统 Python 或 Conda 基础环境直接安装本项目依赖。
 
 环境检查是启动配置页前唯一允许的阻断。若 `.venv\Scripts\tmall-materials.exe` 已可执行，可以直接启动页面；否则准备 `uv` 并同步环境。此时不得要求用户在聊天中提供店铺名、月份或图片根目录，也不得把这些阶段 1 字段与 `uv` 安装合并成一个前置问题。
+
+如果电脑已有兼容的 Python 3.11 或 3.12，可显式传入路径，避免 `uv` 自动下载解释器：
+
+```powershell
+.\scripts\bootstrap.cmd -Python "<python.exe>" -Mirror official -WithTests
+```
+
+网络受限时可把 `-Mirror` 改为 `tuna`、`aliyun` 或 `tencent`。镜像选择会影响 `uv.lock` 的依赖来源；只有明确切换锁文件来源时才传 `-UpdateLock`，并在提交前复核锁文件差异。公开仓库默认保留 `official`，不在源码或配置中保存镜像凭证。`.cmd` 入口只为当前子进程绕过 PowerShell 脚本执行限制，不修改系统执行策略。脚本使用项目内 `.uv-cache`、系统证书和 `--no-managed-python`，避免用户缓存权限及解释器自动下载造成的长时间等待。
 
 ### 1.1 每台电脑只配置一次路径
 
