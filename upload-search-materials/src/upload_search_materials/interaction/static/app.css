@@ -320,11 +320,13 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .inspection-row { display: grid; grid-template-columns: minmax(240px, 1.25fr) minmax(210px, 0.8fr) minmax(210px, 0.8fr); gap: 14px; align-items: start; padding: 14px; background: #fff; border: 1px solid var(--line); border-left: 4px solid #c49a54; border-radius: 12px; }
 .inspection-row[data-status="complete"] { border-left-color: #2f5c4c; }
 .inspection-row[data-status="abnormal"] { border-left-color: #ad361f; }
-.inspection-row[data-status="complete"] { border-left-color: #34825b; }
+.inspection-row[data-status="excluded"] { border-left-color: #7d8790; background: #f3f5f5; }
 .inspection-identity, .inspection-cell, .inspection-controls { display: grid; gap: 6px; min-width: 0; }
 .inspection-identity > span, .inspection-cell > span { color: var(--muted); font-size: 10px; }
 .inspection-status { width: max-content; padding: 3px 7px; color: #74410d !important; background: #fae8ce; border-radius: 999px; }
 .inspection-row[data-status="complete"] .inspection-status { color: #275848 !important; background: #dceee6; }
+.inspection-row[data-status="excluded"] .inspection-status { color: #4f5960 !important; background: #dfe4e6; }
+.inspection-exclusion-reason { color: #68737a !important; }
 .inspection-cell small { color: var(--muted); font-size: 9px; font-weight: 750; text-transform: uppercase; }
 .inspection-cell details { color: var(--muted); font-size: 10px; }
 .inspection-cell summary { cursor: pointer; }

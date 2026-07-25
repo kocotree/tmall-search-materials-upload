@@ -120,6 +120,7 @@ def test_completeness_matrix_reports_only_promotion_upload_gaps():
     assert product["promotion"]["remote_material_ids"] == ["a", "b", "c"]
     assert product["candidate_asset_count"] == 18
     assert product["status"] == "needs_supplement"
+    assert product["selectable"] is True
 
 
 def test_completeness_matrix_never_guesses_missing_backend_target():
@@ -142,6 +143,8 @@ def test_completeness_matrix_never_guesses_missing_backend_target():
     assert product["promotion"]["target_slots"] is None
     assert product["promotion"]["missing_count"] is None
     assert product["status"] == "needs_manual_review"
+    assert matrix["summary"]["selectable_count"] == 1
+    assert matrix["summary"]["excluded_count"] == 0
     assert matrix["summary"]["status_counts"] == {"needs_manual_review": 1}
     assert matrix["source_filter"] == "search_recommend_high_value"
 
@@ -161,3 +164,44 @@ def test_completeness_matrix_marks_zero_gap_product_complete():
 
     assert matrix["products"][0]["status"] == "complete"
     assert matrix["summary"]["status_counts"] == {"complete": 1}
+
+
+def test_completeness_matrix_marks_rule_matches_excluded_and_unselectable():
+    products = [
+        {"商品ID": "1", "商品名称（查找引用）": "UVNO 夏季款", "产品等级": "A级"},
+        {"商品ID": "2", "商品名称（查找引用）": "积分兑换商品", "产品等级": "A级"},
+        {"商品ID": "3", "商品名称（查找引用）": "普通商品", "产品等级": "清仓"},
+        {"商品ID": "4", "商品名称（查找引用）": "好物体验专享", "产品等级": "A级"},
+        {"商品ID": "5", "商品名称（查找引用）": "会员日新品", "产品等级": "A级"},
+        {"商品ID": "6", "商品名称（查找引用）": "正常商品", "产品等级": "A级"},
+    ]
+    promotion_rows = [
+        {
+            "商品ID": str(product_id),
+            "目标容量": "9",
+            "现有素材数": "0",
+            "缺失数量": "9",
+            "状态": "ready_for_review",
+        }
+        for product_id in range(1, 7)
+    ]
+
+    matrix = build_completeness_matrix(
+        promotion_rows=promotion_rows,
+        products=products,
+    )
+
+    excluded = matrix["products"][:5]
+    assert all(product["status"] == "excluded" for product in excluded)
+    assert all(product["selectable"] is False for product in excluded)
+    assert [product["eligibility"]["reason_codes"][0] for product in excluded] == [
+        "EXCLUDE_UVNO",
+        "EXCLUDE_POINTS",
+        "EXCLUDE_CLEARANCE",
+        "EXCLUDE_GOOD_EXPERIENCE",
+        "EXCLUDE_MEMBER_DAY",
+    ]
+    assert matrix["products"][5]["selectable"] is True
+    assert matrix["summary"]["excluded_count"] == 5
+    assert matrix["summary"]["selectable_count"] == 1
+    assert matrix["summary"]["status_counts"]["excluded"] == 5

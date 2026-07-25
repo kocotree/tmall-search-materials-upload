@@ -42,11 +42,12 @@
 
 每个商品必须包含：
 
-- `product_id`、`sku`、`product_title` 和整体 `status`。
+- `product_id`、`sku`、`product_title`、整体 `status` 和布尔值 `selectable`。
+- `eligibility.status/reason_codes/evidence`；标题或等级命中 `uvno`、`积分`、`清仓`、`好物体验`、`会员日` 时，写为 `status=excluded`、`selectable=false`，页面保留展示但禁选。
 - `promotion.target_slots/current_count/missing_count`、远端素材 ID、原因码、采集时间和证据；无法识别容量时标记 `needs_manual_review`，不得根据分类猜测目标容量。
 - `candidate_asset_count`；第二阶段尚未完成素材匹配时保持 `null`，页面显示“待素材匹配”，不得伪造为 0。
 
-页面决定写入 `02-completeness/input.json.values`。`selected_product_ids` 保存用户选择进入下一阶段的商品 ID，至少选择一个才能提交。搜索和状态筛选只改变当前显示范围；“选择当前筛选结果/取消当前筛选结果”批量更新可见商品，不清除其他筛选条件下已经选择的商品。
+页面决定写入 `02-completeness/input.json.values`。`selected_product_ids` 只保存用户选择直接进入第三阶段“素材匹配”的可选商品 ID，至少选择一个才能提交。搜索和状态筛选只改变当前显示范围；“选择当前筛选结果”自动跳过排除项，“取消当前筛选结果”批量更新可见商品，不清除其他筛选条件下已经选择的商品。服务端提交时再次拒绝排除项或不属于当前矩阵的陈旧商品 ID。
 
 Agent 返回 `needs_user_input` 或 `blocked` 时，同时保存只读 `review-context.json`。用户增量保存决定会更新 `input.json` revision，但必须继续展示该审查上下文；修改前置阶段时才使后续审查上下文失效。用户不能通过页面修改 `review-context.json`。
 

@@ -419,9 +419,17 @@ class SessionStore:
             get_stage(stage_id)
         except (KeyError, StopIteration):
             raise KeyError(stage_id) from None
-        return self._safe_path(
-            self._session_path(session_id) / self._stage_directory_name(stage_index, stage_id)
+        session_path = self._session_path(session_id)
+        preferred = self._safe_path(
+            session_path / self._stage_directory_name(stage_index, stage_id)
         )
+        if preferred.is_dir():
+            return preferred
+        legacy_suffix = stage_id.replace("_", "-")
+        legacy_matches = sorted(session_path.glob(f"[0-9][0-9]-{legacy_suffix}"))
+        if len(legacy_matches) == 1:
+            return self._safe_path(legacy_matches[0])
+        return preferred
 
     def _invalidate_after_edit(
         self,
@@ -443,9 +451,7 @@ class SessionStore:
             if stage.id != stage_id:
                 artifact_names = ("review-context.json", *artifact_names)
                 state["stages"][stage.id]["status"] = "draft"
-            stage_path = self._safe_path(
-                session_path / self._stage_directory_name(offset, stage.id)
-            )
+            stage_path = self._stage_path(session_id, stage.id)
             for artifact_name in artifact_names:
                 artifact_path = stage_path / artifact_name
                 if artifact_path.is_file():

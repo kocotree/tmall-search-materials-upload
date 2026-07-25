@@ -39,7 +39,6 @@
   const resultRenderers = {
     "setup_form": [],
     "inspection_matrix": ["InspectionMatrix"],
-    "product_scope_table": ["ProductScopeTable"],
     "asset_match_gallery": ["AssetMatchGallery"],
     "image_review": ["CropDecision"],
     "slots_copy_editor": ["SlotBoard", "CopyEditor"],
@@ -492,10 +491,23 @@
       needs_supplement: "待补充",
       needs_manual_review: "需人工确认",
       complete: "已完整",
-      complete: "完整",
-      excluded: "排除候选",
+      excluded: "已自动排除",
       abnormal: "异常",
     })[status] || "需人工确认";
+  }
+
+  function completenessExclusionReasons(product) {
+    const labels = {
+      EXCLUDE_UVNO: "uvno",
+      EXCLUDE_POINTS: "积分",
+      EXCLUDE_CLEARANCE: "清仓",
+      EXCLUDE_GOOD_EXPERIENCE: "好物体验",
+      EXCLUDE_MEMBER_DAY: "会员日",
+    };
+    const reasonCodes = Array.isArray(product.eligibility?.reason_codes)
+      ? product.eligibility.reason_codes
+      : [];
+    return reasonCodes.map((code) => labels[code] || code);
   }
 
   function renderInspectionMatrix(view) {
@@ -511,6 +523,19 @@
 
     const locked = ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
     const selected = completenessSelectedIds();
+    const selectableIds = new Set(
+      products
+        .filter((product) => product.selectable !== false && product.status !== "excluded")
+        .map((product) => String(product.product_id || "")),
+    );
+    let selectionChanged = false;
+    selected.forEach((productId) => {
+      if (!selectableIds.has(productId)) {
+        selected.delete(productId);
+        selectionChanged = true;
+      }
+    });
+    if (selectionChanged && !locked) writeCompletenessSelectedIds(selected);
     const statusCounts = view.result?.data?.summary?.status_counts || {};
     const summary = element("div", "inspection-summary");
     let selectedCount;
@@ -519,6 +544,7 @@
       ["待补充", statusCounts.needs_supplement || 0],
       ["需人工确认", statusCounts.needs_manual_review || 0],
       ["已完整", statusCounts.complete || 0],
+      ["已排除", view.result?.data?.summary?.excluded_count || 0],
       ["已选择", selected.size],
     ].forEach(([label, count]) => {
       const card = element("div", "inspection-stat");
@@ -541,6 +567,7 @@
       ["needs_supplement", "待补充"],
       ["needs_manual_review", "需人工确认"],
       ["complete", "已完整"],
+      ["excluded", "已自动排除"],
       ["abnormal", "异常"],
     ].forEach(([value, label]) => {
       const option = document.createElement("option");
@@ -580,6 +607,7 @@
       }
       visible.forEach((product) => {
         const productId = String(product.product_id || "");
+        const selectable = product.selectable !== false && product.status !== "excluded";
         const card = element("article", "inspection-row");
         card.dataset.status = product.status || "needs_manual_review";
 
@@ -589,6 +617,16 @@
           element("span", "", `商品 ID ${productId} · 货号 ${product.sku || "未知"}`),
           element("span", "inspection-status", completenessStatusLabel(product.status)),
         );
+        const exclusionReasons = completenessExclusionReasons(product);
+        if (!selectable && exclusionReasons.length) {
+          identity.append(
+            element(
+              "span",
+              "inspection-exclusion-reason",
+              `命中自动排除规则：${exclusionReasons.join("、")}`,
+            ),
+          );
+        }
 
         const promotion = element("div", "inspection-cell");
         const target = product.promotion?.target_slots;
@@ -619,10 +657,13 @@
         choice.className = "inspection-choice";
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
-        checkbox.checked = selected.has(productId);
-        checkbox.disabled = locked;
-        checkbox.setAttribute("aria-label", `选择商品 ${productId} 进入下一阶段`);
-        choice.append(checkbox, document.createTextNode("选择进入下一阶段"));
+        checkbox.checked = selectable && selected.has(productId);
+        checkbox.disabled = locked || !selectable;
+        checkbox.setAttribute("aria-label", `选择商品 ${productId} 进入素材匹配`);
+        choice.append(
+          checkbox,
+          document.createTextNode(selectable ? "选择进入素材匹配" : "已按规则排除"),
+        );
         controls.append(choice);
         checkbox.addEventListener("change", () => {
           if (checkbox.checked) selected.add(productId);
@@ -639,7 +680,9 @@
     filter.addEventListener("change", draw);
     bulkSelect.addEventListener("click", () => {
       visibleProducts().forEach((product) => {
-        selected.add(String(product.product_id));
+        if (product.selectable !== false && product.status !== "excluded") {
+          selected.add(String(product.product_id));
+        }
       });
       writeCompletenessSelectedIds(selected);
       if (selectedCount) selectedCount.textContent = String(selected.size);

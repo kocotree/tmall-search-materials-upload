@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 import re
 from typing import Iterable, Mapping
 
+from .eligibility import evaluate_exclusions
+
 
 BASIC_MATERIAL_FIELDS = (
     "卖点1",
@@ -166,6 +168,23 @@ def build_completeness_matrix(
     records = []
     for product_id, promotion in promotion_by_id.items():
         product = product_by_id.get(product_id, {})
+        product_titles = []
+        for field_name in (
+            "商品名称（查找引用）",
+            "商品名称",
+            "商品标题",
+            "商家短标题",
+            "素材标题",
+            "product_title",
+        ):
+            title = str(product.get(field_name, "")).strip()
+            if title and title not in product_titles:
+                product_titles.append(title)
+        exclusion = evaluate_exclusions(
+            str(product.get("产品等级", product.get("grade", ""))).strip(),
+            product_titles,
+        )
+        excluded = exclusion.status == "excluded"
 
         target_slots = _promotion_int(promotion, "目标容量", "目标坑位")
         current_count = _promotion_int(promotion, "现有素材数")
@@ -178,7 +197,9 @@ def build_completeness_matrix(
             str(promotion.get("状态", "")).strip() or "needs_manual_review"
         )
 
-        if promotion_status in {"error", "blocked", "abnormal"}:
+        if excluded:
+            overall_status = "excluded"
+        elif promotion_status in {"error", "blocked", "abnormal"}:
             overall_status = "abnormal"
         elif missing_count is None:
             overall_status = "needs_manual_review"
@@ -197,6 +218,12 @@ def build_completeness_matrix(
                     product.get("商品名称（查找引用）", product.get("product_title", ""))
                 ).strip(),
                 "status": overall_status,
+                "selectable": not excluded,
+                "eligibility": {
+                    "status": "excluded" if excluded else "eligible",
+                    "reason_codes": list(exclusion.reason_codes),
+                    "evidence": dict(exclusion.evidence),
+                },
                 "promotion": {
                     "status": promotion_status,
                     "target_slots": target_slots,
@@ -227,6 +254,12 @@ def build_completeness_matrix(
         "products": records,
         "summary": {
             "product_count": len(records),
+            "selectable_count": sum(
+                1 for record in records if record["selectable"]
+            ),
+            "excluded_count": sum(
+                1 for record in records if not record["selectable"]
+            ),
             "status_counts": dict(sorted(status_counts.items())),
         },
     }

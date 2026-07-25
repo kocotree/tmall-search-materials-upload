@@ -15,6 +15,7 @@ from upload_search_materials.models import ProductRecord
     ("grade", "title", "code"),
     [
         ("清仓", "普通标题", "EXCLUDE_CLEARANCE"),
+        ("A级", "夏季清仓专场", "EXCLUDE_CLEARANCE"),
         ("A级", "uvno 夏季商品", "EXCLUDE_UVNO"),
         ("A级", "好物体验专享", "EXCLUDE_GOOD_EXPERIENCE"),
         ("A级", "会员日新品", "EXCLUDE_MEMBER_DAY"),

@@ -8,9 +8,21 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 将商品、月度规则、天猫后台状态和已授权素材转换成可恢复、可审计的商品级与坑位级任务。默认只运行 `dry-run`；正式发布仅接受当前批次不可变批准清单，并使用用户已登录会话中的 Playwright DOM 操作。
 
-## Required Inputs
+## 启动契约（必须遵守）
 
-- 用户只需确认页面可见的准确店铺名和目标月份；月份默认当前月。第一阶段不再配置商品范围或搜推采集页数。
+把“运行环境准备”和“阶段 1 业务配置”严格分开：
+
+1. 启动前只检查运行条件：当前 Skill 目录、可执行的既有 `.venv`，或用于创建环境的 `uv`。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
+2. 不得在配置页启动前通过聊天索取店铺名、月份、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
+3. 先创建时间戳会话并运行 `tmall-materials interact`。即使尚未配置店铺或图片源，交互页面也必须正常打开。
+4. 让用户在阶段 1 配置页填写并确认店铺、月份和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
+5. setup handoff 尚未提交时，只等待页面提交或提供恢复指令；不得自行采集、索引、dry-run、上传或发布。
+
+聊天中用户主动提供的值可以用于解释或预填建议，但不能代替配置页提交，也不能跳过 setup handoff。
+
+## 阶段输入（不是启动前置条件）
+
+- 用户在配置页确认页面可见的准确店铺名和目标月份；月份默认当前月。第一阶段不再配置商品范围或搜推采集页数。
 - 商品总表和月度规则从项目目录自动发现。图片源在任务配置页维护，可配置 1–50 个“来源名称 + 根路径”并保存为本机配置。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
 - 本轮上传范围仅为搜推素材，不导出、不审查也不补传基础素材。搜推页的“导出数据”仅是经营指标；第二阶段商品范围必须来自正确店铺实时 DOM 中“商品分类 → 搜推高价值”的全量采集结果。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
@@ -23,7 +35,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 素材阶段按以下顺序执行：
 
-1. 用户提交任务配置后创建或复用精确时间戳会话。把自动发现的商品表、规则表复制为本次任务输入快照；本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
+1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
 2. 默认先对声明的图片 roots 运行 `index-folders`，只记录文件夹名称、路径和商品匹配，不读取图片内容。素材目录变化后使用 `--refresh`；只调整名称、货号或别名匹配规则时使用 `--rematch-only`，不得重新扫描 NAS。
 3. 检查 `folder-scan-summary.json` 和 `folder-candidates.csv`，再运行 `prepare-folder-review` 生成文件夹归属审查数据。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；用户逐项选择“确认归属 / 确认并记录别名 / 排除”，决定写入当前时间戳会话的 `folder_decisions`。只对已确认文件夹按需枚举图片、读取尺寸并计算 SHA-256。全量 `index-assets` 仅作为离线审计选项，不再阻断 1–3 商品试跑。
 4. 人工确认名称/别名候选、同货号不同名称文件夹和逐文件授权，之后才生成或接受 `confirmed-assets.csv`。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；名称候选为 `needs_manual_confirmation`，授权一律从 `unknown` 开始。
@@ -61,16 +73,13 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
 3. 任务配置页只要求店铺确认、月份和图片源配置；不提供商品范围或搜推采集页数。商品表、规则表和运行目录只读展示；图片源组件允许新增、删除、检测并保存任意 1–50 个来源，人工素材清单与历史文件只放在高级设置。
 4. 启动仅监听 `localhost` 的交互页面。
-5. 等待该会话“当前阶段”的精确 `handoff.json`。
-6. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
-7. 将该阶段标记为 `processing`。
-8. 只执行该 `stage_id` 允许的动作。
-9. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
-10. 根据结果停止，或明确进入下一阶段。
-
-提交前允许编辑并在停止输入约 1 秒后自动保存草稿；草稿不得生成 handoff 或触发 Agent。正式提交后冻结该阶段的全部配置。只有状态仍为 `ready_for_agent`、尚未被 Agent 认领时，用户才能显式撤回并继续修改；`processing` 和 `completed` 禁止覆盖。`needs_user_input` 或 `blocked` 才重新开放输入。每次草稿和正式提交都保存到阶段目录的 `revisions/<revision>/`，活动 `handoff.json` 只代表当前可认领提交。
-
-图片源行提供“选择文件夹”，仅由用户点击后打开本机原生目录窗口并回填完整路径；仍保留手工输入用于 UNC、远程或无界面环境。选择目录时不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
+5. 第二阶段先将“搜推高价值”全量结果与商品表合并，并自动排除标题或等级命中 `uvno`、`积分`、`清仓`、`好物体验`、`会员日` 的商品。排除项保留在页面和结果中供审计，但不可选择；用户提交其余商品后直接进入第三阶段“素材匹配”，不再设置独立的“维护范围确认”阶段。
+6. 等待该会话“当前阶段”的精确 `handoff.json`。
+7. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
+8. 将该阶段标记为 `processing`。
+9. 只执行该 `stage_id` 允许的动作。
+10. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
+11. 根据结果停止，或明确进入下一阶段。
 
 提交前允许编辑并在停止输入约 1 秒后自动保存草稿；草稿不得生成 handoff 或触发 Agent。正式提交后冻结该阶段的全部配置。只有状态仍为 `ready_for_agent`、尚未被 Agent 认领时，用户才能显式撤回并继续修改；`processing` 和 `completed` 禁止覆盖。`needs_user_input` 或 `blocked` 才重新开放输入。每次草稿和正式提交都保存到阶段目录的 `revisions/<revision>/`，活动 `handoff.json` 只代表当前可认领提交。
 
@@ -80,9 +89,7 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 恢复指令必须包含 `runs_root`、精确 `session_id`、`stage_id` 和 revision，并要求校验 `handoff.json.input_sha256`；禁止按目录新旧猜测 session。前一阶段未写入 `completed` 结果时，不得提交下一阶段。
 
-恢复指令必须包含 `runs_root`、精确 `session_id`、`stage_id` 和 revision，并要求校验 `handoff.json.input_sha256`；禁止按目录新旧猜测 session。前一阶段未写入 `completed` 结果时，不得提交下一阶段。
-
-页面阶段 08/09 只产生输入和 handoff；`approve` 与 `publish` 是分开的、由 Agent 控制的 CLI 动作。对 1–3 个商品的生产测试必须在当前对话获得显式授权；素材改变后，旧批准永远不得授权发布。可复制的启动和等待命令见 [operations-guide.md](references/operations-guide.md)。
+页面阶段 07/08 只产生输入和 handoff；`approve` 与 `publish` 是分开的、由 Agent 控制的 CLI 动作。对 1–3 个商品的生产测试必须在当前对话获得显式授权；素材改变后，旧批准永远不得授权发布。可复制的启动和等待命令见 [operations-guide.md](references/operations-guide.md)。
 
 ## Safety Contract
 

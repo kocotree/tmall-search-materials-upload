@@ -5,9 +5,9 @@ import pytest
 from upload_search_materials.interaction.stages import STAGES, get_stage
 
 
-def test_registry_contains_ordered_ten_stage_workflow():
+def test_registry_contains_ordered_nine_stage_workflow():
     assert [stage.id for stage in STAGES] == [
-        "setup", "completeness", "scope", "asset_matching", "image_review",
+        "setup", "completeness", "asset_matching", "image_review",
         "slots_copy", "dry_run", "approval", "production_confirmation", "results",
     ]
 
@@ -39,7 +39,6 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "user_notes",
         ),
         "completeness": ("selected_product_ids", "user_notes"),
-        "scope": ("decisions", "user_notes"),
         "asset_matching": ("image_roots", "source_types", "aliases", "folder_decisions", "license_decisions", "asset_decisions", "include_video", "user_notes"),
         "image_review": ("policy_path", "ratio_tolerance", "decisions", "user_notes"),
         "slots_copy": ("slot_assignments", "copy_edits", "user_notes"),

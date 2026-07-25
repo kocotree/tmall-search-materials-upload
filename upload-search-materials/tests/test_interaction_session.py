@@ -57,6 +57,16 @@ def test_create_session_uses_registry_stage_directories(tmp_path):
     assert state["stages"]["setup"] == {"revision": 0, "status": "draft"}
 
 
+def test_stage_path_falls_back_to_unique_legacy_numbered_directory(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    current = session.path / "03-asset-matching"
+    legacy = session.path / "04-asset-matching"
+    current.rename(legacy)
+
+    assert store._stage_path(session.session_id, "asset_matching") == legacy
+
+
 def test_handoff_hash_matches_atomic_input_bytes(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()
@@ -300,7 +310,7 @@ def test_write_result_persists_structured_asset_gallery_data(tmp_path):
 
     assert result["data"] == data
     persisted = json.loads(
-        (session.path / "04-asset-matching" / "result.json").read_text(
+        (session.path / "03-asset-matching" / "result.json").read_text(
             encoding="utf-8"
         )
     )

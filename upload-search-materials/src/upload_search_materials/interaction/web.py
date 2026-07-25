@@ -227,6 +227,10 @@ def create_app(
                 {"stage": f"complete previous stage '{stage.previous_stage}' first"}
             )
         field_errors = _unknown_value_errors(stage, values) | _value_errors(stage, values)
+        if not field_errors and stage_id == "completeness":
+            field_errors |= _completeness_selection_errors(
+                store, session_id, state, values
+            )
         if field_errors:
             return _validation_error(field_errors)
 
@@ -357,6 +361,42 @@ def _current_result(
     ):
         return None
     return context
+
+
+def _completeness_selection_errors(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+    values: dict[str, Any],
+) -> dict[str, str]:
+    """Reject excluded or stale product IDs when stage two is submitted."""
+
+    result = _current_result(store, session_id, "completeness", state)
+    products = result.get("data", {}).get("products", []) if result else []
+    if not isinstance(products, list) or not products:
+        return {}
+    allowed_ids = {
+        str(product.get("product_id", ""))
+        for product in products
+        if isinstance(product, dict)
+        and product.get("selectable") is not False
+        and product.get("status") != "excluded"
+    }
+    selected_ids = {
+        str(product_id).strip()
+        for product_id in values.get("selected_product_ids", [])
+        if str(product_id).strip()
+    }
+    invalid_ids = sorted(selected_ids - allowed_ids)
+    if not invalid_ids:
+        return {}
+    preview = "、".join(invalid_ids[:10])
+    suffix = " 等" if len(invalid_ids) > 10 else ""
+    return {
+        "selected_product_ids": (
+            f"包含已自动排除或不在当前巡检结果中的商品：{preview}{suffix}"
+        )
+    }
 
 
 def _current_input(

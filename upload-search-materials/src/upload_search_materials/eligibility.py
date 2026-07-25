@@ -35,7 +35,7 @@ def evaluate_exclusions(grade: str, titles: Iterable[str]) -> EligibilityDecisio
     normalized_titles = [title.strip() for title in titles if title and title.strip()]
     combined = "\n".join(normalized_titles)
     reasons = []
-    if normalize_grade(grade) == "清仓":
+    if normalize_grade(grade) == "清仓" or "清仓" in combined:
         reasons.append("EXCLUDE_CLEARANCE")
     reasons.extend(code for code, predicate in EXCLUSION_RULES if predicate(combined))
     return EligibilityDecision(

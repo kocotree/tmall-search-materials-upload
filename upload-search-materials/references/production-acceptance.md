@@ -45,7 +45,7 @@
 
 出现错误店铺、验证码、选择器失效、素材变化、远端冲突或结果不确定时立即停止，不扩大商品范围。
 
-交互页面的阶段 08/09 只创建输入和 handoff，不代替 Agent 分开执行的 `approve` 和 `publish` CLI 动作。生产前必须核对 handoff/result 的 `session_id`、`stage_id`、`revision` 和 `input_sha256`。任何素材变化都使对应旧批准失效；过期或与当前四项绑定不一致的批准永远不得授权变更后的素材。
+交互页面的阶段 07/08 只创建输入和 handoff，不代替 Agent 分开执行的 `approve` 和 `publish` CLI 动作。生产前必须核对 handoff/result 的 `session_id`、`stage_id`、`revision` 和 `input_sha256`。任何素材变化都使对应旧批准失效；过期或与当前四项绑定不一致的批准永远不得授权变更后的素材。
 
 ## 生产可用结论
 

@@ -1,4 +1,4 @@
-"""Immutable definitions for the ten-stage material-upload interaction flow."""
+"""Immutable definitions for the nine-stage material-upload interaction flow."""
 
 from dataclasses import dataclass
 
@@ -114,7 +114,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="completeness",
         title="完整度巡检",
-        description="展示“搜推高价值”全量商品；用户可搜索、筛选并批量选择进入下一阶段的商品。基础素材不属于本轮上传范围。",
+        description="展示“搜推高价值”全量商品，自动排除 uvno、积分、清仓、好物体验和会员日商品；用户选择其余商品后直接进入素材匹配。",
         component="inspection_matrix",
         previous_stage="setup",
         fields=(
@@ -123,22 +123,11 @@ STAGES: tuple[StageDefinition, ...] = (
         ),
     ),
     StageDefinition(
-        id="scope",
-        title="维护范围确认",
-        description="逐个决定本次维护或排除，并记录覆盖自动判断的原因。",
-        component="product_scope_table",
-        previous_stage="completeness",
-        fields=(
-            _field("decisions", "维护或排除决定及原因", "table", required=True),
-            _field("user_notes", "用户备注", "textarea"),
-        ),
-    ),
-    StageDefinition(
         id="asset_matching",
         title="素材匹配",
         description="确认图片来源、显式别名、授权状态和采用或排除决定。",
         component="asset_match_gallery",
-        previous_stage="scope",
+        previous_stage="completeness",
         fields=(
             _field("image_roots", "图片源路径", "path_list", required=True),
             _field("source_types", "来源类型", "multi_select", required=True),

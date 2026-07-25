@@ -72,13 +72,13 @@ def test_create_session_returns_timestamp_id(client):
     assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{2})?", response.json["session_id"])
 
 
-def test_root_renders_ten_stage_left_rail(client):
+def test_root_renders_nine_stage_left_rail(client):
     response = client.get("/")
     html = response.get_data(as_text=True)
 
     assert response.status_code == 200
     assert response.mimetype == "text/html"
-    assert html.count('data-stage-id="') == 10
+    assert html.count('data-stage-id="') == 9
     assert "完整度巡检" in html
     assert "生产确认" in html
     assert re.search(r"/static/app\.js\?v=[0-9a-f]{12}", html)
@@ -295,7 +295,6 @@ def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
     html = client.get("/").get_data(as_text=True)
     components = {
         "InspectionMatrix",
-        "ProductScopeTable",
         "AssetMatchGallery",
         "CropDecision",
         "SlotBoard",
@@ -325,7 +324,9 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "搜索商品 ID、货号或名称",
         "选择当前筛选结果",
         "取消当前筛选结果",
-        "选择进入下一阶段",
+        "选择进入素材匹配",
+        "已自动排除",
+        "命中自动排除规则",
         "查看后台证据",
     ):
         assert text in script
@@ -336,7 +337,7 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
 def test_page_uses_explicit_empty_states_without_fabricated_counts(client):
     html = client.get("/").get_data(as_text=True)
 
-    assert html.count('data-empty-state="尚未扫描"') >= 10
+    assert html.count('data-empty-state="尚未扫描"') >= 9
     assert "18 张" not in html
 
 
@@ -444,7 +445,7 @@ def test_results_recovery_form_is_hidden_and_disabled_by_default(client):
 def test_result_modules_keep_persistent_content_containers(client):
     html = client.get("/").get_data(as_text=True)
 
-    assert html.count("data-result-content") == 10
+    assert html.count("data-result-content") == 9
 
 
 def test_image_roots_are_grouped_and_controls_describe_stable_field_errors(client):
@@ -480,7 +481,7 @@ def test_results_stage_rejects_ordinary_submission_without_creating_handoff(
     )
 
     assert response.status_code == 409
-    results_directory = tmp_path / session_id / "10-results"
+    results_directory = tmp_path / session_id / "09-results"
     assert not (results_directory / "input.json").exists()
     assert not (results_directory / "handoff.json").exists()
 
@@ -567,7 +568,7 @@ def test_results_recovery_rechecks_status_inside_save_lock(
         status="completed",
         summary="agent completed while recovery request was waiting",
     )
-    results_path = session.path / "10-results"
+    results_path = session.path / "09-results"
     completed_artifacts = {
         name: (results_path / name).read_bytes()
         for name in ("input.json", "handoff.json", "result.json")
@@ -661,7 +662,7 @@ def test_draft_after_submit_is_rejected_until_handoff_is_withdrawn(client, sessi
         "revision": 1,
         "status": "ready_for_agent",
     }
-    stage_path = tmp_path / session_id / "09-production-confirmation"
+    stage_path = tmp_path / session_id / "08-production-confirmation"
     assert (stage_path / "handoff.json").is_file()
     assert (stage_path / "revisions" / "0001" / "handoff.json").is_file()
     input_path = next(tmp_path.glob(f"{session_id}/**/input.json"))
@@ -691,8 +692,8 @@ def test_stale_draft_returns_conflict_without_changing_durable_files(client, ses
     session_path = tmp_path / session_id
     tracked = [
         session_path / "session.json",
-        session_path / "09-production-confirmation" / "input.json",
-        session_path / "09-production-confirmation" / "handoff.json",
+        session_path / "08-production-confirmation" / "input.json",
+        session_path / "08-production-confirmation" / "handoff.json",
     ]
     before = {path: path.read_bytes() for path in tracked}
 
@@ -807,7 +808,7 @@ def test_stage_read_exposes_only_current_handoff_submission_time(
         f"/api/sessions/{session_id}/stages/production_confirmation/submit",
         json={"values": valid_production_confirmation()},
     )
-    handoff_path = tmp_path / session_id / "09-production-confirmation" / "handoff.json"
+    handoff_path = tmp_path / session_id / "08-production-confirmation" / "handoff.json"
     handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
 
     current = client.get(
@@ -860,7 +861,7 @@ def test_stage_read_exposes_current_agent_result_for_schema_renderer(
     result_path = (
         tmp_path
         / session_id
-        / "09-production-confirmation"
+        / "08-production-confirmation"
         / "result.json"
     )
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -907,6 +908,38 @@ def test_completeness_review_context_survives_incremental_decision_drafts(
     stage_path = tmp_path / session_id / "02-completeness"
     assert not (stage_path / "result.json").exists()
     assert (stage_path / "review-context.json").is_file()
+
+
+def test_completeness_submit_rejects_excluded_or_stale_product_ids(
+    client, session_id, tmp_path
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/submit",
+        json={"values": {"selected_product_ids": ["1"]}},
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "completeness",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="needs_user_input",
+        summary="待用户选择",
+        data={
+            "products": [
+                {"product_id": "1", "status": "needs_supplement", "selectable": True},
+                {"product_id": "2", "status": "excluded", "selectable": False},
+            ]
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/submit",
+        json={"values": {"selected_product_ids": ["1", "2", "999"]}},
+    )
+
+    assert response.status_code == 422
+    assert "2" in response.json["field_errors"]["selected_product_ids"]
+    assert "999" in response.json["field_errors"]["selected_product_ids"]
 
 
 def test_asset_gallery_serves_only_current_result_candidate_images(
@@ -1027,7 +1060,7 @@ def test_stage_read_returns_only_allowlisted_current_input_values(
             "revision": 0,
         },
     )
-    input_path = tmp_path / session_id / "04-asset-matching" / "input.json"
+    input_path = tmp_path / session_id / "03-asset-matching" / "input.json"
     document = json.loads(input_path.read_text(encoding="utf-8"))
     document["values"]["password"] = "must-not-leak"
     input_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
@@ -1127,7 +1160,7 @@ def test_stage_read_rejects_missing_or_unsupported_artifact_schema_version(
     artifact_path = (
         tmp_path
         / session_id
-        / "09-production-confirmation"
+        / "08-production-confirmation"
         / artifact_name
     )
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))

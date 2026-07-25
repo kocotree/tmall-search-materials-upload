@@ -8,7 +8,7 @@
 
 1. 商品 ID 为空：`blocked / MISSING_PRODUCT_ID`。
 2. 商品 ID 在来源表中重复：所有重复行均为 `blocked / DUPLICATE_PRODUCT_ID`。
-3. 产品等级为 `清仓`：`excluded / EXCLUDE_CLEARANCE`。
+3. 产品等级为 `清仓`，或商品标题包含 `清仓`：`excluded / EXCLUDE_CLEARANCE`。
 4. 基础素材或搜推导出的商品/素材标题包含 `UVNO`，忽略大小写：`excluded / EXCLUDE_UVNO`。
 5. 标题包含 `好物体验`：`excluded / EXCLUDE_GOOD_EXPERIENCE`。
 6. 标题包含 `会员日`：`excluded / EXCLUDE_MEMBER_DAY`。
@@ -18,6 +18,8 @@
 10. 其余商品：`eligible`。
 
 同一商品可以命中多个标题排除规则；系统只写一条审计记录，并按 `UVNO`、`好物体验`、`会员日`、`积分` 的固定顺序保留全部原因码。结构性阻断优先于业务排除。
+
+第二阶段“搜推高价值”候选矩阵只执行五项固定自动排除：`UVNO`、`积分`、`清仓`、`好物体验`、`会员日`。命中项必须显示为 `excluded`、`selectable=false` 并保留原因码，不能从结果中静默删除，也不能被前端或 API 提交到素材匹配。该阶段不再设置单独的“维护范围确认”页面。
 
 ## 坑位分配规则
 
