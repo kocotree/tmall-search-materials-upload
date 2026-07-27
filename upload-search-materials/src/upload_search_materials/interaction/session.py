@@ -302,7 +302,10 @@ class SessionStore:
                 result["data"] = data
             self._write_json_atomic(stage_path / "result.json", result)
             review_context_path = stage_path / "review-context.json"
-            if stage_id == "completeness" and status in {"needs_user_input", "blocked"}:
+            if stage_id in {"completeness", "asset_matching"} and status in {
+                "needs_user_input",
+                "blocked",
+            }:
                 self._write_json_atomic(review_context_path, result)
             elif status == "completed" and review_context_path.is_file():
                 review_context_path.unlink()
@@ -317,6 +320,42 @@ class SessionStore:
                 status=status,
             )
             return result
+
+    def write_review_context(
+        self,
+        session_id: str,
+        stage_id: str,
+        document: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist agent-prepared UI context before the user submits a stage."""
+
+        self._stage_index(stage_id)
+        if not isinstance(document, dict):
+            raise InteractionConflict("review context must be an object")
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            revision = int(state["stages"][stage_id]["revision"])
+            if (
+                document.get("session_id") != session_id
+                or document.get("stage_id") != stage_id
+                or int(document.get("revision", -1)) != revision
+            ):
+                raise InteractionConflict(
+                    "review context identity does not match current stage"
+                )
+            stage_path = self._stage_path(session_id, stage_id)
+            self._write_json_atomic(stage_path / "review-context.json", document)
+            if state["stages"][stage_id]["status"] in {"draft", "blocked"}:
+                state["stages"][stage_id]["status"] = "needs_user_input"
+                self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "review_context_written",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=revision,
+            )
+            return document
 
     def wait_for_handoff(
         self,

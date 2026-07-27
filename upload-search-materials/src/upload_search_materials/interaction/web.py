@@ -9,6 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request, send_file
+
+from ..assets import build_image_preview
+from ..image_review import (
+    materialize_review_decisions,
+    normalize_review_decisions,
+    review_context_is_stale,
+)
+from ..slot_planning import (
+    slot_context_is_stale,
+    validate_slot_assignments,
+)
 from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
 from ..runtime_config import (
@@ -94,6 +105,10 @@ def create_app(
                 "rules_csv": str(runtime.rules.path or ""),
                 "rules_available": bool(runtime.rules.path and runtime.rules.path.is_file()),
                 "rules_status": runtime.rules.status,
+                "folder_index_root": str(runtime.folder_index_root),
+                "folder_index_available": (
+                    runtime.folder_index_root / "folder-index.sqlite3"
+                ).is_file(),
                 "image_sources_configured": bool(runtime.image_sources),
                 "image_config_path": str(
                     runtime.config_path
@@ -185,6 +200,9 @@ def create_app(
         values = _values(payload)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        values = _normalize_stage_values(
+            store, session_id, stage_id, state, values
+        )
         if state["stages"][stage_id]["status"] not in {
             "draft",
             "needs_user_input",
@@ -212,6 +230,9 @@ def create_app(
         values = _values(payload)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        values = _normalize_stage_values(
+            store, session_id, stage_id, state, values
+        )
         if state["stages"][stage_id]["status"] not in {
             "draft",
             "needs_user_input",
@@ -231,6 +252,48 @@ def create_app(
             field_errors |= _completeness_selection_errors(
                 store, session_id, state, values
             )
+        if not field_errors and stage_id == "image_review":
+            review_context = _current_result(
+                store, session_id, "image_review", state
+            )
+            review_data = (
+                review_context.get("data")
+                if isinstance(review_context, dict)
+                else None
+            )
+            if not isinstance(review_data, dict):
+                field_errors["decisions"] = (
+                    "Agent must prepare current image review data first"
+                )
+            else:
+                try:
+                    values["decisions"] = normalize_review_decisions(
+                        values.get("decisions"),
+                        review_data,
+                    )
+                except (TypeError, ValueError) as error:
+                    field_errors["decisions"] = str(error)
+        if not field_errors and stage_id == "slots_copy":
+            slot_context = _current_result(
+                store, session_id, "slots_copy", state
+            )
+            slot_data = (
+                slot_context.get("data")
+                if isinstance(slot_context, dict)
+                else None
+            )
+            if not isinstance(slot_data, dict):
+                field_errors["slot_assignments"] = (
+                    "Agent must prepare the current slot board first"
+                )
+            else:
+                try:
+                    values["slot_assignments"] = validate_slot_assignments(
+                        values.get("slot_assignments"),
+                        slot_data,
+                    )
+                except (TypeError, ValueError) as error:
+                    field_errors["slot_assignments"] = str(error)
         if field_errors:
             return _validation_error(field_errors)
 
@@ -239,6 +302,33 @@ def create_app(
             isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
         ):
             return _validation_error({"revision": "must be an integer"})
+
+        if stage_id == "image_review":
+            review_context = _current_result(
+                store, session_id, "image_review", state
+            )
+            review_data = review_context["data"]
+            try:
+                values["decisions"] = materialize_review_decisions(
+                    values["decisions"],
+                    review_data,
+                    derived_root=(
+                        store._stage_path(session_id, "image_review")
+                        / str(
+                            review_data.get("policy", {})
+                            .get("output", {})
+                            .get("derived_directory", "derived")
+                        )
+                    ),
+                )
+                for decision in values["decisions"]:
+                    decision["image_review_revision"] = (
+                        expected_revision
+                        if isinstance(expected_revision, int)
+                        else int(state["stages"]["image_review"]["revision"]) + 1
+                    )
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                return _validation_error({"decisions": str(error)})
 
         handoff = store.save_input(
             session_id,
@@ -312,6 +402,15 @@ def create_app(
         try:
             source_path = Path(str(candidate.get("source_path", ""))).resolve()
             allowed_roots = [Path(str(root)).resolve() for root in roots]
+            folder_decisions = current_input["values"].get("folder_decisions")
+            if isinstance(folder_decisions, list):
+                allowed_roots.extend(
+                    Path(str(decision.get("folder_path", ""))).resolve()
+                    for decision in folder_decisions
+                    if isinstance(decision, dict)
+                    and decision.get("decision") == "confirmed"
+                    and str(decision.get("folder_path", "")).strip()
+                )
             if (
                 source_path.suffix.casefold()
                 not in {".jpg", ".jpeg", ".png", ".webp"}
@@ -321,11 +420,496 @@ def create_app(
                 raise NotFound()
         except (OSError, RuntimeError, ValueError):
             raise NotFound() from None
-        response = send_file(source_path, conditional=True, max_age=0)
-        response.headers["Cache-Control"] = "no-store"
+        preview_cache = (
+            store._stage_path(session_id, "asset_matching") / "preview-cache"
+        )
+        preview_path = preview_cache / f"{asset_id}.jpg"
+        if not preview_path.is_file():
+            try:
+                build_image_preview(source_path, preview_path)
+            except (OSError, RuntimeError, ValueError):
+                raise NotFound() from None
+        response = send_file(
+            preview_path,
+            conditional=True,
+            max_age=300,
+            mimetype="image/jpeg",
+        )
+        response.headers["Cache-Control"] = "private, max-age=300"
+        return response
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/image_review/assets/<asset_id>"
+    )
+    def image_review_preview(session_id: str, asset_id: str):
+        state = store.load_session(session_id)
+        context = _current_result(store, session_id, "image_review", state)
+        data = context.get("data") if isinstance(context, dict) else None
+        assets = data.get("assets") if isinstance(data, dict) else None
+        if not isinstance(assets, list):
+            raise NotFound()
+        asset = next(
+            (
+                item
+                for item in assets
+                if isinstance(item, dict)
+                and str(item.get("asset_id", "")) == asset_id
+            ),
+            None,
+        )
+        if asset is None:
+            raise NotFound()
+        try:
+            source_path = Path(str(asset.get("source_path", ""))).resolve()
+            matching_input = store.read_optional_stage_document(
+                session_id, "asset_matching", "input"
+            )
+            values = matching_input.get("values") if matching_input else {}
+            roots = list(values.get("image_roots", [])) if isinstance(values, dict) else []
+            if isinstance(values, dict) and isinstance(
+                values.get("folder_decisions"), list
+            ):
+                roots.extend(
+                    item.get("folder_path")
+                    for item in values["folder_decisions"]
+                    if isinstance(item, dict)
+                    and item.get("decision") == "confirmed"
+                    and item.get("folder_path")
+                )
+            allowed_roots = [Path(str(root)).resolve() for root in roots]
+            if (
+                source_path.suffix.casefold()
+                not in {".jpg", ".jpeg", ".png", ".webp"}
+                or not source_path.is_file()
+                or not any(source_path.is_relative_to(root) for root in allowed_roots)
+            ):
+                raise NotFound()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise NotFound() from None
+        preview = (
+            store._stage_path(session_id, "image_review")
+            / "preview-cache"
+            / f"{asset_id}.jpg"
+        )
+        if not preview.is_file():
+            try:
+                build_image_preview(source_path, preview)
+            except (OSError, RuntimeError, ValueError):
+                raise NotFound() from None
+        response = send_file(
+            preview,
+            conditional=True,
+            max_age=300,
+            mimetype="image/jpeg",
+        )
+        response.headers["Cache-Control"] = "private, max-age=300"
+        return response
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/image_review/assets/<asset_id>/process"
+    )
+    def image_review_process_preview(session_id: str, asset_id: str):
+        """Generate a task-local output so the user can inspect it before submit."""
+
+        state = store.load_session(session_id)
+        context = _current_result(store, session_id, "image_review", state)
+        review_data = context.get("data") if isinstance(context, dict) else None
+        assets = review_data.get("assets") if isinstance(review_data, dict) else None
+        if not isinstance(assets, list):
+            raise NotFound()
+        payload = _json_object()
+        requested = {
+            "asset_id": asset_id,
+            "action": payload.get("action"),
+            "target_ratio": payload.get("target_ratio"),
+            "crop_box": payload.get("crop_box"),
+        }
+        raw_decisions = []
+        found = False
+        for asset in assets:
+            if not isinstance(asset, dict) or not asset.get("asset_id"):
+                continue
+            current_id = str(asset["asset_id"])
+            if current_id == asset_id:
+                raw_decisions.append(requested)
+                found = True
+            else:
+                raw_decisions.append({
+                    "asset_id": current_id,
+                    "action": (
+                        "excluded"
+                        if asset.get("status") == "blocked"
+                        else "candidate_only"
+                    ),
+                })
+        if not found:
+            raise NotFound()
+        try:
+            normalized = normalize_review_decisions(raw_decisions, review_data)
+            materialized = materialize_review_decisions(
+                normalized,
+                review_data,
+                derived_root=(
+                    store._stage_path(session_id, "image_review")
+                    / str(
+                        review_data.get("policy", {})
+                        .get("output", {})
+                        .get("derived_directory", "derived")
+                    )
+                ),
+            )
+            decision = next(
+                item for item in materialized if item["asset_id"] == asset_id
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            return _validation_error({"decision": str(error)})
+        return jsonify({
+            "asset_id": asset_id,
+            "action": decision["action"],
+            "output": decision.get("output"),
+        })
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/image_review/outputs/<asset_id>"
+    )
+    def image_review_processed_output(session_id: str, asset_id: str):
+        expected_sha256 = str(request.args.get("sha256", "")).strip()
+        if len(expected_sha256) != 64:
+            raise NotFound()
+        state = store.load_session(session_id)
+        context = _current_result(store, session_id, "image_review", state)
+        data = context.get("data") if isinstance(context, dict) else None
+        policy = data.get("policy") if isinstance(data, dict) else None
+        derived_name = (
+            policy.get("output", {}).get("derived_directory", "derived")
+            if isinstance(policy, dict)
+            else "derived"
+        )
+        root = (
+            store._stage_path(session_id, "image_review") / str(derived_name)
+        ).resolve()
+        if not root.is_dir():
+            raise NotFound()
+        output = next(
+            (
+                path
+                for path in root.glob(f"{asset_id}-*.jpg")
+                if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest()
+                == expected_sha256
+            ),
+            None,
+        )
+        if output is None:
+            raise NotFound()
+        response = send_file(
+            output,
+            conditional=True,
+            max_age=60,
+            mimetype="image/jpeg",
+        )
+        response.headers["Cache-Control"] = "private, max-age=60"
+        return response
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/slots_copy/assets/<asset_id>"
+    )
+    def slot_output_preview(session_id: str, asset_id: str):
+        state = store.load_session(session_id)
+        context = _current_result(store, session_id, "slots_copy", state)
+        data = context.get("data") if isinstance(context, dict) else None
+        products = data.get("products") if isinstance(data, dict) else None
+        if not isinstance(products, list):
+            raise NotFound()
+        output = next(
+            (
+                item
+                for product in products
+                if isinstance(product, dict)
+                for item in product.get("outputs", [])
+                if isinstance(item, dict)
+                and str(item.get("asset_id", "")) == asset_id
+            ),
+            None,
+        )
+        if output is None:
+            raise NotFound()
+        try:
+            source_path = Path(str(output.get("output_path", ""))).resolve()
+            stage_root = store._stage_path(session_id, "image_review").resolve()
+            matching_input = store.read_optional_stage_document(
+                session_id, "asset_matching", "input"
+            )
+            matching_values = matching_input.get("values") if matching_input else {}
+            roots = (
+                [Path(str(value)).resolve() for value in matching_values.get("image_roots", [])]
+                if isinstance(matching_values, dict)
+                and isinstance(matching_values.get("image_roots"), list)
+                else []
+            )
+            if (
+                not source_path.is_file()
+                or source_path.suffix.casefold()
+                not in {".jpg", ".jpeg", ".png", ".webp"}
+                or not (
+                    source_path.is_relative_to(stage_root)
+                    or any(source_path.is_relative_to(root) for root in roots)
+                )
+            ):
+                raise NotFound()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise NotFound() from None
+        preview = (
+            store._stage_path(session_id, "slots_copy")
+            / "preview-cache"
+            / f"{asset_id}.jpg"
+        )
+        if not preview.is_file():
+            try:
+                build_image_preview(source_path, preview)
+            except (OSError, RuntimeError, ValueError):
+                raise NotFound() from None
+        response = send_file(
+            preview,
+            conditional=True,
+            max_age=300,
+            mimetype="image/jpeg",
+        )
+        response.headers["Cache-Control"] = "private, max-age=300"
         return response
 
     return app
+
+
+def _normalize_stage_values(
+    store: SessionStore,
+    session_id: str,
+    stage_id: str,
+    state: dict[str, Any],
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(values)
+    if stage_id != "asset_matching":
+        return normalized
+    normalized.pop("aliases", None)
+    result = _current_result(store, session_id, stage_id, state) or {}
+    data = result.get("data") if isinstance(result, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    folders = data.get("folder_candidates")
+    supported_folder_keys: set[tuple[str, str]] | None = None
+    supported_products: set[str] | None = None
+    folder_rows: list[dict[str, Any]] = []
+    if isinstance(folders, list):
+        folder_rows = [
+            item
+            for item in folders
+            if isinstance(item, dict)
+            and item.get("match_type") != "confirmed_alias"
+            and item.get("product_id")
+            and item.get("folder_id")
+        ]
+        supported_folder_keys = {
+            (
+                str(item.get("product_id", "")),
+                str(item.get("folder_id", "")),
+            )
+            for item in folder_rows
+        }
+        supported_products = {key[0] for key in supported_folder_keys}
+
+    decisions = normalized.get("folder_decisions")
+    decision_rows = decisions if isinstance(decisions, list) else []
+    decision_by_key = {
+        (
+            str(item.get("product_id", "")),
+            str(item.get("folder_id", "")),
+        ): item
+        for item in decision_rows
+        if isinstance(item, dict)
+        and item.get("product_id")
+        and item.get("folder_id")
+    }
+    if folder_rows:
+        normalized["folder_decisions"] = [
+            {
+                "folder_id": str(item.get("folder_id", "")),
+                "product_id": str(item.get("product_id", "")),
+                "source_system": str(item.get("source_system", "")),
+                "folder_path": str(item.get("folder_path", "")),
+                "decision": (
+                    "rejected"
+                    if str(
+                        decision_by_key.get(
+                            (
+                                str(item.get("product_id", "")),
+                                str(item.get("folder_id", "")),
+                            ),
+                            {},
+                        ).get("decision", "")
+                    )
+                    == "rejected"
+                    else "confirmed"
+                ),
+                "note": str(
+                    decision_by_key.get(
+                        (
+                            str(item.get("product_id", "")),
+                            str(item.get("folder_id", "")),
+                        ),
+                        {},
+                    ).get("note", "")
+                ),
+            }
+            for item in folder_rows
+        ]
+    elif isinstance(decisions, list):
+        normalized["folder_decisions"] = [
+            {
+                "folder_id": str(item.get("folder_id", "")),
+                "product_id": str(item.get("product_id", "")),
+                "source_system": str(item.get("source_system", "")),
+                "folder_path": str(item.get("folder_path", "")),
+                "decision": (
+                    "rejected"
+                    if str(item.get("decision", "")) == "rejected"
+                    else "confirmed"
+                ),
+                "note": str(item.get("note", "")),
+            }
+            for item in decisions
+            if isinstance(item, dict)
+            and item.get("folder_id")
+            and item.get("product_id")
+        ]
+
+    candidates = data.get("asset_candidates")
+    if isinstance(candidates, list):
+        rejected_folder_keys = {
+            (
+                str(item.get("product_id", "")),
+                str(item.get("folder_id", "")),
+            )
+            for item in normalized.get("folder_decisions", [])
+            if isinstance(item, dict) and item.get("decision") == "rejected"
+        }
+        candidate_by_asset_id = {
+            str(item.get("asset_id", "")): item
+            for item in candidates
+            if isinstance(item, dict)
+            and item.get("match_type") != "confirmed_alias"
+            and (
+                supported_products is None
+                or str(item.get("product_id", "")) in supported_products
+            )
+        }
+        allowed_asset_ids = {
+            asset_id
+            for asset_id, item in candidate_by_asset_id.items()
+            if (
+                str(item.get("product_id", "")),
+                _candidate_folder_id(item, folder_rows),
+            )
+            not in rejected_folder_keys
+            and str(item.get("validation_status", "")) == "valid"
+            and isinstance(item.get("preflight"), dict)
+            and item["preflight"].get("selectable") is True
+            and isinstance(item.get("source_inspection"), dict)
+            and item["source_inspection"].get("size_bytes") is not None
+            and item["source_inspection"].get("width")
+            and item["source_inspection"].get("height")
+        }
+        license_rows = normalized.get("license_decisions")
+        if isinstance(license_rows, list):
+            normalized["license_decisions"] = [
+                {
+                    "asset_id": str(item.get("asset_id", "")),
+                    "status": "confirmed",
+                }
+                for item in license_rows
+                if isinstance(item, dict)
+                and item.get("status") == "confirmed"
+                and str(item.get("asset_id", "")) in allowed_asset_ids
+            ]
+        asset_rows = normalized.get("asset_decisions")
+        if isinstance(asset_rows, list):
+            retained = [
+                item
+                for item in asset_rows
+                if isinstance(item, dict)
+                and item.get("decision") == "selected"
+                and str(item.get("asset_id", "")) in allowed_asset_ids
+            ]
+            product_order: dict[str, int] = {}
+            normalized_rows = []
+            for item in retained:
+                candidate = candidate_by_asset_id[str(item.get("asset_id", ""))]
+                product_id = str(candidate.get("product_id", ""))
+                product_order[product_id] = product_order.get(product_id, 0) + 1
+                normalized_rows.append(
+                    {
+                        "product_id": product_id,
+                        "asset_id": str(item.get("asset_id", "")),
+                        "sha256": str(candidate.get("sha256", "")),
+                        "folder_id": _candidate_folder_id(
+                            candidate,
+                            folder_rows,
+                        ),
+                        "folder_path": str(
+                            candidate.get("folder_path", "")
+                            or candidate.get("candidate_directory", "")
+                        ),
+                        "source_system": str(candidate.get("source_system", "")),
+                        "source_path": str(candidate.get("source_path", "")),
+                        "decision": "selected",
+                        "selection_order": product_order[product_id],
+                    }
+                )
+            normalized["asset_decisions"] = normalized_rows
+            normalized["license_decisions"] = [
+                {
+                    "asset_id": item["asset_id"],
+                    "status": "confirmed",
+                }
+                for item in normalized_rows
+            ]
+    return normalized
+
+
+def _normalized_asset_path(value: Any) -> str:
+    return str(value or "").replace("/", "\\").rstrip("\\").casefold()
+
+
+def _candidate_folder_id(
+    candidate: dict[str, Any],
+    folders: list[dict[str, Any]],
+) -> str:
+    explicit = str(candidate.get("folder_id", "")).strip()
+    if explicit:
+        return explicit
+    source_path = _normalized_asset_path(candidate.get("source_path", ""))
+    source_system = str(candidate.get("source_system", ""))
+    matches = [
+        item
+        for item in folders
+        if (
+            not item.get("source_system")
+            or not source_system
+            or str(item.get("source_system")) == source_system
+        )
+        and _normalized_asset_path(item.get("folder_path", ""))
+        and (
+            source_path == _normalized_asset_path(item.get("folder_path", ""))
+            or source_path.startswith(
+                f"{_normalized_asset_path(item.get('folder_path', ''))}\\"
+            )
+        )
+    ]
+    if not matches:
+        return ""
+    matches.sort(
+        key=lambda item: len(_normalized_asset_path(item.get("folder_path", ""))),
+        reverse=True,
+    )
+    return str(matches[0].get("folder_id", ""))
 
 
 def _current_result(
@@ -351,7 +935,12 @@ def _current_result(
                 return result
     except (FileNotFoundError, OSError):
         pass
-    if stage_id != "completeness":
+    if stage_id not in {
+        "completeness",
+        "asset_matching",
+        "image_review",
+        "slots_copy",
+    }:
         return None
     context = store.read_optional_stage_document(session_id, stage_id, "review-context")
     if (
@@ -360,6 +949,36 @@ def _current_result(
         or context.get("stage_id") != stage_id
     ):
         return None
+    if stage_id == "image_review" and review_context_is_stale(
+        context,
+        current_asset_matching_revision=state["stages"]["asset_matching"][
+            "revision"
+        ],
+    ):
+        stale = dict(context)
+        stale["status"] = "blocked"
+        stale["summary"] = "第三阶段选择已变化，当前图片审查结果已过期"
+        stale["blocking_reasons"] = ["UPSTREAM_REVISION_STALE"]
+        stale["next_action"] = "请 Agent 重新准备第四阶段图片审查"
+        stale_data = dict(stale.get("data") or {})
+        stale_data["stale"] = True
+        stale["data"] = stale_data
+        return stale
+    if stage_id == "slots_copy" and slot_context_is_stale(
+        context,
+        current_image_review_revision=state["stages"]["image_review"][
+            "revision"
+        ],
+    ):
+        stale = dict(context)
+        stale["status"] = "blocked"
+        stale["summary"] = "第四阶段图片决定已变化，当前坑位结果已过期"
+        stale["blocking_reasons"] = ["UPSTREAM_REVISION_STALE"]
+        stale["next_action"] = "请 Agent 重新准备第五阶段坑位编排"
+        stale_data = dict(stale.get("data") or {})
+        stale_data["stale"] = True
+        stale["data"] = stale_data
+        return stale
     return context
 
 

@@ -35,6 +35,8 @@ uv run python -X utf8 $quickValidate .
 3. 项目内 `upload-search-materials/config/local-paths.json`。
 4. 项目结构自动发现；运行目录默认使用 `<项目根目录>/runs/`。
 
+共享文件夹索引路径按 `TMALL_FOLDER_INDEX_ROOT`、本机配置 `folder_index_root`、`<项目根目录>/.local-cache/folder-index/` 解析。它是每台电脑唯一维护的机器级缓存，不放入时间戳任务目录。
+
 路径未配置不会导致交互页面崩溃；只有实际依赖该输入的阶段会保持待配置。不要把个人用户名、桌面绝对路径或本机盘符写回 `SKILL.md`、Python 源码或已提交的配置。
 
 ## 2. 创建隔离任务
@@ -47,15 +49,17 @@ Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入�
 - `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint 和页面证据。
 - `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
 
-共享文件夹索引数据库、选择器与策略配置不重复复制；NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
+共享文件夹索引数据库、选择器与策略配置不重复复制；任务只保存当前商品的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
 
 Agent 只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 `input_sha256` 校验后读取店铺、月份与图片源并继续。用户在聊天中主动说出的值不代替页面提交；页面未提交时保持等待，不提前运行后续动作。
 
 编辑时页面停止输入约 1 秒会自动保存草稿。草稿只写当前任务，不通知 Agent；“保存为本机配置”只更新当前电脑默认图片源；“提交给 Agent”才生成可认领 handoff。提交后表单冻结。Agent 尚未认领时可撤回；进入处理中后不可撤回或覆盖。阶段目录的 `revisions/<revision>/` 保留输入和正式 handoff 快照。
 
+恢复历史任务时只需使用原 `session_id` 打开页面。页面应直接进入 `session.current_stage`，并在首次显示时同步全部阶段状态；如果停留在已完成阶段，保存和提交会保持锁定并提供“进入当前阶段”。仅打开或刷新页面不会产生新 revision。若用户在自动保存进行时点击“提交给 Agent”，页面显示提交已排队，保存成功后再提交最新值；保存失败会保留编辑内容并暂停提交，切换阶段会取消旧阶段的排队操作。
+
 ## 3. 文件夹索引优先
 
-默认先建立三源文件夹级索引，只保存目录名称、完整路径和商品匹配，不打开或哈希图片：
+每台电脑默认只建立并维护一份共享文件夹级索引，只保存目录名称、完整路径和商品匹配，不打开或哈希图片。首次不存在时执行：
 
 ```powershell
 uv run tmall-materials index-folders `
@@ -63,10 +67,22 @@ uv run tmall-materials index-folders `
   --root "model_nas=Y:\视觉部\1-模特图" `
   --root "xhs_taobao=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&淘宝买家秀\优质买家秀" `
   --root "xhs_buyer=Z:\浙江酷趣\运营中心\营销板块\小红书koc置换&买家秀\优质买家秀" `
-  --output "<隔离输出目录>\folder-index"
+  --output "<共享文件夹索引目录>"
 ```
 
-检查 `folder-scan-summary.json` 和 `folder-candidates.csv`。目录新增、删除或改名后使用相同参数加 `--refresh`；只调整名称、货号或别名匹配规则时加 `--rematch-only`，后者只读取本地 SQLite，不重新遍历 NAS。
+检查共享目录中的 `folder-scan-summary.json` 和 `folder-candidates.csv`。目录新增、删除或改名后使用相同参数和输出目录加 `--refresh`；它会重新遍历目录树发现差异，但在同一 SQLite 中增量更新 active/inactive 状态。只调整名称或货号匹配规则时加 `--rematch-only`，后者只读取本地 SQLite，不重新遍历 NAS。不得因为单次任务等待较久就改用任意历史任务索引；只能使用当前本机配置指向且身份校验通过的共享索引。
+
+第二阶段选择商品后，只把对应候选复制到当前任务：
+
+```powershell
+uv run tmall-materials snapshot-folder-candidates `
+  --candidates "<共享文件夹索引目录>\folder-candidates.csv" `
+  --product-id "<商品ID 1>" `
+  --product-id "<商品ID 2>" `
+  --output "<任务目录>\03-asset-matching\folder-candidates.csv"
+```
+
+任务目录不保存 `folder-index.sqlite3`。共享索引缺失时当前任务等待首次建立；共享索引过期时执行 `--refresh`，而不是新建任务级索引。
 
 候选只按文件夹自身名称匹配，父目录命中不会让 `KV`、`合成`、`1` 等普通子目录重复成为候选。包含完整 SKU 的组合名称（例如 `KQ23002-商品名`）可视为货号命中；同货号异名、名称候选和主副链接关系仍需用户确认。确认文件夹归属后，才按需枚举其中图片、读取尺寸并计算 SHA-256。
 
@@ -76,15 +92,37 @@ uv run tmall-materials index-folders `
 
 ```powershell
 uv run tmall-materials prepare-folder-review `
-  --candidates "<隔离输出目录>\folder-index\folder-candidates.csv" `
-  --output "<隔离输出目录>\folder-review.json"
+  --candidates "<任务目录>\03-asset-matching\folder-candidates.csv" `
+  --output "<任务目录>\03-asset-matching\folder-review.json"
 ```
 
-把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面此时只展示目录元数据，不预览、统计或哈希图片。用户选择“确认归属”“确认归属并记录别名”或“排除该文件夹”后，保存草稿或提交会把决定写入同一阶段 `input.json.values.folder_decisions`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定。
+把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面此时只展示目录元数据，不预览、统计或哈希图片。所有候选文件夹默认“采用”，页面只提供“采用 / 排除该文件夹”；保存草稿或提交会把二态决定写入同一阶段 `input.json.values.folder_decisions`。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定；历史 `pending` 按采用读取，新保存结果不再写入 `pending`。
 
-只有 `confirmed` 或 `confirmed_alias` 的文件夹可进入按需图片枚举；`pending` 和 `rejected` 都不得读取其中图片。货号命中也不得跳过人工检查，尤其要核对同货号异名、主副链接和历史目录。
+只有最终采用的文件夹可进入按需图片枚举，`rejected` 不得读取。候选只来自商品 ID、完整货号或完整商品名称命中，不使用别名；仅共享“分龄成长”等部分词语不算命中。用户仍应核对同货号异名、主副链接和历史目录，并排除错误来源。
 
-## 3.2 可选：分片增量图片索引
+若商品标题与素材文件夹名称不同，但用户明确提供了完整文件夹名，可在本次任务追加 `--exact-folder "PRODUCT_ID=FOLDER_NAME"`。例如 `--exact-folder "886506466908=分龄成长太阳镜"`。该参数按规范化后的完整文件夹名精确相等，只产生本次任务的 `exact_folder_query` 候选；它不是别名，不写入共享配置，也不自动影响后续任务。
+
+## 3.2 默认：确认文件夹后按需准备候选
+
+正常的 1–3 商品试跑不建立全量图片索引。用户提交文件夹决定后，直接读取当前任务 `input.json` 中的 `confirmed` 目录，并结合搜推素材状态生成任务级候选清单：
+
+```powershell
+uv run tmall-materials prepare-confirmed-gallery `
+  --products "<商品总表.csv>" `
+  --status "<任务目录>\promotion\promotion-material-status.csv" `
+  --input "<任务目录>\03-asset-matching\input.json" `
+  --output "<任务目录>\03-asset-matching\confirmed-gallery.json" `
+  --candidate-limit 100 `
+  --page-size 30
+```
+
+该命令只遍历当前商品使用中的文件夹。每个商品发现 1–100 张时全部进入候选池；超过 100 张时，先按各文件夹图片数量占比分配 100 个名额，再使用任务 ID 作为种子在每个文件夹内稳定随机抽取。例如三个文件夹数量比例为 5:3:2，则 100 张候选分别抽取 50、30、20 张。同一任务重跑结果一致，新任务可重新抽样。只对抽中的候选读取尺寸、校验、计算 SHA-256 并生成预览，不建立全量图片数据库。输出中的 `candidate_strategy=proportional_task_sample`、`folder_allocations`、`scan_summary` 和逐商品 `requirements` 用于解释发现数、各目录抽样数和候选数。
+
+第三阶段只保留单一“采用”操作，勾选即确认该图片可用于本次发布；前端同步写入采用与授权状态，后端按采用项重新生成授权记录。不设置“应选满 N 张”的上限或不足判定。用户选中的图片只记录稳定 `selection_order`，不提前写入坑位分组。第五阶段再决定本次编排的坑位数量，并按每个图文坑位 3–9 张、同坑位只能使用 3:4 或 1:1 且不得混合比例的规则分组；未在本次填充的后台空坑位继续保留为缺失。`confirmed-gallery.json` 只属于当前时间戳任务，不作为跨任务共享索引。候选准备阶段同步生成最长边不超过 640 像素的 JPEG 到 `03-asset-matching/preview-cache/`；Web 页面只传本地预览，原图保持只读并留给最终上传。旧任务首次请求时按需补建预览。Web 预览仍只允许结果中列出的文件，并额外校验原图位于已确认文件夹下，以兼容配置中的 Y/Z 映射盘与 Agent 实际解析到的 UNC 路径不同。预览响应使用短时私有缓存，勾选时只更新当前卡片和决定，不重新创建整个图片网格。
+
+每条新候选同时记录 `folder_id` 和 `folder_path`。文件夹改为排除后，页面立即移除对应候选并同步取消其已选和授权记录，显示取消数量，随后重新计算候选数和分页；重新采用只恢复候选，不恢复旧选择。后端保存和提交时再次按最终文件夹决定过滤矛盾图片。历史候选缺少 `folder_id` 时按规范化后的最长父目录路径归属，无法唯一归属时保留并显示“历史候选未关联文件夹”。
+
+## 3.3 可选：分片增量图片索引
 
 先校验商品表，再对三个声明的图片来源建立只读索引。只有读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表会阻断整批。缺商品 ID、非法商品 ID、重复商品 ID 是行级 blocked：`scan-summary.json` 保留对应 source row 和 reason codes，这些行不参与 ID、SKU 或名称匹配，其余有效行继续。非空但全部行为行级 blocked 时仍可完成纯 metadata 索引。以下命令使用占位商品表与隔离输出目录，仅供复制后替换；它们不表示已经扫描真实 NAS。raw indexing 不需要月份、店铺或坑位。
 
@@ -133,7 +171,7 @@ uv run tmall-materials index-assets `
 
 原始 NAS 图片只读，视频继续延期。同一个 `asset-index.sqlite3` 同一时刻只能有一个 Agent 或进程执行 new、`--resume`、`--refresh`，禁止并发。人工检查候选并确认逐文件授权后，才能生成或接受 `confirmed-assets.csv`，然后进入素材完整性审查、生产选择器、全量 dry-run 和 1–3 商品生产验收。
 
-### 3.3 生成第二阶段完整度矩阵
+### 3.4 生成第二阶段完整度矩阵
 
 ```powershell
 uv run --project .\upload-search-materials --locked tmall-materials inspect-completeness `
@@ -146,7 +184,7 @@ uv run --project .\upload-search-materials --locked tmall-materials inspect-comp
 
 第二阶段商品范围严格等于“商品分类 → 搜推高价值”的全量采集结果。商品总表仅补充商品名称和货号，不扩展范围。
 
-### 3.4 生成素材候选画廊
+### 3.5 可选：从全量图片索引生成候选画廊
 
 先完成推广素材状态扫描，再把缺失篇数与索引候选合并：
 
@@ -156,13 +194,12 @@ uv run tmall-materials prepare-gallery `
   --status "<隔离输出目录>\promotion-material-status.csv" `
   --output "<隔离输出目录>\asset-gallery.json" `
   --images-per-material 3 `
-  --license-decisions "<逐文件授权决定.json>" `
-  --alias-decisions "<名称候选归属决定.json>"
+  --license-decisions "<逐文件授权决定.json>"
 ```
 
-`--license-decisions`、`--alias-decisions` 和 `--remote-fingerprints` 均为可选输入。首次审查可以不提供，让页面先展示候选并由用户确认；确认后重新生成结果。候选顺序固定，不随机。“换一批”按固定窗口取下一批，单张替换通过先取消再采用另一张完成。
+`--license-decisions` 和 `--remote-fingerprints` 均为可选输入。首次审查可以不提供，让页面先展示候选。页面每批最多 30 张；候选池超过 30 张时启用“换一批”，最后一批显示实际余数。已选素材固定显示，不因换批消失。采用时系统同步生成授权确认。
 
-把 `asset-gallery.json` 的对象作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面只允许预览该结果列出的、且位于当前 `image_roots` 下的图片；保存草稿或提交后，授权和选择分别进入当前阶段 `input.json` 的 `license_decisions` 与 `asset_decisions`。
+把 `asset-gallery.json` 的对象作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面只允许预览该结果列出的、且位于当前 `image_roots` 或当前任务已确认文件夹下的图片；保存草稿或提交后，采用结果进入 `asset_decisions`，对应授权确认由系统同步写入 `license_decisions`。
 
 当后台已有素材只有远端素材 ID、没有图片 SHA-256 或等价内容指纹时，不传 `--remote-fingerprints`。此时输出和页面必须保持 `remote_dedupe_status=not_available`，不得声称已经排除与远端重复；生产上传前仍需人工核对。提供可信远端指纹后，已命中的候选才会被自动排除。
 
@@ -248,3 +285,35 @@ Agent 按以下顺序处理每一阶段：
 `wait-handoff` 只返回已验证的当前 handoff，并领取该阶段为 `processing`。当前九阶段流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。页面阶段 07/08 只保存输入并生成 handoff；它们不直接运行 `approve` 或 `publish`。这两个命令必须由 Agent 分开调用，且 1–3 个商品的生产测试需在当前对话再次获得用户显式授权。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
 若页面没有 Agent 心跳，或原 Codex 任务已结束，请用户把页面显示的恢复指令完整粘贴到新建或当前 Codex 任务。页面不会在后台继续执行 Agent，也无法唤醒已结束的任务。
+# 第四、第五阶段操作
+
+第三阶段已提交并由 Agent 写入 `completed` 结果后：
+
+```powershell
+uv run tmall-materials prepare-image-review `
+  --runs-root <runs目录> `
+  --session <session_id> `
+  --policy config/media-policy.example.yaml
+```
+
+打开交互页进入“图片适用性与裁剪”。准备命令只重新检查当前第三阶段已选素材，并用任务内缓存避免重复读取；不会遍历全部共享盘。页面展示原图大小、尺寸、比例和两个目标比例的裁剪能力。选择“直接使用 / 人工裁剪 / 压缩 / 人工裁剪并压缩”后，先点击“生成处理预览”核对实际输出，再提交。若共享盘暂时不可读，只阻断对应图片，其余图片继续显示。
+
+用户提交第四阶段后，Agent须校验 handoff 的 `session_id`、`stage_id`、`revision` 和 `input_sha256`，完成结果，再运行：
+
+```powershell
+uv run tmall-materials prepare-slot-board `
+  --runs-root <runs目录> `
+  --session <session_id>
+```
+
+第五阶段按商品新建一个或多个坑位，每坑选择 3–9 张同一比例图片。页面保存草稿时必须保留已准备的第四/第五阶段审查上下文，不得退回“尚未扫描”。
+
+排障：
+
+- 图片卡片出现但原图破图：确认交互服务进程能够只读访问配置中的共享盘路径；策略准备成功不代表预览服务进程拥有同样权限。
+- 页面显示结果过期：重新处理第三或第四阶段当前 handoff，再重新运行对应 prepare 命令，不得复用旧 revision。
+- `IMAGE_SIZE_EXCEEDED`：Pillow 压缩可用时允许进入第四阶段并生成实际预览；不可用时同时返回 `COMPRESSION_UNAVAILABLE` 并禁止采用。
+- `IMAGE_SIZE_BELOW_MINIMUM`：原图小于 200KiB，停止使用该图；不得通过填充文件绕过。
+- `OUTPUT_DIMENSIONS_BELOW_MINIMUM`：所有目标比例都无法得到宽高至少 720px 的输出，返回第三阶段更换素材。
+- `COMPRESSION_TARGET_UNREACHABLE`：在允许质量与最小尺寸内仍无法压到 20MiB，排除或更换素材。
+- 所有裁剪/压缩输出只应出现在 `<session>/04-image-review/derived/`。验收前后核对源图大小、mtime 和 SHA-256。

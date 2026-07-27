@@ -83,6 +83,7 @@ class AssetRecord:
     sha256: str = ""
     width: int | None = None
     height: int | None = None
+    size_bytes: int | None = None
     duration: float | None = None
     validation_status: str = "pending_validation"
     reason_codes: list[str] = field(default_factory=list)

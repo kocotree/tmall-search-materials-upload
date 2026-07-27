@@ -3,6 +3,7 @@
   "products_csv": "docs/天猫商品信息表_产品数据表_数据总表.csv",
   "rules_csv": "docs/天猫商品信息表_每月推品规则（合并）_Grid View.csv",
   "runs_root": "runs",
+  "folder_index_root": ".local-cache/folder-index",
   "image_sources": [
     {
       "label": "视觉部 · 模特图",

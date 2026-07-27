@@ -449,6 +449,7 @@ class AssetIndexStore:
         if row is None:
             raise KeyError(root_id)
         return {
+            "root_id": root_id,
             "source_system": str(row["source_system"]),
             "root_path": str(row["root_path"]),
             "current_scan_id": row["current_scan_id"],
@@ -462,6 +463,57 @@ class AssetIndexStore:
             "checkpoint_at": row["checkpoint_at"],
             "completed_at": row["completed_at"],
         }
+
+    def root_records(self) -> tuple[dict[str, object], ...]:
+        rows = self._connection.execute(
+            "SELECT root_id FROM roots ORDER BY source_system"
+        ).fetchall()
+        return tuple(self.root_record(int(row["root_id"])) for row in rows)
+
+    def active_file_ids_for_source(self, source_system: str) -> tuple[int, ...]:
+        rows = self._connection.execute(
+            "SELECT file_id FROM files "
+            "WHERE source_system=? AND active=1 ORDER BY relative_path, file_id",
+            (source_system,),
+        ).fetchall()
+        return tuple(int(row["file_id"]) for row in rows)
+
+    def active_files_for_source(
+        self, source_system: str
+    ) -> tuple[dict[str, object], ...]:
+        rows = self._connection.execute(
+            "SELECT file_id, partition_id, relative_path, absolute_path, "
+            "validation_status FROM files "
+            "WHERE source_system=? AND active=1 ORDER BY relative_path, file_id",
+            (source_system,),
+        ).fetchall()
+        return tuple(
+            {
+                "file_id": int(row["file_id"]),
+                "partition_id": str(row["partition_id"]),
+                "relative_path": str(row["relative_path"]),
+                "absolute_path": str(row["absolute_path"]),
+                "validation_status": str(row["validation_status"]),
+            }
+            for row in rows
+        )
+
+    def refresh_match_statistics(self) -> None:
+        """Recount matched files after an explicit reviewed-folder binding."""
+
+        with self._connection:
+            self._connection.execute(
+                "UPDATE partitions SET matched_count=("
+                "SELECT COUNT(DISTINCT files.file_id) FROM files "
+                "JOIN matches USING(file_id) "
+                "WHERE files.partition_id=partitions.partition_id "
+                "AND files.active=1)"
+            )
+            self._connection.execute(
+                "UPDATE roots SET matched_count=("
+                "SELECT COALESCE(SUM(partitions.matched_count), 0) "
+                "FROM partitions WHERE partitions.root_id=roots.root_id)"
+            )
 
     def upsert_partition(self, root_id: int, relative_path: str) -> str:
         root = self._connection.execute(

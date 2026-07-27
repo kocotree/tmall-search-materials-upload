@@ -106,6 +106,15 @@ def test_product_name_in_filename_does_not_create_a_candidate():
     assert matcher.match(Path("unrelated/花仙子翻翻帽.jpg")) == ()
 
 
+def test_partial_shared_words_do_not_create_an_alias_match():
+    matcher = matcher_for(
+        [product("886506466908", sku="KQ25029", title="分龄成长软软镜/稳稳镜/酷酷镜")]
+    )
+
+    assert matcher.match(Path("分龄成长太阳镜/photo.jpg")) == ()
+    assert matcher.match(Path("分龄成长/photo.jpg")) == ()
+
+
 def test_short_non_contiguous_and_blocked_products_do_not_match():
     records = [
         product("100001", sku="SHORT-SKU", title="雨衣", source_row=10),

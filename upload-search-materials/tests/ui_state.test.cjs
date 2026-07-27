@@ -175,3 +175,40 @@ test("draft requests send the observed revision and adopt the authoritative resp
   );
   assert.equal(UiState.persistedRevision({ revision: 9 }), 9);
 });
+
+test("historical sessions select the authoritative current stage", () => {
+  assert.deepEqual(
+    UiState.selectInitialStage(
+      ["setup", "completeness", "asset_matching", "image_review"],
+      "image_review",
+    ),
+    { stageId: "image_review", warning: null },
+  );
+  const fallback = UiState.selectInitialStage(["setup", "image_review"], "legacy");
+  assert.equal(fallback.stageId, "setup");
+  assert.match(fallback.warning, /不受支持/);
+});
+
+test("the full navigation snapshot is derived without visiting each stage", () => {
+  assert.deepEqual(
+    UiState.stageSnapshot({
+      current_stage: "image_review",
+      stages: {
+        setup: { revision: 4, status: "completed" },
+        image_review: { revision: 40, status: "draft" },
+      },
+    }, ["setup", "image_review", "slots_copy"]),
+    [
+      { stageId: "setup", revision: 4, status: "completed" },
+      { stageId: "image_review", revision: 40, status: "draft" },
+      { stageId: "slots_copy", revision: 0, status: "draft" },
+    ],
+  );
+});
+
+test("submit intent has priority while persistence is in flight", () => {
+  assert.equal(UiState.mergePersistenceIntent(null, "draft"), "draft");
+  assert.equal(UiState.mergePersistenceIntent("draft", "draft"), "draft");
+  assert.equal(UiState.mergePersistenceIntent("draft", "submit"), "submit");
+  assert.equal(UiState.mergePersistenceIntent("submit", "draft"), "submit");
+});

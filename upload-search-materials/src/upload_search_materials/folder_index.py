@@ -13,6 +13,7 @@ from typing import Sequence
 import uuid
 
 from .asset_index import NamedRoot
+from .asset_matching import normalize_match_text
 
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -281,6 +282,47 @@ def write_folder_candidates(database_path: Path, output_path: Path) -> int:
     return len(rows)
 
 
+def snapshot_folder_candidates(
+    candidates_path: Path,
+    output_path: Path,
+    product_ids: Sequence[str],
+) -> dict[str, int]:
+    """Copy only the requested products from a shared candidate CSV."""
+
+    requested = {str(product_id).strip() for product_id in product_ids if str(product_id).strip()}
+    if not requested:
+        raise ValueError("至少提供一个 --product-id")
+    with Path(candidates_path).open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        reader = csv.DictReader(stream)
+        fields = reader.fieldnames or []
+        required = {"product_id", "folder_id", "source_system", "absolute_path"}
+        if not required.issubset(fields):
+            raise ValueError("共享文件夹候选 CSV 缺少必需表头")
+        rows = [dict(row) for row in reader if row.get("product_id", "").strip() in requested]
+    rows.sort(
+        key=lambda row: (
+            row.get("product_id", ""),
+            row.get("source_system", ""),
+            row.get("relative_path", ""),
+            row.get("folder_id", ""),
+        )
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    matched_products = {row.get("product_id", "") for row in rows}
+    return {
+        "requested_products": len(requested),
+        "matched_products": len(matched_products),
+        "candidate_rows": len(rows),
+    }
+
+
 def rematch_folder_index(
     *,
     database_path: Path,
@@ -351,6 +393,7 @@ def build_folder_review_data(
     candidates_path: Path,
     *,
     decisions: Sequence[dict[str, object]] = (),
+    exact_folder_queries: Sequence[dict[str, object]] = (),
 ) -> dict[str, object]:
     """Build deterministic UI data from folder candidates and saved decisions."""
 
@@ -365,13 +408,35 @@ def build_folder_review_data(
         for item in decisions
         if item.get("product_id") and item.get("folder_id")
     }
+    exact_query_keys = {
+        (
+            str(item.get("product_id", "")).strip(),
+            normalize_match_text(str(item.get("folder_name", ""))),
+        )
+        for item in exact_folder_queries
+        if item.get("product_id") and item.get("folder_name")
+    }
     rows = []
     for candidate in candidates:
+        match_type = str(candidate.get("match_type", "")).strip()
         product_id = str(candidate.get("product_id", "")).strip()
+        folder_name = str(candidate.get("folder_name", "")).strip()
+        is_exact_query = (
+            product_id,
+            normalize_match_text(folder_name),
+        ) in exact_query_keys
+        if match_type not in {
+            "exact_product_id",
+            "exact_sku",
+            "name_candidate",
+        } and not is_exact_query:
+            # Ignore legacy alias rows from an older shared index snapshot.
+            continue
         folder_id = str(candidate.get("folder_id", "")).strip()
         if not product_id or not folder_id:
             continue
         decision = decision_by_key.get((product_id, folder_id), {})
+        saved_decision = str(decision.get("decision", "")).strip()
         rows.append(
             {
                 "folder_id": folder_id,
@@ -381,12 +446,19 @@ def build_folder_review_data(
                 "source_system": str(
                     candidate.get("source_system", "")
                 ).strip(),
-                "folder_name": str(candidate.get("folder_name", "")).strip(),
+                "folder_name": folder_name,
                 "folder_path": str(candidate.get("absolute_path", "")).strip(),
-                "match_type": str(candidate.get("match_type", "")).strip(),
-                "match_status": str(candidate.get("match_status", "")).strip(),
-                "decision": str(decision.get("decision", "pending")),
-                "alias": str(decision.get("alias", "")),
+                "match_type": (
+                    "exact_folder_query" if is_exact_query else match_type
+                ),
+                "match_status": (
+                    "needs_manual_confirmation"
+                    if is_exact_query
+                    else str(candidate.get("match_status", "")).strip()
+                ),
+                "decision": (
+                    "rejected" if saved_decision == "rejected" else "confirmed"
+                ),
                 "note": str(decision.get("note", "")),
             }
         )

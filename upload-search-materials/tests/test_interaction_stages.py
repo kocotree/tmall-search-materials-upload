@@ -23,6 +23,17 @@ def test_video_field_is_present_and_deferred():
     assert field.help_text == "本轮测试延期"
 
 
+def test_asset_matching_defers_image_root_reachability_until_folder_confirmation():
+    field = next(
+        field
+        for field in get_stage("asset_matching").fields
+        if field.name == "image_roots"
+    )
+
+    assert field.component == "auto_path_list"
+    assert "读取图片前检查可访问性" in field.help_text
+
+
 def test_each_stage_declares_its_exact_fields_and_dependency():
     expected_fields = {
         "setup": (
@@ -31,6 +42,7 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "month",
             "products_csv",
             "rules_csv",
+            "folder_index_root",
             "image_source_labels",
             "image_roots",
             "asset_manifest",
@@ -39,8 +51,8 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "user_notes",
         ),
         "completeness": ("selected_product_ids", "user_notes"),
-        "asset_matching": ("image_roots", "source_types", "aliases", "folder_decisions", "license_decisions", "asset_decisions", "include_video", "user_notes"),
-        "image_review": ("policy_path", "ratio_tolerance", "decisions", "user_notes"),
+        "asset_matching": ("image_roots", "source_types", "folder_decisions", "license_decisions", "asset_decisions", "include_video", "user_notes"),
+        "image_review": ("decisions", "user_notes"),
         "slots_copy": ("slot_assignments", "copy_edits", "user_notes"),
         "dry_run": ("decision", "warning_notes"),
         "approval": ("task_ids", "confirmed_by", "confirmed_at", "valid_until", "acknowledgement"),

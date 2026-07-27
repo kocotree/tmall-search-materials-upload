@@ -8,6 +8,16 @@
 | `RULE_CONFLICT` | 月度来源冲突 | 转人工审核 |
 | `ASSET_NOT_FOUND` | 没有匹配素材 | 阻断对应坑位 |
 | `ASSET_INVALID` | 数量、比例、尺寸、格式或可读性失败 | 修复本地素材，不上传 |
+| `SOURCE_UNREADABLE` | 原图不存在、无权限、损坏或无法解析 | 阻断该图片，重新连接素材源或更换素材 |
+| `SOURCE_METADATA_MISSING` | 历史候选缺少原图大小、宽高或比例 | 重新运行当前任务的图片预检 |
+| `IMAGE_SIZE_BELOW_MINIMUM` | 原图小于 200KiB | 更换素材，不使用填充方式扩大文件 |
+| `IMAGE_SIZE_EXCEEDED` | 原图或输出大于 20MiB | 第四阶段压缩；最终输出仍超限则阻断 |
+| `OUTPUT_DIMENSIONS_BELOW_MINIMUM` | 目标比例输出宽或高低于 720px | 更换素材或目标比例 |
+| `COMPRESSION_UNAVAILABLE` | 当前任务没有可用压缩提供方 | 禁止采用超限图片并恢复压缩配置 |
+| `COMPRESSION_TARGET_UNREACHABLE` | 最低质量和最小尺寸内仍无法压缩达标 | 更换素材 |
+| `OUTPUT_SIZE_BELOW_MINIMUM` | 处理后文件小于 200KiB | 更换素材，不制造无意义体积 |
+| `OUTPUT_IDENTITY_MISMATCH` | 第四阶段确认后的文件已变化 | 返回第四阶段重新处理和确认 |
+| `OUTPUT_PATH_OUTSIDE_TASK` | 派生输出试图写到当前任务目录外 | 拒绝写入并检查路径配置 |
 | `LICENSE_UNKNOWN` | 使用权未确认 | 阻断对应坑位 |
 | `STORE_IDENTITY_MISMATCH` | 当前店铺不是目标店铺 | 立即停止整批 |
 | `PRODUCT_MISMATCH` | 页面商品 ID 与任务不同 | 立即停止当前批次 |

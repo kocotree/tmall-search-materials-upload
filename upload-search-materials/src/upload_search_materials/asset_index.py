@@ -12,11 +12,12 @@ import re
 import stat
 import subprocess
 import time
-from typing import Iterable, Iterator, Literal, Sequence
+from typing import Iterable, Iterator, Literal, Mapping, Sequence
 import uuid
 
 from .asset_index_store import AssetIndexStore, IndexedFile, PathMatchRecord
 from .assets import IMAGE_EXTENSIONS, inspect_asset
+from .models import ProductRecord
 
 
 _SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -99,6 +100,101 @@ class _DirectoryCandidate:
 class _DirectoryFailure:
     relative_path: Path
     detail: str
+
+
+def bind_confirmed_folder_matches(
+    store: AssetIndexStore,
+    products: Sequence[ProductRecord],
+    decisions: Sequence[Mapping[str, object]],
+) -> dict[str, int]:
+    """Bind every active file under an indexed root to a reviewed product.
+
+    Folder decisions are authoritative here. The indexed root path must match
+    exactly one confirmed decision, so an already-reviewed folder is never
+    sent back through heuristic product-name matching.
+    """
+
+    products_by_id = {str(product.product_id): product for product in products}
+    confirmed_by_path: dict[str, Mapping[str, object]] = {}
+    for decision in decisions:
+        state = str(decision.get("decision", "")).strip()
+        if state != "confirmed":
+            continue
+        folder_path = str(decision.get("folder_path", "")).strip()
+        product_id = str(decision.get("product_id", "")).strip()
+        if not folder_path or not product_id:
+            raise ValueError("confirmed folder decisions require folder_path and product_id")
+        if product_id not in products_by_id:
+            raise ValueError(f"confirmed folder product is absent from products CSV: {product_id}")
+        path_key = os.path.normcase(os.path.normpath(folder_path))
+        if path_key in confirmed_by_path:
+            raise ValueError(f"confirmed folder path is duplicated: {folder_path}")
+        confirmed_by_path[path_key] = decision
+
+    if not confirmed_by_path:
+        raise ValueError("at least one confirmed folder decision is required")
+
+    bound_roots = 0
+    bound_files = 0
+    inspection_failures = 0
+    for root in store.root_records():
+        root_path = str(root["root_path"])
+        decision = confirmed_by_path.get(
+            os.path.normcase(os.path.normpath(root_path))
+        )
+        if decision is None:
+            raise ValueError(
+                f"indexed root has no matching confirmed folder decision: {root_path}"
+            )
+        product_id = str(decision["product_id"]).strip()
+        product = products_by_id[product_id]
+        match = PathMatchRecord(
+            product_id=product_id,
+            sku=str(product.sku),
+            product_title=str(product.title),
+            match_type="name_candidate",
+            match_status="confirmed",
+            reason_codes=("CONFIRMED_FOLDER_BINDING",),
+        )
+        files = store.active_files_for_source(str(root["source_system"]))
+        for file_record in files:
+            file_id = int(file_record["file_id"])
+            try:
+                inspected = inspect_asset(
+                    Path(str(file_record["absolute_path"])),
+                    product_id,
+                    "confirmed",
+                    source_system=str(root["source_system"]),
+                    sku=str(product.sku),
+                )
+                store.update_file_inspection(
+                    file_id,
+                    sha256=inspected.sha256,
+                    width=inspected.width,
+                    height=inspected.height,
+                    validation_status=inspected.validation_status,
+                    reason_codes=inspected.reason_codes,
+                )
+            except Exception:
+                inspection_failures += 1
+                store.update_file_inspection(
+                    file_id,
+                    sha256="",
+                    width=None,
+                    height=None,
+                    validation_status="inspection_failed",
+                    reason_codes=("FILE_INSPECTION_ERROR",),
+                )
+            store.replace_file_matches(file_id, (match,))
+        bound_roots += 1
+        bound_files += len(files)
+
+    store.refresh_match_statistics()
+    return {
+        "bound_roots": bound_roots,
+        "bound_files": bound_files,
+        "inspection_failures": inspection_failures,
+    }
 
 
 class _PartitionWriter:
@@ -873,7 +969,7 @@ class IncrementalAssetIndexer:
                 inspected = inspect_asset(
                     candidate.absolute_path,
                     primary.product_id,
-                    "unknown",
+                    "confirmed",
                     source_system=source_system,
                     sku=primary.sku,
                 )

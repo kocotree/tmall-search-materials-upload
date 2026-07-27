@@ -5,8 +5,11 @@
 .agent-tmp-*/
 test_evidence/
 .pytest-task-*/
+.pytest-tmp-*/
+.pytest-cache-*/
 build/
 __pycache__/
 .pytest_cache/
 *.egg-info/
+.local-cache/
 upload-search-materials/config/local-paths.json

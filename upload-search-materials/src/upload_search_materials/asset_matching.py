@@ -101,10 +101,7 @@ class ProductPathMatcher:
             title = normalize_match_text(product.title)
             if len(title) < 4:
                 continue
-            if any(
-                title in component or (len(component) >= 4 and component in title)
-                for component in normalized_components
-            ):
+            if any(title in component for component in normalized_components):
                 name_matches.append(product)
         return self._build_matches(
             name_matches,

@@ -1,7 +1,27 @@
 image:
+  version: 2
   formats: [jpg, jpeg, png, webp]
   allowed_aspect_ratios: ["3:4", "1:1"]
   aspect_ratio_tolerance: 0.02
+  recommended_dimensions:
+    "3:4": {width: 1440, height: 1920}
+    "1:1": {width: 1440, height: 1440}
+  recommended_size_mode: warning
+  min_width: 720
+  min_height: 720
+  min_size_kb: 200
+  max_size_mb: 20
+  max_pixels: 80000000
+  output:
+    format: JPEG
+    quality: 92
+    quality_min: 55
+    quality_max: 92
+    optimize: true
+    progressive: true
+    background_color: "#FFFFFF"
+    resize_step: 0.9
+    derived_directory: derived
   min_images_per_item: 3
   max_images_per_item: 9
 

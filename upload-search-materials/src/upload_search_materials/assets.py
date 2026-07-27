@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 import yaml
 
 from .io_tables import sha256_file
@@ -95,7 +95,7 @@ def inspect_asset(
             with Image.open(resolved) as image:
                 image.verify()
             with Image.open(resolved) as image:
-                width, height = image.size
+                width, height = ImageOps.exif_transpose(image).size
         except (OSError, UnidentifiedImageError):
             reasons.append("ASSET_UNREADABLE")
     elif detected_type == "video":
@@ -143,21 +143,52 @@ def inspect_asset(
     else:
         reasons.append("ASSET_FORMAT_UNSUPPORTED")
 
+    fingerprint = sha256_file(resolved) if size_bytes else ""
     return AssetRecord(
-        asset_id=sha256_file(resolved)[:16] if size_bytes else "",
+        asset_id=fingerprint[:16],
         product_id=product_id,
         sku=sku,
         asset_type=detected_type,
         source_system=source_system,
         source_path=str(resolved),
         license_status=license_status,
-        sha256=sha256_file(resolved) if size_bytes else "",
+        sha256=fingerprint,
         width=width,
         height=height,
+        size_bytes=size_bytes,
         duration=duration,
         validation_status="blocked" if reasons else "valid",
         reason_codes=reasons,
     )
+
+
+def build_image_preview(
+    source_path: Path,
+    output_path: Path,
+    *,
+    max_size: tuple[int, int] = (640, 640),
+) -> Path:
+    """Create a small task-local JPEG preview without modifying the source."""
+
+    source = Path(source_path).resolve()
+    output = Path(output_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp")
+    try:
+        with Image.open(source) as image:
+            preview = ImageOps.exif_transpose(image).convert("RGB")
+            preview.thumbnail(max_size, Image.Resampling.LANCZOS)
+            preview.save(
+                temporary,
+                format="JPEG",
+                quality=82,
+                optimize=True,
+            )
+        temporary.replace(output)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return output
 
 
 def validate_asset_group(

@@ -29,6 +29,7 @@ class RuntimeConfig:
     rules: DiscoveredPath
     image_sources: tuple[dict[str, str], ...]
     runs_root: Path
+    folder_index_root: Path = Path(".local-cache/folder-index")
     config_path: Path | None = None
 
 
@@ -70,12 +71,21 @@ def load_runtime_config(
         if runs_value
         else workspace_root / "runs"
     )
+    folder_index_value = (
+        env.get("TMALL_FOLDER_INDEX_ROOT") or document.get("folder_index_root")
+    )
+    folder_index_root = (
+        _resolve_configured_path(folder_index_value, workspace_root)
+        if folder_index_value
+        else workspace_root / ".local-cache" / "folder-index"
+    )
     return RuntimeConfig(
         workspace_root=workspace_root,
         products=products,
         rules=rules,
         image_sources=image_sources,
         runs_root=runs_root,
+        folder_index_root=folder_index_root,
         config_path=selected_config,
     )
 

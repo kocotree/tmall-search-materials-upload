@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 import sqlite3
 
@@ -11,6 +12,7 @@ from upload_search_materials.folder_index import (
     build_folder_review_data,
     build_folder_index,
     rematch_folder_index,
+    snapshot_folder_candidates,
     write_folder_candidates,
 )
 
@@ -161,6 +163,58 @@ def test_folder_candidates_csv_contains_folder_not_image_records(tmp_path):
     assert row["match_status"] == "matched_unlicensed"
 
 
+def test_task_snapshot_filters_shared_candidates_without_copying_index(tmp_path):
+    shared = tmp_path / "shared-folder-candidates.csv"
+    shared.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-2,buyer,Z:/b,2026/b,B,2,S2,商品2,name_candidate,needs_manual_confirmation\n"
+        "F-1,model,Y:/a,2025/a,A,1,S1,商品1,exact_sku,matched_unlicensed\n"
+        "F-3,buyer,Z:/c,2026/c,C,1,S1,商品1,name_candidate,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+    task_snapshot = tmp_path / "run" / "folder-candidates.csv"
+
+    summary = snapshot_folder_candidates(shared, task_snapshot, ["1"])
+
+    assert summary == {
+        "requested_products": 1,
+        "matched_products": 1,
+        "candidate_rows": 2,
+    }
+    with task_snapshot.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["folder_id"] for row in rows] == ["F-3", "F-1"]
+    assert all(row["product_id"] == "1" for row in rows)
+
+
+def test_snapshot_folder_candidates_cli_writes_task_local_csv(tmp_path):
+    shared = tmp_path / "folder-candidates.csv"
+    shared.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-1,model,Y:/a,2025/a,A,1,S1,商品1,exact_sku,matched_unlicensed\n"
+        "F-2,buyer,Z:/b,2026/b,B,2,S2,商品2,name_candidate,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+    output = tmp_path / "task" / "folder-candidates.csv"
+
+    exit_code = main(
+        [
+            "snapshot-folder-candidates",
+            "--candidates",
+            str(shared),
+            "--product-id",
+            "2",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    with output.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["product_id"] for row in rows] == ["2"]
+
+
 def test_index_folders_cli_builds_lightweight_outputs(tmp_path):
     root = tmp_path / "root"
     (root / "涂鸦艺术家分体泳衣").mkdir(parents=True)
@@ -197,7 +251,8 @@ def test_folder_review_data_preserves_decisions_and_safety_contract(tmp_path):
     candidates.write_text(
         "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
         "F-2,xhs,Z:/buyer,25/buyer,达人泳衣,898453469175,KQ25046,涂鸦艺术家分体泳衣,name_candidate,needs_manual_confirmation\n"
-        "F-1,model,Y:/model,2025/model,KQ25046,898453469175,KQ25046,涂鸦艺术家分体泳衣,exact_sku,matched_unlicensed\n",
+        "F-1,model,Y:/model,2025/model,KQ25046,898453469175,KQ25046,涂鸦艺术家分体泳衣,exact_sku,matched_unlicensed\n"
+        "F-3,xhs,Z:/legacy,26/legacy,分龄成长太阳镜,886506466908,KQ25029,分龄成长软软镜/稳稳镜/酷酷镜,confirmed_alias,needs_manual_confirmation\n",
         encoding="utf-8-sig",
     )
 
@@ -207,16 +262,16 @@ def test_folder_review_data_preserves_decisions_and_safety_contract(tmp_path):
             {
                 "folder_id": "F-2",
                 "product_id": "898453469175",
-                "decision": "confirmed_alias",
-                "alias": "达人泳衣",
+                "decision": "confirmed",
             }
         ],
     )
 
     assert data["safety_status"] == "folders_only"
     assert [row["folder_id"] for row in data["folder_candidates"]] == ["F-1", "F-2"]
-    assert data["folder_candidates"][1]["decision"] == "confirmed_alias"
-    assert data["folder_candidates"][1]["alias"] == "达人泳衣"
+    assert data["folder_candidates"][1]["decision"] == "confirmed"
+    assert "alias" not in data["folder_candidates"][1]
+    assert {row["folder_id"] for row in data["folder_candidates"]} == {"F-1", "F-2"}
     assert data["folder_products"] == [
         {
             "product_id": "898453469175",
@@ -225,6 +280,57 @@ def test_folder_review_data_preserves_decisions_and_safety_contract(tmp_path):
             "candidate_count": 2,
         }
     ]
+
+
+def test_folder_review_accepts_run_scoped_exact_folder_query_without_alias(tmp_path):
+    candidates = tmp_path / "folder-candidates.csv"
+    candidates.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-3,xhs,Z:/太阳镜,26/1/分龄成长太阳镜,分龄成长太阳镜,886506466908,KQ25029,分龄成长软软镜/稳稳镜/酷酷镜,confirmed_alias,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+
+    data = build_folder_review_data(
+        candidates,
+        exact_folder_queries=[
+            {
+                "product_id": "886506466908",
+                "folder_name": "分龄成长太阳镜",
+            }
+        ],
+    )
+
+    assert len(data["folder_candidates"]) == 1
+    candidate = data["folder_candidates"][0]
+    assert candidate["folder_name"] == "分龄成长太阳镜"
+    assert candidate["match_type"] == "exact_folder_query"
+    assert candidate["decision"] == "confirmed"
+    assert "alias" not in candidate
+
+
+def test_folder_review_treats_missing_and_historical_pending_as_confirmed(tmp_path):
+    candidates = tmp_path / "folder-candidates.csv"
+    candidates.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-1,model,Y:/one,one,商品,1,SKU,商品,name_candidate,needs_manual_confirmation\n"
+        "F-2,buyer,Z:/two,two,商品,1,SKU,商品,name_candidate,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+
+    data = build_folder_review_data(
+        candidates,
+        decisions=[
+            {
+                "folder_id": "F-2",
+                "product_id": "1",
+                "decision": "pending",
+            }
+        ],
+    )
+
+    assert [
+        item["decision"] for item in data["folder_candidates"]
+    ] == ["confirmed", "confirmed"]
 
 
 def test_prepare_folder_review_cli_writes_ui_payload(tmp_path):
@@ -247,3 +353,28 @@ def test_prepare_folder_review_cli_writes_ui_payload(tmp_path):
     ) == 0
 
     assert '"review_type": "folder_ownership"' in output.read_text(encoding="utf-8")
+
+
+def test_prepare_folder_review_cli_accepts_exact_folder_query(tmp_path):
+    candidates = tmp_path / "folder-candidates.csv"
+    candidates.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-3,xhs,Z:/太阳镜,26/1/分龄成长太阳镜,分龄成长太阳镜,886506466908,KQ25029,分龄成长软软镜/稳稳镜/酷酷镜,confirmed_alias,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+    output = tmp_path / "folder-review.json"
+
+    assert main(
+        [
+            "prepare-folder-review",
+            "--candidates",
+            str(candidates),
+            "--output",
+            str(output),
+            "--exact-folder",
+            "886506466908=分龄成长太阳镜",
+        ]
+    ) == 0
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["folder_candidates"][0]["match_type"] == "exact_folder_query"

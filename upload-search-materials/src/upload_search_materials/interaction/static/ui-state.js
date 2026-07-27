@@ -94,6 +94,36 @@
     return createState(stageId);
   }
 
+  function selectInitialStage(knownStageIds, currentStageId) {
+    const known = Array.isArray(knownStageIds) ? knownStageIds : [];
+    if (known.includes(currentStageId)) {
+      return { stageId: currentStageId, warning: null };
+    }
+    return {
+      stageId: known[0] || "setup",
+      warning: currentStageId
+        ? `任务记录的当前阶段 ${currentStageId} 不受支持，已只读回退到第一阶段。`
+        : "任务缺少当前阶段，已只读回退到第一阶段。",
+    };
+  }
+
+  function stageSnapshot(session, knownStageIds) {
+    const known = Array.isArray(knownStageIds) ? knownStageIds : [];
+    const stages = session?.stages && typeof session.stages === "object"
+      ? session.stages
+      : {};
+    return known.map((stageId) => ({
+      stageId,
+      revision: Number(stages[stageId]?.revision || 0),
+      status: stages[stageId]?.status || "draft",
+    }));
+  }
+
+  function mergePersistenceIntent(currentMode, requestedMode) {
+    if (currentMode === "submit" || requestedMode === "submit") return "submit";
+    return requestedMode === "draft" ? "draft" : currentMode || null;
+  }
+
   function receiveRecovery(state, stageId, instruction) {
     if (stageId !== state.stageId) return state;
     return { ...state, recoveryInstruction: instruction };
@@ -102,12 +132,16 @@
   function controlPresentation(value, kind, count) {
     let values;
     let checked = false;
-    if (kind === "boolean") {
-      values = [""];
-      checked = value === true;
-    } else if (kind === "list") {
-      const source = Array.isArray(value) ? value : [];
-      values = Array.from({ length: count }, (_, index) => String(source[index] ?? ""));
+      if (kind === "boolean") {
+        values = [""];
+        checked = value === true;
+      } else if (kind === "list") {
+        // Recover drafts written by the former auto_path_list renderer, which
+        // submitted all paths as one comma-separated text value.
+        const source = Array.isArray(value)
+          ? value
+          : (typeof value === "string" ? value.split(",").map((item) => item.trim()).filter(Boolean) : []);
+        values = Array.from({ length: count }, (_, index) => String(source[index] ?? ""));
     } else if (kind === "line-list") {
       values = [Array.isArray(value) ? value.join("\n") : ""];
     } else if (kind === "json-list") {
@@ -155,6 +189,7 @@
     isCurrentRequest,
     markDirty,
     persistedRevision,
+    mergePersistenceIntent,
     receiveRecovery,
     receiveStage,
     receiveStatus,
@@ -162,7 +197,9 @@
     resultView,
     resultSections,
     statusLabels,
+    stageSnapshot,
     submissionView,
+    selectInitialStage,
     switchStage,
   };
 });

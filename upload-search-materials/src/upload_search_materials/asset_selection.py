@@ -4,19 +4,26 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 import hashlib
+from pathlib import Path
 from typing import Any
+
+from .image_compliance import (
+    REASON_MESSAGES,
+    classify_image,
+    default_image_policy,
+    format_size,
+    ratio_display,
+)
 
 
 MATCH_RANK = {
     "exact_product_id": 0,
     "exact_sku": 1,
-    "confirmed_alias": 2,
-    "name_candidate": 3,
+    "name_candidate": 2,
 }
 CONFIRMED_MATCH_STATUSES = {
     "matched_unlicensed",
     "confirmed",
-    "confirmed_alias",
 }
 
 
@@ -135,8 +142,8 @@ def build_gallery_data(
     *,
     images_per_material: int = 3,
     license_decisions: Iterable[Mapping[str, Any]] = (),
-    alias_decisions: Iterable[Mapping[str, Any]] = (),
     remote_sha256_by_product: Mapping[str, Iterable[str]] | None = None,
+    image_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the structured result consumed by the asset review gallery."""
 
@@ -145,14 +152,6 @@ def build_gallery_data(
     confirmed_licenses = {
         str(item.get("asset_id", ""))
         for item in license_decisions
-        if item.get("status") == "confirmed"
-    }
-    confirmed_aliases = {
-        (
-            str(item.get("product_id", "")),
-            str(item.get("candidate_directory", "")),
-        )
-        for item in alias_decisions
         if item.get("status") == "confirmed"
     }
     requirements = []
@@ -171,8 +170,9 @@ def build_gallery_data(
                 "product_id": product_id,
                 "product_title": "",
                 "missing_materials": missing,
-                "images_per_material": images_per_material,
-                "required_images": missing * images_per_material,
+                "slot_image_min": 3,
+                "slot_image_max": 9,
+                "slot_planning_stage": "slots_copy",
             }
         )
 
@@ -196,20 +196,8 @@ def build_gallery_data(
         if asset_key in seen_asset_keys:
             continue
         seen_asset_keys.add(asset_key)
-        alias_confirmed = (
-            product_id,
-            str(record.candidate_directory),
-        ) in confirmed_aliases
-        match_type = (
-            "confirmed_alias"
-            if record.match_type == "name_candidate" and alias_confirmed
-            else str(record.match_type)
-        )
-        match_status = (
-            "confirmed_alias"
-            if match_type == "confirmed_alias"
-            else str(record.match_status)
-        )
+        match_type = str(record.match_type)
+        match_status = str(record.match_status)
         remote_hashes = (
             {
                 str(value)
@@ -218,23 +206,74 @@ def build_gallery_data(
             if remote_sha256_by_product is not None
             else set()
         )
+        size_bytes = getattr(record, "size_bytes", None)
+        if size_bytes is None:
+            size_bytes = getattr(record, "file_size", None)
+        if size_bytes is None:
+            try:
+                size_bytes = Path(str(record.absolute_path)).stat().st_size
+            except OSError:
+                size_bytes = None
+        preflight = classify_image(
+            width=record.width,
+            height=record.height,
+            size_bytes=size_bytes,
+            extension=Path(str(record.absolute_path)).suffix,
+            validation_status=str(record.validation_status),
+            reason_codes=tuple(record.file_reason_codes),
+            policy=image_policy or default_image_policy(),
+            compression_available=True,
+        )
+        source_inspection = {
+            "source_path": str(record.absolute_path),
+            "format": Path(str(record.absolute_path)).suffix.lstrip(".").upper(),
+            "extension": Path(str(record.absolute_path)).suffix.lstrip(".").casefold(),
+            "size_bytes": size_bytes,
+            "size_display": format_size(size_bytes),
+            "width": record.width,
+            "height": record.height,
+            "ratio_value": preflight["original_ratio"],
+            "ratio_display": ratio_display(record.width, record.height),
+            "sha256": str(record.sha256),
+            "readable": str(record.validation_status) == "valid",
+            "validation_status": str(record.validation_status),
+            "reason_codes": list(record.file_reason_codes),
+            "reason_messages": [
+                REASON_MESSAGES.get(reason, reason)
+                for reason in record.file_reason_codes
+            ],
+        }
         candidates.append(
             {
                 "asset_id": asset_id,
                 "product_id": product_id,
                 "product_title": str(record.product_title),
+                "folder_id": str(getattr(record, "folder_id", "")),
+                "folder_path": str(
+                    getattr(record, "folder_path", record.candidate_directory)
+                ),
                 "source_system": str(record.source_system),
                 "candidate_directory": str(record.candidate_directory),
                 "source_path": str(record.absolute_path),
+                "preview_path": str(getattr(record, "preview_path", "")),
                 "relative_path": str(record.relative_path),
                 "sha256": str(record.sha256),
                 "width": record.width,
                 "height": record.height,
+                "size_bytes": size_bytes,
+                "source_inspection": source_inspection,
+                "target_assessments": preflight["resolution_checks"],
+                "preflight": preflight,
+                "preflight_status": preflight["status"],
+                "size_display": preflight["size_display"],
+                "max_size_display": preflight["max_size_display"],
+                "resolution_checks": preflight["resolution_checks"],
                 "validation_status": str(record.validation_status),
                 "reason_codes": sorted(
                     {
                         *record.file_reason_codes,
                         *record.match_reason_codes,
+                        *preflight["reason_codes"],
                     }
                 ),
                 "match_type": match_type,

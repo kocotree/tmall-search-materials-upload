@@ -87,7 +87,7 @@
           <section class="result-module" data-component="AssetMatchGallery">
             <div class="module-heading"><div><p class="eyebrow">ASSET MATCH</p><h3>文件夹归属与素材候选</h3></div><span>先确认文件夹，再读取图片</span></div>
             <div class="match-legend" aria-label="匹配标签">
-              <span>商品 ID 命中</span><span>SKU 命中</span><span>已确认别名</span><span class="is-pending">名称候选 · 待确认</span>
+              <span>商品 ID 命中</span><span>SKU 命中</span><span class="is-pending">完整商品名称命中 · 待确认</span>
             </div>
             <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>Agent 会先返回候选文件夹；确认归属后才读取图片候选。</p></div></div>
           </section>
@@ -177,6 +177,13 @@
                   <span>搜推素材</span><strong>全量自动采集</strong>
                   <p>选择“商品分类 → 搜推高价值”，遍历全部分页并写入当前任务目录。</p>
                 </article>
+                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.folder_index_available else 'pending' }}">
+                  <span>共享文件夹索引</span><strong>{{ "可复用" if setup_inputs.folder_index_available else "首次任务待建立" }}</strong>
+                  <code>{{ setup_inputs.folder_index_root }}</code>
+                  <input name="folder_index_root" type="hidden" value="{{ setup_inputs.folder_index_root }}" aria-describedby="setup-folder_index_root-error">
+                  <p>每台电脑维护一份；任务目录只保存当前商品的候选快照。</p>
+                  <p class="field-error" id="setup-folder_index_root-error" data-field-error="folder_index_root" aria-live="polite"></p>
+                </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
                   <span>图片源配置</span><strong data-image-source-summary>{{ image_sources|length }} 个图片源</strong>
                   <p>可配置一个或多个来源。名称和根路径会同时写入本次任务；保存本机配置后，新任务自动复用。</p>
@@ -227,10 +234,6 @@
                   <span>视频</span><strong>本轮延期</strong>
                   <p>不阻断当前图片测试。</p>
                 </article>
-                <article class="setup-status-card">
-                  <span>别名</span><strong>按审查积累</strong>
-                  <p>在文件夹归属审查中逐步积累。</p>
-                </article>
               </div>
             </section>
 
@@ -268,8 +271,8 @@
             </div>
             <div class="field-grid">
               {% for field in stage.fields %}
-              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'multi_select'] %} field-wide{% endif %}{% if stage.id == 'completeness' and field.name == 'selected_product_ids' %} interaction-data-field{% endif %}" data-field="{{ field.name }}">
-                {% if field.component == "path_list" and field.name == "image_roots" %}
+              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'auto_path_list', 'multi_select'] %} field-wide{% endif %}{% if (stage.id == 'completeness' and field.name == 'selected_product_ids') or (stage.id == 'image_review' and field.name == 'decisions') or (stage.id == 'slots_copy' and field.name == 'slot_assignments') %} interaction-data-field{% endif %}" data-field="{{ field.name }}">
+                {% if field.component in ["path_list", "auto_path_list"] and field.name == "image_roots" %}
                 <fieldset class="path-list" data-field-group="image_roots">
                   <legend>
                     {{ field.label }}{% if field.required %}<span class="required" aria-label="必填">*</span>{% endif %}

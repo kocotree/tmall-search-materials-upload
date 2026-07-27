@@ -94,7 +94,7 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert "搜推高价值" in html
     assert 'name="promotion_max_pages"' not in html
     assert 'name="product_scope"' not in html
-    assert "别名" in html and "在文件夹归属审查中逐步积累" in html
+    assert "在文件夹归属审查中逐步积累" not in html
     assert "视频" in html and "本轮延期" in html
     assert f'value="{date.today():%Y-%m}"' in html
     assert 'name="products_csv"' in html and 'type="hidden"' in html
@@ -307,8 +307,9 @@ def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
 
     for component in components:
         assert f'data-component="{component}"' in html
-    for label in ("商品 ID 命中", "SKU 命中", "已确认别名", "名称候选 · 待确认"):
+    for label in ("商品 ID 命中", "SKU 命中", "完整商品名称命中 · 待确认"):
         assert label in html
+    assert "已确认别名" not in html
 
 
 def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_ui(client):
@@ -910,6 +911,87 @@ def test_completeness_review_context_survives_incremental_decision_drafts(
     assert (stage_path / "review-context.json").is_file()
 
 
+def test_asset_matching_review_context_survives_rejected_folder_draft(
+    client, session_id, tmp_path
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "source_types": ["image"],
+                "folder_decisions": [],
+            }
+        },
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "asset_matching",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="needs_user_input",
+        summary="请确认候选文件夹",
+        data={
+            "folder_candidates": [
+                {
+                    "folder_id": "folder-a",
+                    "product_id": "1",
+                    "folder_name": "商品 A",
+                },
+                {
+                    "folder_id": "folder-b",
+                    "product_id": "1",
+                    "folder_name": "商品 A 买家秀",
+                },
+            ]
+        },
+    )
+
+    drafted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/draft",
+        json={
+            "revision": submitted.json["revision"],
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "source_types": ["image"],
+                "folder_decisions": [
+                    {
+                        "folder_id": "folder-a",
+                        "product_id": "1",
+                        "decision": "rejected",
+                    }
+                ],
+            },
+        },
+    )
+    current = client.get(f"/api/sessions/{session_id}/stages/asset_matching")
+
+    assert drafted.status_code == 200
+    assert current.json["state"]["status"] == "draft"
+    assert len(current.json["result"]["data"]["folder_candidates"]) == 2
+    assert current.json["input"]["values"]["folder_decisions"] == [
+        {
+            "decision": "rejected",
+            "folder_id": "folder-a",
+            "folder_path": "",
+            "note": "",
+            "product_id": "1",
+            "source_system": "",
+        },
+        {
+            "decision": "confirmed",
+            "folder_id": "folder-b",
+            "folder_path": "",
+            "note": "",
+            "product_id": "1",
+            "source_system": "",
+        },
+    ]
+    stage_path = tmp_path / session_id / "03-asset-matching"
+    assert not (stage_path / "result.json").exists()
+    assert (stage_path / "review-context.json").is_file()
+
+
 def test_completeness_submit_rejects_excluded_or_stale_product_ids(
     client, session_id, tmp_path
 ):
@@ -983,8 +1065,14 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
                     "source_system": "model_nas",
                     "match_type": "exact_product_id",
                     "match_status": "matched_unlicensed",
-                    "license_status": "confirmed",
-                    "validation_status": "valid",
+                        "license_status": "confirmed",
+                        "validation_status": "valid",
+                        "preflight": {"selectable": True, "status": "direct"},
+                        "source_inspection": {
+                            "size_bytes": image_path.stat().st_size,
+                            "width": 20,
+                            "height": 30,
+                        },
                 }
             ],
             "remote_dedupe_status": "not_available",
@@ -1001,8 +1089,224 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
 
     assert stage.json["result"]["data"]["asset_candidates"][0]["asset_id"] == "A"
     assert preview.status_code == 200
-    assert preview.mimetype == "image/png"
+    assert preview.mimetype == "image/jpeg"
+    assert preview.headers["Cache-Control"] == "private, max-age=300"
+    assert (
+        tmp_path
+        / session_id
+        / "03-asset-matching"
+        / "preview-cache"
+        / "A.jpg"
+    ).is_file()
     assert missing.status_code == 404
+
+    draft = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/draft",
+        json={
+            "revision": submitted.json["revision"],
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "source_types": ["image"],
+                "license_decisions": [],
+                "asset_decisions": [
+                    {
+                        "asset_id": "A",
+                        "product_id": "123",
+                        "sha256": "a" * 64,
+                        "source_system": "model_nas",
+                        "source_path": str(image_path),
+                        "decision": "selected",
+                    }
+                ],
+            },
+        },
+    )
+    assert draft.status_code == 200
+    current_input = SessionStore(tmp_path).read_optional_stage_document(
+        session_id, "asset_matching", "input"
+    )
+    assert current_input["values"]["license_decisions"] == [
+        {"asset_id": "A", "status": "confirmed"}
+    ]
+
+
+def test_asset_gallery_allows_candidate_under_confirmed_folder_alias(
+    client, session_id, tmp_path
+):
+    configured_root = tmp_path / "mapped-drive-root"
+    confirmed_folder = tmp_path / "unc-alias" / "confirmed-product"
+    configured_root.mkdir()
+    confirmed_folder.mkdir(parents=True)
+    image_path = confirmed_folder / "candidate.png"
+    Image.new("RGB", (20, 30), "red").save(image_path)
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(configured_root)],
+                "source_types": ["image"],
+                "folder_decisions": [
+                    {
+                        "decision": "confirmed",
+                        "folder_id": "F1",
+                        "folder_path": str(confirmed_folder),
+                        "product_id": "123",
+                        "source_system": "model_nas",
+                    }
+                ],
+            }
+        },
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "asset_matching",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="needs_user_input",
+        summary="review candidate",
+        data={
+            "asset_candidates": [
+                {
+                    "asset_id": "A",
+                    "product_id": "123",
+                    "source_path": str(image_path),
+                }
+            ]
+        },
+    )
+
+    preview = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/A"
+    )
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "image/jpeg"
+
+
+def test_asset_matching_normalization_rejects_selected_assets_from_excluded_folders(
+    client, session_id, tmp_path
+):
+    root = tmp_path / "素材"
+    parent = root / "商品"
+    nested = parent / "精选"
+    nested.mkdir(parents=True)
+    image_a = parent / "a.jpg"
+    image_b = nested / "b.jpg"
+    Image.new("RGB", (20, 30), "red").save(image_a)
+    Image.new("RGB", (20, 30), "blue").save(image_b)
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(root)],
+                "source_types": ["image"],
+                "folder_decisions": [],
+            }
+        },
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "asset_matching",
+        submitted.json["revision"],
+        submitted.json["input_sha256"],
+        status="needs_user_input",
+        summary="请选择素材",
+        data={
+            "folder_candidates": [
+                {
+                    "folder_id": "PARENT",
+                    "folder_path": str(parent),
+                    "product_id": "123",
+                    "source_system": "model",
+                },
+                {
+                    "folder_id": "NESTED",
+                    "folder_path": str(nested),
+                    "product_id": "123",
+                    "source_system": "model",
+                },
+            ],
+            "asset_candidates": [
+                {
+                    "asset_id": "A",
+                    "folder_id": "PARENT",
+                    "folder_path": str(parent),
+                    "product_id": "123",
+                    "source_path": str(image_a),
+                    "sha256": "a" * 64,
+                        "source_system": "model",
+                        "match_type": "name_candidate",
+                        "validation_status": "valid",
+                        "preflight": {"selectable": True, "status": "direct"},
+                        "source_inspection": {
+                            "size_bytes": image_a.stat().st_size,
+                            "width": 20,
+                            "height": 30,
+                        },
+                },
+                {
+                    "asset_id": "B",
+                    "product_id": "123",
+                    "source_path": str(image_b),
+                    "sha256": "b" * 64,
+                        "source_system": "model",
+                        "match_type": "name_candidate",
+                        "validation_status": "valid",
+                        "preflight": {"selectable": True, "status": "direct"},
+                        "source_inspection": {
+                            "size_bytes": image_b.stat().st_size,
+                            "width": 20,
+                            "height": 30,
+                        },
+                },
+            ],
+        },
+    )
+
+    drafted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/draft",
+        json={
+            "revision": submitted.json["revision"],
+            "values": {
+                "image_roots": [str(root)],
+                "source_types": ["image"],
+                "folder_decisions": [
+                    {
+                        "folder_id": "PARENT",
+                        "product_id": "123",
+                        "decision": "rejected",
+                    },
+                    {
+                        "folder_id": "NESTED",
+                        "product_id": "123",
+                        "decision": "pending",
+                    },
+                ],
+                "asset_decisions": [
+                    {"asset_id": "A", "decision": "selected"},
+                    {"asset_id": "B", "decision": "selected"},
+                ],
+                "license_decisions": [
+                    {"asset_id": "A", "status": "confirmed"},
+                    {"asset_id": "B", "status": "confirmed"},
+                ],
+            },
+        },
+    )
+
+    assert drafted.status_code == 200
+    current = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching"
+    )
+    values = current.json["input"]["values"]
+    assert [
+        item["decision"] for item in values["folder_decisions"]
+    ] == ["rejected", "confirmed"]
+    assert [item["asset_id"] for item in values["asset_decisions"]] == ["B"]
+    assert values["asset_decisions"][0]["folder_id"] == "NESTED"
+    assert values["license_decisions"] == [
+        {"asset_id": "B", "status": "confirmed"}
+    ]
 
 
 def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
@@ -1016,17 +1320,30 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     ).read_text(encoding="utf-8")
 
     for expected in (
-        "换一批",
-        "授权已确认",
         "远端去重未完成",
         "asset_decisions",
         "license_decisions",
         "folder_decisions",
-        "确认归属并记录别名",
         "排除该文件夹",
-        "当前只审查文件夹",
+        "候选文件夹默认采用",
+        "folder-decision-changed",
+        "pruneSelectedCandidates",
+        "历史候选未关联文件夹",
+        "preservesReviewContext",
     ):
         assert expected in source
+    assert '["pending", "待确认"]' not in source
+    assert "采用即确认该图片可用于本次发布" in source
+    assert 'document.createTextNode("授权已确认")' not in source
+    assert "第五阶段再按每个坑位 3–9 张" in source
+    assert "坑位数量和每坑 3–9 张的分组在第五阶段决定" in source
+    assert '"换一批"' in source
+    assert "已选素材" in source
+    assert "发现 ${duplicateCount} 张完全重复图片" in source
+    assert "data.page_size || 30" in source
+    assert "已选满" not in source
+    assert "确认归属并记录别名" not in source
+    assert 'candidate?.match_type !== "confirmed_alias"' in source
 
 
 def test_generic_result_renderer_includes_optional_agent_actions_as_safe_text():

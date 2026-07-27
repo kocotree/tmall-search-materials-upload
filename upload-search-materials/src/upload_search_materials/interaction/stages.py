@@ -88,6 +88,7 @@ STAGES: tuple[StageDefinition, ...] = (
             _field("month", "目标月份", "month", required=True),
             _field("products_csv", "商品表", "auto_path", required=True),
             _field("rules_csv", "规则表", "auto_path", required=True),
+            _field("folder_index_root", "共享文件夹索引", "auto_path"),
             _field("image_source_labels", "图片源名称", "auto_path_list", required=True),
             _field("image_roots", "图片源根目录", "auto_path_list", required=True),
             _field(
@@ -125,18 +126,23 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="asset_matching",
         title="素材匹配",
-        description="确认图片来源、显式别名、授权状态和采用或排除决定。",
+        description="候选文件夹默认采用；排除文件夹会立即同步候选和已选图片，再选择本次发布素材。",
         component="asset_match_gallery",
         previous_stage="completeness",
         fields=(
-            _field("image_roots", "图片源路径", "path_list", required=True),
+            _field(
+                "image_roots",
+                "图片源路径",
+                "auto_path_list",
+                required=True,
+                help_text="沿用任务配置；确认文件夹后由 Agent 在读取图片前检查可访问性",
+            ),
             _field("source_types", "来源类型", "multi_select", required=True),
-            _field("aliases", "显式别名映射", "table"),
             _field(
                 "folder_decisions",
                 "候选文件夹归属决定",
                 "table",
-                help_text="首轮扫描可为空；确认、别名或排除后自动写入",
+                help_text="候选默认采用；排除后立即同步画廊并自动写入",
             ),
             _field(
                 "license_decisions",
@@ -163,13 +169,17 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="image_review",
         title="图片适用性与裁剪",
-        description="记录图片策略、比例容差和直接使用、裁剪或人工处理决定。",
+        description="审查第三阶段已选图片，比较 1:1 / 3:4，并完成人工裁剪或排除决定。",
         component="image_review",
         previous_stage="asset_matching",
         fields=(
-            _field("policy_path", "图片策略文件", "path", required=True),
-            _field("ratio_tolerance", "比例容差", "number", required=True),
-            _field("decisions", "使用、裁剪或人工处理决定", "table", required=True),
+            _field(
+                "decisions",
+                "图片审查决定",
+                "table",
+                required=True,
+                help_text="由可视化审查组件自动写入，不需要手工编辑 JSON",
+            ),
             _field("user_notes", "用户备注", "textarea"),
         ),
     ),

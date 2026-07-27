@@ -36,6 +36,7 @@ def test_discovers_unique_tables_from_workspace_relative_docs(tmp_path):
     assert runtime.products.status == "discovered"
     assert runtime.rules.path == rules.resolve()
     assert runtime.runs_root == workspace / "runs"
+    assert runtime.folder_index_root == workspace / ".local-cache" / "folder-index"
     assert runtime.image_sources == ()
 
 
@@ -62,6 +63,7 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
                 "workspace_root": str(workspace),
                 "products_csv": "inputs/products.csv",
                 "runs_root": "task-runs",
+                "folder_index_root": "machine-cache/folders",
                 "image_sources": [
                     {"label": "NAS", "path": r"X:\\company-media"}
                 ],
@@ -76,7 +78,22 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
     assert runtime.products.path == (workspace / "inputs" / "products.csv").resolve()
     assert runtime.products.status == "missing"
     assert runtime.runs_root == (workspace / "task-runs").resolve()
+    assert runtime.folder_index_root == (
+        workspace / "machine-cache" / "folders"
+    ).resolve()
     assert runtime.image_sources[0]["path"] == r"X:\company-media"
+
+
+def test_folder_index_root_can_be_overridden_by_environment(tmp_path):
+    workspace = make_workspace(tmp_path)
+    shared_index = tmp_path / "shared-folder-index"
+
+    runtime = load_runtime_config(
+        environ={"TMALL_FOLDER_INDEX_ROOT": str(shared_index)},
+        start=workspace,
+    )
+
+    assert runtime.folder_index_root == shared_index.resolve()
 
 
 def test_missing_explicit_config_fails_with_precise_error(tmp_path):

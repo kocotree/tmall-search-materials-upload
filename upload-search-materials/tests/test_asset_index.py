@@ -19,12 +19,14 @@ from upload_search_materials.asset_index_store import (
     PathMatchRecord,
 )
 from upload_search_materials.asset_index import (
+    bind_confirmed_folder_matches,
     IncrementalAssetIndexer,
     IndexOptions,
     NamedRoot,
     ScanOutcome,
 )
 from upload_search_materials.asset_matching import PathMatch
+from upload_search_materials.models import ProductRecord
 
 
 class Matcher:
@@ -87,6 +89,41 @@ def test_unmatched_broken_image_is_fast_indexed_without_inspection(tmp_path, mon
     assert store.file_count() == 1
     record = store.file_record(file_ids(store)[0])
     assert record["sha256"] == "" and record["validation_status"] == "not_inspected"
+    store.close()
+
+
+def test_confirmed_folder_binding_inspects_and_matches_root_level_images(tmp_path):
+    root = tmp_path / "confirmed-product-folder"
+    root.mkdir()
+    make_image(root / "a.jpg")
+    store, indexer = make_indexer(tmp_path, root)
+
+    outcome = indexer.run("new")
+    assert outcome.matched == 0
+
+    binding = bind_confirmed_folder_matches(
+        store,
+        [ProductRecord("123", sku="SKU-123", title="Confirmed product")],
+        [
+            {
+                "decision": "confirmed",
+                "folder_path": str(root.resolve()),
+                "product_id": "123",
+            }
+        ],
+    )
+
+    assert binding == {
+        "bound_roots": 1,
+        "bound_files": 1,
+        "inspection_failures": 0,
+    }
+    file_id = file_ids(store)[0]
+    record = store.file_record(file_id)
+    assert record["validation_status"] == "valid"
+    assert record["sha256"]
+    assert store.matches_for(file_id)[0]["product_id"] == "123"
+    assert store.database_statistics()["matched_files"] == 1
     store.close()
 
 

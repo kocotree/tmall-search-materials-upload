@@ -1219,6 +1219,59 @@ def test_index_assets_cli_writes_sqlite_csv_json_and_never_uses_browser(
     assert boundary_calls == []
 
 
+def test_index_assets_cli_binds_confirmed_root_from_interaction_input(tmp_path):
+    products = tmp_path / "products.csv"
+    _write_index_products(products)
+    root = tmp_path / "confirmed-product-folder"
+    root.mkdir()
+    Image.new("RGB", (400, 400), color="white").save(root / "a.png")
+    decisions = tmp_path / "input.json"
+    decisions.write_text(
+        json.dumps(
+            {
+                "values": {
+                    "folder_decisions": [
+                        {
+                            "decision": "confirmed",
+                            "folder_path": str(root.resolve()),
+                            "product_id": "123",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "index-output"
+
+    exit_code = main(
+        _index_assets_args(
+            products,
+            root,
+            output,
+            "--folder-decisions",
+            str(decisions),
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads(
+        (output / "scan-summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["matched"] == 1
+    assert summary["confirmed_folder_binding"] == {
+        "bound_roots": 1,
+        "bound_files": 1,
+        "inspection_failures": 0,
+    }
+    with (output / "match-candidates.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows[0]["product_id"] == "123"
+    assert rows[0]["hashes_complete"] == "true"
+
+
 def test_prepare_gallery_cli_reads_index_and_material_gap_without_browser(
     tmp_path,
 ):
@@ -1262,8 +1315,9 @@ def test_prepare_gallery_cli_reads_index_and_material_gap_without_browser(
             "product_id": "123",
             "product_title": "Hat",
             "missing_materials": 2,
-            "images_per_material": 3,
-            "required_images": 6,
+            "slot_image_min": 3,
+            "slot_image_max": 9,
+            "slot_planning_stage": "slots_copy",
         }
     ]
     assert gallery["asset_candidates"][0]["source_path"] == str(

@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 
 from .approval import create_manifest, render_review_html, verify_manifest
 from .asset_index import (
+    bind_confirmed_folder_matches,
     IncrementalAssetIndexer,
     IndexOptions,
     NamedRoot,
@@ -49,11 +50,16 @@ from .browser.session import (
 from .browser.upload_page import upload_approved_item
 from .browser.verifier import verify_remote_item
 from .copywriting import generate_and_validate_copy
+from .confirmed_assets import (
+    build_confirmed_folder_gallery,
+    extract_folder_decisions,
+)
 from .eligibility import collect_titles_by_product, evaluate_all, load_monthly_rules
 from .folder_index import (
     build_folder_review_data,
     build_folder_index,
     rematch_folder_index,
+    snapshot_folder_candidates,
     write_folder_candidates,
 )
 from .io_tables import (
@@ -67,6 +73,7 @@ from .io_tables import (
 from .interaction.session import SessionStore
 from .interaction.stages import STAGES
 from .interaction.web import create_app
+from .image_review import prepare_image_review_session
 from .material_state import (
     build_completeness_matrix,
     merge_material_state,
@@ -83,6 +90,7 @@ from .reporting import (
 )
 from .runtime_config import load_runtime_config
 from .state_store import StateStore
+from .slot_planning import prepare_slot_board_session
 from .tasks import build_material_items, build_product_tasks
 
 
@@ -850,11 +858,6 @@ def _prepare_gallery(args) -> int:
         if args.license_decisions
         else []
     )
-    alias_decisions = (
-        read_json(Path(args.alias_decisions))
-        if args.alias_decisions
-        else []
-    )
     remote_fingerprints = (
         read_json(Path(args.remote_fingerprints))
         if args.remote_fingerprints
@@ -866,10 +869,86 @@ def _prepare_gallery(args) -> int:
             status_rows,
             images_per_material=args.images_per_material,
             license_decisions=license_decisions,
-            alias_decisions=alias_decisions,
             remote_sha256_by_product=remote_fingerprints,
         )
     write_json(Path(args.output), data)
+    return 0
+
+
+def _prepare_confirmed_gallery(args) -> int:
+    try:
+        output_path = Path(args.output)
+        products = read_product_csv(Path(args.products))
+        with Path(args.status).open(
+            "r",
+            encoding="utf-8-sig",
+            newline="",
+        ) as stream:
+            status_rows = list(csv.DictReader(stream))
+        decisions = extract_folder_decisions(read_json(Path(args.input)))
+        data = build_confirmed_folder_gallery(
+            products,
+            status_rows,
+            decisions,
+            candidate_limit=args.candidate_limit,
+            page_size=args.page_size,
+            sampling_seed=output_path.parent.parent.name,
+            preview_dir=output_path.parent / "preview-cache",
+        )
+        write_json(output_path, data)
+        return 0
+    except (OSError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
+def _prepare_image_review(args) -> int:
+    try:
+        context = prepare_image_review_session(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            policy_path=Path(args.policy),
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if args.output:
+        write_json(Path(args.output), context)
+    print(
+        json.dumps(
+            {
+                "session_id": args.session,
+                "selected_count": context["data"]["selected_count"],
+                "reviewable_count": context["data"]["reviewable_count"],
+                "policy_sha256": context["data"]["policy_sha256"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def _prepare_slot_board(args) -> int:
+    try:
+        context = prepare_slot_board_session(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if args.output:
+        write_json(Path(args.output), context)
+    print(
+        json.dumps(
+            {
+                "session_id": args.session,
+                "product_count": len(context["data"]["products"]),
+                "blocked_output_count": len(context["data"]["blocked_outputs"]),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -1081,8 +1160,42 @@ def _index_assets(args) -> int:
             )
             return 1
 
+        binding_summary = None
+        if args.folder_decisions:
+            decisions_payload = read_json(Path(args.folder_decisions))
+            if isinstance(decisions_payload, dict):
+                values = decisions_payload.get("values")
+                decisions_payload = (
+                    values.get("folder_decisions")
+                    if isinstance(values, dict)
+                    else decisions_payload.get("folder_decisions")
+                )
+            if not isinstance(decisions_payload, list):
+                raise ValueError(
+                    "folder decisions must be a JSON list or an input object "
+                    "containing values.folder_decisions"
+                )
+            binding_summary = bind_confirmed_folder_matches(
+                store,
+                products,
+                decisions_payload,
+            )
+            outcome = ScanOutcome(
+                complete=outcome.complete,
+                partial_failure=(
+                    outcome.partial_failure
+                    or binding_summary["inspection_failures"] > 0
+                ),
+                discovered=outcome.discovered,
+                indexed=outcome.indexed,
+                matched=binding_summary["bound_files"],
+                failed=outcome.failed + binding_summary["inspection_failures"],
+                elapsed_seconds=outcome.elapsed_seconds,
+                scan_id=outcome.scan_id,
+            )
+
         write_match_candidates(store, output / "match-candidates.csv")
-        write_scan_summary(
+        summary = write_scan_summary(
             store,
             outcome,
             output / "scan-summary.json",
@@ -1090,6 +1203,12 @@ def _index_assets(args) -> int:
             products_sha256,
             product_validation,
         )
+        if binding_summary is not None:
+            summary["confirmed_folder_binding"] = binding_summary
+            summary["folder_decisions_path"] = str(
+                Path(args.folder_decisions).resolve()
+            )
+            write_json(output / "scan-summary.json", summary)
         return 1 if outcome.partial_failure else 0
     except (IndexIdentityError, SchemaError, sqlite3.DatabaseError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
@@ -1177,11 +1296,39 @@ def _prepare_folder_review(args) -> int:
         )
         if not isinstance(decisions, list):
             raise ValueError("文件夹决定 JSON 必须是数组")
+        exact_folder_queries = []
+        for raw_query in args.exact_folder or ():
+            product_id, separator, folder_name = raw_query.partition("=")
+            if not separator or not product_id.strip() or not folder_name.strip():
+                raise ValueError(
+                    "精确文件夹查询必须使用 PRODUCT_ID=FOLDER_NAME 格式"
+                )
+            exact_folder_queries.append(
+                {
+                    "product_id": product_id.strip(),
+                    "folder_name": folder_name.strip(),
+                }
+            )
         data = build_folder_review_data(
             Path(args.candidates),
             decisions=decisions,
+            exact_folder_queries=exact_folder_queries,
         )
         write_json(Path(args.output), data)
+        return 0
+    except (OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
+def _snapshot_folder_candidates(args) -> int:
+    try:
+        summary = snapshot_folder_candidates(
+            Path(args.candidates),
+            Path(args.output),
+            args.product_id,
+        )
+        print(json.dumps(summary, ensure_ascii=False))
         return 0
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
@@ -1307,6 +1454,14 @@ def build_parser() -> argparse.ArgumentParser:
     index_assets.add_argument("--output", required=True, metavar="DIR")
     index_assets.add_argument("--partition-depth", type=int, default=2)
     index_assets.add_argument("--checkpoint-size", type=int, default=1000)
+    index_assets.add_argument(
+        "--folder-decisions",
+        metavar="JSON",
+        help=(
+            "Bind indexed roots to products using reviewed folder decisions "
+            "instead of heuristic path matching"
+        ),
+    )
     index_mode = index_assets.add_mutually_exclusive_group()
     index_mode.add_argument("--resume", action="store_true")
     index_mode.add_argument("--refresh", action="store_true")
@@ -1330,6 +1485,24 @@ def build_parser() -> argparse.ArgumentParser:
     folder_review.add_argument("--candidates", required=True, metavar="CSV")
     folder_review.add_argument("--output", required=True, metavar="JSON")
     folder_review.add_argument("--decisions", metavar="JSON")
+    folder_review.add_argument(
+        "--exact-folder",
+        action="append",
+        metavar="PRODUCT_ID=FOLDER_NAME",
+        help=(
+            "Add a run-scoped exact folder-name query without recording "
+            "a reusable alias"
+        ),
+    )
+    folder_snapshot = subparsers.add_parser(
+        "snapshot-folder-candidates",
+        help="Copy selected products from the machine-shared folder candidate cache",
+    )
+    folder_snapshot.add_argument("--candidates", required=True, metavar="CSV")
+    folder_snapshot.add_argument(
+        "--product-id", action="append", required=True, metavar="ID"
+    )
+    folder_snapshot.add_argument("--output", required=True, metavar="CSV")
     prepare_gallery = subparsers.add_parser(
         "prepare-gallery",
         help="Build deterministic visual-review candidates from an asset index",
@@ -1344,8 +1517,46 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
     )
     prepare_gallery.add_argument("--license-decisions", metavar="JSON")
-    prepare_gallery.add_argument("--alias-decisions", metavar="JSON")
     prepare_gallery.add_argument("--remote-fingerprints", metavar="JSON")
+    confirmed_gallery = subparsers.add_parser(
+        "prepare-confirmed-gallery",
+        help="Build a bounded task-local gallery from reviewed folders",
+    )
+    confirmed_gallery.add_argument("--products", required=True, metavar="CSV")
+    confirmed_gallery.add_argument("--status", required=True, metavar="CSV")
+    confirmed_gallery.add_argument(
+        "--input",
+        required=True,
+        metavar="JSON",
+        help="Submitted asset-matching input containing folder_decisions",
+    )
+    confirmed_gallery.add_argument("--output", required=True, metavar="JSON")
+    confirmed_gallery.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=100,
+        choices=range(1, 101),
+    )
+    confirmed_gallery.add_argument(
+        "--page-size",
+        type=int,
+        default=30,
+    )
+    image_review = subparsers.add_parser(
+        "prepare-image-review",
+        help="Prepare task-local stage-four image compliance and crop context",
+    )
+    image_review.add_argument("--runs-root", required=True, metavar="DIR")
+    image_review.add_argument("--session", required=True)
+    image_review.add_argument("--policy", required=True, metavar="YAML")
+    image_review.add_argument("--output", metavar="JSON")
+    slot_board = subparsers.add_parser(
+        "prepare-slot-board",
+        help="Prepare stage-five slots from confirmed stage-four outputs",
+    )
+    slot_board.add_argument("--runs-root", required=True, metavar="DIR")
+    slot_board.add_argument("--session", required=True)
+    slot_board.add_argument("--output", metavar="JSON")
     return parser
 
 
@@ -1382,8 +1593,16 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _index_folders(args)
     if args.command == "prepare-folder-review":
         return _prepare_folder_review(args)
+    if args.command == "snapshot-folder-candidates":
+        return _snapshot_folder_candidates(args)
     if args.command == "prepare-gallery":
         return _prepare_gallery(args)
+    if args.command == "prepare-confirmed-gallery":
+        return _prepare_confirmed_gallery(args)
+    if args.command == "prepare-image-review":
+        return _prepare_image_review(args)
+    if args.command == "prepare-slot-board":
+        return _prepare_slot_board(args)
     raise AssertionError(args.command)
 
 
