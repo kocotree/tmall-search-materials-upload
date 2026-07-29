@@ -1,5 +1,22 @@
 # 错误处理与恢复规则
 
+## 前端启动与交互路由
+
+| 原因码 | 阻断范围 | 恢复 |
+|---|---|---|
+| `UI_START_FAILED` | 当前 UI 启动 | 查看 session 日志并运行精确 `ui-restart` |
+| `UI_UNREACHABLE` | 当前 UI 连接 | 先运行 `ui-status`，再恢复同一 session |
+| `BROWSER_OPEN_FAILED` | 只影响自动打开浏览器 | 服务保持可用，手动打开精确 URL |
+| `SERVICE_OWNERSHIP_MISMATCH` | stop/restart | 不结束该 PID；检查 PID 复用或陈旧状态 |
+| `SYSTEM_PERMISSION_REQUIRED` | 运行环境准备 | 只请求安装 uv 或所需系统权限 |
+| `LOGIN_INTERACTION_REQUIRED` | 天猫原生登录 | 用户完成登录、验证码或扫码；不保存凭据 |
+| `SCHEMA_GAP` | 缺少的页面字段 | 生成 `frontend-gap.json`，不得永久保存自由文本旁路 |
+| `FALLBACK_REASON_REQUIRED` | 聊天降级写入 | 先取得真实、允许的稳定原因码 |
+| `FRONTEND_REQUIRED` | 指定业务字段 | 回到对应页面完成 |
+| `FALLBACK_VALIDATION_FAILED` | 当前降级草稿/提交 | 按相同字段 schema 修正，不生成 handoff |
+
+缺少店铺、月份、图片根目录、NAS 当前不可访问或未登录不是启动错误。
+
 ## 确定性编排
 
 - `SLOT_AI_PLANNING_REMOVED`：新任务请求了坑位 AI；继续使用自动草稿或人工编辑。

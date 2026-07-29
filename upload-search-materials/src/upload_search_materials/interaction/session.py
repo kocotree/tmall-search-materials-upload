@@ -252,6 +252,7 @@ class SessionStore:
         *,
         expected_revision: int | None = None,
         allowed_current_statuses: frozenset[str] | set[str] | None = None,
+        interaction_audit: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._stage_index(stage_id)
         with self._session_lock(session_id):
@@ -267,6 +268,9 @@ class SessionStore:
             if expected_revision is not None and expected_revision != revision:
                 raise InteractionConflict("expected revision is stale")
             created_at = self._iso_timestamp(datetime.now(timezone.utc))
+            interaction_history = self._next_interaction_history(
+                stage_path, interaction_audit
+            )
 
             self._invalidate_after_edit(session_id, stage_id, state)
             input_document = {
@@ -278,6 +282,7 @@ class SessionStore:
                 "submitted_at": created_at,
                 "values": values,
                 "user_notes": user_notes,
+                "interaction_history": interaction_history,
             }
             input_path = stage_path / "input.json"
             self._write_json_atomic(input_path, input_document)
@@ -314,6 +319,7 @@ class SessionStore:
         user_notes: str = "",
         *,
         expected_revision: int,
+        interaction_audit: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist an editable revision and atomically revoke its handoff."""
 
@@ -326,6 +332,9 @@ class SessionStore:
                 raise InteractionConflict("expected revision is stale")
             revision = int(stage_state["revision"]) + 1
             created_at = self._iso_timestamp(datetime.now(timezone.utc))
+            interaction_history = self._next_interaction_history(
+                stage_path, interaction_audit
+            )
 
             self._invalidate_after_edit(
                 session_id, stage_id, state, remove_current_handoff=True
@@ -339,6 +348,7 @@ class SessionStore:
                 "submitted_at": created_at,
                 "values": values,
                 "user_notes": user_notes,
+                "interaction_history": interaction_history,
             }
             self._write_json_atomic(stage_path / "input.json", document)
             self._write_revision_snapshot(stage_path, revision, "input", document)
@@ -496,6 +506,24 @@ class SessionStore:
             )
             return document
 
+    def _next_interaction_history(
+        self,
+        stage_path: Path,
+        interaction_audit: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        history: list[dict[str, Any]] = []
+        current_path = stage_path / "input.json"
+        if current_path.is_file():
+            current = self._read_json(current_path, "input")
+            existing = current.get("interaction_history", [])
+            if isinstance(existing, list):
+                history = [
+                    dict(item) for item in existing if isinstance(item, dict)
+                ]
+        if interaction_audit:
+            history.append(dict(interaction_audit))
+        return history
+
     def wait_for_handoff(
         self,
         session_id: str,
@@ -547,11 +575,20 @@ class SessionStore:
         stage_path = self._stage_path(session_id, stage_id)
         state = self.load_session(session_id)
         revision = state["stages"][stage_id]["revision"]
+        ui_first = (
+            "First run the managed UI launcher with this exact runs_root and "
+            "session_id, open the returned current-stage URL, and wait for its "
+            "handoff. Do not ask for store, month, image roots, or other "
+            "structured fields in chat while the page is available. Chat "
+            "fallback requires an allowed recorded reason code. "
+        )
         if (
             state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
             and stage_id == "slots_copy"
         ):
             return (
+                ui_first
+                +
                 "Continue upload-search-materials without creating a new session. "
                 f"Use session_id='{session_id}', stage_id='slots_copy', "
                 f"revision={revision}, runs_root='{self._runs_root}'. "
@@ -562,6 +599,8 @@ class SessionStore:
                 "edits; only final copywriting may create an Agent request."
             )
         return (
+            ui_first
+            +
             "Continue upload-search-materials without creating a new session. "
             f"Use session_id='{session_id}', stage_id='{stage_id}', revision={revision}, "
             f"runs_root='{self._runs_root}'. "

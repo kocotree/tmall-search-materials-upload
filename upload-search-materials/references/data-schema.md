@@ -1,5 +1,15 @@
 # 数据结构
 
+## Managed UI Service
+
+每个精确 session 可有一个 `.ui-service.json`，记录 schema version、session ID、runs root、PID、ownership token、loopback 端口、精确 URL、stdout/stderr 日志、启动/检查时间、健康状态、session 可读状态和浏览器打开状态。对外 CLI 结果不返回 ownership token；浏览器失败与服务失败分开记录。
+
+## Interaction Policy 与聊天降级
+
+阶段和字段 API 返回 `component`、`interaction_policy=frontend_required|frontend_preferred|chat_fallback` 和 `fallback_reason_codes`。聊天降级值仍写入阶段 `input.json.values`；`interaction_history[]` 保存 channel、reason、detail、actor、时间、session、stage、base revision 和输入 SHA。前端后续修改必须保留历史。
+
+批准与生产确认另外保存 `safety_checklist_sha256` 和参与哈希的字段名。未知 schema 字段不得写入 `values`，只生成 `frontend-gap.json`。
+
 ## Selected-asset preflight 与确定性坑位草稿
 
 新任务在 `03-asset-matching/selected-asset-preflight.json` 保存当前选图

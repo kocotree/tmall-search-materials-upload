@@ -3421,7 +3421,16 @@
         result: payload.result,
         submission: payload.submission,
       });
-      if (payload.input) hydrateForm(activeForm(), payload.input.values);
+      if (payload.input) {
+        hydrateForm(activeForm(), payload.input.values);
+        const fallbackHistory = payload.input.interaction_history || [];
+        const latestFallback = fallbackHistory[fallbackHistory.length - 1];
+        if (latestFallback?.interaction_channel === "chat_fallback") {
+          actionMessage.textContent =
+            `已载入 Codex 对话保底数据（${latestFallback.fallback_reason_code}），` +
+            "可在本页继续检查和修改。";
+        }
+      }
       renderStatus();
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);

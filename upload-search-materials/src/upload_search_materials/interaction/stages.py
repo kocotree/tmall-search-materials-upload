@@ -3,6 +3,26 @@
 from dataclasses import dataclass
 
 
+INTERACTION_POLICIES = frozenset(
+    {"frontend_required", "frontend_preferred", "chat_fallback"}
+)
+FALLBACK_REASON_CODES = frozenset(
+    {
+        "UI_START_FAILED",
+        "UI_UNREACHABLE",
+        "BROWSER_OPEN_FAILED",
+        "SYSTEM_PERMISSION_REQUIRED",
+        "LOGIN_INTERACTION_REQUIRED",
+        "SCHEMA_GAP",
+    }
+)
+UI_FALLBACK_REASONS = (
+    "UI_START_FAILED",
+    "UI_UNREACHABLE",
+    "BROWSER_OPEN_FAILED",
+)
+
+
 @dataclass(frozen=True)
 class FieldDefinition:
     """A user-visible field that a stage renderer can turn into a control."""
@@ -16,6 +36,8 @@ class FieldDefinition:
     exclusive_with: tuple[str, ...] = ()
     required_before_stage: str | None = None
     enabled_when: str | None = None
+    interaction_policy: str = "frontend_required"
+    fallback_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -39,6 +61,7 @@ class StageDefinition:
     read_only: bool = False
     visible: bool = True
     exactly_one_constraints: tuple[ExactlyOneConstraint, ...] = ()
+    interaction_policy: str = "frontend_required"
 
 
 def _field(
@@ -52,7 +75,14 @@ def _field(
     exclusive_with: tuple[str, ...] = (),
     required_before_stage: str | None = None,
     enabled_when: str | None = None,
+    interaction_policy: str = "frontend_required",
+    fallback_reason_codes: tuple[str, ...] = (),
 ) -> FieldDefinition:
+    if interaction_policy not in INTERACTION_POLICIES:
+        raise ValueError(f"unsupported interaction policy: {interaction_policy}")
+    unknown_reasons = set(fallback_reason_codes) - FALLBACK_REASON_CODES
+    if unknown_reasons:
+        raise ValueError(f"unsupported fallback reason codes: {sorted(unknown_reasons)}")
     return FieldDefinition(
         name=name,
         label=label,
@@ -63,6 +93,8 @@ def _field(
         exclusive_with=exclusive_with,
         required_before_stage=required_before_stage,
         enabled_when=enabled_when,
+        interaction_policy=interaction_policy,
+        fallback_reason_codes=fallback_reason_codes,
     )
 
 
@@ -72,6 +104,7 @@ STAGES: tuple[StageDefinition, ...] = (
         title="任务配置",
         description="确认店铺和月份；后台全量采集“搜推高价值”，商品在第二阶段选择。",
         component="setup_form",
+        interaction_policy="frontend_preferred",
         fields=(
             _field(
                 "store",
@@ -79,19 +112,44 @@ STAGES: tuple[StageDefinition, ...] = (
                 "text",
                 required=True,
                 help_text="由 Agent 从已登录页面识别；用户核对页面可见店铺名",
+                interaction_policy="frontend_preferred",
+                fallback_reason_codes=UI_FALLBACK_REASONS,
             ),
             _field(
                 "store_confirmed",
                 "确认当前页面店铺与目标店铺一致",
                 "checkbox",
                 required=True,
+                interaction_policy="frontend_preferred",
+                fallback_reason_codes=UI_FALLBACK_REASONS,
             ),
-            _field("month", "目标月份", "month", required=True),
+            _field(
+                "month",
+                "目标月份",
+                "month",
+                required=True,
+                interaction_policy="frontend_preferred",
+                fallback_reason_codes=UI_FALLBACK_REASONS,
+            ),
             _field("products_csv", "商品表", "auto_path", required=True),
             _field("rules_csv", "规则表", "auto_path", required=True),
             _field("folder_index_root", "共享文件夹索引", "auto_path"),
-            _field("image_source_labels", "图片源名称", "auto_path_list", required=True),
-            _field("image_roots", "图片源根目录", "auto_path_list", required=True),
+            _field(
+                "image_source_labels",
+                "图片源名称",
+                "auto_path_list",
+                required=True,
+                interaction_policy="frontend_preferred",
+                fallback_reason_codes=UI_FALLBACK_REASONS,
+            ),
+            _field(
+                "image_roots",
+                "图片源根目录",
+                "auto_path_list",
+                required=True,
+                interaction_policy="frontend_preferred",
+                fallback_reason_codes=UI_FALLBACK_REASONS,
+            ),
             _field(
                 "asset_manifest",
                 "人工图片素材清单",
@@ -213,13 +271,14 @@ STAGES: tuple[StageDefinition, ...] = (
         title="精确任务授权",
         description="选择精确任务 ID，并记录批准人、时间、有效期和确认。",
         component="approval_table",
+        interaction_policy="frontend_preferred",
         previous_stage="dry_run",
         fields=(
-            _field("task_ids", "精确任务 ID", "multi_select", required=True),
-            _field("confirmed_by", "批准人", "text", required=True),
-            _field("confirmed_at", "批准时间", "datetime", required=True),
-            _field("valid_until", "有效期", "datetime", required=True),
-            _field("acknowledgement", "确认授权", "checkbox", required=True),
+            _field("task_ids", "精确任务 ID", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("confirmed_by", "批准人", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("confirmed_at", "批准时间", "datetime", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("valid_until", "有效期", "datetime", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("acknowledgement", "确认授权", "checkbox", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
         ),
     ),
     StageDefinition(
@@ -227,15 +286,16 @@ STAGES: tuple[StageDefinition, ...] = (
         title="生产确认",
         description="核对店铺、商品、坑位、任务和批准清单哈希并生成交接。",
         component="production_confirmation",
+        interaction_policy="frontend_preferred",
         previous_stage="approval",
         fields=(
-            _field("store", "目标店铺", "text", required=True),
-            _field("product_ids", "商品 ID", "multi_select", required=True),
-            _field("task_ids", "精确任务 ID", "multi_select", required=True),
-            _field("slot_ids", "目标坑位", "multi_select", required=True),
-            _field("max_products", "最大商品数", "number", required=True),
-            _field("approval_manifest_sha256", "批准清单哈希", "text", required=True),
-            _field("final_confirmation", "最终确认", "checkbox", required=True),
+            _field("store", "目标店铺", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("product_ids", "商品 ID", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("task_ids", "精确任务 ID", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("slot_ids", "目标坑位", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("max_products", "最大商品数", "number", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("approval_manifest_sha256", "批准清单哈希", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("final_confirmation", "最终确认", "checkbox", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
             _field("notes", "备注", "textarea"),
         ),
     ),

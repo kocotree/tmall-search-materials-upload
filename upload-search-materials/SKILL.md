@@ -1,10 +1,30 @@
 ---
 name: upload-search-materials
-description: Use when preparing, validating, reviewing, publishing, resuming, or auditing Tmall search-recommendation image-text and video materials from product CSV, backend XLSX, Playwright page state, and local or NAS media sources.
+description: Use when starting, configuring, testing, preparing, validating, reviewing, resuming, auditing, dry-running, approving, publishing, or uploading Tmall search-recommendation materials. Always start or resume the managed interaction UI before requesting structured business inputs such as store, month, image-source roots, product choices, media decisions, slots, copy, approval, or production confirmation in chat.
 ---
 # Upload Search Materials
 
 ## Overview
+
+## 前端优先启动与交互路由（每次触发首先执行）
+
+1. 完整读取本文件后，从 Skill 目录执行 `scripts/start-ui.cmd`；恢复任务时必须传精确 `-Session` 和需要时的 `-RunsRoot`。该命令在后台启动服务、轮询健康状态并及时返回 JSON，不会像前台 `interact` 一样长期占用调用终端。
+2. 启动成功后，优先用 Codex 内置浏览器打开 JSON 中的精确 `url`。内置浏览器不可用时才传 `-OpenSystemBrowser` 或把 URL 交给用户。浏览器失败不等于服务失败。
+3. 新任务没有店铺、月份、图片源、NAS 映射或登录状态时仍须先打开阶段一页面；这些都是页面字段或后续原生登录动作，不是启动阻断。
+4. 每一阶段先打开当前页面并等待精确 handoff。结构化配置和人工决定不得先在聊天中索取。
+5. 只有启动器/API 返回允许的稳定原因码后，才能对声明为 `frontend_preferred` 的字段使用 `tmall-materials chat-fallback`；写入仍绑定同一 session、stage、revision、schema 和审计历史。页面恢复后立即回到页面。
+6. 安装 uv 或系统运行权限可在 UI 前通过聊天申请；店铺/NAS 等业务值不可以。批准和生产确认即使降级也必须使用精确清单与哈希，模糊的“全部继续”无效。
+
+日常状态与恢复：
+
+```powershell
+scripts\start-ui.cmd
+tmall-materials ui-status --runs-root <runs-root> --session <session-id>
+tmall-materials ui-restart --runs-root <runs-root> --session <session-id>
+tmall-materials ui-stop --runs-root <runs-root> --session <session-id>
+```
+
+`tmall-materials interact` 只用于前台调试，不是日常入口。完整原因码、字段路由、聊天降级信封和跨电脑约束见 [frontend-interaction-contract.md](references/frontend-interaction-contract.md)；长命令见 [operations-guide.md](references/operations-guide.md)。
 
 ## 执行模式契约（每一阶段必读）
 
@@ -39,13 +59,13 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 将商品、月度规则、天猫后台状态和已授权素材转换成可恢复、可审计的商品级与坑位级任务。默认只运行 `dry-run`；正式发布仅接受当前批次不可变批准清单，并使用用户已登录会话中的 Playwright DOM 操作。
 
-## 启动契约（必须遵守）
+## 启动契约（兼容说明）
 
 把“运行环境准备”和“阶段 1 业务配置”严格分开：
 
 1. 启动前只检查运行条件：当前 Skill 目录、可执行的既有 `.venv`，或用于创建环境的 `uv`。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
 2. 不得在配置页启动前通过聊天索取店铺名、月份、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
-3. 先创建时间戳会话并运行 `tmall-materials interact`。即使尚未配置店铺或图片源，交互页面也必须正常打开。
+3. 先通过 `scripts/start-ui.cmd` 创建时间戳会话并运行受管 UI；`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
 4. 让用户在阶段 1 配置页填写并确认店铺、月份和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
 5. setup handoff 尚未提交时，只等待页面提交或提供恢复指令；不得自行采集、索引、dry-run、上传或发布。
 

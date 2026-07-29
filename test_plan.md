@@ -1,5 +1,30 @@
 # Upload Search Materials 测试计划
 
+## 前端优先交互与受管启动器增量测试（2026-07-29）
+
+- [ ] fresh repository context 能发现 `$upload-search-materials`，并在业务动作前完整读取 canonical Skill。
+- [ ] “开始上传素材”“继续旧 session”“页面打不开”三类 fresh-context 任务的首个业务交互是页面或精确 UI 恢复动作，不询问店铺/NAS 路径。
+- [x] `scripts/start-ui.cmd` 后台启动、健康轮询并及时返回 JSON；重复启动同一健康 session 不产生第二服务。
+- [x] 默认端口占用时选择受控范围下一端口，不结束未知进程；提前退出、迟启动和超时返回稳定原因与日志。
+- [x] `ui-status/ui-stop/ui-restart` 绑定精确 session；PID 或 ownership token 不匹配时拒绝结束进程。
+- [x] 服务健康但浏览器失败时返回 `BROWSER_OPEN_FAILED` 和精确 URL，不误报服务失败。
+- [x] 每个阶段和字段 API 返回 component、interaction policy 和允许原因码；未声明结构化字段默认 `frontend_required`。
+- [x] 有效聊天保底写入相同 `input.json`、revision 和 handoff 管道；无原因、错误字段、frontend-required 字段和陈旧 revision 均拒绝。
+- [x] 页面恢复后显示聊天保底来源；`SCHEMA_GAP` 只生成补充任务，不把未知自由文本写入业务值。
+- [x] 普通屏与窄屏检查全部阶段字段可见、可输入、可恢复，不存在只能在聊天完成的结构化决定。
+- [x] 批准与生产确认保持精确 task、店铺、坑位、有效期和哈希门禁；“全部继续”无效。
+- [x] 测试全过程不调用真实 `approve`、`publish` 或素材上传。
+
+建议命令：
+
+```powershell
+uv run --directory .\upload-search-materials --locked pytest -q --basetemp ..\test_evidence\frontend-first\pytest-temp
+node --test .\upload-search-materials\tests\ui_state.test.cjs
+uv run --project .\upload-search-materials --locked python .\upload-search-materials\scripts\validate_skill_entry.py --repository-root .
+$env:PYTHONUTF8='1'; uv run --project .\upload-search-materials --locked python "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .\upload-search-materials
+openspec validate make-skill-interactions-frontend-first --strict
+```
+
 ## 确定性坑位编排增量测试（2026-07-28）
 
 - [ ] 新任务显示 8 个阶段，不出现独立图片适用性阶段；旧任务仍可读取该阶段。
@@ -419,7 +444,7 @@ uv run --project .\upload-search-materials --locked tmall-materials report --run
 
 ## 阶段 8：更新文档和发布状态
 
-**状态：** 进行中（Skill validator 与 5/5 Skill GREEN 场景已有证据；最终状态待前序阶段）
+**状态：** 进行中（2026-07-29 已完成前端优先交互、受管 UI 启动器、聊天降级审计和普通/窄屏自动验收；全量 `526 passed, 2 skipped`、Node `17 passed`、Skill validator、OpenSpec strict、`uv lock --check` 和 `git diff --check` 通过。真实生产小批量仍待用户另行授权。）
 
 **目标：** 让文档准确反映测试证据，不提前宣称生产可用。
 
@@ -453,7 +478,7 @@ git diff -- test_plan.md upload-search-materials plan.md
 | 5. 生产选择器 | 未开始 | `test_evidence/05-selectors/` |
 | 6. 全量 dry-run | 未开始 | `test_evidence/06-dry-run/` |
 | 7. 1–3 商品生产验收 | 阻断：等待再次授权 | `test_evidence/07-production-pilot/` |
-| 8. 文档和发布状态 | 进行中 | Skill validator 与 `5/5 GREEN` 已确认；最终状态待前序阶段 |
+| 8. 文档和发布状态 | 进行中 | 前端优先变更的实现与非生产验收完成；真实生产小批量仍待用户授权 |
 
 ### 最终结论规则
 

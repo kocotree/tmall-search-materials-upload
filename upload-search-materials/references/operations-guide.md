@@ -67,6 +67,15 @@ uv run python -X utf8 $quickValidate .
 
 先创建时间戳会话并启动任务配置页，再让用户确认店铺、月份和本次图片源；不配置商品范围或搜推采集页数。缺少这些业务值不得阻止页面启动。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。搜推素材标记为“搜推高价值”全量自动采集；本分支不准备基础素材。人工图片素材清单和历史推广素材状态位于高级设置，日常执行保持为空。
 
+日常唯一推荐入口是：
+
+```powershell
+cd .\upload-search-materials
+.\scripts\start-ui.cmd
+```
+
+它返回精确 `session_id`、PID、端口、日志和 URL 的 JSON 后立即结束。Agent 优先用 Codex 内置浏览器打开 URL；只有内置浏览器不可用时才传 `-OpenSystemBrowser`。恢复任务时使用 `-Session "<session-id>" -RunsRoot "<runs-root>"`，不得猜测最新目录。`tmall-materials interact` 只保留为会持续占用终端的前台调试入口。
+
 Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
 
 - `inputs/`：复制商品表、规则表并生成输入清单与 SHA-256。
@@ -290,9 +299,19 @@ uv run tmall-materials report --run-dir "<最终审核批次目录>"
 新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
 
 ```powershell
-uv run --project .\upload-search-materials --locked tmall-materials interact
+.\upload-search-materials\scripts\start-ui.cmd
 uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --runs-root .\runs --session 20260721_143025 --stage asset_matching
 ```
+
+服务状态、恢复和停止：
+
+```powershell
+uv run --project .\upload-search-materials --locked tmall-materials ui-status --runs-root "<runs-root>" --session "<session-id>"
+uv run --project .\upload-search-materials --locked tmall-materials ui-restart --runs-root "<runs-root>" --session "<session-id>"
+uv run --project .\upload-search-materials --locked tmall-materials ui-stop --runs-root "<runs-root>" --session "<session-id>"
+```
+
+`.ui-service.json` 和 `logs/` 位于精确 session 目录。stop/restart 只管理健康端点返回 PID 和 ownership token 同时匹配的服务；端口被未知进程占用时选择 `8765–8795` 中的下一端口，不结束未知进程。
 
 Agent 按以下顺序处理每一阶段：
 
@@ -311,6 +330,19 @@ Agent 按以下顺序处理每一阶段：
 `wait-handoff` 只返回已验证的当前 handoff，并领取该阶段为 `processing`。当前九阶段流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。页面阶段 07/08 只保存输入并生成 handoff；它们不直接运行 `approve` 或 `publish`。这两个命令必须由 Agent 分开调用，且 1–3 个商品的生产测试需在当前对话再次获得用户显式授权。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
 若页面没有 Agent 心跳，或原 Codex 任务已结束，请用户把页面显示的恢复指令完整粘贴到新建或当前 Codex 任务。页面不会在后台继续执行 Agent，也无法唤醒已结束的任务。
+
+### 9.1 前端不可用时的受控聊天保底
+
+只有启动器或能力检查返回 [frontend-interaction-contract.md](frontend-interaction-contract.md) 中允许的稳定原因码，Agent 才能对 `frontend_preferred` 字段执行：
+
+```powershell
+uv run --project .\upload-search-materials --locked tmall-materials chat-fallback `
+  --runs-root "<runs-root>" --session "<session-id>" --stage setup `
+  --revision 0 --reason-code UI_START_FAILED `
+  --reason-detail "<实际失败说明>" --values-json "<当前阶段字段.json>"
+```
+
+默认只保存草稿；`--mode submit` 必须通过完整必填字段、revision 和安全校验才生成 handoff。页面恢复后应检查带“Codex 对话保底”来源的值。空店铺、空月份、空图片源、NAS 不可访问和未登录都不是 UI 失败。
 # 第四、第五阶段操作
 
 第三阶段已提交并由 Agent 写入 `completed` 结果后：

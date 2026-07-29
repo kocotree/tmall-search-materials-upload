@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
@@ -57,8 +58,15 @@ from ..runtime_config import (
 )
 from ..decision_modes import get_decision_boundary
 from .folder_picker import choose_directory
+from .fallback import safety_context
 from .session import InteractionConflict, InteractionPathError, SessionStore
-from .stages import STAGES, FieldDefinition, StageDefinition, get_stage
+from .stages import (
+    FALLBACK_REASON_CODES,
+    STAGES,
+    FieldDefinition,
+    StageDefinition,
+    get_stage,
+)
 
 
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
@@ -69,6 +77,7 @@ def create_app(
     runtime_config: RuntimeConfig | None = None,
     *,
     enforce_stage_order: bool = True,
+    service_identity: dict[str, Any] | None = None,
 ) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
@@ -164,6 +173,27 @@ def create_app(
     def api_index():
         return jsonify(service="upload-search-materials interaction API")
 
+    @app.get("/api/health")
+    def health():
+        identity = service_identity or {}
+        return jsonify(
+            service="upload-search-materials interaction API",
+            healthy=True,
+            pid=os.getpid(),
+            ownership_token=str(identity.get("ownership_token", "")),
+        )
+
+    @app.get("/api/health/sessions/<session_id>")
+    def session_health(session_id: str):
+        state = store.load_session(session_id)
+        return jsonify(
+            healthy=True,
+            readable=True,
+            session_id=session_id,
+            current_stage=state["current_stage"],
+            revision=state["stages"][state["current_stage"]]["revision"],
+        )
+
     @app.get("/api/runtime/image-sources")
     def get_runtime_image_sources():
         return jsonify(
@@ -232,6 +262,167 @@ def create_app(
             input=_current_input(store, session_id, stage, state),
             result=_current_result(store, session_id, stage_id, state),
             submission=_current_submission(store, session_id, stage_id, state),
+        )
+
+    @app.post("/api/sessions/<session_id>/stages/<stage_id>/chat-fallback")
+    def write_chat_fallback(session_id: str, stage_id: str):
+        payload = _json_object()
+        supplied_values = _values(payload)
+        state = store.load_session(session_id)
+        stage = get_stage(stage_id)
+        if state["stages"][stage_id]["status"] not in {
+            "draft",
+            "needs_user_input",
+            "blocked",
+        }:
+            raise InteractionConflict(
+                "stage status does not allow chat fallback"
+            )
+        reason_code = str(payload.get("reason_code", "")).strip()
+        reason_detail = str(payload.get("reason_detail", "")).strip()
+        actor = str(payload.get("actor", "codex-agent")).strip()
+        mode = str(payload.get("mode", "draft")).strip()
+        expected_revision = payload.get("revision")
+        if reason_code not in FALLBACK_REASON_CODES:
+            return _validation_error(
+                {"reason_code": "an allowed stable fallback reason is required"}
+            )
+        if not reason_detail:
+            return _validation_error({"reason_detail": "is required"})
+        if not actor:
+            return _validation_error({"actor": "is required"})
+        if mode not in {"draft", "submit"}:
+            return _validation_error({"mode": "must be draft or submit"})
+        if isinstance(expected_revision, bool) or not isinstance(
+            expected_revision, int
+        ):
+            return _validation_error({"revision": "must be an integer"})
+        if expected_revision != int(state["stages"][stage_id]["revision"]):
+            raise InteractionConflict("expected revision is stale")
+        if (
+            mode == "submit"
+            and stage.previous_stage
+            and state["stages"][stage.previous_stage]["status"]
+            != "completed"
+        ):
+            raise InteractionConflict(
+                f"complete previous stage '{stage.previous_stage}' first"
+            )
+
+        field_map = {field.name: field for field in stage.fields}
+        unknown = sorted(set(supplied_values) - set(field_map))
+        if unknown:
+            if reason_code == "SCHEMA_GAP":
+                store._write_json_atomic(
+                    store._stage_path(session_id, stage_id)
+                    / "frontend-gap.json",
+                    {
+                        "schema_version": 1,
+                        "session_id": session_id,
+                        "stage_id": stage_id,
+                        "revision": expected_revision,
+                        "reason_code": reason_code,
+                        "missing_fields": unknown,
+                        "detail": reason_detail,
+                        "created_at": datetime.now().astimezone().isoformat(),
+                        "status": "frontend_schema_task_required",
+                    },
+                )
+            return _validation_error(
+                {
+                    name: (
+                        "page schema does not support this field; "
+                        "frontend-gap.json was recorded"
+                    )
+                    for name in unknown
+                }
+            )
+        disallowed = {
+            name: "frontend is required for this field"
+            for name, field in field_map.items()
+            if name in supplied_values
+            and (
+                field.interaction_policy == "frontend_required"
+                or reason_code not in field.fallback_reason_codes
+            )
+        }
+        if disallowed:
+            return _validation_error(disallowed)
+
+        current = _current_input(store, session_id, stage, state)
+        merged = dict((current or {}).get("values", {}))
+        merged.update(supplied_values)
+        field_errors: dict[str, str] = {}
+        for name in supplied_values:
+            error = _field_error(field_map[name], merged.get(name), True)
+            if error:
+                field_errors[name] = error
+        if mode == "submit":
+            field_errors |= _value_errors(stage, merged)
+        if field_errors:
+            return _validation_error(field_errors)
+
+        value_sha = hashlib.sha256(
+            json.dumps(
+                merged,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        audit = {
+            "interaction_channel": "chat_fallback",
+            "fallback_reason_code": reason_code,
+            "fallback_detail": reason_detail,
+            "recorded_at": datetime.now().astimezone().isoformat(),
+            "recorded_by": actor,
+            "session_id": session_id,
+            "stage_id": stage_id,
+            "base_revision": expected_revision,
+            "input_sha256": value_sha,
+        }
+        if stage_id in {"approval", "production_confirmation"}:
+            checklist = safety_context(
+                store, session_id, stage_id, merged
+            )
+            audit["safety_checklist"] = checklist
+            audit["safety_checklist_sha256"] = hashlib.sha256(
+                json.dumps(
+                    checklist,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            audit["safety_checklist_fields"] = sorted(checklist)
+        if mode == "draft":
+            document = store.save_draft(
+                session_id,
+                stage_id,
+                merged,
+                _user_notes(payload),
+                expected_revision=expected_revision,
+                interaction_audit=audit,
+            )
+            return jsonify(
+                status="draft",
+                revision=document["revision"],
+                interaction_audit=audit,
+            )
+        handoff = store.save_input(
+            session_id,
+            stage_id,
+            merged,
+            _user_notes(payload),
+            expected_revision=expected_revision + 1,
+            allowed_current_statuses={"draft", "needs_user_input", "blocked"},
+            interaction_audit=audit,
+        )
+        return jsonify(
+            status="ready_for_agent",
+            revision=handoff["revision"],
+            input_sha256=handoff["input_sha256"],
+            interaction_audit=audit,
         )
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/draft")
@@ -2525,10 +2716,18 @@ def _current_input(
         or document.get("revision") != revision
     ):
         return None
-    return {
+    response = {
         "revision": revision,
         "values": _allowlisted_values(stage, document["values"]),
     }
+    interaction_history = [
+        dict(item)
+        for item in document.get("interaction_history", [])
+        if isinstance(item, dict)
+    ]
+    if interaction_history:
+        response["interaction_history"] = interaction_history
+    return response
 
 
 def _current_submission(

@@ -1,4 +1,4 @@
 interface:
-  display_name: "天猫搜推素材自动化"
-  short_description: "审计、补采、审批并安全发布天猫搜推素材"
-  default_prompt: "Use $upload-search-materials to prepare the runtime, open the setup UI before requesting business inputs, then continue from its validated handoff and stop at explicit safety gates."
+  display_name: "天猫搜推素材上传"
+  short_description: "前端优先配置、审查并安全发布搜推素材"
+  default_prompt: "Use $upload-search-materials. Start or resume the managed interaction UI before requesting structured business inputs in chat, continue only from its validated handoff, and stop at exact approval and production safety gates."

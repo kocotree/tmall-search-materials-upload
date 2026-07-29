@@ -208,9 +208,29 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
             full_page=True,
         )
 
+        wide = browser.new_page(viewport={"width": 1440, "height": 900})
+        wide.goto(
+            f"{base_url}/?session_id={session_id}",
+            wait_until="networkidle",
+        )
+        wide.get_by_role("button", name="图片裁剪与压缩").wait_for()
+        assert wide.locator("[data-stage-id]").count() >= 8
+        assert (
+            wide.evaluate(
+                "document.documentElement.scrollWidth <= window.innerWidth"
+            )
+            is True
+        )
+        wide.screenshot(
+            path=str(evidence_root / "two-page-wide-workflow.png"),
+            full_page=True,
+        )
+        wide.close()
+
         evidence = {
             "session_id": session_id,
             "viewport": {"width": 390, "height": 844},
+            "wide_viewport": {"width": 1440, "height": 900},
             "candidate_first_batch": 30,
             "candidate_second_batch": 5,
             "slot_counts": [3, 3, 3],

@@ -2,6 +2,8 @@
 
 ## 执行总则
 
+所有结构化配置和人工决定先进入对应前端页面。Agent 的第一动作是启动或恢复受管 UI 并等待 handoff；页面健康时禁止在聊天中询问店铺、NAS 根目录或阶段决定。只有真实 UI 失败并取得允许的稳定原因码后，才可把 fallback-eligible 字段写回同一阶段 draft。完整路由见 [frontend-interaction-contract.md](frontend-interaction-contract.md)。
+
 每次处理阶段 handoff 前，Agent 必须先读取当前 revision 绑定的
 `<stage>/decision-modes/<decision_id>.json`。文件不存在时，只能使用下表的
 Skill 默认模式；历史任务不得推断成 AI 模式。

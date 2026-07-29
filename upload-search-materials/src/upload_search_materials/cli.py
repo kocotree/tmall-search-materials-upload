@@ -77,7 +77,15 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
-from .interaction.session import SessionStore
+from .interaction.session import InteractionPathError, SessionStore
+from .interaction.service import (
+    ManagedServiceError,
+    restart_service,
+    start_service,
+    status_service,
+    stop_service,
+)
+from .interaction.fallback import write_chat_fallback
 from .interaction.stages import STAGES
 from .interaction.web import create_app
 from .image_review import (
@@ -1011,7 +1019,12 @@ def _interact(args) -> int:
     else:
         session_id = store.create_session().session_id
 
-    app = create_app(Path(runs_root), runtime_config=runtime)
+    app_kwargs = {"runtime_config": runtime}
+    if args.ownership_token:
+        app_kwargs["service_identity"] = {
+            "ownership_token": args.ownership_token
+        }
+    app = create_app(Path(runs_root), **app_kwargs)
     query = urlencode({"session_id": session_id})
     print(f"http://127.0.0.1:{args.port}/?{query}", flush=True)
     app.run(
@@ -1547,6 +1560,44 @@ def build_parser() -> argparse.ArgumentParser:
     interact.add_argument("--config", help="Machine-local runtime path configuration JSON")
     interact.add_argument("--session")
     interact.add_argument("--port", type=int, default=8765)
+    interact.add_argument("--ownership-token", help=argparse.SUPPRESS)
+
+    for command, help_text in (
+        ("ui-start", "Start or reuse a managed interaction UI"),
+        ("ui-restart", "Restart a managed interaction UI"),
+    ):
+        managed = subparsers.add_parser(command, help=help_text)
+        managed.add_argument("--runs-root")
+        managed.add_argument("--config", help="Machine-local runtime path configuration JSON")
+        managed.add_argument("--session")
+        managed.add_argument("--port-start", type=int, default=8765)
+        managed.add_argument("--port-end", type=int, default=8795)
+        managed.add_argument("--startup-timeout", type=float, default=15.0)
+        managed.add_argument("--open-system-browser", action="store_true")
+
+    for command, help_text in (
+        ("ui-status", "Show managed interaction UI status"),
+        ("ui-stop", "Stop an owned managed interaction UI"),
+    ):
+        managed = subparsers.add_parser(command, help=help_text)
+        managed.add_argument("--runs-root")
+        managed.add_argument("--config", help="Machine-local runtime path configuration JSON")
+        managed.add_argument("--session", required=True)
+
+    chat_fallback = subparsers.add_parser(
+        "chat-fallback",
+        help="Write an allowed reason-coded fallback into the current stage",
+    )
+    chat_fallback.add_argument("--runs-root", required=True)
+    chat_fallback.add_argument("--session", required=True)
+    chat_fallback.add_argument("--stage", choices=[stage.id for stage in STAGES], required=True)
+    chat_fallback.add_argument("--revision", type=int, required=True)
+    chat_fallback.add_argument("--reason-code", required=True)
+    chat_fallback.add_argument("--reason-detail", required=True)
+    chat_fallback.add_argument("--values-json", required=True)
+    chat_fallback.add_argument("--actor", default="codex-agent")
+    chat_fallback.add_argument("--mode", choices=("draft", "submit"), default="draft")
+    chat_fallback.add_argument("--user-notes", default="")
 
     wait_handoff = subparsers.add_parser(
         "wait-handoff",
@@ -1766,6 +1817,80 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _supplement(args, page, page_factory)
     if args.command == "interact":
         return _interact(args)
+    if args.command in {"ui-start", "ui-restart", "ui-status", "ui-stop"}:
+        runtime = load_runtime_config(args.config)
+        runs_root = Path(args.runs_root or runtime.runs_root)
+        try:
+            if args.command == "ui-start":
+                result = start_service(
+                    runs_root,
+                    session_id=args.session,
+                    port_start=args.port_start,
+                    port_end=args.port_end,
+                    startup_timeout=args.startup_timeout,
+                    open_system_browser=args.open_system_browser,
+                    config=args.config,
+                )
+            elif args.command == "ui-restart":
+                if not args.session:
+                    print("ui-restart requires --session", file=sys.stderr)
+                    return 2
+                result = restart_service(
+                    runs_root,
+                    args.session,
+                    port_start=args.port_start,
+                    port_end=args.port_end,
+                    startup_timeout=args.startup_timeout,
+                    open_system_browser=args.open_system_browser,
+                    config=args.config,
+                )
+            elif args.command == "ui-status":
+                result = status_service(runs_root, args.session)
+            else:
+                result = stop_service(runs_root, args.session)
+        except (ManagedServiceError, InteractionPathError) as error:
+            payload = {
+                "ok": False,
+                "reason_code": getattr(error, "reason_code", "SESSION_NOT_FOUND"),
+                "message": str(error),
+                "recovery_command": getattr(error, "recovery_command", ""),
+            }
+            print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
+    if args.command == "chat-fallback":
+        try:
+            values = json.loads(Path(args.values_json).read_text(encoding="utf-8"))
+            if not isinstance(values, dict):
+                raise ValueError("values JSON must contain an object")
+            result = write_chat_fallback(
+                SessionStore(Path(args.runs_root)),
+                args.session,
+                args.stage,
+                values=values,
+                expected_revision=args.revision,
+                reason_code=args.reason_code,
+                reason_detail=args.reason_detail,
+                actor=args.actor,
+                mode=args.mode,
+                user_notes=args.user_notes,
+            )
+        except (OSError, json.JSONDecodeError, ValueError, InteractionConflict) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
     if args.command == "wait-handoff":
         return _wait_handoff(args)
     if args.command == "claim-agent-request":
