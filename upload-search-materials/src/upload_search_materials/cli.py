@@ -15,6 +15,13 @@ import sys
 from typing import Sequence
 from urllib.parse import urlencode
 
+from .agent_handoff import (
+    cancel_agent_request,
+    claim_agent_request,
+    complete_agent_request,
+    list_agent_requests,
+    wait_for_agent_request,
+)
 from .approval import create_manifest, render_review_html, verify_manifest
 from .asset_index import (
     bind_confirmed_folder_matches,
@@ -73,7 +80,11 @@ from .io_tables import (
 from .interaction.session import SessionStore
 from .interaction.stages import STAGES
 from .interaction.web import create_app
-from .image_review import prepare_image_review_session
+from .image_review import (
+    migrate_legacy_image_review_session,
+    migrate_legacy_suitability_to_selected_preflight,
+    prepare_image_review_session,
+)
 from .material_state import (
     build_completeness_matrix,
     merge_material_state,
@@ -928,6 +939,33 @@ def _prepare_image_review(args) -> int:
     return 0
 
 
+def _migrate_slot_first(args) -> int:
+    try:
+        report = migrate_legacy_image_review_session(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            policy_path=Path(args.policy),
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False))
+    return 0
+
+
+def _migrate_deterministic_selection(args) -> int:
+    try:
+        report = migrate_legacy_suitability_to_selected_preflight(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False))
+    return 0
+
+
 def _prepare_slot_board(args) -> int:
     try:
         context = prepare_slot_board_session(
@@ -1032,6 +1070,79 @@ def _wait_handoff(args) -> int:
         print(str(error), file=sys.stderr)
         return 2
     print(json.dumps(handoff, ensure_ascii=False))
+    return 0
+
+
+def _claim_agent_request(args) -> int:
+    try:
+        request_document = claim_agent_request(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            args.request,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(request_document, ensure_ascii=False))
+    return 0
+
+
+def _list_agent_requests(args) -> int:
+    try:
+        values = list_agent_requests(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            statuses=set(args.status) if args.status else None,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps({"requests": values}, ensure_ascii=False))
+    return 0
+
+
+def _wait_agent_request(args) -> int:
+    try:
+        value = wait_for_agent_request(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            timeout_seconds=args.timeout,
+        )
+    except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(value, ensure_ascii=False))
+    return 0
+
+
+def _cancel_agent_request(args) -> int:
+    try:
+        value = cancel_agent_request(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            args.request,
+            actor="codex-agent",
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(value, ensure_ascii=False))
+    return 0
+
+
+def _complete_agent_request(args) -> int:
+    try:
+        response = read_json(Path(args.response))
+        written = complete_agent_request(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            args.request,
+            response,
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(written, ensure_ascii=False))
     return 0
 
 
@@ -1446,6 +1557,76 @@ def build_parser() -> argparse.ArgumentParser:
     wait_handoff.add_argument("--stage", choices=[stage.id for stage in STAGES], required=True)
     wait_handoff.add_argument("--timeout", type=float)
 
+    claim_agent = subparsers.add_parser(
+        "claim-agent-request",
+        help="Claim one explicit Codex Agent request from the task directory",
+    )
+    claim_agent.add_argument("--runs-root", required=True)
+    claim_agent.add_argument("--session", required=True)
+    claim_agent.add_argument("--request", required=True)
+
+    list_agent = subparsers.add_parser(
+        "list-agent-requests",
+        help="List durable Codex Agent requests for one session",
+    )
+    list_agent.add_argument("--runs-root", required=True)
+    list_agent.add_argument("--session", required=True)
+    list_agent.add_argument(
+        "--status",
+        action="append",
+        choices=[
+            "pending_agent",
+            "processing",
+            "completed",
+            "failed",
+            "superseded",
+            "cancelled",
+        ],
+    )
+
+    wait_agent = subparsers.add_parser(
+        "wait-agent-request",
+        help="Wait for a pending Codex Agent request without claiming it",
+    )
+    wait_agent.add_argument("--runs-root", required=True)
+    wait_agent.add_argument("--session", required=True)
+    wait_agent.add_argument("--timeout", type=float)
+
+    cancel_agent = subparsers.add_parser(
+        "cancel-agent-request",
+        help="Cancel a pending or processing Codex Agent request",
+    )
+    cancel_agent.add_argument("--runs-root", required=True)
+    cancel_agent.add_argument("--session", required=True)
+    cancel_agent.add_argument("--request", required=True)
+
+    complete_agent = subparsers.add_parser(
+        "complete-agent-request",
+        help="Validate and atomically complete one Codex Agent request",
+    )
+    complete_agent.add_argument("--runs-root", required=True)
+    complete_agent.add_argument("--session", required=True)
+    complete_agent.add_argument("--request", required=True)
+    complete_agent.add_argument("--response", required=True)
+
+    migrate_slot_first = subparsers.add_parser(
+        "migrate-slot-first",
+        help="Rebuild stage-four suitability for a historical session",
+    )
+    migrate_slot_first.add_argument("--runs-root", required=True)
+    migrate_slot_first.add_argument("--session", required=True)
+    migrate_slot_first.add_argument("--policy", required=True)
+
+    migrate_deterministic = subparsers.add_parser(
+        "migrate-deterministic-selection",
+        help=(
+            "Copy a compatible historical suitability snapshot into the "
+            "selected-asset preflight stage without deleting legacy files"
+        ),
+    )
+    migrate_deterministic.add_argument("--runs-root", required=True)
+    migrate_deterministic.add_argument("--session", required=True)
+
     index_assets = subparsers.add_parser(
         "index-assets", help="Build or continue the local incremental asset index"
     )
@@ -1587,6 +1768,20 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _interact(args)
     if args.command == "wait-handoff":
         return _wait_handoff(args)
+    if args.command == "claim-agent-request":
+        return _claim_agent_request(args)
+    if args.command == "list-agent-requests":
+        return _list_agent_requests(args)
+    if args.command == "wait-agent-request":
+        return _wait_agent_request(args)
+    if args.command == "cancel-agent-request":
+        return _cancel_agent_request(args)
+    if args.command == "complete-agent-request":
+        return _complete_agent_request(args)
+    if args.command == "migrate-slot-first":
+        return _migrate_slot_first(args)
+    if args.command == "migrate-deterministic-selection":
+        return _migrate_deterministic_selection(args)
     if args.command == "index-assets":
         return _index_assets(args)
     if args.command == "index-folders":

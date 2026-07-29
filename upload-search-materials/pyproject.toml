@@ -28,5 +28,5 @@ where = ["src"]
 "upload_search_materials.interaction" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
 testpaths = ["tests"]

@@ -60,7 +60,17 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
         "results": ("recovery_action", "manual_notes", "allow_retry_after_remote_absence"),
     }
     assert {stage.id: tuple(field.name for field in stage.fields) for stage in STAGES} == expected_fields
-    assert [stage.previous_stage for stage in STAGES] == [None, *expected_fields.keys()][:-1]
+    assert [stage.previous_stage for stage in STAGES] == [
+        None,
+        "setup",
+        "completeness",
+        "asset_matching",
+        "asset_matching",
+        "slots_copy",
+        "dry_run",
+        "approval",
+        "production_confirmation",
+    ]
 
 
 def test_definitions_are_immutable_and_results_is_read_only():

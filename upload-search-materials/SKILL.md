@@ -6,25 +6,34 @@ description: Use when preparing, validating, reviewing, publishing, resuming, or
 
 ## Overview
 
+## 执行模式契约（每一阶段必读）
+
+本 Skill 在不同阶段使用 `manual`、`rules`、`deterministic`、`agent_assisted`、`manual_only` 执行模式。
+Agent 在处理任何 handoff 前，必须先读取该阶段当前 revision 的持久化
+decision-mode；不存在时使用 Skill 的阶段默认值。第五阶段新任务的坑位编排只允许
+`deterministic` 与 `manual` 两个入口；历史规则/AI 草稿只读展示，不得重新生成、
+自动采用或覆盖。`agent_assisted` 只用于最终图片确定后的标题和描述。
+模式选择决定 Agent 是等待用户、运行确定性规则，还是领取受控 AI 请求。
+
+素材选择提交后，同步运行确定性编排器并生成唯一未确认
+`current_slot_plan`。用户必须审核或人工调整草稿，再点击“确认坑位并进入图片裁剪”。
+AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩，也不能触发 dry-run、
+批准或上传。
+`approval` 和 `production_confirmation` 永远是 `manual_only`，任何 Agent、规则或
+页面轮询都不能代替当前用户的精确授权。完整九阶段边界、回退和恢复协议见
+[decision-boundaries.md](references/decision-boundaries.md)；字段见
+[data-schema.md](references/data-schema.md)，稳定错误见
+[error-handling.md](references/error-handling.md)。
+
 ## 第三至第五阶段：图片合规、裁剪与坑位编排
 
-1. 第三阶段候选卡片必须显示原图宽高、原始比例、格式、文件大小、200KiB–20MiB 范围，以及 1:1/3:4 最大内接尺寸的最小/推荐分辨率结果。统一分类器输出 `direct`、`croppable`、`needs_compression`、`crop_and_compress` 或 `unusable`。小于 200KiB、无法产生宽高均至少 720px 的目标比例输出、不可读取或格式不支持时禁止采用；超过 20MiB 仅在当前任务的 Pillow 压缩提供方可用时允许进入第四阶段。
-2. 第三阶段当前 revision 完成后运行：
-
-   ```powershell
-   uv run tmall-materials prepare-image-review --runs-root <runs目录> --session <session_id> --policy config/media-policy.example.yaml
-   ```
-
-   命令重新只读检查已选源图，在 `04-image-review/` 保存策略快照、策略 SHA-256、增量检查缓存和与第三阶段 revision 绑定的 `review-context.json`。第三阶段重提后，旧审查结果必须视为过期。
-3. 第四阶段提供“直接使用、人工裁剪、压缩、人工裁剪并压缩、仅作候选、排除”。人工裁剪同时提供 1:1 和 3:4 最大内接初始框；两种比例分别保留调整状态。用户先点击“生成处理预览”，对比原图与实际输出的尺寸、比例、格式、文件大小、JPEG 质量和处理动作，再提交决定。AI 裁剪仍只保留接口。
-4. Pillow 压缩按策略质量区间寻找满足上限的最高质量，必要时等比例缩小但不得低于 720×720。裁剪/压缩派生图只写入当前任务 `04-image-review/derived/`，记录完整来源链；禁止修改、覆盖或回写共享盘源图。
-5. Agent 完成第四阶段结果后运行：
-
-   ```powershell
-   uv run tmall-materials prepare-slot-board --runs-root <runs目录> --session <session_id>
-   ```
-
-   第五阶段只能使用当前第四阶段确认的直接、裁剪、压缩或裁剪并压缩输出。服务端必须重新读取实际文件并校验 SHA-256、200KiB–20MiB、宽高至少 720px、1:1/3:4、每坑 3–9 张及坑位内比例一致；不得信任浏览器提交的文件元数据。
+1. 第三阶段候选卡片显示原图宽高、比例、格式、大小、200KiB–20MiB 范围，以及 1:1/3:4 的最小/推荐分辨率评估。小于 200KiB、无法生成宽高均至少 720px 的目标比例、不可读或格式不支持时不得采用；超过 20MiB 只有压缩提供方可用时才可采用。
+2. 用户采用图片时只更新当前商品的选择预览；保存 1–2 张草稿合法，但提交时每个商品必须至少有 3 张预检通过且源 SHA-256 唯一的图片。提交动作同步重新检查采用图片并保存 `03-asset-matching/selected-asset-preflight.json`；不得遍历未采用共享盘图片，不得生成派生图片。
+3. 确定性坑位数为 `K=min(后台缺失坑位, floor(可用唯一图片数/3))`，最多使用 `min(N,K*9)` 张并均衡分配。示例：9 张且缺 3/2/1 个坑位时分别为 `3+3+3`、`5+4`、`9`。图片先按用户选择顺序，再按来源文件夹稳定轮询交错。
+4. 每坑比例必须是全部成员共同可行的 3:4 或 1:1，并依次按原生比例数量、推荐分辨率通过数、画面保留率、较少压缩和最终 3:4 同分优先进行确定性评分。策略 ID、版本和 SHA-256 与输入 revision 一起写入草稿；相同输入必须产生相同结果。
+5. 新任务不显示或提交独立 `image_review` 阶段；内部 stage ID 和旧 `04-image-review/` 文件仅用于历史恢复。新任务也不得创建 `slot_plan` / `slot_plan_with_analysis` Agent request。
+6. 第五阶段只使用两个递进子页面：`图片裁剪和压缩 → AI生成标题和描述`。第一页顶部先显示自动坑位摘要、依据、未使用候选和人工编辑器；计划未按精确 revision 确认前隐藏裁剪区。人工可增删坑位、增删/调序图片及修改比例，一张图片只能属于一个坑位。确认后才在同页展开可视化 3:4/1:1 裁剪和压缩，输出只写任务目录并由服务端复核实际文件。
+7. 坑位输出达到 `outputs_ready` 后才允许创建独立 `copy_draft` 请求。请求绑定计划 revision、最终输出 SHA-256 和图片顺序；响应逐坑给出标题、描述、依据和风险。文案只能使用可信商品字段，必须逐坑人工确认；图片、比例、顺序、裁剪结果或输出 SHA 改变时，对应文案过期。
 
 详细字段、判定规则和恢复方式见 [asset-requirements.md](references/asset-requirements.md)、[data-schema.md](references/data-schema.md) 与 [operations-guide.md](references/operations-guide.md)。
 

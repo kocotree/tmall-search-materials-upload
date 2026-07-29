@@ -1,5 +1,22 @@
 # 首次运行指南
 
+## 新任务第三至第五阶段
+
+素材选择页保存草稿不会运行预检或编排。正式提交时只复查采用图片，写入
+`selected-asset-preflight.json` 并同步创建确定性 `current-slot-plan.json`。
+成功后不领取 `image_review` 或坑位 Agent request；直接打开 `slots_copy` 检查
+自动分组并按需人工调整。确认精确 plan revision 后第一页才展开裁剪和压缩；
+实际输出复核通过后，第二页才允许创建 `copy_draft` 文案请求。
+
+`prepare-image-review`、`prepare-slot-board` 和坑位类 Agent request 命令仅供
+历史任务恢复，不用于新任务。
+
+兼容的旧 suitability snapshot 可显式迁移，原阶段文件不会删除：
+
+```powershell
+uv run tmall-materials migrate-deterministic-selection --runs-root <runs目录> --session <session_id>
+```
+
 ## 1. 安装与检查
 
 在本 skill 目录使用 `uv` 管理 Python 3.11、锁文件和虚拟环境：
@@ -277,10 +294,12 @@ Agent 按以下顺序处理每一阶段：
 3. 启动仅监听 `localhost` 的 UI。
 4. 等待精确当前阶段的 handoff。
 5. 对照 `input.json` 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256`。
-6. 将该阶段标记为 `processing`。
-7. 只运行当前阶段允许的动作。
-8. 写入与同一组四个值绑定的 `result.json`。
-9. 停止，或明确进入下一阶段。
+6. 读取 `<stage>/decision-modes/<decision_id>.json`；不存在时按 [decision-boundaries.md](decision-boundaries.md) 使用 Skill 默认模式。
+7. `manual/manual_only` 等待用户；`rules` 运行确定性规则；只有 `agent_assisted` 才发现和领取 AI 请求。
+8. 将该阶段标记为 `processing`。
+9. 只运行当前模式与阶段都允许的动作。
+10. 写入与同一组四个值绑定的 `result.json`。
+11. 停止，或明确进入下一阶段。
 
 `wait-handoff` 只返回已验证的当前 handoff，并领取该阶段为 `processing`。当前九阶段流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。页面阶段 07/08 只保存输入并生成 handoff；它们不直接运行 `approve` 或 `publish`。这两个命令必须由 Agent 分开调用，且 1–3 个商品的生产测试需在当前对话再次获得用户显式授权。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
@@ -296,7 +315,7 @@ uv run tmall-materials prepare-image-review `
   --policy config/media-policy.example.yaml
 ```
 
-打开交互页进入“图片适用性与裁剪”。准备命令只重新检查当前第三阶段已选素材，并用任务内缓存避免重复读取；不会遍历全部共享盘。页面展示原图大小、尺寸、比例和两个目标比例的裁剪能力。选择“直接使用 / 人工裁剪 / 压缩 / 人工裁剪并压缩”后，先点击“生成处理预览”核对实际输出，再提交。若共享盘暂时不可读，只阻断对应图片，其余图片继续显示。
+打开交互页进入“图片适用性检测”。准备命令只重新检查当前第三阶段已选素材，并用任务内缓存避免重复读取；不会遍历全部共享盘。页面展示原图大小、尺寸、比例以及 1:1、3:4 两种裁剪可行性。用户只决定是否进入坑位候选，并可分别调整两个候选框；此时不生成正式派生文件。
 
 用户提交第四阶段后，Agent须校验 handoff 的 `session_id`、`stage_id`、`revision` 和 `input_sha256`，完成结果，再运行：
 
@@ -306,14 +325,62 @@ uv run tmall-materials prepare-slot-board `
   --session <session_id>
 ```
 
-第五阶段按商品新建一个或多个坑位，每坑选择 3–9 张同一比例图片。页面保存草稿时必须保留已准备的第四/第五阶段审查上下文，不得退回“尚未扫描”。
+第五阶段分为三个递进子页面。第一页上方按商品分页展示第四阶段候选，下方展示唯一当前坑位草稿；默认由 Codex 在一次请求中完成图片分析、主题聚类与坑位编排，规则和完全人工仅作兜底。点击“确认坑位并进入图片裁剪”只锁定每坑 3–9 张、有序图片和唯一比例，不生成派生图。第二页按坑位显示原图尺寸、原始大小、目标比例、裁剪方式和压缩确认；点击“完成图片处理并进入文案生成”才在任务目录生成派生图并复核实际文件。第三页以最终有序图片为依据生成标题和描述，逐坑人工确认后只能进入 dry-run，不会触发阶段 07/08 或真实上传。
+
+可选的 Codex 建议必须由用户点击“提交给 Agent 生成建议”创建。页面不会自动唤醒 Codex；复制页面恢复提示词到当前 Codex 任务，或由 Agent 执行：
+
+```powershell
+uv run tmall-materials list-agent-requests --runs-root <runs目录> --session <session_id>
+uv run tmall-materials wait-agent-request --runs-root <runs目录> --session <session_id> --timeout 30
+uv run tmall-materials claim-agent-request --runs-root <runs目录> --session <session_id> --request <request_id>
+uv run tmall-materials complete-agent-request --runs-root <runs目录> --session <session_id> --request <request_id> --response <response.json>
+uv run tmall-materials cancel-agent-request --runs-root <runs目录> --session <session_id> --request <request_id>
+```
+
+请求优先读取当前任务第三/第四阶段缓存，最终只含请求目录缩略图。等待必须有界；
+未领取、超时、超预算、缩略图不可用或响应无效时保留当前合法草稿，直接继续规则
+方案或人工编排。AI 响应显示后必须由用户“采用”；采用只写坑位草稿，用户仍须
+点击“确认计划并处理图片”才会生成派生文件。
+
+Agent 对每张缩略图分析前调用同源 SHA、provider、模型和 schema 绑定的
+`read_analysis_cache`，缺失时分析并用 `write_analysis_cache` 写入；用户点击
+“换一套”时复用未变化图片的分析，只重新组合方案。缓存只减少重复分析，不授权
+自动采用或处理图片。
+
+两种第五阶段入口，共同编辑同一份活动草稿：
+
+1. **AI 编排坑位**：显式创建请求 → Agent 有界发现、领取并回写 → 合法结果载入
+   唯一当前草稿 → 用户继续增删坑位、加删图片或调序 → 确认坑位 → 在第二页完成
+   可视化裁剪/压缩 → 校验派生图 → 在第三页生成并确认文案。
+2. **人工添加坑位**：创建空坑位 → 展开坑位内“添加候选图片”组件 → 从商品级
+   共享候选池加图并排序 → 保存不完整草稿 → 达到每坑 3–9 张后确认 → 在第二页
+   完成可视化裁剪/压缩 → 校验派生图 → 在第三页生成并确认文案。
+
+同一商品的所有候选组件派生自同一共享池。图片加入一个坑位后立即从其他坑位
+候选组件消失，移出或删除坑位后重新出现；每批最多显示 30 张。新流程没有规则
+入口，也不会在 AI 失败时自动创建或采用规则草稿。
+
+任何路径恢复时都复用精确 session，并先读取 current stage、revision、decision
+mode 和现有草稿。AI 超时、取消、无效或过期时不清空草稿，切回规则或人工继续；
+页面重载和轮询不自动创建或采用请求。
 
 排障：
 
 - 图片卡片出现但原图破图：确认交互服务进程能够只读访问配置中的共享盘路径；策略准备成功不代表预览服务进程拥有同样权限。
 - 页面显示结果过期：重新处理第三或第四阶段当前 handoff，再重新运行对应 prepare 命令，不得复用旧 revision。
-- `IMAGE_SIZE_EXCEEDED`：Pillow 压缩可用时允许进入第四阶段并生成实际预览；不可用时同时返回 `COMPRESSION_UNAVAILABLE` 并禁止采用。
+- `IMAGE_SIZE_EXCEEDED`：第四阶段记录“需要压缩”；第五阶段确认坑位后才生成压缩输出。不可用时返回 `COMPRESSION_UNAVAILABLE`。
 - `IMAGE_SIZE_BELOW_MINIMUM`：原图小于 200KiB，停止使用该图；不得通过填充文件绕过。
 - `OUTPUT_DIMENSIONS_BELOW_MINIMUM`：所有目标比例都无法得到宽高至少 720px 的输出，返回第三阶段更换素材。
 - `COMPRESSION_TARGET_UNREACHABLE`：在允许质量与最小尺寸内仍无法压到 20MiB，排除或更换素材。
-- 所有裁剪/压缩输出只应出现在 `<session>/04-image-review/derived/`。验收前后核对源图大小、mtime 和 SHA-256。
+- 所有正式裁剪/压缩输出只应出现在 `<session>/05-slots-copy/derived/`。验收前后核对源图大小、mtime 和 SHA-256。
+## 第五阶段恢复与回滚
+
+- `UPLOAD_SEARCH_MATERIALS_AI_DEFAULT_SLOT_PLANNING=1` 仅保留为历史兼容开关；新第五阶段始终只显示 AI 与人工入口。设为 `0` 不会创建规则入口，也不会删除历史请求、缓存或草稿。
+- 页面首次进入会幂等创建 `slot_plan_with_analysis`；刷新只查询同 revision 请求。待领取且没有活动 Agent 时才复制页面恢复提示词。
+- Agent 领取后应读取精确 request ID，生成 `asset_analysis / clusters / slot_plan`，再原子完成请求。不得直接修改共享盘或确认坑位。
+- AI 失败、超时或非法响应时保留现有草稿；无草稿时保持空状态。用户可以重试 AI
+  或人工添加坑位。用户开始人工编辑后旧请求会被取消/过期。
+- 坑位确认前不生成派生图片。处理页使用 `3:4 / 1:1` 比例按钮与可拖动、可缩放、
+  锁定比例的可视化裁剪框；页面不要求用户输入归一化坐标。单图裁剪变化只使该图
+  输出与所属坑位文案失效，其他坑位文案保持有效。
+- 图片输出完成后单独领取 `copy_draft` 请求；文案确认之前不得提交第五阶段。

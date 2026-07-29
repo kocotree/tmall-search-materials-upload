@@ -79,6 +79,14 @@ def test_root_renders_nine_stage_left_rail(client):
     assert response.status_code == 200
     assert response.mimetype == "text/html"
     assert html.count('data-stage-id="') == 9
+
+
+def test_new_session_hides_legacy_image_review_stage(client, session_id):
+    html = client.get(f"/?session_id={session_id}").get_data(as_text=True)
+
+    assert html.count('data-stage-id="') == 8
+    assert 'data-stage-id="image_review"' not in html
+    assert 'data-stage-id="slots_copy"' in html
     assert "完整度巡检" in html
     assert "生产确认" in html
     assert re.search(r"/static/app\.js\?v=[0-9a-f]{12}", html)
@@ -348,6 +356,35 @@ def test_unscanned_slot_board_has_no_fabricated_slot_count(client):
     assert "3 / 9 坑位" not in html
     assert 'data-component="SlotBoard"' in html
     assert 'data-empty-state="尚未扫描"' in html
+
+
+def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_controls(
+    client,
+):
+    html = client.get("/").get_data(as_text=True)
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert re.search(
+        r'<input[^>]+name="slot_assignments"[^>]+type="hidden"', html
+    )
+    assert not re.search(
+        r'<textarea[^>]+name="(?:slot_assignments|copy_edits)"', html
+    )
+    for text in (
+        "候选素材与坑位编排",
+        "图片裁剪与压缩",
+        "AI 标题与描述",
+        "确认坑位并进入图片裁剪",
+        "完成图片处理并进入文案生成",
+        "完成第五阶段并进入 dry-run",
+    ):
+        assert text in javascript
+    assert '? ["process", "copy"]' in javascript
+    assert "请求 ID：" not in javascript
+    assert 'detail: { source: "explicit-user-edit" }' in javascript
+    assert (
+        'event.detail?.source !== "explicit-user-edit"' in javascript
+    )
 
 
 def test_asset_matching_prefills_three_editable_labeled_image_roots(client):
@@ -1099,6 +1136,13 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
         / "A.jpg"
     ).is_file()
     assert missing.status_code == 404
+    image_path.unlink()
+    cached_preview = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/A"
+    )
+    assert cached_preview.status_code == 200
+    assert cached_preview.mimetype == "image/jpeg"
+    assert cached_preview.headers["Cache-Control"] == "private, max-age=300"
 
     draft = client.post(
         f"/api/sessions/{session_id}/stages/asset_matching/draft",
@@ -1335,8 +1379,9 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert '["pending", "待确认"]' not in source
     assert "采用即确认该图片可用于本次发布" in source
     assert 'document.createTextNode("授权已确认")' not in source
-    assert "第五阶段再按每个坑位 3–9 张" in source
-    assert "坑位数量和每坑 3–9 张的分组在第五阶段决定" in source
+    assert "按每坑 3–9 张自动生成坑位草稿" in source
+    assert "预计创建 ${guidance.completeSlots} 个完整坑位" in source
+    assert "重复素材不计入可用数量" in source
     assert '"换一批"' in source
     assert "已选素材" in source
     assert "发现 ${duplicateCount} 张完全重复图片" in source
@@ -1493,3 +1538,36 @@ def test_stage_read_rejects_missing_or_unsupported_artifact_schema_version(
 
     assert response.status_code == 409
     assert "schema_version" in response.json["error"]
+
+
+def test_fifth_stage_uses_ai_manual_shared_pool_and_visual_crop():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    assert "人工添加坑位" in source
+    assert "添加候选图片 · 可用" in source
+    assert "加入当前坑位" in source
+    assert "从坑位移除" in source
+    assert "恢复建议框" in source
+    assert "slot-ratio-buttons" in source
+    assert source.count("overlay.tabIndex = 0") >= 2
+    assert source.count('"aria-keyshortcuts"') >= 2
+    assert 'overlay.addEventListener("keydown"' in source
+    assert "window.prompt(" not in source
+    assert "/stages/slots_copy/use-rules" not in source
+    stylesheet = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.css"
+    ).read_text(encoding="utf-8")
+    assert "@media (max-width: 760px)" in stylesheet
+    assert "@media (max-width: 480px)" in stylesheet
+    assert ".crop-overlay:focus-visible" in stylesheet

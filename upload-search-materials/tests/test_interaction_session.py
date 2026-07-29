@@ -242,6 +242,17 @@ def test_wait_timeout_applies_while_another_process_holds_the_session_lock(tmp_p
     assert outcome and "setup" in outcome[0]
 
 
+def test_session_lock_reuses_outer_os_lock_for_same_thread(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    with store._session_lock(session.session_id):
+        with store._session_lock(session.session_id):
+            state = store.load_session(session.session_id)
+
+    assert state["session_id"] == session.session_id
+
+
 def test_write_result_binds_identity_and_updates_session(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()

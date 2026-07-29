@@ -63,6 +63,7 @@
   }
 
   function formatBytes(value) {
+    if (value == null || value === "") return "大小未知";
     const bytes = Number(value);
     if (!Number.isFinite(bytes)) return "读取失败";
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
@@ -78,6 +79,9 @@
     if (!response.ok) {
       const error = new Error(payload.error || `请求失败（${response.status}）`);
       error.fieldErrors = payload.field_errors || {};
+      error.reasonCode = payload.reason_code || "";
+      error.userMessage = payload.message || "";
+      error.allowedActions = payload.allowed_actions || [];
       throw error;
     }
     return payload;
@@ -193,7 +197,10 @@
       });
       if (!payload.cancelled) {
         pathInput.value = payload.path;
-        pathInput.dispatchEvent(new Event("input", { bubbles: true }));
+        pathInput.dispatchEvent(new CustomEvent(
+          "input",
+          { bubbles: true, detail: { source: "explicit-user-edit" } },
+        ));
         state.textContent = "已选择，等待检测";
       } else {
         state.textContent = "已取消选择";
@@ -296,7 +303,7 @@
       const group = controls.filter((candidate) => candidate.name === name);
       const kind = control.dataset.valueKind || "string";
 
-      if (group.length > 1 && control.type !== "radio") {
+      if (kind === "list" || (group.length > 1 && control.type !== "radio")) {
         values[name] = group.map((candidate) => candidate.value.trim()).filter(Boolean);
       } else if (control.type === "radio") {
         values[name] = group.find((candidate) => candidate.checked)?.value || "";
@@ -535,7 +542,12 @@
       .join("\n");
     if (control.value === value) return;
     control.value = value;
-    if (notify) control.dispatchEvent(new Event("input", { bubbles: true }));
+    if (notify) {
+      control.dispatchEvent(new CustomEvent(
+        "input",
+        { bubbles: true, detail: { source: "explicit-user-edit" } },
+      ));
+    }
   }
 
   function completenessStatusLabel(status) {
@@ -767,8 +779,14 @@
   function writeJsonListControl(name, values, { notify = false } = {}) {
     const control = activeForm()?.querySelector(`[name="${CSS.escape(name)}"]`);
     if (!control) return false;
+    let currentValue = null;
+    try {
+      currentValue = JSON.parse(control.value || "[]");
+    } catch (_error) {
+      currentValue = null;
+    }
+    if (UiState.jsonSemanticallyEqual(currentValue, values)) return false;
     const value = JSON.stringify(values, null, 2);
-    if (control.value === value) return false;
     control.value = value;
     if (notify) control.dispatchEvent(new Event("input", { bubbles: true }));
     return true;
@@ -1187,7 +1205,7 @@
         element(
           "p",
           "",
-          "选择本次采用的图片；采用即确认该图片可用于本次发布。坑位数量和每坑 3–9 张的分组在第五阶段决定。",
+          "选择本次采用的图片；采用即确认该图片可用于本次发布。系统会在提交时完成增量预检，并按每坑 3–9 张自动生成坑位草稿。",
         ),
       );
       resultSummary.replaceChildren(heading, action);
@@ -1287,6 +1305,24 @@
             || folderDecisionState(productId, folderId) !== "rejected";
         }),
       );
+
+      const updateSelectionSummary = () => {
+        const guidance = UiState.assetSelectionGuidance(
+          selectedAssetDecisions().filter(
+            (item) => String(item.product_id) === productId,
+          ),
+          missingMaterials,
+        );
+        const preview = guidance.balancedCounts.length
+          ? guidance.balancedCounts.join("+")
+          : "尚不能形成完整坑位";
+        const duplicateSuffix = guidance.duplicateCount
+          ? `；${guidance.duplicateCount} 张重复素材不计入可用数量`
+          : "";
+        selectionSummary.textContent = guidance.usableUnique < 3
+          ? `已选 ${guidance.selectedCount} 张、可用唯一 ${guidance.usableUnique} 张；还差 ${guidance.minimumShortage} 张才能提交。草稿仍可保存${duplicateSuffix}。`
+          : `已选 ${guidance.selectedCount} 张、可用唯一 ${guidance.usableUnique} 张；预计创建 ${guidance.completeSlots} 个完整坑位（${preview}），提交后仍可人工调整${duplicateSuffix}。`;
+      };
 
       const draw = () => {
         const productCandidates = visibleCandidates();
@@ -1405,11 +1441,11 @@
               productCandidates.filter((item) => selectedIds.has(String(item.asset_id))),
             );
             card.classList.toggle("is-selected", select.checked);
-            selectionSummary.textContent = `已选 ${selectedIds.size} 张；采用即确认可用于本次发布。第五阶段再按每个坑位 3–9 张且图片比例一致进行编排，本次不要求填满全部缺失坑位。`;
+            updateSelectionSummary();
             renderSelected();
           });
         });
-        selectionSummary.textContent = `已选 ${selectedIds.size} 张；采用即确认可用于本次发布。第五阶段再按每个坑位 3–9 张且图片比例一致进行编排，本次不要求填满全部缺失坑位。`;
+        updateSelectionSummary();
         pageLabel.textContent = `第 ${pageIndex + 1} / ${pageCount} 批 · 本批 ${displayedCandidates.length} 张`;
         previousPage.disabled = pageIndex === 0;
         nextPage.disabled = pageIndex >= pageCount - 1;
@@ -1519,6 +1555,9 @@
       ratios.forEach((ratio) => {
         boxes[ratio] = {
           ...(asset.crop_options[ratio]?.normalized || {}),
+          ...(existing?.crop_candidates?.[ratio]?.normalized
+            || existing?.crop_candidates?.[ratio]
+            || {}),
           ...(existing?.target_ratio === ratio
             ? existing.crop_box?.normalized || existing.crop_box || {}
             : {}),
@@ -1527,10 +1566,7 @@
       let action = existing?.action;
       if (!action) {
         if (asset.status === "blocked") action = "excluded";
-        else if (asset.preflight?.size_exceeded && matching.length) action = "compress";
-        else if (asset.preflight?.size_exceeded) action = "crop_and_compress";
-        else if (matching.length) action = "direct";
-        else action = "crop";
+        else action = "candidate_only";
       }
       let targetRatio = existing?.target_ratio || matching[0] || ratios[0] || "";
       if (action === "direct" && !matching.includes(targetRatio)) {
@@ -1547,11 +1583,8 @@
           asset_id: String(asset.asset_id),
           action: state.action,
         };
-        if (["direct", "crop", "compress", "crop_and_compress"].includes(state.action)) {
-          decision.target_ratio = state.targetRatio;
-        }
-        if (["crop", "crop_and_compress"].includes(state.action)) {
-          decision.crop_box = state.boxes[state.targetRatio];
+        if (state.action === "candidate_only") {
+          decision.crop_candidates = state.boxes;
         }
         return decision;
       });
@@ -1562,7 +1595,7 @@
     overview.append(
       element("strong", "", `第三阶段已选 ${data.selected_count || assets.length} 张`),
       element("span", "", `可审查 ${data.reviewable_count || 0} · 阻断 ${data.blocked_count || 0} · 重复 ${data.duplicate_count || 0}`),
-      element("span", "", "人工裁剪与本地图片压缩已启用；所有派生文件只写入当前任务目录。"),
+      element("span", "", "本阶段只保存适用性和两种比例的候选裁剪框；正式裁剪、压缩在坑位比例确认后执行。"),
     );
     content.appendChild(overview);
     const list = element("div", "image-review-list");
@@ -1585,6 +1618,16 @@
         `/stages/image_review/assets/${encodeURIComponent(assetId)}`,
       );
       const overlay = element("div", "crop-overlay");
+      overlay.tabIndex = 0;
+      overlay.setAttribute("role", "application");
+      overlay.setAttribute(
+        "aria-label",
+        `${assignment.slot_id} 裁剪框；方向键移动，Shift 加方向键缩放`,
+      );
+      overlay.setAttribute(
+        "aria-keyshortcuts",
+        "ArrowUp ArrowDown ArrowLeft ArrowRight",
+      );
       const resizeHandle = element("span", "crop-resize-handle");
       overlay.appendChild(resizeHandle);
       sourceFrame.append(sourceImage, overlay);
@@ -1607,14 +1650,10 @@
       });
       editor.appendChild(resolution);
 
-      const actionLabel = element("label", "crop-control-label", "处理决定");
+      const actionLabel = element("label", "crop-control-label", "候选决定");
       const actionSelect = document.createElement("select");
       [
-        ["direct", "直接使用"],
-        ["crop", "人工裁剪"],
-        ["compress", "压缩"],
-        ["crop_and_compress", "人工裁剪并压缩"],
-        ["candidate_only", "仅作候选"],
+        ["candidate_only", "进入坑位候选"],
         ["excluded", "排除"],
       ].forEach(([value, label]) => {
         const option = document.createElement("option");
@@ -1627,7 +1666,7 @@
       actionLabel.appendChild(actionSelect);
       editor.appendChild(actionLabel);
 
-      const ratioLabel = element("label", "crop-control-label", "目标比例");
+      const ratioLabel = element("label", "crop-control-label", "检查比例（仅预览）");
       const ratioSelect = document.createElement("select");
       Object.keys(asset.crop_options || {}).forEach((ratio) => {
         const option = document.createElement("option");
@@ -1652,72 +1691,12 @@
         (asset.reason_codes || []).join("、"),
       );
       editor.appendChild(reasons);
-      const processed = element("section", "processed-output-summary");
-      const processButton = element("button", "button-secondary", "生成处理预览");
-      processButton.type = "button";
-      const renderProcessed = () => {
-        processed.replaceChildren();
-        const processedOutput = state.output;
-        if (processedOutput) {
-          const compressionRate = asset.size_bytes && processedOutput.output_size_bytes
-            ? `${Math.round((1 - processedOutput.output_size_bytes / asset.size_bytes) * 100)}%`
-            : "—";
-          const image = document.createElement("img");
-          image.className = "processed-output-image";
-          image.alt = `${asset.product_title || asset.product_id} 处理后预览`;
-          image.src = processedOutput.kind === "direct"
-            ? apiPath(`/stages/image_review/assets/${encodeURIComponent(assetId)}`)
-            : apiPath(
-              `/stages/image_review/outputs/${encodeURIComponent(assetId)}?sha256=${encodeURIComponent(processedOutput.output_sha256 || "")}`,
-            );
-          processed.append(
-            element("strong", "", "处理后输出"),
-            image,
-            element("span", "", `尺寸 ${processedOutput.output_width || "?"}×${processedOutput.output_height || "?"} · 比例 ${processedOutput.target_ratio || state.targetRatio}`),
-            element("span", "", `文件 ${formatBytes(processedOutput.output_size_bytes)} · ${processedOutput.output_format || "JPEG"} · 质量 ${processedOutput.quality ?? "原图"}`),
-            element("span", "", `动作 ${processedOutput.kind || state.action} · 体积变化 ${compressionRate}`),
-            processButton,
-          );
-        } else {
-          processed.append(
-            element("strong", "", "预计处理后"),
-            element("span", "", "先生成任务本地预览并核对实际尺寸、比例和文件大小，再提交本阶段。"),
-            processButton,
-          );
-        }
-      };
-      processButton.addEventListener("click", async () => {
-        if (!["direct", "crop", "compress", "crop_and_compress"].includes(state.action)) {
-          actionMessage.textContent = "当前决定不会生成发布输出。";
-          return;
-        }
-        processButton.disabled = true;
-        processButton.textContent = "处理中…";
-        try {
-          const payload = {
-            action: state.action,
-            target_ratio: state.targetRatio,
-          };
-          if (["crop", "crop_and_compress"].includes(state.action)) {
-            payload.crop_box = state.boxes[state.targetRatio];
-          }
-          const response = await fetchJson(
-            apiPath(`/stages/image_review/assets/${encodeURIComponent(assetId)}/process`),
-            { method: "POST", body: JSON.stringify(payload) },
-          );
-          state.output = response.output || null;
-          actionMessage.textContent = "已生成处理预览，请核对处理前后信息。";
-        } catch (error) {
-          state.output = null;
-          actionMessage.textContent = error.message;
-        } finally {
-          processButton.disabled = false;
-          processButton.textContent = "重新生成处理预览";
-          renderProcessed();
-        }
-      });
-      renderProcessed();
-      editor.appendChild(processed);
+      const suitabilityNotice = element("section", "processed-output-summary");
+      suitabilityNotice.append(
+        element("strong", "", "正式处理尚未开始"),
+        element("span", "", "第五阶段先编排坑位并确认唯一比例，再按坑位生成裁剪或压缩输出。"),
+      );
+      editor.appendChild(suitabilityNotice);
       card.append(sourcePane, editor);
       list.appendChild(card);
 
@@ -1727,8 +1706,8 @@
       );
       const currentBox = () => state.boxes[state.targetRatio];
       const update = (notify = false) => {
-        const cropMode = ["crop", "crop_and_compress"].includes(state.action);
-        ratioSelect.disabled = !["direct", "crop", "compress", "crop_and_compress"].includes(state.action);
+        const cropMode = state.action === "candidate_only";
+        ratioSelect.disabled = state.action !== "candidate_only";
         overlay.hidden = !cropMode || !currentBox();
         sourceFrame.classList.toggle("is-cropping", cropMode);
         if (currentBox()) {
@@ -1774,24 +1753,16 @@
       const matching = asset.preflight?.matching_ratios || [];
       actionSelect.addEventListener("change", () => {
         state.action = actionSelect.value;
-        state.output = null;
-        renderProcessed();
-        if (["direct", "compress"].includes(state.action) && !matching.includes(state.targetRatio)) {
-          state.targetRatio = matching[0] || "";
-          ratioSelect.value = state.targetRatio;
-        }
         update(true);
       });
       ratioSelect.addEventListener("change", () => {
         state.targetRatio = ratioSelect.value;
-        state.output = null;
-        renderProcessed();
         update(true);
       });
       sourceImage.addEventListener("load", () => update(false));
 
       const beginPointer = (event, mode) => {
-        if (!["crop", "crop_and_compress"].includes(state.action) || !currentBox()) return;
+        if (state.action !== "candidate_only" || !currentBox()) return;
         event.preventDefault();
         const startBox = { ...currentBox() };
         const startX = event.clientX;
@@ -1814,8 +1785,6 @@
             currentBox().width = width;
             currentBox().height = width / normalizedRatio;
           }
-          state.output = null;
-          renderProcessed();
           update(true);
         };
         const stop = () => {
@@ -1845,56 +1814,1284 @@
     const module = document.querySelector('[data-component="SlotBoard"]');
     const content = module?.querySelector("[data-result-content]");
     if (!content || !products.length || data?.stale) return;
+    const copyModule = document.querySelector('[data-component="CopyEditor"]');
+    if (copyModule) copyModule.hidden = true;
+    handoffActions?.classList.add("is-stage-managed");
+    if (actionMessage) {
+      actionMessage.textContent = "第五阶段由当前子页面的主按钮推进；修改仍会自动保存到任务目录。";
+    }
+    content.replaceChildren();
     const saved = readJsonListControl("slot_assignments");
     const stateByProduct = new Map();
+    let currentPlanRevision = 0;
+    let slotPlanDirty = false;
+    const cropParameters = {};
+    const candidatePageByProduct = new Map();
     products.forEach((product) => {
       const productId = String(product.product_id || "");
       let assignments = saved
         .filter((item) => String(item.product_id || "") === productId)
         .map((item) => ({
+          ...item,
           slot_id: String(item.slot_id || ""),
           product_id: productId,
           target_ratio: String(item.target_ratio || ""),
+          plan_source: String(item.plan_source || "manual"),
           asset_ids: Array.isArray(item.asset_ids)
             ? item.asset_ids.map(String)
             : [],
         }));
       if (!assignments.length) {
-        const ratios = Object.entries(product.available_by_ratio || {})
-          .sort((left, right) => Number(right[1]) - Number(left[1]));
-        const targetRatio = String(ratios[0]?.[0] || "3:4");
-        const assetIds = (product.outputs || [])
-          .filter((output) => output.target_ratio === targetRatio)
-          .slice(0, Number(data.slot_image_max || 9))
-          .map((output) => String(output.asset_id));
-        assignments = [{
-          slot_id: `${productId}-slot-1`,
-          product_id: productId,
-          target_ratio: targetRatio,
-          asset_ids: assetIds,
-        }];
+        assignments = [];
       }
       stateByProduct.set(productId, assignments);
     });
     const persist = (notify = false) => {
+      if (notify) slotPlanDirty = true;
       writeJsonListControl(
         "slot_assignments",
         [...stateByProduct.values()].flat(),
         { notify },
       );
     };
-    const overview = element("div", "slot-board-overview");
-    overview.append(
-      element("strong", "", `第四阶段确认输出 ${products.reduce((sum, product) => sum + (product.outputs || []).length, 0)} 张`),
-      element("span", "", `每个坑位 ${data.slot_image_min || 3}–${data.slot_image_max || 9} 张，坑位内只能使用一种比例。`),
-      element("span", "", `已阻止 ${data.blocked_outputs?.length || 0} 个超限或无效输出。`),
+    const applyCurrentPlan = (plan) => {
+      if (!plan || !Array.isArray(plan.slot_assignments)) return;
+      products.forEach((product) => {
+        const productId = String(product.product_id || "");
+        const assignments = plan.slot_assignments
+          .filter((item) => String(item.product_id || "") === productId)
+          .map((item) => ({
+            ...item,
+            slot_id: String(item.slot_id || ""),
+            product_id: productId,
+            target_ratio: String(item.target_ratio || ""),
+            asset_ids: Array.isArray(item.asset_ids)
+              ? item.asset_ids.map(String)
+              : [],
+          }));
+        stateByProduct.set(productId, assignments);
+      });
+      currentPlanRevision = Number(plan.plan_revision || 0);
+      slotPlanDirty = false;
+      const page = twoPageWorkflow
+        ? UiState.twoStepFifthStagePage(plan.workflow_state)
+        : UiState.fifthStagePage(plan.workflow_state);
+      maxUnlockedPage = Math.max(maxUnlockedPage, pageOrder.indexOf(page));
+      setSubpage(page);
+      persist();
+      draw();
+      if (page === "process" && plan.confirmed === true) {
+        processPanel.hidden = false;
+        renderProcessingPage();
+      }
+    };
+    const wizard = element("nav", "slot-workflow-steps");
+    const twoPageWorkflow = Boolean(
+      data.deterministic_plan || data.two_page_workflow,
     );
-    content.appendChild(overview);
+    const pageOrder = twoPageWorkflow
+      ? ["process", "copy"]
+      : ["compose", "process", "copy"];
+    const pageLabels = {
+      compose: "候选素材与坑位编排",
+      process: "图片裁剪与压缩",
+      copy: "AI 标题与描述",
+    };
+    let activeSubpage = pageOrder[0];
+    let maxUnlockedPage = 0;
+    const subpages = {};
+    const setSubpage = (page, { userRequested = false } = {}) => {
+      const requestedIndex = pageOrder.indexOf(page);
+      if (requestedIndex < 0) return;
+      if (userRequested && requestedIndex > maxUnlockedPage) return;
+      activeSubpage = page;
+      Object.entries(subpages).forEach(([name, panel]) => {
+        panel.hidden = name !== page;
+      });
+      [...wizard.children].forEach((item, index) => {
+        item.dataset.active = index === requestedIndex ? "true" : "false";
+        item.dataset.complete = index < maxUnlockedPage ? "true" : "false";
+        item.disabled = index > maxUnlockedPage;
+      });
+    };
+    pageOrder.forEach((page, index) => {
+      const button = element(
+        "button",
+        "slot-workflow-step",
+        `${index + 1}. ${pageLabels[page]}`,
+      );
+      button.type = "button";
+      button.addEventListener("click", () => setSubpage(
+        page,
+        { userRequested: true },
+      ));
+      wizard.appendChild(button);
+    });
+    if (wizard.firstElementChild) wizard.firstElementChild.dataset.active = "true";
+    content.appendChild(wizard);
+    pageOrder.forEach((page) => {
+      const panel = element("section", "slot-subpage");
+      panel.dataset.slotSubpage = page;
+      panel.hidden = page !== pageOrder[0];
+      subpages[page] = panel;
+      content.appendChild(panel);
+    });
+    const overview = element("div", "slot-board-overview");
+    const agentPanel = element("section", "processed-output-summary");
+    const modeHelp = element(
+      "span",
+      "",
+      "可以由 Codex AI 直接编排，也可以人工添加坑位。两种方式共用一份当前草稿，AI 草稿仍可继续人工增删和调序。",
+    );
+    const agentStatus = element("span", "", "正在检查 AI 分析与编排任务…");
+    const agentButton = element("button", "button-secondary", "AI 编排坑位");
+    agentButton.type = "button";
+    const agentProposalList = element("div", "slot-list");
+    const recoveryPrompt = document.createElement("textarea");
+    recoveryPrompt.readOnly = true;
+    recoveryPrompt.hidden = true;
+    recoveryPrompt.setAttribute("aria-label", "Agent 恢复提示词");
+    const copyPrompt = element("button", "button-secondary", "复制恢复提示词");
+    copyPrompt.type = "button";
+    copyPrompt.hidden = true;
+    const agentTechnical = document.createElement("details");
+    agentTechnical.className = "slot-technical-details";
+    agentTechnical.hidden = true;
+    const agentTechnicalSummary = element("summary", "", "技术详情与恢复");
+    const agentRequestId = element("code", "", "");
+    agentTechnical.append(
+      agentTechnicalSummary,
+      agentRequestId,
+      recoveryPrompt,
+      copyPrompt,
+    );
+    const renderAgentResponse = (detail) => {
+      agentProposalList.replaceChildren();
+      const request = detail?.request;
+      const combinedPlan = detail?.response?.result?.slot_plan || [];
+      const proposals = detail?.response?.result?.proposals || [];
+      if (!request) return;
+      if (request.kind === "slot_plan_with_analysis") {
+        const cache = request.analysis_cache || {};
+        agentProposalList.append(
+          element("span", "", `缓存命中 ${cache.hit_count || 0} 张 · 新分析 ${cache.pending_count || 0} 张 · AI 坑位 ${combinedPlan.length} 个。合法结果已自动载入唯一当前草稿。`),
+          element(
+            "small",
+            "",
+            "仅载入通过服务端硬校验的 AI 结果；失败商品保持原草稿或空状态，不会自动切换规则方案。",
+          ),
+        );
+        fetchJson(apiPath("/stages/slots_copy/current-slot-plan"))
+          .then((payload) => applyCurrentPlan(payload.current_slot_plan))
+          .catch(() => {});
+        return;
+      }
+      proposals.forEach((proposal, proposalIndex) => {
+        const card = element("article", "slot-card");
+        const ordered = proposal.ordered_asset_ids || [];
+        const currentAssignments = stateByProduct.get(
+          String(proposal.product_id),
+        ) || [];
+        const current = currentAssignments[0];
+        const difference = current
+          ? `与当前草稿差异：比例 ${current.target_ratio || "未定"} → ${proposal.target_ratio}；图片 ${current.asset_ids?.length || 0} → ${ordered.length} 张。采用会替换该商品当前坑位草稿。`
+          : `与当前草稿差异：新增 ${proposal.target_ratio} 坑位，共 ${ordered.length} 张。`;
+        const adopt = element("button", "button-secondary", "采用该方案");
+        adopt.type = "button";
+        const reject = element("button", "button-secondary", "拒绝");
+        reject.type = "button";
+        const actionStatus = element("small", "", "采用只会更新坑位草稿，仍需点击“确认计划并处理图片”。");
+        adopt.addEventListener("click", async () => {
+          if (!window.confirm(`${difference}\n确认采用为草稿吗？此操作不会处理图片或上传。`)) {
+            actionStatus.textContent = "已取消采用，当前草稿保持不变。";
+            return;
+          }
+          adopt.disabled = true;
+          try {
+            const adopted = await fetchJson(
+              apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(request.request_id)}/adopt`),
+              {
+                method: "POST",
+                body: JSON.stringify({ proposal_index: proposalIndex }),
+              },
+            );
+            revision = Number(adopted.revision || revision);
+            revisionLabel.textContent = String(revision);
+            actionStatus.textContent = "已采用为当前坑位草稿；请检查图片后确认计划。";
+            await loadStage();
+          } catch (error) {
+            actionStatus.textContent = error.userMessage
+              || Object.values(error.fieldErrors || {})[0]
+              || error.message;
+          } finally {
+            adopt.disabled = false;
+          }
+        });
+        reject.addEventListener("click", async () => {
+          reject.disabled = true;
+          try {
+            await fetchJson(
+              apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(request.request_id)}/reject`),
+              {
+                method: "POST",
+                body: JSON.stringify({ proposal_index: proposalIndex }),
+              },
+            );
+            actionStatus.textContent = "已拒绝；当前坑位草稿保持不变。";
+          } catch (error) {
+            actionStatus.textContent = error.userMessage || error.message;
+          } finally {
+            reject.disabled = false;
+          }
+        });
+        card.append(
+          element("strong", "", `${proposal.product_title || proposal.product_id} · ${proposal.target_ratio} · ${ordered.length}张`),
+          element("span", "", proposal.reason || ""),
+          element("span", "", `AI置信度 ${proposal.ai_confidence ?? "—"} · 预计裁剪 ${proposal.estimated_crop_count ?? "—"}张 · 预计压缩 ${proposal.estimated_compression_count ?? "—"}张`),
+          element("span", "", `裁剪风险：${proposal.crop_risk || "—"} · 多样性：${proposal.diversity_summary || "—"} · 重复：${proposal.duplicate_summary || "—"}`),
+          element("span", "", difference),
+          adopt,
+          reject,
+          actionStatus,
+        );
+        agentProposalList.appendChild(card);
+      });
+      if (proposals.length) agentButton.textContent = "换一套 AI 建议";
+    };
+    const loadAgentResponse = async (request) => {
+      if (request?.status !== "completed") return;
+      const detail = await fetchJson(
+        apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(request.request_id)}`),
+      );
+      renderAgentResponse(detail);
+    };
+    const showAgentRequest = (request) => {
+      if (!request) return;
+      const statusText = {
+        pending_agent: "等待 Agent；网页不会自动唤醒 Codex。",
+        processing: `Agent 已于 ${request.claimed_at || "未知时间"}领取。`,
+        completed: "AI 分析和编排已返回，合法结果会自动载入当前草稿。",
+        cancelled: "AI 请求已取消，当前坑位草稿保持不变。",
+        superseded: "AI 请求已过期，不会覆盖当前草稿。",
+        failed: "Agent 请求失败；当前草稿保持不变，可重试或人工编排。",
+      }[request.status] || "Agent 请求状态未知。";
+      agentStatus.textContent = statusText;
+      agentRequestId.textContent = `请求 ${request.request_id}`;
+      agentTechnical.hidden = false;
+      agentButton.disabled = ["pending_agent", "processing"].includes(request.status);
+      if (request.recovery_prompt && request.status === "pending_agent" && !request.claimed_at) {
+        recoveryPrompt.value = request.recovery_prompt;
+        recoveryPrompt.hidden = false;
+        copyPrompt.hidden = false;
+      }
+      loadAgentResponse(request).catch((error) => {
+        agentStatus.textContent = error.userMessage || error.message;
+      });
+    };
+    agentButton.addEventListener("click", async () => {
+      const hasDraft = [...stateByProduct.values()].some(
+        (assignments) => assignments.length > 0,
+      );
+      if (
+        hasDraft
+        && !window.confirm(
+          "重新 AI 编排会在返回成功后替换当前未确认坑位草稿。是否继续？",
+        )
+      ) {
+        agentStatus.textContent = "已取消 AI 重新编排，当前草稿保持不变。";
+        return;
+      }
+      agentButton.disabled = true;
+      agentStatus.textContent = "正在生成受控缩略图并写入 Agent 请求…";
+      try {
+        const request = await fetchJson(
+          apiPath("/stages/slots_copy/agent-requests"),
+          {
+            method: "POST",
+            body: JSON.stringify({
+              kind: "slot_plan_with_analysis",
+              max_images: 30,
+              thumbnail_max_edge: 768,
+              max_proposals: 2,
+              force_replan: hasDraft,
+              plan_revision: currentPlanRevision,
+            }),
+          },
+        );
+        showAgentRequest(request);
+      } catch (error) {
+        const detail = error.userMessage
+          || Object.values(error.fieldErrors || {})[0]
+          || error.message;
+        const actions = {
+          AGENT_IMAGE_BUDGET_EXCEEDED: "可缩小候选范围，或直接人工编排。",
+          AGENT_THUMBNAIL_UNAVAILABLE: "请重建任务缓存，或直接人工编排。",
+          AGENT_CANDIDATE_IDENTITY_INCOMPLETE: "请重新准备当前坑位候选，或直接人工编排。",
+        }[error.reasonCode] || "可重试 AI 或直接人工编排。";
+        agentStatus.textContent = `${detail}（${error.reasonCode || "AGENT_REQUEST_FAILED"}）；${actions}`;
+        agentButton.disabled = false;
+      }
+    });
+    copyPrompt.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(recoveryPrompt.value);
+      copyPrompt.textContent = "已复制";
+      window.setTimeout(() => { copyPrompt.textContent = "复制恢复提示词"; }, 1500);
+    });
+    agentPanel.append(
+      modeHelp,
+      element("strong", "", "AI 编排（可选）"),
+      agentStatus,
+      agentButton,
+      agentTechnical,
+      agentProposalList,
+    );
+    overview.append(
+      element("strong", "", `已选素材预检形成 ${products.reduce((sum, product) => sum + (product.assets || []).length, 0)} 张唯一候选图`),
+      element("span", "", `每个坑位 ${data.slot_image_min || 3}–${data.slot_image_max || 9} 张，坑位内只能使用一种比例。`),
+      element(
+        "span",
+        "",
+        (data.deterministic_plan?.products || []).map(
+          (item) => `${item.product_id}：${(item.slot_sizes || []).join("+") || "0 个完整坑位"}；未使用 ${item.unused_count || 0} 张`,
+        ).join(" · "),
+      ),
+      element("span", "", `未确认坑位前不会生成正式图片。已阻止 ${data.blocked_outputs?.length || 0} 张图片。`),
+    );
+    const planningPage = subpages.compose || subpages.process;
+    planningPage.appendChild(overview);
+    if (!twoPageWorkflow) planningPage.appendChild(agentPanel);
+    if (twoPageWorkflow) {
+      const replanButton = element(
+        "button",
+        "button-secondary",
+        "重新自动编排",
+      );
+      replanButton.type = "button";
+      const replanStatus = element(
+        "small",
+        "",
+        "会按当前已选图片重新生成全部未确认坑位，并使旧裁剪输出与文案失效。",
+      );
+      replanButton.addEventListener("click", async () => {
+        if (!window.confirm(
+          "重新自动编排会替换当前坑位草稿，并使已有裁剪输出和文案失效。是否继续？",
+        )) return;
+        replanButton.disabled = true;
+        replanStatus.textContent = "正在按当前选择重新编排…";
+        try {
+          const payload = await fetchJson(
+            apiPath("/stages/slots_copy/current-slot-plan/replan"),
+            {
+              method: "POST",
+              body: JSON.stringify({
+                plan_revision: currentPlanRevision,
+              }),
+            },
+          );
+          applyCurrentPlan(payload.current_slot_plan);
+          replanStatus.textContent = "已重新编排；请检查后再次确认。";
+        } catch (error) {
+          replanStatus.textContent = error.userMessage || error.message;
+        } finally {
+          replanButton.disabled = false;
+        }
+      });
+      planningPage.append(replanButton, replanStatus);
+    }
     const board = element("div", "slot-board-products");
-    content.appendChild(board);
+    planningPage.appendChild(board);
+    const composeActionPanel = element("section", "slot-primary-action");
+    const composeStatus = element(
+      "span",
+      "",
+      "确认每个坑位的图片、顺序和建议比例后，再进入裁剪页面。",
+    );
+    const confirmPlanButton = element(
+      "button",
+      "primary-button",
+      "确认坑位并进入图片裁剪",
+    );
+    confirmPlanButton.type = "button";
+    composeActionPanel.append(
+      composeStatus,
+      confirmPlanButton,
+    );
+    planningPage.appendChild(composeActionPanel);
+
+    const processPanel = element("section", "slot-process-page");
+    processPanel.hidden = twoPageWorkflow;
+    const processHeading = element("div", "slot-page-heading");
+    processHeading.append(
+      element("strong", "", "图片裁剪与压缩"),
+      element(
+        "span",
+        "",
+        "比例按坑位统一选择；每张图片只调整当前比例的裁剪框。",
+      ),
+    );
+    const processWorkspace = element("div", "slot-process-workspace");
+    const processStatus = element(
+      "span",
+      "",
+      "请检查裁剪框、原图大小和压缩参数。",
+    );
+    const processPlanButton = element(
+      "button",
+      "primary-button",
+      "完成图片处理并进入文案生成",
+    );
+    processPlanButton.type = "button";
+    const backToCompose = element(
+      "button",
+      "button-secondary",
+      "返回坑位编排",
+    );
+    backToCompose.type = "button";
+    backToCompose.addEventListener("click", () => setSubpage(
+      "compose",
+      { userRequested: true },
+    ));
+    const processActions = element("div", "slot-page-actions");
+    if (!twoPageWorkflow) processActions.appendChild(backToCompose);
+    processActions.append(processStatus, processPlanButton);
+    processPanel.append(processHeading, processWorkspace, processActions);
+    subpages.process.appendChild(processPanel);
+    const normalizedCropBox = (output) => {
+      const value = output?.crop_box?.normalized || output?.crop_box;
+      if (
+        Array.isArray(value)
+        && value.length === 4
+        && value.every((item) => Number.isFinite(Number(item)))
+      ) {
+        return value.map(Number);
+      }
+      if (
+        value
+        && Number.isFinite(Number(value.x))
+        && Number.isFinite(Number(value.y))
+        && Number.isFinite(Number(value.width))
+        && Number.isFinite(Number(value.height))
+      ) {
+        const x = Number(value.x);
+        const y = Number(value.y);
+        return [x, y, x + Number(value.width), y + Number(value.height)];
+      }
+      return [0, 0, 1, 1];
+    };
+    const candidateFor = (product, assetId, targetRatio) =>
+      (product?.outputs || []).find(
+        (output) =>
+          String(output.asset_id) === String(assetId)
+          && String(output.target_ratio) === String(targetRatio),
+      );
+    const createSlotCropEditor = (output, assignment, cropState) => {
+      const width = Number(output.width || output.source_width || 0);
+      const height = Number(output.height || output.source_height || 0);
+      const frame = element("div", "crop-source-frame slot-crop-frame");
+      if (width && height) frame.style.aspectRatio = `${width} / ${height}`;
+      const image = document.createElement("img");
+      image.loading = "lazy";
+      image.alt = `${assignment.slot_id} 可视化裁剪原图`;
+      image.src = apiPath(
+        `/stages/slots_copy/assets/${encodeURIComponent(output.asset_id)}`,
+      );
+      const overlay = element("div", "crop-overlay");
+      overlay.tabIndex = 0;
+      overlay.setAttribute("role", "application");
+      overlay.setAttribute(
+        "aria-label",
+        `${assignment.slot_id} 图片裁剪框；方向键移动，Shift 加方向键缩放`,
+      );
+      overlay.setAttribute(
+        "aria-keyshortcuts",
+        "ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowUp Shift+ArrowDown Shift+ArrowLeft Shift+ArrowRight",
+      );
+      const handle = element("span", "crop-resize-handle");
+      overlay.appendChild(handle);
+      frame.append(image, overlay);
+      const preview = document.createElement("canvas");
+      preview.className = "crop-preview-canvas";
+      const outputSize = element("small", "crop-output-size");
+      const controls = element("div", "slot-crop-actions");
+      const restore = element("button", "button-secondary", "恢复建议框");
+      restore.type = "button";
+      const original = element(
+        "button",
+        "button-secondary",
+        cropState.use_original ? "已使用原图" : "使用原图",
+      );
+      original.type = "button";
+      original.hidden = !output.native_ratio;
+      controls.append(restore, original);
+      const currentBox = () => cropState.normalized_box;
+      const update = () => {
+        const box = currentBox();
+        const useOriginal = cropState.use_original === true;
+        overlay.hidden = useOriginal || !box;
+        preview.hidden = useOriginal || !box;
+        restore.disabled = useOriginal;
+        original.textContent = useOriginal ? "已使用原图" : "使用原图";
+        if (useOriginal || !box) {
+          outputSize.textContent = `原图直出 ${width}×${height}`;
+          return;
+        }
+        overlay.style.left = `${box[0] * 100}%`;
+        overlay.style.top = `${box[1] * 100}%`;
+        overlay.style.width = `${(box[2] - box[0]) * 100}%`;
+        overlay.style.height = `${(box[3] - box[1]) * 100}%`;
+        const cropWidth = Math.round((box[2] - box[0]) * width);
+        const cropHeight = Math.round((box[3] - box[1]) * height);
+        outputSize.textContent = `预计输出区域 ${cropWidth}×${cropHeight} · ${assignment.target_ratio}`;
+        if (image.complete && image.naturalWidth) {
+          const context = preview.getContext("2d");
+          const sourceX = box[0] * image.naturalWidth;
+          const sourceY = box[1] * image.naturalHeight;
+          const sourceWidth = (box[2] - box[0]) * image.naturalWidth;
+          const sourceHeight = (box[3] - box[1]) * image.naturalHeight;
+          preview.width = assignment.target_ratio === "1:1" ? 260 : 195;
+          preview.height = 260;
+          context.clearRect(0, 0, preview.width, preview.height);
+          context.drawImage(
+            image,
+            sourceX,
+            sourceY,
+            sourceWidth,
+            sourceHeight,
+            0,
+            0,
+            preview.width,
+            preview.height,
+          );
+        }
+      };
+      const beginPointer = (event, mode) => {
+        if (cropState.use_original || !currentBox() || !width || !height) return;
+        event.preventDefault();
+        const start = [...currentBox()];
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const rect = frame.getBoundingClientRect();
+        const targetRatio = assignment.target_ratio === "1:1" ? 1 : 0.75;
+        const normalizedRatio = targetRatio * height / width;
+        const move = (pointerEvent) => {
+          const dx = (pointerEvent.clientX - startX) / rect.width;
+          const dy = (pointerEvent.clientY - startY) / rect.height;
+          if (mode === "move") {
+            const boxWidth = start[2] - start[0];
+            const boxHeight = start[3] - start[1];
+            const x = Math.min(1 - boxWidth, Math.max(0, start[0] + dx));
+            const y = Math.min(1 - boxHeight, Math.max(0, start[1] + dy));
+            cropState.normalized_box = [x, y, x + boxWidth, y + boxHeight];
+          } else {
+            const maxWidth = Math.min(
+              1 - start[0],
+              (1 - start[1]) * normalizedRatio,
+            );
+            const boxWidth = Math.min(
+              maxWidth,
+              Math.max(0.08, start[2] - start[0] + dx),
+            );
+            const boxHeight = boxWidth / normalizedRatio;
+            cropState.normalized_box = [
+              start[0],
+              start[1],
+              start[0] + boxWidth,
+              start[1] + boxHeight,
+            ];
+          }
+          update();
+        };
+        const stop = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", stop);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", stop, { once: true });
+      };
+      overlay.addEventListener("pointerdown", (event) => {
+        if (event.target !== handle) beginPointer(event, "move");
+      });
+      handle.addEventListener("pointerdown", (event) => {
+        event.stopPropagation();
+        beginPointer(event, "resize");
+      });
+      overlay.addEventListener("keydown", (event) => {
+        if (
+          cropState.use_original
+          || !currentBox()
+          || !width
+          || !height
+          || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
+            event.key,
+          )
+        ) return;
+        event.preventDefault();
+        const box = [...currentBox()];
+        const step = 0.01;
+        if (event.shiftKey) {
+          const targetRatio = assignment.target_ratio === "1:1" ? 1 : 0.75;
+          const normalizedRatio = targetRatio * height / width;
+          const direction = ["ArrowRight", "ArrowDown"].includes(event.key)
+            ? 1
+            : -1;
+          const boxWidth = Math.min(
+            1 - box[0],
+            (1 - box[1]) * normalizedRatio,
+            Math.max(0.08, box[2] - box[0] + direction * step),
+          );
+          cropState.normalized_box = [
+            box[0],
+            box[1],
+            box[0] + boxWidth,
+            box[1] + boxWidth / normalizedRatio,
+          ];
+        } else {
+          const boxWidth = box[2] - box[0];
+          const boxHeight = box[3] - box[1];
+          const dx = event.key === "ArrowLeft"
+            ? -step
+            : event.key === "ArrowRight" ? step : 0;
+          const dy = event.key === "ArrowUp"
+            ? -step
+            : event.key === "ArrowDown" ? step : 0;
+          const x = Math.min(1 - boxWidth, Math.max(0, box[0] + dx));
+          const y = Math.min(1 - boxHeight, Math.max(0, box[1] + dy));
+          cropState.normalized_box = [x, y, x + boxWidth, y + boxHeight];
+        }
+        update();
+      });
+      image.addEventListener("load", update);
+      restore.addEventListener("click", () => {
+        cropState.use_original = false;
+        cropState.normalized_box = normalizedCropBox(output);
+        update();
+      });
+      original.addEventListener("click", () => {
+        cropState.use_original = true;
+        cropState.normalized_box = null;
+        update();
+      });
+      update();
+      const editor = element("div", "slot-crop-editor");
+      editor.append(frame, controls, outputSize, preview);
+      return editor;
+    };
+    const renderProcessingPage = () => {
+      processWorkspace.replaceChildren();
+      let blockedReason = "";
+      [...stateByProduct.values()].flat().forEach((assignment) => {
+        const product = products.find(
+          (item) => String(item.product_id) === String(assignment.product_id),
+        );
+        const card = element("article", "slot-process-card");
+        const heading = element("div", "slot-product-heading");
+        const recommendationSource = {
+          agent_assisted: "AI 建议",
+          manual_override: "人工调整",
+          rules: "规则建议",
+          manual: "人工选择",
+        }[assignment.plan_source] || "当前计划";
+        const ratio = element("div", "slot-ratio-buttons");
+        ["3:4", "1:1"].forEach((value) => {
+          const button = element("button", "button-secondary", value);
+          button.type = "button";
+          button.dataset.active = value === assignment.target_ratio
+            ? "true"
+            : "false";
+          button.setAttribute(
+            "aria-label",
+            `${assignment.slot_id} 使用 ${value} 比例`,
+          );
+          button.addEventListener("click", () => {
+            if (value === assignment.target_ratio) return;
+            assignment.target_ratio = value;
+            assignment.plan_source = "manual_override";
+            Object.keys(cropParameters)
+              .filter((key) => key.startsWith(`${assignment.slot_id}:`))
+              .forEach((key) => delete cropParameters[key]);
+            persist(true);
+            renderProcessingPage();
+          });
+          ratio.appendChild(button);
+        });
+        heading.append(
+          element(
+            "strong",
+            "",
+            `${assignment.theme || assignment.slot_id} · ${assignment.asset_ids.length} 张`,
+          ),
+          element(
+            "span",
+            "",
+            `${recommendationSource} ${assignment.target_ratio}；整个坑位必须使用同一比例`,
+          ),
+          ratio,
+        );
+        const grid = element("div", "slot-process-grid");
+        assignment.asset_ids.forEach((assetId, order) => {
+          const output = candidateFor(
+            product,
+            assetId,
+            assignment.target_ratio,
+          );
+          const imageCard = element("article", "slot-process-image");
+          if (!output) {
+            blockedReason = "有已选图片缺少当前坑位比例的处理数据，请返回坑位编排重新选择。";
+            imageCard.append(
+              element("strong", "", `第 ${order + 1} 张`),
+              element("span", "slot-process-error", blockedReason),
+            );
+            grid.appendChild(imageCard);
+            return;
+          }
+          const cropKey = `${assignment.slot_id}:${assetId}`;
+          if (!cropParameters[cropKey]) {
+            cropParameters[cropKey] = {
+              normalized_box: output.native_ratio
+                ? null
+                : normalizedCropBox(output),
+              use_original: Boolean(output.native_ratio),
+              confirm_compression: !output.requires_compression,
+            };
+          }
+          const originalWidth = Number(output.width || output.source_width || 0);
+          const originalHeight = Number(output.height || output.source_height || 0);
+          const originalSize = Number(
+            output.size_bytes ?? output.output_size_bytes ?? 0,
+          );
+          if (!originalWidth || !originalHeight || !originalSize) {
+            blockedReason = "有图片原图信息读取失败，请返回第四阶段重新检测。";
+          }
+          const compression = document.createElement("input");
+          compression.type = "checkbox";
+          compression.checked =
+            cropParameters[cropKey].confirm_compression === true;
+          compression.disabled = !output.requires_compression;
+          compression.addEventListener("change", () => {
+            cropParameters[cropKey].confirm_compression = compression.checked;
+            renderProcessingPage();
+          });
+          const compressionLabel = element("label", "check-control");
+          compressionLabel.append(
+            compression,
+            element(
+              "span",
+              "",
+              output.requires_compression
+                ? "确认压缩到 20MB 以内"
+                : "无需压缩",
+            ),
+          );
+          imageCard.append(
+            element("strong", "", `第 ${order + 1} 张`),
+            element(
+              "span",
+              "",
+              originalWidth && originalHeight
+                ? `原图 ${originalWidth}×${originalHeight} · ${output.original_ratio || ratioText(output)} · ${
+                    originalSize
+                      ? formatBytes(originalSize)
+                      : "大小读取失败"
+                  }${output.format ? ` · ${output.format}` : ""}`
+                : "原图尺寸与大小读取失败",
+            ),
+            element(
+              "small",
+              "",
+              `目标 ${assignment.target_ratio} · ${
+                output.native_ratio ? "原生比例直出" : "需要裁剪"
+              }${output.requires_compression ? " · 需要压缩" : ""}`,
+            ),
+            createSlotCropEditor(
+              output,
+              assignment,
+              cropParameters[cropKey],
+            ),
+            compressionLabel,
+          );
+          grid.appendChild(imageCard);
+        });
+        card.append(heading, grid);
+        processWorkspace.appendChild(card);
+      });
+      const needsCompression = [...stateByProduct.values()]
+        .flat()
+        .some((assignment) => {
+          const product = products.find(
+            (item) => String(item.product_id) === String(assignment.product_id),
+          );
+          return assignment.asset_ids.some((assetId) => {
+            const output = candidateFor(product, assetId, assignment.target_ratio);
+            const cropKey = `${assignment.slot_id}:${assetId}`;
+            return output?.requires_compression
+              && cropParameters[cropKey]?.confirm_compression !== true;
+          });
+        });
+      if (needsCompression) {
+        blockedReason ||= "请先确认所有需要压缩的图片。";
+      }
+      processPlanButton.disabled = Boolean(blockedReason);
+      processStatus.textContent =
+        blockedReason || "参数已就绪；执行后会生成任务目录内的派生图片并校验结果。";
+    };
+    const renderProcessedPreview = (processed) => {
+      processPanel.querySelector(".processed-preview-grid")?.remove();
+      const preview = element("div", "slot-asset-grid processed-preview-grid");
+      (processed.slots || []).forEach((slot) => {
+        (slot.outputs || []).forEach((output) => {
+          const card = element("article", "slot-asset-card");
+          const image = document.createElement("img");
+          image.loading = "lazy";
+          image.alt = `${slot.slot_id} 第 ${output.order} 张最终预览`;
+          image.src = apiPath(
+            `/stages/slots_copy/processed-assets/${encodeURIComponent(slot.slot_id)}/${output.order}`,
+          );
+          card.append(
+            image,
+            element("strong", "", `${slot.slot_id} · 第 ${output.order} 张`),
+            element(
+              "small",
+              "",
+              `${output.output_width}×${output.output_height} · ${formatBytes(output.output_size_bytes)} · ${output.crop_source || "已处理"}`,
+            ),
+          );
+          preview.appendChild(card);
+        });
+      });
+      processPanel.appendChild(preview);
+    };
+
+    const renderCopyEditor = (processed) => {
+      const copyContent = subpages.copy;
+      const assignments = [...stateByProduct.values()].flat();
+      const savedCopy = new Map(
+        readJsonListControl("copy_edits")
+          .filter((item) => item?.slot_id)
+          .map((item) => [String(item.slot_id), item]),
+      );
+      const form = element("div", "slot-list");
+      const copyState = [];
+      let finishButton = null;
+      const copyActions = element("div", "decision-mode-controls");
+      const copyStatus = element("span", "", "AI 文案绑定当前最终图片和顺序；生成后仍需逐坑人工确认。");
+      const copyButton = element("button", "primary-button", "AI 生成标题与描述");
+      copyButton.type = "button";
+      const copyVersions = document.createElement("select");
+      copyVersions.setAttribute("aria-label", "AI 文案版本");
+      copyActions.append(copyButton, copyVersions, copyStatus);
+      const updateCopyActions = () => {
+        const hasCompleteDrafts = copyState.length > 0
+          && copyState.every((draft) => draft.title && draft.description);
+        copyButton.className = hasCompleteDrafts
+          ? "button-secondary"
+          : "primary-button";
+        if (finishButton) {
+          finishButton.hidden = !hasCompleteDrafts;
+          finishButton.disabled = copyState.some(
+            (draft) => !draft.title || !draft.description || !draft.confirmed,
+          );
+        }
+      };
+      assignments.forEach((assignment) => {
+        const existing = savedCopy.get(String(assignment.slot_id)) || {};
+        const item = {
+          slot_id: assignment.slot_id,
+          product_id: assignment.product_id,
+          title: String(existing.title || ""),
+          description: String(existing.description || ""),
+          confirmed: existing.confirmed === true,
+          source: String(existing.source || "manual"),
+          evidence: Array.isArray(existing.evidence) ? existing.evidence : [],
+          risks: Array.isArray(existing.risks) ? existing.risks : [],
+          output_sha256: Array.isArray(existing.output_sha256)
+            ? existing.output_sha256
+            : (processed.slots || [])
+              .find((slot) => String(slot.slot_id) === String(assignment.slot_id))
+              ?.outputs?.map((output) => String(output.output_sha256 || ""))
+              || [],
+        };
+        copyState.push(item);
+        const card = element("article", "slot-card");
+        const title = document.createElement("input");
+        title.placeholder = "标题（必填）";
+        title.value = item.title;
+        const description = document.createElement("textarea");
+        description.placeholder = "描述（必填）";
+        description.rows = 3;
+        description.value = item.description;
+        const confirmation = document.createElement("input");
+        confirmation.type = "checkbox";
+        confirmation.checked = item.confirmed;
+        const confirmationLabel = element("label", "check-control");
+        confirmationLabel.append(
+          confirmation,
+          element("span", "", "确认该文案可进入 dry-run"),
+        );
+        const save = () => {
+          item.title = title.value;
+          item.description = description.value;
+          item.confirmed = confirmation.checked;
+          writeJsonListControl("copy_edits", copyState, { notify: true });
+          updateCopyActions();
+        };
+        title.addEventListener("input", save);
+        description.addEventListener("input", save);
+        confirmation.addEventListener("change", save);
+        card.append(
+          element(
+            "strong",
+            "",
+            `${assignment.slot_id} · ${assignment.target_ratio} · ${assignment.asset_ids.length} 张`,
+          ),
+          title,
+          description,
+          element(
+            "small",
+            "",
+            `依据：${item.evidence.join("；") || "人工填写/等待 AI"} · 风险：${item.risks.join("；") || "未标记"}`,
+          ),
+          confirmationLabel,
+        );
+        form.appendChild(card);
+      });
+      const storyBoard = element("aside", "copy-story-board");
+      (processed.slots || []).forEach((slot) => {
+        const story = element("article", "slot-card");
+        story.append(
+          element(
+            "strong",
+            "",
+            `${slot.slot_id} · ${slot.target_ratio} · ${slot.outputs?.length || 0} 张`,
+          ),
+          element("span", "", slot.theme || "当前坑位故事板"),
+        );
+        const strip = element("div", "copy-story-strip");
+        (slot.outputs || []).forEach((output) => {
+          const image = document.createElement("img");
+          image.loading = "lazy";
+          image.alt = `${slot.slot_id} 第 ${output.order} 张`;
+          image.src = apiPath(
+            `/stages/slots_copy/processed-assets/${encodeURIComponent(slot.slot_id)}/${output.order}`,
+          );
+          strip.appendChild(image);
+        });
+        story.appendChild(strip);
+        storyBoard.appendChild(story);
+      });
+      const copyWorkspace = element("div", "copy-workspace");
+      copyWorkspace.append(storyBoard, form);
+      const copyHeading = element("div", "slot-page-heading");
+      copyHeading.append(
+        element("strong", "", "AI 标题与描述"),
+        element(
+          "span",
+          "",
+          "文案只依据最终图片和可信商品信息生成；每个坑位都需要人工确认。",
+        ),
+      );
+      const finish = element(
+        "button",
+        "primary-button",
+        "完成第五阶段并进入 dry-run",
+      );
+      finish.type = "button";
+      finishButton = finish;
+      updateCopyActions();
+      finish.addEventListener("click", () => persistStage("submit"));
+      const backToProcess = element(
+        "button",
+        "button-secondary",
+        "返回图片裁剪",
+      );
+      backToProcess.type = "button";
+      backToProcess.addEventListener("click", () => setSubpage(
+        "process",
+        { userRequested: true },
+      ));
+      const finalActions = element("div", "slot-page-actions");
+      finalActions.append(backToProcess, finish);
+      const technical = document.createElement("details");
+      technical.className = "slot-technical-details";
+      technical.append(
+        element("summary", "", "技术详情"),
+        element(
+          "code",
+          "",
+          `计划 ${String(processed.plan_sha256 || "").slice(0, 12)}`,
+        ),
+      );
+      copyContent.replaceChildren(
+        copyHeading,
+        copyActions,
+        copyWorkspace,
+        finalActions,
+        technical,
+      );
+      writeJsonListControl("copy_edits", copyState);
+      const applyCopyDrafts = (drafts, requestId) => {
+        const merged = drafts.map((draft) => ({
+          slot_id: draft.slot_id,
+          product_id: assignments.find(
+            (item) => item.slot_id === draft.slot_id,
+          )?.product_id || "",
+          title: draft.title || "",
+          description: draft.description || "",
+          evidence: draft.evidence || [],
+          risks: draft.risks || [],
+          confirmed: false,
+          source: "agent_assisted",
+          request_id: requestId,
+        }));
+        writeJsonListControl("copy_edits", merged, { notify: true });
+        copyStatus.textContent = "AI 文案已载入；请核对依据、风险并逐坑确认。";
+        renderCopyEditor(processed);
+      };
+      const requestCopy = async (regenerate = false) => {
+        copyButton.disabled = true;
+        try {
+          const copyRequest = await fetchJson(
+            apiPath("/stages/slots_copy/copy-request"),
+            {
+              method: "POST",
+              body: JSON.stringify({ regenerate }),
+            },
+          );
+          if (copyRequest.status !== "completed") {
+            copyStatus.textContent = {
+              pending_agent: "文案请求等待当前 Codex 任务领取。",
+              processing: "Codex 正在按最终坑位图片生成标题和描述。",
+              failed: "AI 文案失败，可保留人工填写并重试。",
+            }[copyRequest.status] || `文案请求：${copyRequest.status}`;
+            return;
+          }
+          const detail = await fetchJson(
+            apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(copyRequest.request_id)}`),
+          );
+          const drafts = detail.response?.result?.copy_drafts || [];
+          if (!drafts.length) {
+            copyStatus.textContent = "AI 响应没有可用文案，请重试或人工填写。";
+            return;
+          }
+          applyCopyDrafts(drafts, copyRequest.request_id);
+        } catch (error) {
+          copyStatus.textContent = error.userMessage || error.message;
+        } finally {
+          copyButton.disabled = false;
+        }
+      };
+      copyButton.addEventListener("click", () => requestCopy(true));
+      fetchJson(apiPath("/stages/slots_copy/agent-requests"))
+        .then((payload) => {
+          const versions = (payload.requests || []).filter(
+            (item) => item.kind === "copy_draft" && item.status === "completed",
+          );
+          copyVersions.replaceChildren();
+          if (!versions.length) {
+            const option = document.createElement("option");
+            option.textContent = "暂无 AI 文案版本";
+            copyVersions.appendChild(option);
+            copyVersions.disabled = true;
+            return;
+          }
+          versions.forEach((item, index) => {
+            const option = document.createElement("option");
+            option.value = item.request_id;
+            option.textContent = `版本 ${versions.length - index} · ${item.request_id}`;
+            copyVersions.appendChild(option);
+          });
+        })
+        .catch(() => {});
+      copyVersions.addEventListener("change", async () => {
+        if (!copyVersions.value) return;
+        const detail = await fetchJson(
+          apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(copyVersions.value)}`),
+        );
+        applyCopyDrafts(
+          detail.response?.result?.copy_drafts || [],
+          copyVersions.value,
+        );
+      });
+    };
+
+    confirmPlanButton.addEventListener("click", async () => {
+      const assignments = [...stateByProduct.values()].flat();
+      confirmPlanButton.disabled = true;
+      composeStatus.textContent = "正在保存并锁定坑位图片、顺序和比例…";
+      try {
+        if (slotPlanDirty) {
+          const updated = await fetchJson(
+            apiPath("/stages/slots_copy/current-slot-plan"),
+            {
+              method: "POST",
+              body: JSON.stringify({
+                plan_revision: currentPlanRevision,
+                slot_assignments: assignments,
+              }),
+            },
+          );
+          currentPlanRevision = Number(
+            updated.current_slot_plan?.plan_revision || currentPlanRevision,
+          );
+          slotPlanDirty = false;
+        }
+        const confirmed = await fetchJson(
+          apiPath("/stages/slots_copy/current-slot-plan/confirm"),
+          {
+            method: "POST",
+            body: JSON.stringify({ plan_revision: currentPlanRevision }),
+          },
+        );
+        currentPlanRevision = Number(
+          confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
+        );
+        composeStatus.textContent = "坑位已确认；现在逐图检查裁剪与压缩。";
+        processPanel.hidden = false;
+        maxUnlockedPage = Math.max(
+          maxUnlockedPage,
+          pageOrder.indexOf("process"),
+        );
+        renderProcessingPage();
+        setSubpage("process");
+      } catch (error) {
+        composeStatus.textContent = error.userMessage
+          || Object.values(error.fieldErrors || {})[0]
+          || error.message;
+      } finally {
+        confirmPlanButton.disabled = false;
+      }
+    });
+
+    processPlanButton.addEventListener("click", async () => {
+      const assignments = [...stateByProduct.values()].flat();
+      processPlanButton.disabled = true;
+      processStatus.textContent = "正在生成裁剪/压缩输出并复核实际文件…";
+      try {
+        if (slotPlanDirty) {
+          const updated = await fetchJson(
+            apiPath("/stages/slots_copy/current-slot-plan"),
+            {
+              method: "POST",
+              body: JSON.stringify({
+                plan_revision: currentPlanRevision,
+                slot_assignments: assignments,
+              }),
+            },
+          );
+          currentPlanRevision = Number(
+            updated.current_slot_plan?.plan_revision || currentPlanRevision,
+          );
+          const confirmed = await fetchJson(
+            apiPath("/stages/slots_copy/current-slot-plan/confirm"),
+            {
+              method: "POST",
+              body: JSON.stringify({ plan_revision: currentPlanRevision }),
+            },
+          );
+          currentPlanRevision = Number(
+            confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
+          );
+          slotPlanDirty = false;
+        }
+        const processed = await fetchJson(
+          apiPath("/stages/slots_copy/process-plan"),
+          {
+            method: "POST",
+            body: JSON.stringify({
+              slot_assignments: assignments,
+              crop_parameters: cropParameters,
+            }),
+          },
+        );
+        processStatus.textContent = `处理完成：${processed.slots?.length || 0} 个坑位已通过校验；现在确认文案。`;
+        renderProcessedPreview(processed);
+        renderCopyEditor(processed);
+        maxUnlockedPage = Math.max(
+          maxUnlockedPage,
+          pageOrder.indexOf("copy"),
+        );
+        setSubpage("copy");
+      } catch (error) {
+        processStatus.textContent = error.userMessage
+          || Object.values(error.fieldErrors || {})[0]
+          || error.message;
+      } finally {
+        processPlanButton.disabled = false;
+      }
+    });
+    fetchJson(apiPath("/stages/slots_copy/processed-outputs"))
+      .then((processed) => {
+        if (processed.workflow_state === "outputs_ready" && processed.plan_sha256) {
+          processStatus.textContent = "当前坑位计划已有通过校验的输出；可以继续确认文案。";
+          renderProcessedPreview(processed);
+          renderCopyEditor(processed);
+          processPanel.hidden = false;
+          maxUnlockedPage = Math.max(
+            maxUnlockedPage,
+            pageOrder.indexOf("copy"),
+          );
+        }
+      })
+      .catch(() => {});
+
+    const productAssets = (product) => {
+      if (Array.isArray(product.assets) && product.assets.length) {
+        return product.assets;
+      }
+      const assets = new Map();
+      (product.outputs || []).forEach((output) => {
+        const assetId = String(output.asset_id);
+        const current = assets.get(assetId) || {
+          asset_id: assetId,
+          product_id: String(output.product_id || product.product_id || ""),
+          source_sha256: String(output.source_sha256 || ""),
+          width: output.width || output.source_width || output.output_width,
+          height: output.height || output.source_height || output.output_height,
+          original_ratio: output.original_ratio || "",
+          size_bytes: output.size_bytes ?? output.output_size_bytes,
+          size_display: output.size_display || "",
+          format: output.format || "",
+          ratio_options: {},
+        };
+        current.ratio_options[String(output.target_ratio)] = {
+          crop_box: output.crop_box,
+          native_ratio: Boolean(output.native_ratio),
+          requires_compression: Boolean(output.requires_compression),
+          estimated_width: output.estimated_width,
+          estimated_height: output.estimated_height,
+        };
+        assets.set(assetId, current);
+      });
+      return [...assets.values()];
+    };
+    const ratioText = (asset) => {
+      if (asset.original_ratio) return asset.original_ratio;
+      const width = Number(asset.width || 0);
+      const height = Number(asset.height || 0);
+      if (!width || !height) return "比例未知";
+      const gcd = (left, right) => (right ? gcd(right, left % right) : left);
+      const divisor = gcd(width, height);
+      return `${width / divisor}:${height / divisor}`;
+    };
+    const assetMetaText = (asset) => {
+      const width = asset.width || asset.source_width || asset.output_width || "—";
+      const height = asset.height || asset.source_height || asset.output_height || "—";
+      const size = asset.size_display
+        || formatBytes(asset.size_bytes ?? asset.output_size_bytes);
+      return `原图 ${width}×${height} · ${ratioText(asset)} · ${size}${asset.format ? ` · ${asset.format}` : ""}`;
+    };
+    const assignedAssetIds = (productId) => new Set(
+      (stateByProduct.get(productId) || [])
+        .flatMap((assignment) => assignment.asset_ids || [])
+        .map(String),
+    );
 
     const draw = () => {
       board.replaceChildren();
+      const hasDraft = [...stateByProduct.values()].some(
+        (assignments) => assignments.length > 0,
+      );
+      confirmPlanButton.disabled = !hasDraft;
+      agentButton.className = hasDraft ? "button-secondary" : "primary-button";
       products.forEach((product) => {
         const productId = String(product.product_id || "");
         const section = element("section", "slot-product");
@@ -1903,7 +3100,7 @@
           element("strong", "", `商品 ${productId}`),
           element("span", "", `3:4 ${product.available_by_ratio?.["3:4"] || 0} 张 · 1:1 ${product.available_by_ratio?.["1:1"] || 0} 张`),
         );
-        const add = element("button", "button-secondary", "添加坑位");
+        const add = element("button", "button-secondary", "人工添加坑位");
         add.type = "button";
         add.addEventListener("click", () => {
           const assignments = stateByProduct.get(productId);
@@ -1914,12 +3111,16 @@
             product_id: productId,
             target_ratio: ratio,
             asset_ids: [],
+            plan_source: "manual",
           });
           persist(true);
           draw();
         });
         heading.appendChild(add);
         section.appendChild(heading);
+        section.appendChild(
+          element("h4", "slot-section-title", "当前坑位草稿"),
+        );
         const slots = element("div", "slot-list");
         section.appendChild(slots);
         board.appendChild(section);
@@ -1940,53 +3141,183 @@
           ratio.value = assignment.target_ratio;
           const remove = element("button", "button-secondary", "删除坑位");
           remove.type = "button";
-          remove.disabled = stateByProduct.get(productId).length === 1;
           const count = element("span", "slot-count");
           controls.append(slotId, ratio, count, remove);
+          const sourceLabel = {
+            agent_assisted: "AI 生成",
+            manual_override: "AI 生成、人工调整",
+            rules: "历史规则草稿",
+            agent_assisted_with_rules_fallback: "历史 AI/规则草稿",
+            manual: "人工编排",
+          }[assignment.plan_source] || assignment.plan_source || "未知";
+          slot.append(
+            element(
+              "strong",
+              "",
+              assignment.theme || `${productId} 坑位`,
+            ),
+            element(
+              "span",
+              "",
+              `来源：${sourceLabel} · ${assignment.quantity_reason || "请人工确认图片数量与互补性"}`,
+            ),
+            element(
+              "small",
+              "",
+              `预计需处理 ${assignment.estimated_processing_count ?? "—"} 张`,
+            ),
+            element(
+              "small",
+              "slot-copy-pending",
+              "标题与描述：待图片处理完成后生成",
+            ),
+          );
           slot.appendChild(controls);
           const grid = element("div", "slot-asset-grid");
           slot.appendChild(grid);
+          const candidateSection = document.createElement("details");
+          candidateSection.className = "slot-candidate-section";
+          const candidateSummary = element("summary", "", "添加候选图片");
+          const candidateGrid = element("div", "slot-candidate-grid");
+          const batchActions = element("div", "slot-candidate-actions");
+          candidateSection.append(
+            candidateSummary,
+            candidateGrid,
+            batchActions,
+          );
+          slot.appendChild(candidateSection);
           slots.appendChild(slot);
 
           const drawAssets = () => {
             grid.replaceChildren();
-            const outputs = (product.outputs || []).filter(
-              (output) => output.target_ratio === assignment.target_ratio,
+            candidateGrid.replaceChildren();
+            batchActions.replaceChildren();
+            const assets = productAssets(product);
+            const byId = new Map(
+              assets.map((asset) => [String(asset.asset_id), asset]),
             );
             assignment.asset_ids = assignment.asset_ids.filter((assetId) =>
-              outputs.some((output) => String(output.asset_id) === String(assetId))
+              byId.has(String(assetId))
             );
-            outputs.forEach((output) => {
-              const card = element("label", "slot-asset-card");
+            assignment.asset_ids.forEach((assetId) => {
+              const output = byId.get(String(assetId));
+              const card = element("article", "slot-asset-card");
               const image = document.createElement("img");
               image.loading = "lazy";
-              image.alt = `${productId} ${assignment.slot_id} 候选图`;
+              image.alt = `${productId} ${assignment.slot_id} 已选图片`;
               image.src = apiPath(
                 `/stages/slots_copy/assets/${encodeURIComponent(output.asset_id)}`,
               );
-              const checkbox = document.createElement("input");
-              checkbox.type = "checkbox";
-              checkbox.checked = assignment.asset_ids.includes(String(output.asset_id));
-              checkbox.disabled = (
-                !checkbox.checked
-                && assignment.asset_ids.length >= Number(data.slot_image_max || 9)
-              );
-              checkbox.addEventListener("change", () => {
-                const assetId = String(output.asset_id);
-                if (checkbox.checked) assignment.asset_ids.push(assetId);
-                else assignment.asset_ids = assignment.asset_ids.filter(
-                  (value) => value !== assetId,
+              const removeAsset = element("button", "button-secondary", "从坑位移除");
+              removeAsset.type = "button";
+              removeAsset.addEventListener("click", () => {
+                assignment.asset_ids = assignment.asset_ids.filter(
+                  (value) => String(value) !== String(assetId),
                 );
+                assignment.plan_source = assignment.plan_source === "agent_assisted"
+                  ? "manual_override"
+                  : "manual";
+                persist(true);
+                draw();
+              });
+              const role = (assignment.image_roles || []).find(
+                (item) => String(item.asset_id || "") === assetId,
+              );
+              card.draggable = true;
+              card.addEventListener("dragstart", (event) => {
+                event.dataTransfer?.setData("text/plain", assetId);
+              });
+              card.addEventListener("dragover", (event) => {
+                event.preventDefault();
+              });
+              card.addEventListener("drop", (event) => {
+                event.preventDefault();
+                const moved = event.dataTransfer?.getData("text/plain");
+                const from = assignment.asset_ids.indexOf(String(moved));
+                const to = assignment.asset_ids.indexOf(assetId);
+                if (from < 0 || to < 0 || from === to) return;
+                assignment.asset_ids.splice(from, 1);
+                assignment.asset_ids.splice(to, 0, String(moved));
                 persist(true);
                 drawAssets();
               });
               card.append(
                 image,
-                checkbox,
-                element("span", "", `${output.kind === "crop" ? "裁剪" : "原图"} · ${(Number(output.output_size_bytes || 0) / 1048576).toFixed(2)}MB`),
+                element("span", "", assetMetaText(output)),
+                element(
+                  "small",
+                  "",
+                  role
+                    ? `${role.role}：${role.reason}`
+                    : "已加入当前坑位",
+                ),
+                removeAsset,
               );
               grid.appendChild(card);
             });
+            const available = assets.filter((asset) => (
+              !assignedAssetIds(productId).has(String(asset.asset_id))
+              && asset.ratio_options?.[assignment.target_ratio]
+            ));
+            const pageKey = `${productId}:${assignment.slot_id}`;
+            const pageSize = 30;
+            const pageCount = Math.max(1, Math.ceil(available.length / pageSize));
+            const requestedPage = candidatePageByProduct.get(pageKey) || 0;
+            const pageIndex = Math.min(requestedPage, pageCount - 1);
+            candidatePageByProduct.set(pageKey, pageIndex);
+            available.slice(
+              pageIndex * pageSize,
+              (pageIndex + 1) * pageSize,
+            ).forEach((candidate) => {
+              const card = element("article", "slot-candidate-card");
+              const image = document.createElement("img");
+              image.loading = "lazy";
+              image.alt = `${productId} 可加入 ${assignment.slot_id} 的候选图片`;
+              image.src = apiPath(
+                `/stages/slots_copy/assets/${encodeURIComponent(candidate.asset_id)}`,
+              );
+              const addAsset = element("button", "button-secondary", "加入当前坑位");
+              addAsset.type = "button";
+              addAsset.disabled = (
+                assignment.asset_ids.length >= Number(data.slot_image_max || 9)
+              );
+              addAsset.addEventListener("click", () => {
+                assignment.asset_ids.push(String(candidate.asset_id));
+                assignment.plan_source = assignment.plan_source === "agent_assisted"
+                  ? "manual_override"
+                  : "manual";
+                persist(true);
+                draw();
+              });
+              card.append(
+                image,
+                element("small", "", assetMetaText(candidate)),
+                addAsset,
+              );
+              candidateGrid.appendChild(card);
+            });
+            candidateSummary.textContent = `添加候选图片 · 可用 ${available.length} 张`;
+            if (pageCount > 1) {
+              const previous = element("button", "button-secondary", "上一批");
+              previous.type = "button";
+              previous.disabled = pageIndex === 0;
+              previous.addEventListener("click", () => {
+                candidatePageByProduct.set(pageKey, pageIndex - 1);
+                draw();
+              });
+              const next = element("button", "button-secondary", "下一批");
+              next.type = "button";
+              next.disabled = pageIndex >= pageCount - 1;
+              next.addEventListener("click", () => {
+                candidatePageByProduct.set(pageKey, pageIndex + 1);
+                draw();
+              });
+              batchActions.append(
+                previous,
+                element("span", "", `${pageIndex + 1} / ${pageCount}`),
+                next,
+              );
+            }
             const valid = assignment.asset_ids.length >= Number(data.slot_image_min || 3)
               && assignment.asset_ids.length <= Number(data.slot_image_max || 9);
             count.textContent = `已选 ${assignment.asset_ids.length} 张${valid ? "" : " · 数量不合规"}`;
@@ -1999,9 +3330,11 @@
           });
           ratio.addEventListener("change", () => {
             assignment.target_ratio = ratio.value;
-            assignment.asset_ids = [];
+            assignment.plan_source = assignment.plan_source === "agent_assisted"
+              ? "manual_override"
+              : "manual";
             persist(true);
-            drawAssets();
+            draw();
           });
           remove.addEventListener("click", () => {
             const assignments = stateByProduct.get(productId);
@@ -2015,6 +3348,42 @@
     };
     draw();
     persist();
+    (async () => {
+      try {
+        const currentPayload = await fetchJson(
+          apiPath("/stages/slots_copy/current-slot-plan"),
+        );
+        if (currentPayload.current_slot_plan) {
+          applyCurrentPlan(currentPayload.current_slot_plan);
+        }
+        const requestsPayload = await fetchJson(
+          apiPath("/stages/slots_copy/agent-requests"),
+        );
+        let latest = Array.isArray(requestsPayload.requests)
+          ? requestsPayload.requests.find((item) =>
+            item.kind === "slot_plan_with_analysis"
+            && ["pending_agent", "processing", "completed"].includes(item.status)
+          )
+          : null;
+        if (!currentPayload.current_slot_plan && currentPayload.ai_default && !latest) {
+          latest = await fetchJson(
+            apiPath("/stages/slots_copy/agent-requests"),
+            {
+              method: "POST",
+              body: JSON.stringify({
+                kind: "slot_plan_with_analysis",
+                max_images: 30,
+                thumbnail_max_edge: 768,
+                max_proposals: 2,
+              }),
+            },
+          );
+        }
+        if (latest) showAgentRequest(latest);
+      } catch (error) {
+        agentStatus.textContent = error.userMessage || error.message;
+      }
+    })();
   }
 
   function renderStageResult(schemaComponent) {
@@ -2097,6 +3466,31 @@
       persistenceInFlight = false;
       return;
     }
+    if (
+      mode === "submit"
+      && requestedStageId === "asset_matching"
+    ) {
+      const decisions = Array.isArray(values.asset_decisions)
+        ? values.asset_decisions.filter((item) => item?.decision === "selected")
+        : [];
+      const counts = new Map();
+      decisions.forEach((item) => {
+        const productId = String(item.product_id || "");
+        counts.set(productId, (counts.get(productId) || 0) + 1);
+      });
+      const shortages = [...counts.entries()]
+        .filter(([, count]) => count < 3)
+        .map(([productId, count]) => `${productId || "当前商品"} 还差 ${3 - count} 张`);
+      if (!decisions.length || shortages.length) {
+        const message = !decisions.length
+          ? "每个商品至少采用 3 张图片；当前草稿可以继续保存。"
+          : `完整坑位至少需要 3 张图片：${shortages.join("；")}`;
+        showFieldErrors(form, { asset_decisions: message });
+        actionMessage.textContent = message;
+        persistenceInFlight = false;
+        return;
+      }
+    }
 
     saveButton.disabled = true;
     submitButton.disabled = mode === "submit";
@@ -2133,15 +3527,22 @@
         revision = payload.revision;
         uiState = UiState.receiveStage(uiState, {
           stageId: requestedStageId,
-          status: "ready_for_agent",
+          status: payload.status || "ready_for_agent",
           result: null,
           submission: { created_at: payload.created_at },
         });
         renderStatus();
         renderSubmission();
         renderStageResult(stages.get(requestedStageId).component);
-        actionMessage.textContent = "交接已持久化，正在等待 Agent 接收。";
-        await loadRecoveryInstruction(requestedStageId);
+        actionMessage.textContent = payload.status === "completed"
+          ? "图片预检与坑位草稿已生成，可直接进入下一阶段检查。"
+          : "交接已持久化，正在等待 Agent 接收。";
+        if (payload.status !== "completed") {
+          await loadRecoveryInstruction(requestedStageId);
+        } else if (payload.next_stage && stages.has(payload.next_stage)) {
+          sessionCurrentStageId = payload.next_stage;
+          activateStage(payload.next_stage);
+        }
       } else {
         revision = UiState.persistedRevision(payload);
         const preservesReviewContext = [
@@ -2262,16 +3663,24 @@
       if (requestedStageId !== currentStageId) return;
       const priorRevision = revision;
       const priorStatus = uiState.serverStatus;
+      const stageChanged = UiState.stagePollChanged(
+        priorRevision,
+        priorStatus,
+        stageState.revision,
+        stageState.status,
+      );
       revision = stageState.revision;
       revisionLabel.textContent = String(revision);
       const heartbeat = sessionPayload.session.last_agent_heartbeat;
       applySessionSnapshot(sessionPayload.session);
       uiState = UiState.receiveStatus(uiState, stageState.status, heartbeat);
-      renderStatus();
       const connection = UiState.connectionView(uiState, Date.now());
       connectionLabel.textContent = connection.connectionLabel;
       offlinePanel.hidden = connection.connectionLabel === "Agent 已连接";
-      if (priorRevision !== revision || priorStatus !== stageState.status) await loadStage();
+      if (stageChanged) {
+        renderStatus();
+        await loadStage();
+      }
     } catch (error) {
       offlinePanel.hidden = false;
       connectionLabel.textContent = "Agent 状态暂不可用";
@@ -2319,6 +3728,10 @@
   panels.forEach((panel) => {
     panel.addEventListener("input", (event) => {
       if (!event.target?.getAttribute?.("name")) return;
+      if (
+        !event.isTrusted
+        && event.detail?.source !== "explicit-user-edit"
+      ) return;
       if (panel.dataset.stagePanel === currentStageId) {
         localEditVersion += 1;
         uiState = UiState.markDirty(uiState);

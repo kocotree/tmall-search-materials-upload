@@ -37,6 +37,7 @@ class StageDefinition:
     fields: tuple[FieldDefinition, ...]
     previous_stage: str | None = None
     read_only: bool = False
+    visible: bool = True
     exactly_one_constraints: tuple[ExactlyOneConstraint, ...] = ()
 
 
@@ -168,10 +169,11 @@ STAGES: tuple[StageDefinition, ...] = (
     ),
     StageDefinition(
         id="image_review",
-        title="图片适用性与裁剪",
-        description="审查第三阶段已选图片，比较 1:1 / 3:4，并完成人工裁剪或排除决定。",
+        title="图片适用性检测",
+        description="审查第三阶段已选图片，同时比较 1:1 / 3:4 的可行性；本阶段不确定最终坑位比例，也不生成正式派生文件。",
         component="image_review",
         previous_stage="asset_matching",
+        visible=False,
         fields=(
             _field(
                 "decisions",
@@ -185,10 +187,10 @@ STAGES: tuple[StageDefinition, ...] = (
     ),
     StageDefinition(
         id="slots_copy",
-        title="坑位编排与文案",
-        description="分配坑位素材及素材组顺序，并编辑标题、描述和备注。",
+        title="坑位编排、图片处理与文案",
+        description="先确认每个坑位的图片、顺序和唯一比例，再执行裁剪/压缩；输出校验通过后编辑并确认文案。",
         component="slots_copy_editor",
-        previous_stage="image_review",
+        previous_stage="asset_matching",
         fields=(
             _field("slot_assignments", "坑位素材分配与顺序", "table", required=True),
             _field("copy_edits", "标题、描述与人工备注", "table", required=True),

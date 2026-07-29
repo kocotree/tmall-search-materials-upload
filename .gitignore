@@ -7,9 +7,14 @@ test_evidence/
 .pytest-task-*/
 .pytest-tmp-*/
 .pytest-cache-*/
+upload-search-materials/.pytest-*/
+upload-search-materials/.browser-test-runs/
+upload-search-materials/v/
 build/
 __pycache__/
 .pytest_cache/
 *.egg-info/
+*.log
+feishu-auth-*.png
 .local-cache/
 upload-search-materials/config/local-paths.json

@@ -1,5 +1,17 @@
 # 数据结构
 
+## Selected-asset preflight 与确定性坑位草稿
+
+新任务在 `03-asset-matching/selected-asset-preflight.json` 保存当前选图
+revision、策略 SHA-256、源检查身份、检测提供方版本、统计及逐图检查记录；该文件
+只能包含元数据，不得包含派生图片。
+
+初始 `current-slot-plan.json` 使用 `decision_source=deterministic`。坑位上下文的
+`deterministic_plan` 包含 `strategy_id`、`strategy_version`、
+`strategy_sha256`、输入 revision、`assignments[]`、`unused_assets[]` 和逐商品
+坑位数量摘要。人工编辑后来源改为 `manual` 或 `manual_override`。历史
+`rules` / `agent_assisted` 文件保持可读，但新任务不得生成。
+
 ## Task Setup
 
 任务配置 handoff 的用户输入为：`store`、`store_confirmed` 和 `month`。第一阶段不接受 `product_scope`、`product_ids` 或 `promotion_max_pages`；商品范围由第二阶段的“搜推高价值”全量采集结果决定。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
@@ -149,11 +161,36 @@ manifest SHA-256 覆盖除自身之外的完整规范化批准信封，不能只
 - `assets[]`：商品/素材标识、完整 `source_inspection`、`target_assessments`、预检结果和两个比例的 `crop_options`
 - `capabilities.manual_crop=true`、`capabilities.ai_crop=false`、`capabilities.image_compression=true`，并记录压缩提供方及版本
 
-第四阶段 `input.json.values.decisions[]`：
+第四阶段 `input.json.values.decisions[]` 使用 `suitability_decision`：`asset_id`、`product_id`、`decision=candidate|excluded`、`candidate_ratios[]`、`crop_candidates.<ratio>`、`requires_compression` 和 `asset_matching_revision`。第四阶段输入不得包含正式 `output`；兼容读取的旧 `action/target_ratio/crop_box` 只用于迁移审计。
 
-- 公共字段：`asset_id`、`product_id`、`action`
-- `direct|compress`：必须有与原图匹配的 `target_ratio`
-- `crop|crop_and_compress`：必须有 `target_ratio` 和归一化 `crop_box{x,y,width,height}`
-- 提交后四种发布动作必须增加 `output`，记录 `kind`、路径、SHA-256、宽高、大小、比例、格式、质量、提供方/版本、源 SHA-256、策略 SHA-256 和来源链。
+第五阶段 `review-context.json.data` 使用 `slot_plan` schema，包含 `image_review_revision`、`policy_sha256`、`products[].assets[]`（一张原图一条规范记录）、`products[].outputs[]`（比例能力候选，不是正式输出）、`blocked_outputs[]`、`slot_image_min=3`、`slot_image_max=9`。规范素材以 `asset_id + source_sha256` 为身份，保存宽高、原始比例、`size_bytes`、显示大小、格式和嵌套的 `ratio_options.1:1/3:4`。新任务不生成 `rule_drafts[]`；历史规则字段仅供只读审计。`slot_assignments[]` 包含 `slot_id`、`product_id`、有序 `asset_ids`、单一 `target_ratio`、来源和 revision 绑定。
 
-第五阶段 `review-context.json.data` 包含 `image_review_revision`、`products[].outputs[]`、`blocked_outputs[]`、`slot_image_min=3`、`slot_image_max=9`。`slot_assignments[]` 包含 `slot_id`、`product_id`、`asset_ids`、单一 `target_ratio` 与 `image_review_revision`。
+用户确认计划后，`processed-outputs.json` 记录 `plan_sha256`、逐坑位实际输出、源/输出 SHA-256、处理参数和 `workflow_state=outputs_ready`；正式文件只位于 `05-slots-copy/derived/`。`copy_edits[]` 必须逐 `slot_id` 记录标题、描述、人工确认、计划 SHA 和最终输出 SHA 列表。
+
+每个决策模式保存于 `<stage>/decision-modes/<decision_id>.json`，必含
+`schema_version`、`session_id`、`stage_id`、`decision_id`、`mode`、
+`selected_by`、`selected_at`、`bound_revision` 和 `persisted`。模式必须来自
+阶段注册表允许集合；revision 不一致时返回 `DECISION_REVISION_STALE`。
+
+Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
+
+- `request.json` 状态为 `pending_agent|processing|completed|failed|superseded|cancelled`，每次迁移记录 actor、时间、context revision 和 reason code。
+- 候选记录商品身份、asset ID、源 SHA-256、比例候选、裁剪框、压缩需求，以及请求目录缩略图路径、尺寸、大小、来源和缩略图 SHA-256；不得暴露共享盘源路径给响应消费者。
+- `response.json` 绑定 request ID、provider、模型和分析 schema。坑位方案必须包含同商品、单一比例、3–9 张唯一有序图片、理由、`ai_confidence`、预计裁剪/压缩数、裁剪风险、多样性和重复摘要。
+- `adoption.json` 绑定 response SHA-256、proposal index 和采用后的草稿 revision；采用只更新 `slot_assignments`，不生成 `processed-outputs.json`。
+- `rejection.json` 记录拒绝方案及说明，不改动当前草稿。
+
+规则建议使用 `rule_score` 和评分组成，AI 建议使用 `ai_confidence`，两者不得混用。
+
+## 第五阶段 AI 默认工作流（Schema v2）
+
+- `slot_plan_with_analysis` 请求绑定 session、`slots_copy` revision、第四阶段 revision、策略 SHA、剩余坑位和受控缩略图预算。
+- 响应固定分为 `asset_analysis`、`clusters`、`slot_plan`。图片分析包含场景、主体、拍摄类型、角度、姿态、商品可见度、风格、质量、比例风险和重复组。
+- `current-slot-plan.json` 是唯一活动草稿，包含 `plan_revision`、`workflow_state`、`decision_source`、`confirmed`、原 Agent request/response 身份以及审计事件。人工修改将来源改为 `manual_override`。
+- 新草稿来源只允许 `agent_assisted`、`manual`、`manual_override`。历史 `rules` 与 `agent_assisted_with_rules_fallback` 可读取；一旦编辑即写为人工来源，不再生成规则草稿。
+- 保存草稿允许空坑位和少于 3 张的中间状态；确认时严格校验每坑 3–9 张、坑位 ID、商品归属及 `asset_id + source_sha256` 跨坑唯一。
+- 历史素材缺少宽高、大小或格式时，只按该素材的 `source_path` 增量补采；已有快照不重复读取，也不触发共享盘全量扫描。
+- 坑位必须包含主题、数量理由、3–9 张唯一有序图片、逐图角色/理由/新增信息、未采用原因和预计裁剪压缩数。
+- `processed-outputs.json` 同时保存计划 SHA 和包含裁剪参数的 processing SHA；输出逐图保存源/输出 SHA、宽高、大小、比例和顺序。
+- `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；响应逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
+图片分析缓存键由源 SHA-256、`codex-agent-handoff`、模型标识和 schema 版本共同确定。

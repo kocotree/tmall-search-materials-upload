@@ -7,6 +7,8 @@ import json
 import os
 import tempfile
 import time
+import re
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,9 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from .stages import STAGES, get_stage
+from ..decision_modes import get_decision_boundary
 
 
 SCHEMA_VERSION = 1
+CURRENT_WORKFLOW_PROFILE = "deterministic-manual-v1"
+LEGACY_AI_COMPATIBILITY_PROFILE = "legacy-ai-compat-v1"
+LEGACY_WORKFLOW_MIGRATION_ID = "deterministic-manual-history-v1"
 STAGE_STATUSES = frozenset(
     {
         "draft",
@@ -45,6 +51,10 @@ class SessionRecord:
 
 class SessionStore:
     """Create sessions and hand user input to an interaction agent."""
+
+    _process_locks_guard = threading.Lock()
+    _process_locks: dict[str, threading.RLock] = {}
+    _lock_state = threading.local()
 
     def __init__(self, runs_root: Path) -> None:
         self.runs_root = Path(runs_root).expanduser()
@@ -84,6 +94,7 @@ class SessionStore:
                 },
                 "runs_root": str(self._runs_root),
                 "video_test_deferred": True,
+                "workflow_profile": CURRENT_WORKFLOW_PROFILE,
                 "last_agent_heartbeat": None,
             }
             self._write_json_atomic(session_path / "session.json", state)
@@ -91,6 +102,15 @@ class SessionStore:
         return SessionRecord(session_id=session_id, path=session_path)
 
     def load_session(self, session_id: str) -> dict[str, Any]:
+        state = self._load_session_file(session_id)
+        if state.get("workflow_profile") not in {
+            CURRENT_WORKFLOW_PROFILE,
+            LEGACY_AI_COMPATIBILITY_PROFILE,
+        }:
+            state = self._migrate_legacy_workflow(session_id, state)
+        return state
+
+    def _load_session_file(self, session_id: str) -> dict[str, Any]:
         path = self._session_path(session_id)
         try:
             with (path / "session.json").open(encoding="utf-8") as stream:
@@ -103,6 +123,125 @@ class SessionStore:
         if state.get("session_id") != session_id:
             raise InteractionConflict("session.json identity does not match its path")
         return state
+
+    def _migrate_legacy_workflow(
+        self, session_id: str, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Idempotently map historical stages into the deterministic workflow.
+
+        Historical files remain where they are.  The migration only writes a
+        selected-asset preflight compatibility snapshot, annotates the slot
+        review context, and updates the durable session navigation profile.
+        """
+
+        with self._session_lock(session_id):
+            state = self._load_session_file(session_id)
+            if state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE:
+                return state
+
+            original_stage = str(state.get("current_stage", "setup"))
+            image_state = state.get("stages", {}).get("image_review", {})
+            image_status = str(image_state.get("status", "draft"))
+            asset_stage_path = self._stage_path(session_id, "asset_matching")
+            image_stage_path = self._stage_path(session_id, "image_review")
+            slot_stage_path = self._stage_path(session_id, "slots_copy")
+            migrated_preflight = False
+
+            preflight_path = asset_stage_path / "selected-asset-preflight.json"
+            if not preflight_path.is_file():
+                legacy_context_path = image_stage_path / "review-context.json"
+                if legacy_context_path.is_file():
+                    legacy_context = self._read_json(
+                        legacy_context_path, "review-context"
+                    )
+                    legacy_data = legacy_context.get("data")
+                    if (
+                        isinstance(legacy_data, dict)
+                        and isinstance(legacy_data.get("assets"), list)
+                        and isinstance(legacy_data.get("policy_sha256"), str)
+                    ):
+                        asset_revision = int(
+                            legacy_data.get(
+                                "asset_matching_revision",
+                                state["stages"]["asset_matching"]["revision"],
+                            )
+                        )
+                        self._write_json_atomic(
+                            preflight_path,
+                            {
+                                "schema_version": SCHEMA_VERSION,
+                                "session_id": session_id,
+                                "stage_id": "asset_matching",
+                                "revision": asset_revision,
+                                "policy_sha256": legacy_data["policy_sha256"],
+                                "data": legacy_data,
+                                "migration": {
+                                    "migration_id": LEGACY_WORKFLOW_MIGRATION_ID,
+                                    "source_stage_id": "image_review",
+                                    "source_revision": int(
+                                        legacy_context.get(
+                                            "revision",
+                                            image_state.get("revision", 0),
+                                        )
+                                    ),
+                                    "source_path": str(legacy_context_path),
+                                },
+                            },
+                        )
+                        migrated_preflight = True
+
+            slot_context_path = slot_stage_path / "review-context.json"
+            if slot_context_path.is_file():
+                slot_context = self._read_json(
+                    slot_context_path, "review-context"
+                )
+                slot_data = slot_context.get("data")
+                if isinstance(slot_data, dict) and not slot_data.get(
+                    "two_page_workflow"
+                ):
+                    slot_data["two_page_workflow"] = True
+                    slot_context["migration"] = {
+                        "migration_id": LEGACY_WORKFLOW_MIGRATION_ID,
+                        "legacy_page_count": 3,
+                        "current_page_count": 2,
+                    }
+                    self._write_json_atomic(slot_context_path, slot_context)
+
+            current_plan_exists = (
+                slot_stage_path / "current-slot-plan.json"
+            ).is_file()
+            slot_context_exists = slot_context_path.is_file()
+            if original_stage == "image_review":
+                if image_status == "completed" and (
+                    current_plan_exists or slot_context_exists
+                ):
+                    state["current_stage"] = "slots_copy"
+                else:
+                    state["current_stage"] = "asset_matching"
+                    asset_state = state["stages"]["asset_matching"]
+                    if asset_state.get("status") == "completed":
+                        asset_state["status"] = "needs_user_input"
+
+            state["workflow_profile"] = CURRENT_WORKFLOW_PROFILE
+            state["workflow_migration"] = {
+                "migration_id": LEGACY_WORKFLOW_MIGRATION_ID,
+                "original_current_stage": original_stage,
+                "mapped_current_stage": state.get("current_stage"),
+                "legacy_image_review_status": image_status,
+                "selected_asset_preflight_migrated": migrated_preflight,
+                "legacy_files_preserved": True,
+            }
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "workflow_migrated",
+                session_id=session_id,
+                migration_id=LEGACY_WORKFLOW_MIGRATION_ID,
+                original_current_stage=original_stage,
+                mapped_current_stage=state.get("current_stage"),
+                selected_asset_preflight_migrated=migrated_preflight,
+            )
+            return state
 
     def save_input(
         self,
@@ -408,6 +547,20 @@ class SessionStore:
         stage_path = self._stage_path(session_id, stage_id)
         state = self.load_session(session_id)
         revision = state["stages"][stage_id]["revision"]
+        if (
+            state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
+            and stage_id == "slots_copy"
+        ):
+            return (
+                "Continue upload-search-materials without creating a new session. "
+                f"Use session_id='{session_id}', stage_id='slots_copy', "
+                f"revision={revision}, runs_root='{self._runs_root}'. "
+                f"Read {stage_path / 'review-context.json'} and "
+                f"{stage_path / 'current-slot-plan.json'}. "
+                "Do not wait for, claim, retry, or create a slot-planning Agent "
+                "request. Continue with the deterministic draft or user manual "
+                "edits; only final copywriting may create an Agent request."
+            )
         return (
             "Continue upload-search-materials without creating a new session. "
             f"Use session_id='{session_id}', stage_id='{stage_id}', revision={revision}, "
@@ -416,6 +569,144 @@ class SessionStore:
             f"the exact bytes of {stage_path / 'input.json'} before continuing. "
             "Do not select another session by recency."
         )
+
+    def read_decision_mode(
+        self,
+        session_id: str,
+        stage_id: str,
+        decision_id: str,
+    ) -> dict[str, Any]:
+        """Return the persisted mode or the deterministic Skill default."""
+
+        boundary = get_decision_boundary(stage_id, decision_id)
+        path = self._decision_mode_path(session_id, stage_id, decision_id)
+        if path.is_file():
+            document = self._read_json(path, "decision-mode")
+            self._validate_decision_mode(
+                document, session_id, stage_id, decision_id
+            )
+            return document
+        state = self.load_session(session_id)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "session_id": session_id,
+            "stage_id": stage_id,
+            "decision_id": decision_id,
+            "mode": boundary.default_mode,
+            "selected_by": "skill_default",
+            "selected_at": None,
+            "bound_revision": int(state["stages"][stage_id]["revision"]),
+            "persisted": False,
+        }
+
+    def write_decision_mode(
+        self,
+        session_id: str,
+        stage_id: str,
+        decision_id: str,
+        mode: str,
+        *,
+        selected_by: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Persist an explicit branch choice bound to the current revision."""
+
+        boundary = get_decision_boundary(stage_id, decision_id)
+        if mode not in boundary.allowed_modes:
+            raise InteractionConflict("DECISION_MODE_NOT_ALLOWED")
+        if selected_by not in {"user", "agent", "migration"}:
+            raise InteractionConflict("decision selected_by is not supported")
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            revision = int(state["stages"][stage_id]["revision"])
+            if revision != int(expected_revision):
+                raise InteractionConflict("DECISION_REVISION_STALE")
+            previous = self.read_decision_mode(
+                session_id, stage_id, decision_id
+            )
+            selected_at = self._iso_timestamp(datetime.now(timezone.utc))
+            document = {
+                "schema_version": SCHEMA_VERSION,
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "decision_id": decision_id,
+                "mode": mode,
+                "selected_by": selected_by,
+                "selected_at": selected_at,
+                "bound_revision": revision,
+                "persisted": True,
+                "previous_mode": previous.get("mode"),
+            }
+            path = self._decision_mode_path(
+                session_id, stage_id, decision_id
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_json_atomic(path, document)
+            event = (
+                "decision_mode_selected"
+                if previous.get("mode") != mode
+                else "decision_mode_reaffirmed"
+            )
+            self._append_event(
+                self._session_path(session_id),
+                event,
+                session_id=session_id,
+                stage_id=stage_id,
+                decision_id=decision_id,
+                mode=mode,
+                previous_mode=previous.get("mode"),
+                selected_by=selected_by,
+                revision=revision,
+            )
+            return document
+
+    def append_decision_event(
+        self,
+        session_id: str,
+        stage_id: str,
+        decision_id: str,
+        event: str,
+        **details: Any,
+    ) -> None:
+        """Append an auditable decision event without changing stage data."""
+
+        get_decision_boundary(stage_id, decision_id)
+        self._append_event(
+            self._session_path(session_id),
+            event,
+            session_id=session_id,
+            stage_id=stage_id,
+            decision_id=decision_id,
+            **details,
+        )
+
+    def _decision_mode_path(
+        self, session_id: str, stage_id: str, decision_id: str
+    ) -> Path:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", decision_id):
+            raise InteractionPathError("invalid decision identifier")
+        return self._safe_path(
+            self._stage_path(session_id, stage_id)
+            / "decision-modes"
+            / f"{decision_id}.json"
+        )
+
+    @staticmethod
+    def _validate_decision_mode(
+        document: dict[str, Any],
+        session_id: str,
+        stage_id: str,
+        decision_id: str,
+    ) -> None:
+        boundary = get_decision_boundary(stage_id, decision_id)
+        if (
+            document.get("session_id") != session_id
+            or document.get("stage_id") != stage_id
+            or document.get("decision_id") != decision_id
+            or document.get("mode") not in boundary.allowed_modes
+            or not isinstance(document.get("bound_revision"), int)
+        ):
+            raise InteractionConflict("decision-mode identity is invalid")
 
     def _write_revision_snapshot(
         self,
@@ -571,8 +862,37 @@ class SessionStore:
         """Serialize mutations from local UI and Agent processes for one session."""
 
         session_path = self._session_path(session_id)
-        with self._file_lock(session_path / ".session.lock", deadline=deadline):
-            yield session_path
+        key = os.path.normcase(str(session_path.resolve()))
+        held_keys = getattr(self._lock_state, "session_keys", None)
+        if held_keys is None:
+            held_keys = set()
+            self._lock_state.session_keys = held_keys
+        already_held = key in held_keys
+        with self._process_locks_guard:
+            process_lock = self._process_locks.setdefault(
+                key, threading.RLock()
+            )
+        acquired = process_lock.acquire(
+            timeout=-1
+            if deadline is None
+            else max(0.0, deadline - time.monotonic())
+        )
+        if not acquired:
+            raise TimeoutError("timed out acquiring session lock")
+        try:
+            if already_held:
+                yield session_path
+                return
+            with self._file_lock(
+                session_path / ".session.lock", deadline=deadline
+            ):
+                held_keys.add(key)
+                try:
+                    yield session_path
+                finally:
+                    held_keys.discard(key)
+        finally:
+            process_lock.release()
 
     @staticmethod
     @contextmanager

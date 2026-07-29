@@ -101,14 +101,13 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
     review_input = store.read_optional_stage_document(
         session.session_id, "image_review", "input"
     )
-    outputs = [
-        decision["output"] for decision in review_input["values"]["decisions"]
-    ]
-    derived_root = store._stage_path(
-        session.session_id, "image_review"
-    ) / "derived"
-    assert all(Path(output["output_path"]).is_relative_to(derived_root) for output in outputs)
-    assert all(Path(output["output_path"]).is_file() for output in outputs)
+    assert all(
+        "output" not in decision
+        for decision in review_input["values"]["decisions"]
+    )
+    assert not (
+        store._stage_path(session.session_id, "image_review") / "derived"
+    ).exists()
 
     review_handoff = store.read_optional_stage_document(
         session.session_id, "image_review", "handoff"
@@ -123,24 +122,47 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
     )
     board = prepare_slot_board_session(store, session.session_id)
     assert board["blocking_reasons"] == []
+    slot_assignments = [
+        {
+            "slot_id": "slot-square",
+            "product_id": "P1",
+            "target_ratio": "1:1",
+            "asset_ids": ["asset-0", "asset-1", "asset-2"],
+        },
+        {
+            "slot_id": "slot-portrait",
+            "product_id": "P1",
+            "target_ratio": "3:4",
+            "asset_ids": ["asset-3", "asset-4", "asset-5"],
+        },
+    ]
+    process_response = client.post(
+        f"/api/sessions/{session.session_id}/stages/slots_copy/process-plan",
+        json={"slot_assignments": slot_assignments},
+    )
+    assert process_response.status_code == 200, process_response.json
     slot_submit = client.post(
         f"/api/sessions/{session.session_id}/stages/slots_copy/submit",
         json={
             "revision": 1,
             "values": {
-                "slot_assignments": [
+                "slot_assignments": slot_assignments,
+                "copy_edits": [
                     {
                         "slot_id": "slot-square",
                         "product_id": "P1",
-                        "asset_ids": ["asset-0", "asset-1", "asset-2"],
+                        "title": "square dry-run",
+                        "description": "square description",
+                        "confirmed": True,
                     },
                     {
                         "slot_id": "slot-portrait",
                         "product_id": "P1",
-                        "asset_ids": ["asset-3", "asset-4", "asset-5"],
+                        "title": "portrait dry-run",
+                        "description": "portrait description",
+                        "confirmed": True,
                     },
                 ],
-                "copy_edits": [{"product_id": "P1", "title": "dry-run"}],
                 "user_notes": "",
             },
         },
@@ -153,6 +175,22 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
         assignment["target_ratio"]
         for assignment in slot_input["values"]["slot_assignments"]
     ] == ["1:1", "3:4"]
+    processed = json.loads(
+        (
+            store._stage_path(session.session_id, "slots_copy")
+            / "processed-outputs.json"
+        ).read_text(encoding="utf-8")
+    )
+    derived_root = (
+        store._stage_path(session.session_id, "slots_copy") / "derived"
+    )
+    assert processed["workflow_state"] == "outputs_ready"
+    assert all(
+        Path(output["output_path"]).is_relative_to(derived_root)
+        and Path(output["output_path"]).is_file()
+        for slot in processed["slots"]
+        for output in slot["outputs"]
+    )
     assert all(
         source_fingerprints[source.name] == _fingerprint(source)
         for source in sources

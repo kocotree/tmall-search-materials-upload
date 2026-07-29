@@ -79,7 +79,72 @@ def test_image_review_context_and_preview_are_served(tmp_path):
     assert preview.mimetype == "image/jpeg"
 
 
-def test_image_review_submit_materializes_manual_crop(tmp_path):
+def test_image_review_cached_preview_is_served_when_source_is_offline(tmp_path):
+    client, store, session_id, data = _prepared_client(tmp_path)
+    preview_url = (
+        f"/api/sessions/{session_id}/stages/image_review/assets/asset-a"
+    )
+
+    initial = client.get(preview_url)
+    assert initial.status_code == 200
+    preview_path = (
+        store._stage_path(session_id, "image_review")
+        / "preview-cache"
+        / "asset-a.jpg"
+    )
+    assert preview_path.is_file()
+
+    Path(data["assets"][0]["source_path"]).unlink()
+    cached = client.get(preview_url)
+
+    assert cached.status_code == 200
+    assert cached.mimetype == "image/jpeg"
+    assert cached.headers["Cache-Control"] == "private, max-age=300"
+
+
+def test_slot_board_reuses_review_preview_when_source_is_offline(tmp_path):
+    client, store, session_id, data = _prepared_client(tmp_path)
+    review_preview = client.get(
+        f"/api/sessions/{session_id}/stages/image_review/assets/asset-a"
+    )
+    assert review_preview.status_code == 200
+
+    store.write_review_context(
+        session_id,
+        "slots_copy",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "slots_copy",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "ready",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "review",
+            "data": {
+                "products": [{
+                    "product_id": "P1",
+                    "outputs": [{
+                        "asset_id": "asset-a",
+                        "source_path": data["assets"][0]["source_path"],
+                    }],
+                }],
+            },
+        },
+    )
+    Path(data["assets"][0]["source_path"]).unlink()
+
+    cached = client.get(
+        f"/api/sessions/{session_id}/stages/slots_copy/assets/asset-a"
+    )
+
+    assert cached.status_code == 200
+    assert cached.mimetype == "image/jpeg"
+    assert cached.headers["Cache-Control"] == "private, max-age=300"
+
+
+def test_image_review_submit_saves_suitability_without_materializing(tmp_path):
     client, store, session_id, data = _prepared_client(tmp_path)
     response = client.post(
         f"/api/sessions/{session_id}/stages/image_review/submit",
@@ -102,15 +167,16 @@ def test_image_review_submit_materializes_manual_crop(tmp_path):
     document = store.read_optional_stage_document(
         session_id, "image_review", "input"
     )
-    output = document["values"]["decisions"][0]["output"]
-    assert output["kind"] == "crop"
-    assert Path(output["output_path"]).is_file()
-    assert Path(output["output_path"]).is_relative_to(
+    decision = document["values"]["decisions"][0]
+    assert decision["decision"] == "candidate"
+    assert {"1:1", "3:4"} <= set(decision["candidate_ratios"])
+    assert "output" not in decision
+    assert not (
         store._stage_path(session_id, "image_review") / "derived"
-    )
+    ).exists()
 
 
-def test_image_review_can_generate_and_serve_processed_preview(tmp_path):
+def test_image_review_rejects_processing_before_slot_plan(tmp_path):
     client, _, session_id, data = _prepared_client(tmp_path)
     response = client.post(
         f"/api/sessions/{session_id}/stages/image_review/assets/asset-a/process",
@@ -120,14 +186,8 @@ def test_image_review_can_generate_and_serve_processed_preview(tmp_path):
             "crop_box": data["assets"][0]["crop_options"]["1:1"]["normalized"],
         },
     )
-    assert response.status_code == 200
-    output = response.json["output"]
-    preview = client.get(
-        f"/api/sessions/{session_id}/stages/image_review/outputs/asset-a"
-        f"?sha256={output['output_sha256']}"
-    )
-    assert preview.status_code == 200
-    assert preview.mimetype == "image/jpeg"
+    assert response.status_code == 409
+    assert "SLOT_PLAN_REQUIRED" in response.json["error"]
 
 
 def test_image_review_rejects_missing_or_stale_decisions(tmp_path):
@@ -140,7 +200,7 @@ def test_image_review_rejects_missing_or_stale_decisions(tmp_path):
     assert response.json["field_errors"]["decisions"] == "must not be empty"
 
 
-def test_frontend_exposes_manual_crop_and_real_compression_controls():
+def test_frontend_exposes_suitability_then_slot_first_processing():
     static_root = (
         Path(__file__).parents[1]
         / "src"
@@ -153,9 +213,14 @@ def test_frontend_exposes_manual_crop_and_real_compression_controls():
     assert "crop-overlay" in javascript
     assert '"image_review",' in javascript
     assert '"slots_copy",' in javascript
-    assert "人工裁剪与本地图片压缩已启用" in javascript
-    assert "生成处理预览" in javascript
-    assert "裁剪并压缩" in javascript
+    assert "本阶段只保存适用性和两种比例的候选裁剪框" in javascript
+    assert "第五阶段先编排坑位并确认唯一比例" in javascript
+    assert "AI 编排坑位" in javascript
+    assert "网页不会自动唤醒 Codex" in javascript
+    assert 'if (value == null || value === "") return "大小未知"' in javascript
+    assert "assetMetaText" in javascript
+    assert "asset.size_bytes ?? asset.output_size_bytes" in javascript
+    assert "assignment.asset_ids = [];" not in javascript
     assert "AI 裁剪按钮" not in javascript
 
 

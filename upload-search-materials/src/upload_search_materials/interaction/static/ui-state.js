@@ -124,6 +124,89 @@
     return requestedMode === "draft" ? "draft" : currentMode || null;
   }
 
+  function canonicalJsonValue(value) {
+    if (Array.isArray(value)) return value.map(canonicalJsonValue);
+    if (value && typeof value === "object") {
+      return Object.keys(value)
+        .sort()
+        .reduce((result, key) => {
+          result[key] = canonicalJsonValue(value[key]);
+          return result;
+        }, {});
+    }
+    return value;
+  }
+
+  function jsonSemanticallyEqual(left, right) {
+    return JSON.stringify(canonicalJsonValue(left))
+      === JSON.stringify(canonicalJsonValue(right));
+  }
+
+  function stagePollChanged(
+    previousRevision,
+    previousStatus,
+    nextRevision,
+    nextStatus,
+  ) {
+    return previousRevision !== nextRevision || previousStatus !== nextStatus;
+  }
+
+  function fifthStagePage(workflowState) {
+    if (["plan_confirmed", "processing"].includes(workflowState)) return "process";
+    if ([
+      "outputs_ready",
+      "copy_generating",
+      "copy_review",
+      "completed",
+    ].includes(workflowState)) return "copy";
+    return "compose";
+  }
+
+  function twoStepFifthStagePage(workflowState) {
+    if ([
+      "outputs_ready",
+      "copy_generating",
+      "copy_review",
+      "completed",
+    ].includes(workflowState)) return "copy";
+    return "process";
+  }
+
+  function assetSelectionGuidance(decisions, missingMaterials) {
+    const selected = (Array.isArray(decisions) ? decisions : [])
+      .filter((item) => item?.decision === "selected");
+    const identities = new Set();
+    selected.forEach((item) => {
+      const identity = String(
+        item.sha256 || item.source_sha256 || item.asset_id || "",
+      );
+      if (identity) identities.add(identity);
+    });
+    const usableUnique = identities.size;
+    const missingSlots = Math.max(0, Number(missingMaterials || 0));
+    const completeSlots = Math.min(
+      missingSlots,
+      Math.floor(usableUnique / 3),
+    );
+    const assigned = Math.min(usableUnique, completeSlots * 9);
+    const balancedCounts = completeSlots
+      ? Array.from(
+        { length: completeSlots },
+        (_, index) => Math.floor(assigned / completeSlots)
+          + (index < assigned % completeSlots ? 1 : 0),
+      )
+      : [];
+    return {
+      selectedCount: selected.length,
+      usableUnique,
+      duplicateCount: selected.length - usableUnique,
+      completeSlots,
+      balancedCounts,
+      minimumShortage: Math.max(0, 3 - usableUnique),
+      fillAllMinimumShortage: Math.max(0, missingSlots * 3 - usableUnique),
+    };
+  }
+
   function receiveRecovery(state, stageId, instruction) {
     if (stageId !== state.stageId) return state;
     return { ...state, recoveryInstruction: instruction };
@@ -181,12 +264,17 @@
   }
 
   return {
+    canonicalJsonValue,
+    assetSelectionGuidance,
     connectionView,
     controlPresentation,
     createRequestIdentity,
     createState,
     draftRequestBody,
+    fifthStagePage,
+    twoStepFifthStagePage,
     isCurrentRequest,
+    jsonSemanticallyEqual,
     markDirty,
     persistedRevision,
     mergePersistenceIntent,
@@ -197,6 +285,7 @@
     resultView,
     resultSections,
     statusLabels,
+    stagePollChanged,
     stageSnapshot,
     submissionView,
     selectInitialStage,

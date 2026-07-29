@@ -13,6 +13,7 @@ from upload_search_materials.image_compliance import (
 from upload_search_materials.image_review import (
     build_image_review_data,
     materialize_review_decisions,
+    migrate_legacy_suitability_to_selected_preflight,
     normalize_review_decisions,
     prepare_image_review_session,
     review_context_is_stale,
@@ -183,6 +184,41 @@ def test_prepare_session_snapshots_policy_and_binds_current_revision(tmp_path):
         context,
         current_asset_matching_revision=2,
     )
+
+    legacy_state = store.load_session(session.session_id)
+    legacy_state.pop("workflow_profile", None)
+    legacy_state["current_stage"] = "image_review"
+    store._write_session_state(session.session_id, legacy_state)
+    store.write_review_context(
+        session.session_id,
+        "slots_copy",
+        {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "stage_id": "slots_copy",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "legacy three-page workflow",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "legacy",
+            "data": {"workflow_state": "plan_review"},
+        },
+    )
+    report = migrate_legacy_suitability_to_selected_preflight(
+        store, session.session_id
+    )
+    migrated_state = store.load_session(session.session_id)
+    assert report["current_stage"] == "asset_matching"
+    assert migrated_state["current_stage"] == "asset_matching"
+    assert migrated_state["workflow_profile"] == "deterministic-manual-v1"
+    assert migrated_state["stages"]["asset_matching"]["status"] == "needs_user_input"
+    assert (stage_path / "suitability.snapshot.json").is_file()
+    assert Path(report["selected_asset_preflight"]).is_file()
+    migrated_slots = store.read_optional_stage_document(
+        session.session_id, "slots_copy", "review-context"
+    )
+    assert migrated_slots["data"]["two_page_workflow"] is True
 
 
 def test_oversize_source_is_reviewable_for_manual_crop(tmp_path):

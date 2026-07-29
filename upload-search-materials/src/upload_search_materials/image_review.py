@@ -23,6 +23,7 @@ from .image_compliance import (
     validate_normalized_crop,
 )
 from .interaction.session import InteractionConflict, SessionStore
+from .interaction.session import CURRENT_WORKFLOW_PROFILE
 
 
 def build_image_review_data(
@@ -119,6 +120,12 @@ def build_image_review_data(
                 "product_id": str(candidate.get("product_id", "")),
                 "product_title": str(candidate.get("product_title", "")),
                 "source_system": str(candidate.get("source_system", "")),
+                "candidate_directory": str(
+                    candidate.get("candidate_directory")
+                    or candidate.get("folder_path")
+                    or ""
+                ),
+                "selection_order": int(selection.get("selection_order") or 0),
                 "source_path": str(source_path),
                 "source_sha256": source_sha256,
                 "source_inspection": inspection,
@@ -130,12 +137,23 @@ def build_image_review_data(
                 "status": "blocked" if not preflight["selectable"] else "pending",
                 "reason_codes": preflight["reason_codes"],
                 "crop_options": crop_options,
+                "ratio_options": {
+                    ratio: {
+                        "ratio": ratio,
+                        "crop_box": crop_options.get(ratio),
+                        "assessment": preflight["resolution_checks"].get(ratio, {}),
+                        "feasible": ratio in crop_options,
+                        "requires_compression": bool(preflight["size_exceeded"]),
+                    }
+                    for ratio in image_policy["allowed_aspect_ratios"]
+                },
                 "duplicate": duplicate,
                 "asset_matching_revision": asset_matching_revision,
             }
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "record_type": "suitability_record",
         "asset_matching_revision": asset_matching_revision,
         "policy": image_policy,
         "policy_sha256": policy_sha256,
@@ -144,6 +162,7 @@ def build_image_review_data(
         "blocked_count": sum(item["status"] == "blocked" for item in records),
         "duplicate_count": duplicate_count,
         "assets": records,
+        "suitability_records": records,
         "capabilities": {
             "manual_crop": True,
             "ai_crop": False,
@@ -221,10 +240,20 @@ def prepare_image_review_session(
         "evidence": [
             str(stage_path / "policy.snapshot.json"),
         ],
-        "next_action": "在第四阶段逐张确认直接使用、人工裁剪、压缩、仅作候选或排除",
+        "next_action": "在第四阶段确认候选图片及 1:1、3:4 两种比例的可行性；第五阶段再确定坑位比例",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": review_data,
     }
+    store._write_json_atomic(
+        stage_path / "suitability.snapshot.json",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "image_review",
+            "asset_matching_revision": int(matching_state["revision"]),
+            "data": review_data,
+        },
+    )
     store.write_review_context(session_id, "image_review", review_context)
     return review_context
 
@@ -281,13 +310,40 @@ def normalize_review_decisions(
             )
         else:
             validated = None
+        crop_candidates: dict[str, Any] = {}
+        supplied_candidates = raw.get("crop_candidates")
+        if isinstance(supplied_candidates, Mapping):
+            for ratio, crop in supplied_candidates.items():
+                ratio = str(ratio)
+                if ratio not in asset.get("crop_options", {}):
+                    continue
+                crop_candidates[ratio] = validate_normalized_crop(
+                    crop,
+                    target_ratio=ratio,
+                    width=int(asset["width"]),
+                    height=int(asset["height"]),
+                )
+        if validated is not None and target_ratio:
+            crop_candidates[target_ratio] = validated
+        for ratio, crop in asset.get("crop_options", {}).items():
+            if ratio not in crop_candidates:
+                crop_candidates[ratio] = crop
+        candidate = action not in {"excluded"} and asset.get("status") != "blocked"
         normalized.append(
             {
+                "schema_version": 1,
+                "record_type": "suitability_decision",
                 "asset_id": asset_id,
                 "product_id": str(asset.get("product_id", "")),
-                "action": action,
+                "decision": "candidate" if candidate else "excluded",
+                "action": action if candidate else "excluded",
                 "target_ratio": target_ratio or None,
                 "crop_box": validated,
+                "candidate_ratios": sorted(crop_candidates) if candidate else [],
+                "crop_candidates": crop_candidates if candidate else {},
+                "requires_compression": bool(
+                    asset.get("preflight", {}).get("size_exceeded")
+                ),
                 "asset_matching_revision": review_data.get(
                     "asset_matching_revision"
                 ),
@@ -424,3 +480,126 @@ def review_context_is_stale(
         or int(data.get("asset_matching_revision", -1))
         != int(current_asset_matching_revision)
     )
+
+
+def migrate_legacy_image_review_session(
+    store: SessionStore,
+    session_id: str,
+    *,
+    policy_path: Path,
+) -> dict[str, Any]:
+    """Rebuild suitability while retaining legacy outputs as read-only audit."""
+
+    before = store.load_session(session_id)
+    legacy_stage = store._stage_path(session_id, "image_review")
+    legacy_outputs = sorted(
+        str(path)
+        for path in (legacy_stage / "derived").glob("**/*")
+        if path.is_file()
+    ) if (legacy_stage / "derived").is_dir() else []
+    context = prepare_image_review_session(
+        store,
+        session_id,
+        policy_path=policy_path,
+    )
+    with store._session_lock(session_id):
+        state = store.load_session(session_id)
+        state["stages"]["image_review"]["status"] = "needs_user_input"
+        state["stages"]["slots_copy"]["status"] = "draft"
+        state["current_stage"] = "image_review"
+        store._write_session_state(session_id, state)
+    report = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "migration": "slot-first-image-processing",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "obsolete_image_review_revision": before["stages"]["image_review"][
+            "revision"
+        ],
+        "obsolete_slots_copy_revision": before["stages"]["slots_copy"][
+            "revision"
+        ],
+        "legacy_outputs_retained_read_only": legacy_outputs,
+        "rebuilt_asset_matching_revision": context["data"][
+            "asset_matching_revision"
+        ],
+        "next_action": "review suitability and submit stage four again",
+    }
+    store._write_json_atomic(legacy_stage / "migration-slot-first.json", report)
+    return report
+
+
+def migrate_legacy_suitability_to_selected_preflight(
+    store: SessionStore,
+    session_id: str,
+) -> dict[str, Any]:
+    """Copy a compatible historical suitability snapshot into the new stage."""
+
+    state = store.load_session(session_id)
+    source_stage = store._stage_path(session_id, "image_review")
+    source_path = source_stage / "suitability.snapshot.json"
+    if not source_path.is_file():
+        raise InteractionConflict("historical suitability snapshot is unavailable")
+    snapshot = SessionStore._read_json(
+        source_path, "historical-suitability"
+    )
+    data = snapshot.get("data")
+    if not isinstance(data, dict):
+        raise InteractionConflict("historical suitability snapshot is invalid")
+    asset_revision = int(data.get("asset_matching_revision", -1))
+    if asset_revision != int(state["stages"]["asset_matching"]["revision"]):
+        raise InteractionConflict("historical suitability snapshot is stale")
+    target_stage = store._stage_path(session_id, "asset_matching")
+    target_path = target_stage / "selected-asset-preflight.json"
+    migrated = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "asset_matching",
+        "revision": asset_revision,
+        "migration_source": str(source_path),
+        "legacy_image_review_revision": int(
+            state["stages"]["image_review"]["revision"]
+        ),
+        "policy_sha256": data.get("policy_sha256"),
+        "data": data,
+    }
+    store._write_json_atomic(target_path, migrated)
+    slots_context = store.read_optional_stage_document(
+        session_id, "slots_copy", "review-context"
+    )
+    if isinstance(slots_context, dict) and isinstance(
+        slots_context.get("data"), dict
+    ):
+        slots_context = dict(slots_context)
+        slots_context["data"] = dict(slots_context["data"])
+        slots_context["data"]["two_page_workflow"] = True
+        slots_context["data"]["legacy_workflow_migrated"] = True
+        store._write_json_atomic(
+            store._stage_path(session_id, "slots_copy")
+            / "review-context.json",
+            slots_context,
+        )
+    with store._session_lock(session_id):
+        current = store.load_session(session_id)
+        current["workflow_profile"] = CURRENT_WORKFLOW_PROFILE
+        current["current_stage"] = "asset_matching"
+        current["stages"]["asset_matching"]["status"] = "needs_user_input"
+        current["stages"]["slots_copy"]["status"] = "draft"
+        store._write_session_state(session_id, current)
+        store._append_event(
+            store._session_path(session_id),
+            "legacy_suitability_migrated",
+            session_id=session_id,
+            stage_id="asset_matching",
+            revision=asset_revision,
+            source=str(source_path),
+            target=str(target_path),
+        )
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "migration": "selected-asset-preflight",
+        "selected_asset_preflight": str(target_path),
+        "legacy_stage_retained": str(source_stage),
+        "current_stage": "asset_matching",
+    }

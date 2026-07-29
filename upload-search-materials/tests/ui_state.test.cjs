@@ -212,3 +212,88 @@ test("submit intent has priority while persistence is in flight", () => {
   assert.equal(UiState.mergePersistenceIntent("draft", "submit"), "submit");
   assert.equal(UiState.mergePersistenceIntent("submit", "draft"), "submit");
 });
+
+test("JSON comparison ignores object key order but preserves array order", () => {
+  assert.equal(typeof UiState.jsonSemanticallyEqual, "function");
+  assert.equal(
+    UiState.jsonSemanticallyEqual(
+      [{ asset_id: "a", decision: { action: "use", ratio: "3:4" } }],
+      [{ decision: { ratio: "3:4", action: "use" }, asset_id: "a" }],
+    ),
+    true,
+  );
+  assert.equal(
+    UiState.jsonSemanticallyEqual(
+      [{ asset_id: "a" }, { asset_id: "b" }],
+      [{ asset_id: "b" }, { asset_id: "a" }],
+    ),
+    false,
+  );
+});
+
+test("poll refreshes only when authoritative revision or status changes", () => {
+  assert.equal(typeof UiState.stagePollChanged, "function");
+  assert.equal(UiState.stagePollChanged(4, "draft", 4, "draft"), false);
+  assert.equal(UiState.stagePollChanged(4, "draft", 5, "draft"), true);
+  assert.equal(UiState.stagePollChanged(4, "draft", 4, "processing"), true);
+});
+
+test("legacy fifth-stage states map to three progressive pages", () => {
+  assert.equal(typeof UiState.fifthStagePage, "function");
+  assert.equal(UiState.fifthStagePage("analysing"), "compose");
+  assert.equal(UiState.fifthStagePage("plan_review"), "compose");
+  assert.equal(UiState.fifthStagePage("plan_confirmed"), "process");
+  assert.equal(UiState.fifthStagePage("processing"), "process");
+  assert.equal(UiState.fifthStagePage("outputs_ready"), "copy");
+  assert.equal(UiState.fifthStagePage("copy_generating"), "copy");
+  assert.equal(UiState.fifthStagePage("copy_review"), "copy");
+  assert.equal(UiState.fifthStagePage("completed"), "copy");
+  assert.equal(UiState.fifthStagePage("unknown"), "compose");
+});
+
+test("historical fifth-stage states map into the two-page workflow", () => {
+  assert.equal(UiState.twoStepFifthStagePage("analysing"), "process");
+  assert.equal(UiState.twoStepFifthStagePage("plan_review"), "process");
+  assert.equal(UiState.twoStepFifthStagePage("plan_confirmed"), "process");
+  assert.equal(UiState.twoStepFifthStagePage("processing"), "process");
+  assert.equal(UiState.twoStepFifthStagePage("outputs_ready"), "copy");
+  assert.equal(UiState.twoStepFifthStagePage("copy_generating"), "copy");
+  assert.equal(UiState.twoStepFifthStagePage("copy_review"), "copy");
+  assert.equal(UiState.twoStepFifthStagePage("completed"), "copy");
+});
+
+test("selection guidance updates per change and excludes duplicate identities", () => {
+  const one = UiState.assetSelectionGuidance([
+    { asset_id: "a", sha256: "same", decision: "selected" },
+  ], 3);
+  assert.deepEqual(one, {
+    selectedCount: 1,
+    usableUnique: 1,
+    duplicateCount: 0,
+    completeSlots: 0,
+    balancedCounts: [],
+    minimumShortage: 2,
+    fillAllMinimumShortage: 8,
+  });
+
+  const duplicate = UiState.assetSelectionGuidance([
+    { asset_id: "a", sha256: "same", decision: "selected" },
+    { asset_id: "b", sha256: "same", decision: "selected" },
+    { asset_id: "c", sha256: "third", decision: "selected" },
+  ], 3);
+  assert.equal(duplicate.selectedCount, 3);
+  assert.equal(duplicate.usableUnique, 2);
+  assert.equal(duplicate.duplicateCount, 1);
+  assert.equal(duplicate.completeSlots, 0);
+  assert.equal(duplicate.minimumShortage, 1);
+
+  const nine = UiState.assetSelectionGuidance(
+    Array.from({ length: 9 }, (_, index) => ({
+      asset_id: `asset-${index}`,
+      sha256: `sha-${index}`,
+      decision: "selected",
+    })),
+    3,
+  );
+  assert.deepEqual(nine.balancedCounts, [3, 3, 3]);
+});
