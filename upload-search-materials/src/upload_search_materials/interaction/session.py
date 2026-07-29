@@ -9,14 +9,16 @@ import tempfile
 import time
 import re
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .stages import STAGES, get_stage
 from ..decision_modes import get_decision_boundary
+from ..time_utils import iso_timestamp
 
 
 SCHEMA_VERSION = 1
@@ -62,7 +64,7 @@ class SessionStore:
         self._runs_root = self.runs_root.resolve()
 
     def create_session(self, now: datetime | None = None) -> SessionRecord:
-        created = now or datetime.now()
+        created = now or datetime.now(timezone.utc)
         base_id = created.strftime("%Y%m%d_%H%M%S")
         session_path: Path | None = None
         session_id = base_id
@@ -96,6 +98,7 @@ class SessionStore:
                 "video_test_deferred": True,
                 "workflow_profile": CURRENT_WORKFLOW_PROFILE,
                 "last_agent_heartbeat": None,
+                "processing_claim": None,
             }
             self._write_json_atomic(session_path / "session.json", state)
             self._append_event(session_path, "session_created", session_id=session_id)
@@ -407,6 +410,8 @@ class SessionStore:
         evidence: tuple[Any, ...] | list[Any] = (),
         next_action: str | None = None,
         data: dict[str, Any] | None = None,
+        claim_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist an agent-owned result bound to the current user handoff."""
 
@@ -429,6 +434,65 @@ class SessionStore:
                 raise InteractionConflict("result input_sha256 does not match the current input")
             if handoff.get("session_id") != session_id or handoff.get("stage_id") != stage_id:
                 raise InteractionConflict("handoff identity does not match its path")
+            result_path = stage_path / "result.json"
+            if result_path.is_file():
+                existing_result = self._read_json(
+                    result_path, "result"
+                )
+                if (
+                    existing_result.get("revision") != revision
+                    or existing_result.get("input_sha256") != input_sha256
+                ):
+                    raise InteractionConflict(
+                        "BOUND_RESULT_IDENTITY_MISMATCH"
+                    )
+                if existing_result.get("status") == "completed":
+                    return existing_result
+            active_claim = state.get("processing_claim")
+            if isinstance(active_claim, dict):
+                if (
+                    active_claim.get("stage_id") != stage_id
+                    or int(active_claim.get("revision", -1)) != revision
+                    or active_claim.get("input_sha256") != input_sha256
+                ):
+                    raise InteractionConflict(
+                        "processing claim identity does not match result"
+                    )
+                if claim_id and active_claim.get("claim_id") != claim_id:
+                    raise InteractionConflict("PROCESSING_CLAIM_STALE")
+                active_attempt_id = str(
+                    active_claim.get("attempt_id", "")
+                ).strip()
+                if (
+                    attempt_id
+                    and active_attempt_id
+                    and attempt_id != active_attempt_id
+                ):
+                    raise InteractionConflict("COLLECTION_ATTEMPT_STALE")
+                if not attempt_id and active_attempt_id:
+                    attempt_id = active_attempt_id
+
+            if result_path.is_file():
+                existing_result = self._read_json(
+                    result_path, "result"
+                )
+                existing_attempt_id = str(
+                    existing_result.get("attempt_id", "")
+                ).strip()
+                if (
+                    existing_attempt_id
+                    and attempt_id
+                    and existing_attempt_id != attempt_id
+                ):
+                    history_path = (
+                        stage_path
+                        / "results"
+                        / f"{existing_attempt_id}.json"
+                    )
+                    if not history_path.is_file():
+                        self._write_json_atomic(
+                            history_path, existing_result
+                        )
 
             completed_at = self._iso_timestamp(datetime.now(timezone.utc))
             result = {
@@ -445,6 +509,8 @@ class SessionStore:
                 "created_at": completed_at,
                 "completed_at": completed_at,
             }
+            if attempt_id:
+                result["attempt_id"] = attempt_id
             if data is not None:
                 if not isinstance(data, dict):
                     raise InteractionConflict("result data must be an object")
@@ -459,6 +525,7 @@ class SessionStore:
             elif status == "completed" and review_context_path.is_file():
                 review_context_path.unlink()
             state["stages"][stage_id]["status"] = status
+            state["processing_claim"] = None
             self._write_session_state(session_id, state)
             self._append_event(
                 self._session_path(session_id),
@@ -529,6 +596,11 @@ class SessionStore:
         session_id: str,
         stage_id: str,
         timeout_seconds: float | None = None,
+        *,
+        claimant_id: str = "codex-agent",
+        lease_seconds: int = 300,
+        reclaim_expired: bool = False,
+        resume_needs_user_input: bool = False,
     ) -> dict[str, Any]:
         """Wait for a valid handoff, then claim it for the interaction agent."""
 
@@ -548,10 +620,67 @@ class SessionStore:
                         state = self.load_session(session_id)
                         if state["stages"][stage_id]["revision"] != handoff["revision"]:
                             raise InteractionConflict("handoff revision does not match session state")
-                        if state["stages"][stage_id]["status"] == "ready_for_agent":
-                            heartbeat = self._iso_timestamp(datetime.now(timezone.utc))
+                        current_status = state["stages"][stage_id]["status"]
+                        can_claim = current_status == "ready_for_agent"
+                        if (
+                            current_status == "needs_user_input"
+                            and resume_needs_user_input
+                        ):
+                            can_claim = True
+                        if (
+                            current_status == "processing"
+                            and reclaim_expired
+                            and self._claim_is_expired(
+                                state.get("processing_claim")
+                            )
+                        ):
+                            can_claim = True
+                        if can_claim:
+                            now = datetime.now(timezone.utc)
+                            heartbeat = self._iso_timestamp(now)
+                            claim_id = uuid.uuid4().hex
+                            prior_claim = state.get("processing_claim")
+                            prior_attempt_id = (
+                                str(prior_claim.get("attempt_id", "")).strip()
+                                if isinstance(prior_claim, dict)
+                                else ""
+                            )
+                            attempt_id = (
+                                prior_attempt_id
+                                if current_status == "processing"
+                                and reclaim_expired
+                                and prior_attempt_id
+                                else uuid.uuid4().hex
+                            )
                             state["stages"][stage_id]["status"] = "processing"
                             state["last_agent_heartbeat"] = heartbeat
+                            state["processing_claim"] = {
+                                "claim_id": claim_id,
+                                "attempt_id": attempt_id,
+                                "claimant_id": str(claimant_id).strip()
+                                or "codex-agent",
+                                "session_id": session_id,
+                                "stage_id": stage_id,
+                                "revision": int(handoff["revision"]),
+                                "input_sha256": str(handoff["input_sha256"]),
+                                "claimed_at": heartbeat,
+                                "heartbeat_at": heartbeat,
+                                "lease_expires_at": self._iso_timestamp(
+                                    now
+                                    + timedelta(
+                                        seconds=max(1, int(lease_seconds))
+                                    )
+                                ),
+                                "recovery_count": (
+                                    int(prior_claim.get("recovery_count", 0))
+                                    + 1
+                                    if (
+                                        current_status == "processing"
+                                        and isinstance(prior_claim, dict)
+                                    )
+                                    else 0
+                                ),
+                            }
                             self._write_session_state(session_id, state)
                             self._append_event(
                                 self._session_path(session_id),
@@ -559,6 +688,9 @@ class SessionStore:
                                 session_id=session_id,
                                 stage_id=stage_id,
                                 revision=handoff["revision"],
+                                claim_id=claim_id,
+                                attempt_id=attempt_id,
+                                reclaimed=current_status == "processing",
                             )
                             return handoff
                 except TimeoutError as error:
@@ -568,6 +700,99 @@ class SessionStore:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out waiting for handoff for stage {stage_id}")
             time.sleep(0.25)
+
+    def processing_claim(
+        self, session_id: str, stage_id: str
+    ) -> dict[str, Any] | None:
+        state = self.load_session(session_id)
+        claim = state.get("processing_claim")
+        if not isinstance(claim, dict) or claim.get("stage_id") != stage_id:
+            return None
+        return {**claim, "expired": self._claim_is_expired(claim)}
+
+    def renew_processing_claim(
+        self,
+        session_id: str,
+        stage_id: str,
+        claim_id: str,
+        *,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            claim = state.get("processing_claim")
+            if (
+                not isinstance(claim, dict)
+                or claim.get("stage_id") != stage_id
+                or claim.get("claim_id") != claim_id
+                or self._claim_is_expired(claim)
+            ):
+                raise InteractionConflict("PROCESSING_CLAIM_STALE")
+            now = datetime.now(timezone.utc)
+            heartbeat = self._iso_timestamp(now)
+            claim["heartbeat_at"] = heartbeat
+            claim["lease_expires_at"] = self._iso_timestamp(
+                now + timedelta(seconds=max(1, int(lease_seconds)))
+            )
+            state["last_agent_heartbeat"] = heartbeat
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "processing_heartbeat",
+                session_id=session_id,
+                stage_id=stage_id,
+                claim_id=claim_id,
+            )
+            return dict(claim)
+
+    def mark_processing_claim_recoverable(
+        self,
+        session_id: str,
+        stage_id: str,
+        *,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """Expire only the exact proven-dead attempt; never act on PID alone."""
+
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            claim = state.get("processing_claim")
+            if (
+                not isinstance(claim, dict)
+                or claim.get("stage_id") != stage_id
+                or claim.get("attempt_id") != attempt_id
+            ):
+                raise InteractionConflict(
+                    "PROCESSING_CLAIM_IDENTITY_MISMATCH"
+                )
+            claim["lease_expires_at"] = self._iso_timestamp(
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            )
+            claim["recovery_reason"] = "OWNED_WORKER_CONFIRMED_DEAD"
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "processing_marked_recoverable",
+                session_id=session_id,
+                stage_id=stage_id,
+                attempt_id=attempt_id,
+            )
+            return dict(claim)
+
+    @staticmethod
+    def _claim_is_expired(claim: object) -> bool:
+        if not isinstance(claim, dict):
+            return True
+        value = claim.get("lease_expires_at")
+        if not isinstance(value, str) or not value:
+            return True
+        try:
+            expires = datetime.fromisoformat(value)
+        except ValueError:
+            return True
+        if expires.tzinfo is None:
+            return True
+        return expires <= datetime.now(timezone.utc)
 
     def recovery_instruction(self, session_id: str, stage_id: str) -> str:
         """Describe the durable files an agent must inspect before recovering work."""
@@ -1005,9 +1230,7 @@ class SessionStore:
 
     @staticmethod
     def _iso_timestamp(moment: datetime) -> str:
-        if moment.tzinfo is None:
-            return moment.isoformat(timespec="seconds")
-        return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+        return iso_timestamp(moment)
 
     @staticmethod
     def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:

@@ -64,6 +64,11 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
                 "products_csv": "inputs/products.csv",
                 "runs_root": "task-runs",
                 "folder_index_root": "machine-cache/folders",
+                "selectors_file": "machine/selectors.yaml",
+                "cdp_url": "http://127.0.0.1:9333",
+                "browser_executable": "bin/browser.exe",
+                "browser_profile_dir": "machine/chrome-profile",
+                "material_center_url": "https://example.test/materials",
                 "image_sources": [
                     {"label": "NAS", "path": r"X:\\company-media"}
                 ],
@@ -81,6 +86,13 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
     assert runtime.folder_index_root == (
         workspace / "machine-cache" / "folders"
     ).resolve()
+    assert runtime.selectors_file is None
+    assert runtime.cdp_url == "http://127.0.0.1:9333"
+    assert runtime.browser_executable == (workspace / "bin/browser.exe").resolve()
+    assert runtime.browser_profile_dir == (
+        workspace / "machine/chrome-profile"
+    ).resolve()
+    assert runtime.material_center_url == "https://example.test/materials"
     assert runtime.image_sources[0]["path"] == r"X:\company-media"
 
 
@@ -121,6 +133,8 @@ def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
     assert [item["label"] for item in saved["image_sources"]] == ["模特图", "买家秀"]
     statuses = inspect_image_sources(updated, saved["image_sources"])
     assert [item["status"] for item in statuses] == ["available", "unavailable"]
+    assert statuses[0]["reason_code"] == "PATH_AVAILABLE"
+    assert statuses[1]["reason_code"] == "PATH_NOT_FOUND"
 
 
 def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):

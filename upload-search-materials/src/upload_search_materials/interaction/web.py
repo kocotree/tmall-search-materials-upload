@@ -11,7 +11,17 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request, send_file
+import yaml
 
+from ..browser.config import SelectorConfigError, load_selector_profile
+from ..browser.session import inspect_cdp_endpoint, open_cdp_page
+from ..collection_readiness import (
+    build_collection_readiness,
+    create_selector_candidate,
+    promote_selector_candidate,
+    validate_selector_candidate,
+)
+from ..collection_worker import collection_status as get_collection_status
 from ..agent_handoff import (
     AgentRequestError,
     ai_default_slot_planning_enabled,
@@ -55,9 +65,10 @@ from ..runtime_config import (
     inspect_image_sources,
     load_runtime_config,
     save_image_sources,
+    save_selector_profile_path,
 )
 from ..decision_modes import get_decision_boundary
-from .folder_picker import choose_directory
+from .folder_picker import FolderPickerError, choose_directory
 from .fallback import safety_context
 from .session import InteractionConflict, InteractionPathError, SessionStore
 from .stages import (
@@ -154,6 +165,9 @@ def create_app(
                 "rules_csv": str(runtime.rules.path or ""),
                 "rules_available": bool(runtime.rules.path and runtime.rules.path.is_file()),
                 "rules_status": runtime.rules.status,
+                "selectors_file": str(runtime.selectors_file or ""),
+                "cdp_url": runtime.cdp_url,
+                "material_center_url": runtime.material_center_url,
                 "folder_index_root": str(runtime.folder_index_root),
                 "folder_index_available": (
                     runtime.folder_index_root / "folder-index.sqlite3"
@@ -207,6 +221,316 @@ def create_app(
             ),
         )
 
+    @app.get("/api/runtime/collection")
+    def get_runtime_collection():
+        selector_status: dict[str, Any] = {
+            "configured": False,
+            "path": str(runtime.selectors_file or ""),
+            "reason_code": "SELECTOR_PROFILE_NOT_FOUND",
+        }
+        if runtime.selectors_file is not None:
+            try:
+                profile = load_selector_profile(
+                    runtime.selectors_file,
+                    purpose="high_value_collection",
+                    production=True,
+                )
+                selector_status = {
+                    "configured": True,
+                    "path": str(profile.path),
+                    "profile_name": profile.name,
+                    "profile_version": profile.version,
+                    "profile_sha256": profile.sha256,
+                    "purpose": profile.purpose,
+                    "reason_code": "",
+                }
+            except SelectorConfigError as error:
+                selector_status["reason_code"] = str(error).split(":", 1)[0]
+                selector_status["detail"] = str(error)
+        cdp = inspect_cdp_endpoint(runtime.cdp_url, timeout_seconds=0.25)
+        session_status: dict[str, Any] = {
+            "session_id": "",
+            "login_state": "unknown",
+            "observed_store": "",
+            "observed_url": "",
+            "page_identity": "",
+            "next_action": "",
+        }
+        selected_session = str(request.args.get("session_id", "")).strip()
+        expected_store = str(request.args.get("expected_store", "")).strip()
+        dom_evidence: dict[str, Any] = {}
+        if selected_session:
+            session_path = store._session_path(selected_session)
+            readiness_evidence = (
+                session_path
+                / "collected"
+                / "promotion"
+                / "collection-readiness-evidence.json"
+            )
+            if readiness_evidence.is_file():
+                try:
+                    dom_evidence = json.loads(
+                        readiness_evidence.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    dom_evidence = {}
+            page_evidence = (
+                session_path
+                / "collected"
+                / "promotion"
+                / "store-page-evidence.json"
+            )
+            login_evidence = (
+                session_path / "collected" / "login-required.json"
+            )
+            session_status["session_id"] = selected_session
+            if page_evidence.is_file():
+                try:
+                    document = json.loads(
+                        page_evidence.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    document = {}
+                    session_status.update(
+                        {
+                            "login_state": "unknown",
+                            "next_action": (
+                                "页面证据尚未完整写入，请稍后刷新"
+                            ),
+                        }
+                    )
+                session_status.update(
+                    {
+                        "login_state": (
+                            "authenticated"
+                            if document
+                            else session_status["login_state"]
+                        ),
+                        "observed_store": str(
+                            document.get("observed_store", "")
+                        ),
+                        "observed_url": str(
+                            document.get("page_url", "")
+                        ),
+                        "page_identity": str(
+                            document.get("page_identity", "")
+                        ),
+                        "next_action": "继续受管搜推高价值采集",
+                    }
+                )
+            elif login_evidence.is_file():
+                try:
+                    document = json.loads(
+                        login_evidence.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    document = {}
+                reason_code = str(document.get("reason_code", ""))
+                session_status.update(
+                    {
+                        "login_state": (
+                            "human_check"
+                            if reason_code == "HUMAN_CHECK"
+                            else (
+                                "interaction_required"
+                                if document
+                                else "unknown"
+                            )
+                        ),
+                        "observed_url": str(
+                            document.get("material_center_url", "")
+                        ),
+                        "next_action": (
+                            (
+                                "请在 CDP Chrome 完成登录或人机验证，"
+                                "然后恢复同一任务"
+                            )
+                            if document
+                            else "登录证据尚未完整写入，请稍后刷新"
+                        ),
+                    }
+                )
+        return jsonify(
+            selector_profile=selector_status,
+            cdp={
+                "connected": cdp.connected,
+                "endpoint": cdp.endpoint,
+                "reason_code": cdp.reason_code,
+                "next_action": cdp.next_action,
+                "pages": list(cdp.pages),
+            },
+            material_center_url=runtime.material_center_url,
+            session=session_status,
+            boundary=(
+                "本页面用于任务配置；CDP Chrome 用于用户登录和只读采集。"
+            ),
+            collection_readiness=build_collection_readiness(
+                runtime,
+                dom_evidence=dom_evidence,
+                expected_store=expected_store,
+            ),
+        )
+
+    @app.post("/api/runtime/selector-profile/bootstrap")
+    def bootstrap_runtime_selector_profile():
+        payload = _json_object()
+        selected = str(payload.get("selectors_file", "")).strip()
+        target = (
+            Path(selected)
+            if selected
+            else (
+                runtime.workspace_root
+                / "upload-search-materials"
+                / "config"
+                / "selectors.local.yaml"
+            )
+        )
+        if target.is_file():
+            try:
+                existing = load_selector_profile(
+                    target,
+                    purpose="high_value_collection",
+                    production=False,
+                )
+            except SelectorConfigError as error:
+                return _validation_error(
+                    {"selectors_file": str(error)}
+                )
+            return jsonify(
+                status="existing",
+                production=bool(
+                    yaml.safe_load(
+                        target.read_text(encoding="utf-8-sig")
+                    ).get("production")
+                ),
+                path=str(existing.path),
+                profile_name=existing.name,
+                profile_version=existing.version,
+                profile_sha256=existing.sha256,
+            )
+        try:
+            created = create_selector_candidate(
+                target,
+                material_center_url=runtime.material_center_url,
+            )
+        except OSError as error:
+            return _validation_error(
+                {"selectors_file": str(error)}
+            )
+        return jsonify(created), 201
+
+    @app.post("/api/runtime/collection/validate")
+    def validate_runtime_collection():
+        nonlocal runtime
+        payload = _json_object()
+        session_id = str(payload.get("session_id", "")).strip()
+        expected_store = str(payload.get("expected_store", "")).strip()
+        selected = str(payload.get("selectors_file", "")).strip()
+        if not session_id:
+            return _validation_error({"session_id": "is required"})
+        if not expected_store:
+            return _validation_error({"expected_store": "is required"})
+        selector_path = (
+            Path(selected)
+            if selected
+            else runtime.selectors_file
+            or (
+                runtime.workspace_root
+                / "upload-search-materials"
+                / "config"
+                / "selectors.local.yaml"
+            )
+        )
+        try:
+            with open_cdp_page(
+                runtime.cdp_url,
+                runtime.material_center_url,
+            ) as page:
+                validation = validate_selector_candidate(
+                    selector_path,
+                    page,
+                    expected_store=expected_store,
+                )
+        except (OSError, RuntimeError, SelectorConfigError) as error:
+            return _error(
+                "collection readiness validation failed",
+                409,
+                reason_code=str(error).split(":", 1)[0],
+                message=str(error),
+                next_action=(
+                    "在 CDP Chrome 完成登录并打开官方素材中心后重新验证"
+                ),
+            )
+        session_path = store._session_path(session_id)
+        evidence_path = (
+            session_path
+            / "collected"
+            / "promotion"
+            / "collection-readiness-evidence.json"
+        )
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        promoted = None
+        if validation["ready"]:
+            profile_document = yaml.safe_load(
+                selector_path.read_text(encoding="utf-8-sig")
+            ) or {}
+            if profile_document.get("production") is not True:
+                promoted = promote_selector_candidate(
+                    selector_path,
+                    validation,
+                )
+            runtime = save_selector_profile_path(runtime, selector_path)
+            active_profile = load_selector_profile(
+                selector_path,
+                purpose="high_value_collection",
+                production=True,
+            )
+            validation["page_evidence"]["selector_profile"] = {
+                "name": active_profile.name,
+                "version": active_profile.version,
+                "sha256": active_profile.sha256,
+                "purpose": active_profile.purpose,
+            }
+        store._write_json_atomic(
+            evidence_path, validation["page_evidence"]
+        )
+        readiness = build_collection_readiness(
+            runtime,
+            dom_evidence=validation["page_evidence"],
+            expected_store=expected_store,
+        )
+        return jsonify(
+            validation=validation,
+            promoted=promoted,
+            collection_readiness=readiness,
+            evidence_path=str(evidence_path),
+        )
+
+    @app.put("/api/runtime/selector-profile")
+    def put_runtime_selector_profile():
+        nonlocal runtime
+        payload = _json_object()
+        selected = str(payload.get("selectors_file", "")).strip()
+        try:
+            profile = load_selector_profile(
+                Path(selected),
+                purpose="high_value_collection",
+                production=True,
+            )
+            runtime = save_selector_profile_path(runtime, profile.path)
+        except (OSError, ValueError, SelectorConfigError) as error:
+            return _validation_error(
+                {"selectors_file": str(error)}
+            )
+        return jsonify(
+            saved=True,
+            selectors_file=str(profile.path),
+            profile_name=profile.name,
+            profile_version=profile.version,
+            profile_sha256=profile.sha256,
+            purpose=profile.purpose,
+        )
+
     @app.post("/api/runtime/image-sources/check")
     def check_runtime_image_sources():
         payload = _json_object()
@@ -238,9 +562,24 @@ def create_app(
             return _validation_error({"initial_path": "must be a string"})
         try:
             selected = choose_directory(initial_path)
-        except (OSError, RuntimeError) as error:
-            return _error(f"folder picker unavailable: {error}", 503)
-        return jsonify(cancelled=selected is None, path=selected or "")
+        except FolderPickerError as error:
+            return _error(
+                "folder picker unavailable",
+                503,
+                reason_code=error.reason_code,
+                message=error.message,
+                next_action=error.message,
+                detail=error.detail,
+            )
+        return jsonify(
+            cancelled=selected is None,
+            path=selected or "",
+            reason_code=(
+                "FOLDER_PICKER_CANCELLED"
+                if selected is None
+                else "FOLDER_PICKER_SELECTED"
+            ),
+        )
 
     @app.post("/api/sessions")
     def create_session():
@@ -256,13 +595,90 @@ def create_app(
     def get_stage_route(session_id: str, stage_id: str):
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        response = {
+            "stage": asdict(stage),
+            "state": state["stages"][stage_id],
+            "input": _current_input(store, session_id, stage, state),
+            "result": _current_result(
+                store, session_id, stage_id, state
+            ),
+            "submission": _current_submission(
+                store, session_id, stage_id, state
+            ),
+            "processing_claim": store.processing_claim(
+                session_id, stage_id
+            ),
+        }
+        if stage_id == "setup":
+            authoritative = get_collection_status(
+                store.runs_root, session_id
+            )
+            response["collection_status"] = authoritative
+            response["result"] = authoritative["current_result"]
+            response["result_history"] = authoritative["history"]
+        return jsonify(response)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/<stage_id>/recover-processing"
+    )
+    def recover_processing(session_id: str, stage_id: str):
+        payload = _json_object()
+        claimant_id = str(
+            payload.get("claimant_id", "codex-agent")
+        ).strip() or "codex-agent"
+        current = store.processing_claim(session_id, stage_id)
+        if current and not current.get("expired"):
+            if stage_id != "setup":
+                raise InteractionConflict("PROCESSING_CLAIM_ACTIVE")
+            authoritative = get_collection_status(
+                store.runs_root, session_id
+            )
+            if authoritative["status"] != "recoverable":
+                raise InteractionConflict("PROCESSING_CLAIM_ACTIVE")
+            attempt_id = str(
+                authoritative.get("attempt_id", "")
+            ).strip()
+            if not attempt_id:
+                raise InteractionConflict(
+                    "PROCESSING_RECOVERY_IDENTITY_REQUIRED"
+                )
+            store.mark_processing_claim_recoverable(
+                session_id,
+                stage_id,
+                attempt_id=attempt_id,
+            )
+        try:
+            handoff = store.wait_for_handoff(
+                session_id,
+                stage_id,
+                timeout_seconds=0.5,
+                claimant_id=claimant_id,
+                reclaim_expired=True,
+            )
+        except TimeoutError as error:
+            raise InteractionConflict(
+                "PROCESSING_RECOVERY_NOT_AVAILABLE"
+            ) from error
         return jsonify(
-            stage=asdict(stage),
-            state=state["stages"][stage_id],
-            input=_current_input(store, session_id, stage, state),
-            result=_current_result(store, session_id, stage_id, state),
-            submission=_current_submission(store, session_id, stage_id, state),
+            status="processing",
+            handoff=handoff,
+            processing_claim=store.processing_claim(
+                session_id, stage_id
+            ),
         )
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/<stage_id>/heartbeat"
+    )
+    def renew_processing(session_id: str, stage_id: str):
+        payload = _json_object()
+        claim_id = str(payload.get("claim_id", "")).strip()
+        if not claim_id:
+            return _validation_error({"claim_id": "is required"})
+        claim = store.renew_processing_claim(
+            session_id, stage_id, claim_id
+        )
+        return jsonify(status="processing", processing_claim=claim)
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/chat-fallback")
     def write_chat_fallback(session_id: str, stage_id: str):
@@ -486,6 +902,36 @@ def create_app(
             field_errors |= _completeness_selection_errors(
                 store, session_id, state, values
             )
+        if not field_errors and stage_id == "setup" and enforce_stage_order:
+            readiness_path = (
+                store._session_path(session_id)
+                / "collected"
+                / "promotion"
+                / "collection-readiness-evidence.json"
+            )
+            dom_evidence: dict[str, Any] = {}
+            if readiness_path.is_file():
+                try:
+                    dom_evidence = json.loads(
+                        readiness_path.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    dom_evidence = {}
+            readiness = build_collection_readiness(
+                runtime,
+                dom_evidence=dom_evidence,
+                expected_store=str(values.get("store", "")),
+            )
+            if not readiness["ready"]:
+                blocked = [
+                    item
+                    for item in readiness["checks"]
+                    if not item["ready"]
+                ]
+                field_errors["collection_readiness"] = "；".join(
+                    f"{item['reason_code']}：{item['message']}"
+                    for item in blocked
+                )
         if not field_errors and stage_id == "image_review":
             review_context = _current_result(
                 store, session_id, "image_review", state
@@ -947,7 +1393,15 @@ def create_app(
     def status(session_id: str, stage_id: str):
         state = store.load_session(session_id)
         get_stage(stage_id)
-        return jsonify(state["stages"][stage_id])
+        payload = dict(state["stages"][stage_id])
+        claim = store.processing_claim(session_id, stage_id)
+        if claim is not None:
+            payload["processing_claim"] = claim
+        if stage_id == "setup":
+            payload["collection_status"] = get_collection_status(
+                store.runs_root, session_id
+            )
+        return jsonify(payload)
 
     @app.get("/api/sessions/<session_id>/stages/<stage_id>/recovery")
     def recovery(session_id: str, stage_id: str):

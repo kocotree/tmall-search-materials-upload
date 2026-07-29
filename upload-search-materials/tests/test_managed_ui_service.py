@@ -170,3 +170,40 @@ def test_child_exit_before_readiness_returns_stable_failure(
     assert len(state_files) == 1
     state = json.loads(state_files[0].read_text(encoding="utf-8"))
     assert state["exit_code"] == 17
+
+
+def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
+    tmp_path, monkeypatch
+):
+    commands = []
+
+    class ExitedProcess:
+        pid = 12346
+        returncode = 17
+
+        def poll(self):
+            return 17
+
+    def capture(command, **_kwargs):
+        commands.append(command)
+        return ExitedProcess()
+
+    monkeypatch.setattr(
+        "upload_search_materials.interaction.service.secrets.token_urlsafe",
+        lambda _size: "-leading-token",
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.interaction.service.subprocess.Popen",
+        capture,
+    )
+
+    port = _free_port()
+    with pytest.raises(ManagedServiceError):
+        start_service(
+            tmp_path,
+            port_start=port,
+            port_end=port,
+            startup_timeout=1,
+        )
+
+    assert "--ownership-token=-leading-token" in commands[0]

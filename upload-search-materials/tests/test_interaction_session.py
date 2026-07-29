@@ -203,6 +203,103 @@ def test_wait_verifies_hash_and_marks_stage_processing(tmp_path):
     assert state["last_agent_heartbeat"] is not None
 
 
+def test_handoff_claim_records_authoritative_processing_lease(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id,
+        "setup",
+        {"store": "测试店铺"},
+    )
+
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="thread-123",
+        lease_seconds=60,
+    )
+
+    claim = store.processing_claim(session.session_id, "setup")
+    assert claim is not None
+    assert claim["claimant_id"] == "thread-123"
+    assert claim["revision"] == handoff["revision"]
+    assert claim["input_sha256"] == handoff["input_sha256"]
+    assert claim["expired"] is False
+    assert datetime.fromisoformat(claim["claimed_at"]).tzinfo is not None
+
+
+def test_expired_processing_claim_can_be_reclaimed_and_rejects_late_write(
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id,
+        "setup",
+        {"store": "测试店铺"},
+    )
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="old-agent",
+    )
+    old_claim = store.processing_claim(session.session_id, "setup")
+    state = store.load_session(session.session_id)
+    state["processing_claim"]["lease_expires_at"] = (
+        "2000-01-01T00:00:00+00:00"
+    )
+    store._write_json_atomic(session.path / "session.json", state)
+
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="new-agent",
+        reclaim_expired=True,
+    )
+    new_claim = store.processing_claim(session.session_id, "setup")
+    assert new_claim["claim_id"] != old_claim["claim_id"]
+    with pytest.raises(InteractionConflict, match="PROCESSING_CLAIM_STALE"):
+        store.write_result(
+            session.session_id,
+            "setup",
+            handoff["revision"],
+            handoff["input_sha256"],
+            status="completed",
+            summary="late",
+            claim_id=old_claim["claim_id"],
+        )
+
+
+def test_legacy_processing_without_lease_can_be_reclaimed(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id,
+        "setup",
+        {"store": "测试店铺"},
+    )
+    state = store.load_session(session.session_id)
+    state["stages"]["setup"]["status"] = "processing"
+    state["processing_claim"] = None
+    store._write_json_atomic(session.path / "session.json", state)
+
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="migration-agent",
+        reclaim_expired=True,
+    )
+
+    claim = store.processing_claim(session.session_id, "setup")
+    assert claim["claimant_id"] == "migration-agent"
+    assert claim["revision"] == handoff["revision"]
+    assert claim["input_sha256"] == handoff["input_sha256"]
+
+
 def test_wait_rejects_input_changed_after_handoff(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()

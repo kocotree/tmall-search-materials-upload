@@ -3,12 +3,15 @@ import json
 import re
 import subprocess
 import threading
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 from PIL import Image
 
+from upload_search_materials.browser.session import CdpStatus
 from upload_search_materials.interaction.web import create_app
 import upload_search_materials.interaction.web as web_module
 from upload_search_materials.interaction.session import SessionStore
@@ -110,6 +113,266 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert html.count('name="image_roots"') >= 3
     for removed in ("basic_xlsx", "search_xlsx", "asset_root", "runs_root"):
         assert f'name="{removed}"' not in html
+    assert 'data-component="CollectionRuntimeConfig"' in html
+    assert 'data-save-selector-profile' in html
+    assert "CDP Chrome" in html
+
+
+def test_collection_runtime_panel_validates_and_saves_local_profile(
+    tmp_path, monkeypatch
+):
+    selectors = tmp_path / "selectors.local.yaml"
+    selectors.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "profile_name": "local-test",
+                "profile_version": "2026.07.29",
+                "production": True,
+                "supported_purposes": ["high_value_collection"],
+                "store_name": "[data-store-name]",
+                "human_check": "[data-human-check]",
+                "promotion_tab": '[role="tab"]:has-text("搜推素材")',
+                "high_value_filter": '[role="checkbox"]:has-text("搜推高价值")',
+                "promotion_rows": "tbody tr",
+                "promotion_next_page": 'button:has-text("下一页")',
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+    monkeypatch.setattr(
+        web_module,
+        "inspect_cdp_endpoint",
+        lambda *_args, **_kwargs: CdpStatus(
+            connected=True,
+            endpoint="http://127.0.0.1:9222",
+            pages=(
+                {
+                    "id": "page-1",
+                    "title": "素材中心",
+                    "url": "https://myseller.taobao.com/material-center",
+                },
+            ),
+        ),
+    )
+    local_client = create_app(
+        runtime.runs_root, runtime_config=runtime
+    ).test_client()
+
+    saved = local_client.put(
+        "/api/runtime/selector-profile",
+        json={"selectors_file": str(selectors)},
+    )
+    status = local_client.get("/api/runtime/collection")
+
+    assert saved.status_code == 200
+    assert saved.json["profile_name"] == "local-test"
+    assert status.json["selector_profile"]["configured"] is True
+    assert status.json["cdp"]["connected"] is True
+    config = json.loads(
+        (
+            tmp_path
+            / "upload-search-materials"
+            / "config"
+            / "local-paths.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert config["selectors_file"] == str(selectors)
+
+
+def test_collection_runtime_reports_session_login_and_store_evidence(
+    client, session_id, monkeypatch
+):
+    monkeypatch.setattr(
+        web_module,
+        "inspect_cdp_endpoint",
+        lambda *_args, **_kwargs: CdpStatus(
+            connected=True,
+            endpoint="http://127.0.0.1:9222",
+        ),
+    )
+    # The fixture runs root is available through the route's closure, so use
+    # the current session path returned by its durable state location.
+    runs_root = Path(
+        client.get(f"/?session_id={session_id}")
+        .get_data(as_text=True)
+        .split('data-runs-root="', 1)[1]
+        .split('"', 1)[0]
+    )
+    evidence = (
+        runs_root
+        / session_id
+        / "collected"
+        / "promotion"
+        / "store-page-evidence.json"
+    )
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(
+        json.dumps(
+            {
+                "observed_store": "测试店铺",
+                "page_url": (
+                    "https://myseller.taobao.com/home.htm/"
+                    "material-center/material-management"
+                ),
+                "page_identity": "material_center",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get(
+        f"/api/runtime/collection?session_id={session_id}"
+    )
+
+    assert response.status_code == 200
+    assert response.json["session"]["login_state"] == "authenticated"
+    assert response.json["session"]["observed_store"] == "测试店铺"
+
+
+def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    project = workspace / "upload-search-materials"
+    scripts = project / ".venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    (workspace / "docs").mkdir()
+    (project / "config").mkdir()
+    (scripts / "python.exe").write_bytes(b"prepared")
+    (scripts / "tmall-materials.exe").write_bytes(b"prepared")
+    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=workspace / "runs",
+    )
+
+    class Locator:
+        def count(self):
+            return 1
+
+        def inner_text(self):
+            return "测试店铺"
+
+        def is_visible(self):
+            return False
+
+    class Page:
+        url = (
+            "https://myseller.taobao.com/home.htm/"
+            "material-center/material-management"
+        )
+
+        def locator(self, _selector):
+            return Locator()
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    connected = CdpStatus(
+        connected=True,
+        endpoint="http://127.0.0.1:9222",
+    )
+    monkeypatch.setattr(web_module, "open_cdp_page", open_page)
+    monkeypatch.setattr(
+        web_module, "inspect_cdp_endpoint", lambda *_a, **_k: connected
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_readiness."
+        "inspect_cdp_endpoint",
+        lambda *_a, **_k: connected,
+    )
+    local_client = create_app(
+        runtime.runs_root, runtime_config=runtime
+    ).test_client()
+    session_id = local_client.post("/api/sessions", json={}).json[
+        "session_id"
+    ]
+    candidate = project / "config" / "selectors.local.yaml"
+
+    created = local_client.post(
+        "/api/runtime/selector-profile/bootstrap",
+        json={"selectors_file": str(candidate)},
+    )
+    validated = local_client.post(
+        "/api/runtime/collection/validate",
+        json={
+            "session_id": session_id,
+            "expected_store": "测试店铺",
+            "selectors_file": str(candidate),
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json["production"] is False
+    assert validated.status_code == 200
+    assert validated.json["validation"]["ready"] is True
+    assert validated.json["promoted"]["production"] is True
+    assert validated.json["collection_readiness"]["ready"] is True
+
+
+def test_production_setup_submission_is_blocked_by_readiness(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "upload-search-materials").mkdir()
+    products = workspace / "products.csv"
+    rules = workspace / "rules.csv"
+    products.write_text("商品ID\n1\n", encoding="utf-8")
+    rules.write_text("month,rule\n7,include\n", encoding="utf-8")
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(products, "configured"),
+        rules=DiscoveredPath(rules, "configured"),
+        image_sources=({"label": "本地", "path": str(workspace)},),
+        runs_root=workspace / "runs",
+    )
+    local_client = create_app(
+        runtime.runs_root,
+        runtime_config=runtime,
+        enforce_stage_order=True,
+    ).test_client()
+    session_id = local_client.post("/api/sessions", json={}).json[
+        "session_id"
+    ]
+
+    response = local_client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={
+            "values": {
+                "store": "测试店铺",
+                "store_confirmed": True,
+                "month": "2026-07",
+                "products_csv": str(products),
+                "rules_csv": str(rules),
+                "image_source_labels": ["本地"],
+                "image_roots": [str(workspace)],
+                "folder_index_root": str(workspace / ".index"),
+                "asset_manifest": "",
+                "historical_basic_xlsx": "",
+                "historical_promotion_csv": "",
+                "user_notes": "",
+            }
+        },
+    )
+
+    assert response.status_code == 422
+    assert "collection_readiness" in response.json["field_errors"]
+    assert "ENVIRONMENT_NOT_PREPARED" in response.json["field_errors"][
+        "collection_readiness"
+    ]
 
 
 def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(client):
@@ -213,7 +476,72 @@ def test_folder_picker_api_returns_only_user_selected_directory(
     )
 
     assert response.status_code == 200
-    assert response.json == {"cancelled": False, "path": str(tmp_path)}
+    assert response.json == {
+        "cancelled": False,
+        "path": str(tmp_path),
+        "reason_code": "FOLDER_PICKER_SELECTED",
+    }
+
+
+def test_folder_picker_api_returns_reason_coded_gui_failure(
+    client, monkeypatch
+):
+    monkeypatch.setattr(
+        web_module,
+        "choose_directory",
+        lambda _initial: (_ for _ in ()).throw(
+            web_module.FolderPickerError(
+                "FOLDER_PICKER_GUI_UNAVAILABLE"
+            )
+        ),
+    )
+
+    response = client.post(
+        "/api/runtime/folder-picker",
+        json={"initial_path": r"Z:\未映射"},
+    )
+
+    assert response.status_code == 503
+    assert response.json["reason_code"] == (
+        "FOLDER_PICKER_GUI_UNAVAILABLE"
+    )
+    assert "手工" in response.json["message"]
+
+
+def test_folder_picker_api_preserves_cancellation(client, monkeypatch):
+    monkeypatch.setattr(
+        web_module, "choose_directory", lambda _initial: None
+    )
+
+    response = client.post(
+        "/api/runtime/folder-picker",
+        json={"initial_path": r"C:\existing"},
+    )
+
+    assert response.status_code == 200
+    assert response.json == {
+        "cancelled": True,
+        "path": "",
+        "reason_code": "FOLDER_PICKER_CANCELLED",
+    }
+
+
+def test_image_source_frontend_uses_diagnostic_copy_and_unc_action():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "diagnostic.reason_code" in source
+    assert "diagnostic.message" in source
+    assert "portable_path_suggestion" in source
+    assert "error.userMessage" in source
+    assert "已采用 UNC，等待检测" in source
+    assert "if (!payload.cancelled)" in source
 
 
 def test_stage_submission_requires_previous_stage_completion(tmp_path):
@@ -836,7 +1164,10 @@ def test_stage_read_and_status_expose_schema_and_state(client, session_id):
     assert stage.status_code == 200
     assert stage.json["stage"]["id"] == "setup"
     assert {field["name"] for field in stage.json["stage"]["fields"]} >= {"store", "month"}
-    assert status.json == {"revision": 0, "status": "draft"}
+    assert status.json["revision"] == 0
+    assert status.json["status"] == "draft"
+    assert status.json["collection_status"]["status"] == "draft"
+    assert status.json["collection_status"]["history"] == []
 
 
 def test_stage_read_exposes_only_current_handoff_submission_time(
@@ -1446,6 +1777,77 @@ def test_recovery_returns_session_store_instruction(client, session_id):
 
     assert response.status_code == 200
     assert "handoff.json" in response.json["instruction"]
+
+
+def test_stage_status_exposes_authoritative_claim_and_expired_recovery(
+    client, session_id, tmp_path
+):
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={
+            "values": {
+                "store": "测试店铺",
+                "store_confirmed": True,
+                "month": "2026-07",
+                "products_csv": str(tmp_path),
+                "rules_csv": str(tmp_path),
+                "image_source_labels": ["测试素材源"],
+                "image_roots": [str(tmp_path)],
+                "asset_manifest": "",
+                "historical_basic_xlsx": "",
+                "historical_promotion_csv": "",
+                "user_notes": "",
+            }
+        },
+    )
+    store = SessionStore(tmp_path)
+    store.wait_for_handoff(
+        session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="first-agent",
+        lease_seconds=60,
+    )
+
+    active = client.get(
+        f"/api/sessions/{session_id}/stages/setup/status"
+    )
+
+    assert submitted.status_code == 202
+    assert active.json["processing_claim"]["claimant_id"] == "first-agent"
+    assert active.json["processing_claim"]["expired"] is False
+    state = store.load_session(session_id)
+    state["processing_claim"]["lease_expires_at"] = (
+        "2000-01-01T00:00:00+00:00"
+    )
+    store._write_session_state(session_id, state)
+
+    recovered = client.post(
+        f"/api/sessions/{session_id}/stages/setup/recover-processing",
+        json={"claimant_id": "replacement-agent"},
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.json["processing_claim"]["claimant_id"] == (
+        "replacement-agent"
+    )
+    assert recovered.json["processing_claim"]["expired"] is False
+
+
+def test_frontend_shows_processing_lease_and_expired_recovery_action():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "恢复过期处理" in source
+    assert "processing_claim" in source
+    assert "/recover-processing" in source
+    assert "处理租约已于" in source
 
 
 def test_validation_enforces_paths_lists_dates_and_boolean_confirmation(client, session_id, tmp_path):

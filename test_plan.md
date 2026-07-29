@@ -1,5 +1,95 @@
 # Upload Search Materials 测试计划
 
+## NAS 路径检测与原生目录选择增量测试（2026-07-29）
+
+### 自动化验收
+
+- [x] 普通本机目录只读元数据检测返回 `PATH_AVAILABLE`，不枚举子项、不读取图片。
+- [x] 当前服务会话缺少 `Y:`/`Z:` 映射时返回 `DRIVE_NOT_MAPPED`，不再显示笼统的“当前不可访问”。
+- [x] 可访问映射盘保留原路径，并只提供需用户点击的 UNC 建议；检测不自动保存或提交。
+- [x] UNC 主机不可达、共享不存在、子目录不存在、拒绝访问、无效路径、超时和未知失败均有稳定原因码与中文恢复动作。
+- [x] 1–50 个图片源使用有界并发与单项/整批超时；离线 NAS 不长期占用 Web 请求。
+- [x] 路径检测不列举目录、不写源目录、不映射共享、不请求或保存凭据。
+- [x] Windows 原生 STA 助手覆盖选择、取消、忙碌、超时、无桌面、非 Windows、启动/协议失败和无效结果。
+- [x] 原生助手超时只结束本次拥有的子进程；失败或取消保留页面已有输入。
+- [x] API 和页面逐行显示具体原因与下一步，始终保留手工本机/UNC 输入入口。
+
+### 当前电脑人工验收
+
+- [ ] 在配置页检测一个普通本机目录，显示“路径可访问”。
+- [ ] 点击“选择文件夹”，在 Windows 原生窗口选中该目录并正确回填。
+- [ ] 取消窗口，确认原路径不变；快速重复点击时第二次显示“已有目录选择窗口”。
+- [ ] 断开或填写离线 NAS，确认请求在边界内返回，不使页面卡死。
+- [ ] 对一个无读取权限目录确认显示“当前身份无权限”，且没有出现凭据输入。
+- [ ] 对一个真实 UNC 图片根目录确认返回 `PATH_AVAILABLE`，检测前后源目录内容、大小和时间不变。
+- [ ] 检测或选择路径后，确认没有自动点击“保存为本机配置”或“提交给 Agent”。
+
+### 环境边界
+
+- 当前自动检查确认本服务身份下 `Y:`/`Z:` 未映射；恢复方式是用户在同一 Windows
+  身份连接网络盘，或在页面粘贴 UNC。程序不会代替用户建立映射。
+- 无图形桌面、远程服务会话或非 Windows 环境允许
+  `FOLDER_PICKER_GUI_UNAVAILABLE/FOLDER_PICKER_UNSUPPORTED`，但手工路径输入必须可用。
+- 真实 UNC 验收需要用户提供该电脑可访问的共享路径；未完成前不得把自动化模拟结果
+  声称为 NAS 实机通过。
+
+## 受管搜推高价值采集增量测试（2026-07-29）
+
+### 变更前可复现问题
+
+- [ ] fresh session 提交阶段一后，Agent 没有进入固定采集入口，而是临时生成 Playwright 脚本。
+- [ ] 只有仓库示例 selector 时，真实采集缺少可用生产配置，却没有稳定修复入口。
+- [ ] CDP 只打开空白页或用户登录后，Agent 不能恢复同一 session。
+- [ ] 中断后阶段长期停在 `processing`，无法判断活动 Agent、过期租约或可恢复 checkpoint。
+- [ ] 批量缺失数量被误解为具体空坑位编号，商品表异常行也没有在第二阶段单独展示。
+
+### 自动化验收
+
+- [x] `runs/`、本机 selector、CDP profile、缓存和诊断文件均被 Git 忽略。
+- [x] 新默认 session 不出现在 Git status，且 session 证据不含 Cookie、Token、密码、短信码或二维码载荷。
+- [x] selector 按用途校验；`high_value_collection` 不依赖 export/publish 字段。
+- [x] 阶段一页面显示生产 selector 和 CDP Chrome 状态，并支持验证、保存本机 profile。
+- [x] `process-setup` 校验精确 session/revision/input SHA，复用 high-value collector，生成逐页 CSV/checkpoint 和 completeness matrix。
+- [x] 登录暂停后可恢复同一 session；相同完成请求幂等复用，不重复采集。
+- [x] claim 含 claim ID、heartbeat、lease expiry 和输入绑定；过期 claim 可重领，旧 claim 回写被拒绝。
+- [x] 批量行写 `exact_slot_status=not_collected`，完整性矩阵不生成具体空坑位编号。
+- [x] 混合有效/无效商品行继续处理有效商品，并保留 source row reason codes。
+- [x] 阶段一分别返回 environment、selector schema/current DOM、CDP、login/human-check、material page 和 store identity；草稿可保存，生产模式提交在未 ready 时被拒绝。
+- [x] 缺少生产 profile 时只创建 `production=false` 本机候选；字段失败保持候选状态并返回精确字段，全部当前 DOM 验证通过后才提升。
+- [x] `process-setup` 默认启动项目 `.venv` 中的受管 Worker 后立即返回；重复请求复用同一活 Worker。
+- [x] Worker manifest 绑定 attempt、claim、PID、ownership token、进程创建身份、session/revision/input/selector/store 和日志；公开状态不泄露 token。
+- [x] 首个 checkpoint 前显示 phase/heartbeat 且行数为未知；每页完成后显示 durable page/row/checkpoint。
+- [x] 旧 selector 错误进入 superseded history，不能与新 Worker 同时作为当前状态。
+- [x] 已确认死亡的自有 Worker 可立即恢复；token/PID/进程身份不确定时不结束、不抢占并等待租约。
+- [x] checkpoint 写入前验证当前 claim，绑定 attempt，记录 CSV SHA-256，并拒绝重复商品、陈旧 Worker 写入和输入/选择器变化。
+- [x] 历史无 `attempt_id` checkpoint 只有在旧稳定绑定全部一致时才升级；恢复从最后完整页之后继续。
+- [x] 日常运行优先项目 `.venv` 和 `.uv-cache`；依赖同步仅由 bootstrap 执行，不在采集/恢复时隐式下载。
+
+### 浏览器人工验收
+
+- [ ]（公司网络）新电脑首次打开配置页，能创建本机候选并用当前真实 DOM 提升生产 selector。
+- [ ] 配置页明确区别于 CDP Chrome；后者自动打开官方素材中心而不是空白页。
+- [ ]（公司网络）用户自行完成登录，受管 collector 处理延迟出现的 7 步引导/广告弹窗。
+- [ ]（公司网络）调用命令已返回时，Worker 仍写出首个 CSV/checkpoint。
+- [ ]（公司网络）不传 `--max-pages`，全量遍历“商品分类 → 搜推高价值”，每页恰好更新一次 checkpoint。
+- [ ]（公司网络）采集至少一页后结束自有 Worker，立即显示可恢复并恢复；已完成页不重复、CSV 不产生重复商品。
+- [ ]（公司网络）制造 ownership 不匹配，确认不会结束或抢占未知 PID。
+- [ ] 第二阶段显示有效商品、异常行统计、目标/当前/缺失数量和“精确坑位尚未采集”。
+- [ ] 全程不执行 approve、publish、上传，不修改素材源，也不持久化登录凭据。
+
+### 恢复命令
+
+```powershell
+.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli ui-status --runs-root "<runs-root>" --session "<session-id>"
+.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli ui-restart --runs-root "<runs-root>" --session "<session-id>"
+.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli process-setup --runs-root "<runs-root>" --session "<session-id>"
+.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli collection-status --runs-root "<runs-root>" --session "<session-id>"
+```
+
+只有受管 collector 产生 `SELECTOR_INVALID` 等可复现错误后，才允许用 Playwright
+诊断真实 DOM；修复现有 profile/collector 并补回归测试后，必须重新运行
+`process-setup`，不得保留第二条生产采集脚本。
+
 ## 前端优先交互与受管启动器增量测试（2026-07-29）
 
 - [ ] fresh repository context 能发现 `$upload-search-materials`，并在业务动作前完整读取 canonical Skill。

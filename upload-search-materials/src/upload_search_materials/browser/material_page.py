@@ -18,6 +18,20 @@ VISIBLE_MATERIAL_WARNINGS = (
     "标题无意义",
     "审核不通过",
 )
+READ_ONLY_FORCE_TARGETS = frozenset(
+    {"promotion_tab", "high_value_filter", "promotion_next_page"}
+)
+RECOGNIZED_GUIDE_KEYS = (
+    "safe_popup_progress",
+    "safe_popup_close_priority",
+)
+OVERLAY_INTERCEPTION_MARKERS = (
+    "intercept",
+    "overlay",
+    "joyride",
+    "guide",
+    "pointer event",
+)
 
 
 def _settle_safe_popups(
@@ -86,10 +100,40 @@ def _click_with_popup_retries(
     delay_ms: int,
 ) -> None:
     last_error = None
-    for _ in range(5):
+    for _ in range(2):
         _settle_safe_popups(page, selectors, delay_ms=delay_ms)
         try:
             locator.click(timeout=3000)
+            return
+        except PlaywrightError as error:
+            last_error = error
+    recognized_guide_configured = any(
+        str(selectors.get(key, "")).strip()
+        for key in RECOGNIZED_GUIDE_KEYS
+    )
+    error_summary = str(last_error or "").casefold()
+    overlay_identified = any(
+        marker in error_summary for marker in OVERLAY_INTERCEPTION_MARKERS
+    )
+    if (
+        field_name in READ_ONLY_FORCE_TARGETS
+        and recognized_guide_configured
+        and overlay_identified
+    ):
+        try:
+            locator.click(force=True, timeout=3000)
+            events = getattr(page, "_tmall_collection_events", None)
+            if not isinstance(events, list):
+                events = []
+                setattr(page, "_tmall_collection_events", events)
+            events.append(
+                {
+                    "action": "force_click",
+                    "target_field": field_name,
+                    "reason": "recognized_guide_interceptor",
+                    "read_only": True,
+                }
+            )
             return
         except PlaywrightError as error:
             last_error = error
@@ -140,6 +184,7 @@ def _parse_promotion_row(
         "现有素材数": str(current),
         "缺失数量": missing_text,
         "空坑位": "",
+        "精确坑位状态": "not_collected",
         "远端素材ID": material_id_text,
         "素材状态": warning_text,
         "审核状态": warning_text,
@@ -166,6 +211,9 @@ def scan_recommended_material_status(
     max_pages: int | None = None,
     settle_delay_ms: int = 1000,
     action_wait_ms: int = 3000,
+    initial_rows: Iterable[dict[str, str]] = (),
+    skip_completed_pages: int = 0,
+    on_phase: Callable[[str, int | None], None] | None = None,
 ) -> list[dict[str, str]]:
     required = (
         "promotion_tab",
@@ -177,6 +225,8 @@ def scan_recommended_material_status(
     if missing:
         raise SelectorInvalidError(",".join(missing))
 
+    if on_phase is not None:
+        on_phase("opening_promotion", None)
     _click_with_popup_retries(
         page,
         page.locator(selectors["promotion_tab"]),
@@ -188,6 +238,8 @@ def scan_recommended_material_status(
         page.wait_for_timeout(action_wait_ms)
     _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
 
+    if on_phase is not None:
+        on_phase("selecting_high_value", None)
     category_filter = page.locator(selectors[filter_selector_key])
     checked = category_filter.get_attribute("aria-checked")
     class_name = category_filter.get_attribute("class") or ""
@@ -207,10 +259,16 @@ def scan_recommended_material_status(
     if checked != "true" and "checked" not in class_name.split():
         raise SelectorInvalidError(filter_selector_key)
 
-    output_by_product: dict[str, dict[str, str]] = {}
+    output_by_product: dict[str, dict[str, str]] = {
+        str(row.get("商品ID", "")): dict(row)
+        for row in initial_rows
+        if str(row.get("商品ID", "")).strip()
+    }
     page_number = 0
     while True:
         page_number += 1
+        if on_phase is not None:
+            on_phase("collecting_page", page_number)
         row_texts = [
             text.strip()
             for text in page.locator(selectors["promotion_rows"]).all_inner_texts()
@@ -218,22 +276,25 @@ def scan_recommended_material_status(
         ]
         if not row_texts:
             raise SelectorInvalidError("promotion_rows")
-        for row_text in row_texts:
-            if re.search(r"商品ID\s*x{4,}", row_text, flags=re.IGNORECASE):
-                continue
-            row = _parse_promotion_row(
-                row_text,
-                collected_at=collected_at,
-                evidence_source=(
-                    "search_recommend_high_value_dom"
-                    if filter_selector_key == "high_value_filter"
-                    else "recommended_promotion_dom"
-                ),
-            )
-            output_by_product.setdefault(row["商品ID"], row)
-        values = list(output_by_product.values())
-        if on_page:
-            on_page(page_number, values)
+        if page_number > skip_completed_pages:
+            for row_text in row_texts:
+                if re.search(
+                    r"商品ID\s*x{4,}", row_text, flags=re.IGNORECASE
+                ):
+                    continue
+                row = _parse_promotion_row(
+                    row_text,
+                    collected_at=collected_at,
+                    evidence_source=(
+                        "search_recommend_high_value_dom"
+                        if filter_selector_key == "high_value_filter"
+                        else "recommended_promotion_dom"
+                    ),
+                )
+                output_by_product.setdefault(row["商品ID"], row)
+            values = list(output_by_product.values())
+            if on_page:
+                on_page(page_number, values)
         if max_pages is not None and page_number >= max_pages:
             break
         next_page = page.locator(selectors["promotion_next_page"])
@@ -330,6 +391,7 @@ def supplement_material_status(
                     "目标坑位": str(desired_slots),
                     "现有素材数": str(material_count),
                     "空坑位": ";".join(str(index) for index in empty_indexes),
+                    "精确坑位状态": "collected",
                     "审核状态": ";".join(review_states),
                     "审核状态完整": "true",
                     "状态": "ready_for_review",
@@ -345,6 +407,7 @@ def supplement_material_status(
                     "目标坑位": "",
                     "现有素材数": "",
                     "空坑位": "",
+                    "精确坑位状态": "unknown",
                     "审核状态": "",
                     "审核状态完整": "false",
                     "状态": "needs_manual_review",

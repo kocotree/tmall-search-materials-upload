@@ -25,6 +25,9 @@
   const taskDirectoryLabel = document.querySelector("[data-task-directory]");
   const connectionLabel = document.querySelector("[data-connection-label]");
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
+  const collectionRuntimeConfig = document.querySelector(
+    '[data-component="CollectionRuntimeConfig"]',
+  );
   const handoffActions = document.querySelector(".handoff-actions");
   const goCurrentStageButton = document.createElement("button");
   goCurrentStageButton.type = "button";
@@ -32,6 +35,12 @@
   goCurrentStageButton.textContent = "进入当前阶段";
   goCurrentStageButton.hidden = true;
   handoffActions?.prepend(goCurrentStageButton);
+  const recoverProcessingButton = document.createElement("button");
+  recoverProcessingButton.type = "button";
+  recoverProcessingButton.className = "secondary-button";
+  recoverProcessingButton.textContent = "恢复过期处理";
+  recoverProcessingButton.hidden = true;
+  handoffActions?.prepend(recoverProcessingButton);
 
   let sessionId = shell.dataset.sessionId || "";
   let currentStageId = railButtons[0]?.dataset.stageId || "setup";
@@ -43,6 +52,8 @@
   let persistenceInFlight = false;
   let pendingPersistenceMode = null;
   let localEditVersion = 0;
+  let currentProcessingClaim = null;
+  let currentCollectionStatus = null;
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -159,10 +170,24 @@
         body: JSON.stringify({ image_sources: configuredImageSources() }),
       });
       imageSourceRows().forEach((row, index) => {
-        const status = payload.image_sources[index]?.status || "unavailable";
+        const diagnostic = payload.image_sources[index] || {};
+        const status = diagnostic.status || "unavailable";
         const node = row.querySelector("[data-image-source-state]");
         node.dataset.status = status;
-        node.textContent = status === "available" ? "路径可访问" : "当前不可访问";
+        node.dataset.reasonCode = diagnostic.reason_code || "";
+        node.textContent = diagnostic.message
+          || (status === "available" ? "路径可访问" : "当前不可访问");
+        node.title = [
+          diagnostic.reason_code,
+          diagnostic.checked_at,
+        ].filter(Boolean).join(" · ");
+        const portable = row.querySelector("[data-use-portable-path]");
+        const suggestion = diagnostic.portable_path_suggestion || "";
+        portable.hidden = !suggestion;
+        portable.dataset.path = suggestion;
+        portable.title = suggestion
+          ? `改为跨电脑路径：${suggestion}`
+          : "";
       });
       const available = payload.image_sources.filter((source) => source.status === "available").length;
       feedback.textContent = `检测完成：${available} / ${payload.image_sources.length} 个路径可访问。`;
@@ -206,8 +231,13 @@
         state.textContent = "已取消选择";
       }
     } catch (error) {
-      state.textContent = "选择窗口不可用";
-      imageSourceConfig.querySelector("[data-image-source-feedback]").textContent = error.message;
+      state.dataset.status = "unavailable";
+      state.dataset.reasonCode = error.reasonCode || "";
+      state.textContent = error.userMessage
+        || error.message
+        || "选择窗口不可用";
+      imageSourceConfig.querySelector("[data-image-source-feedback]").textContent =
+        error.userMessage || error.message;
     }
   }
 
@@ -224,6 +254,20 @@
       const picker = event.target.closest("[data-pick-image-source]");
       if (picker) {
         pickImageSource(picker.closest("[data-image-source-row]"));
+        return;
+      }
+      const portable = event.target.closest("[data-use-portable-path]");
+      if (portable && portable.dataset.path) {
+        const row = portable.closest("[data-image-source-row]");
+        const input = row.querySelector('[name="image_roots"]');
+        input.value = portable.dataset.path;
+        input.dispatchEvent(new CustomEvent(
+          "input",
+          { bubbles: true, detail: { source: "explicit-user-edit" } },
+        ));
+        row.querySelector("[data-image-source-state]").textContent =
+          "已采用 UNC，等待检测";
+        portable.hidden = true;
         return;
       }
       const button = event.target.closest("[data-remove-image-source]");
@@ -245,6 +289,168 @@
     imageSourceConfig.querySelector("[data-check-image-sources]").addEventListener("click", checkImageSources);
     imageSourceConfig.querySelector("[data-save-image-sources]").addEventListener("click", saveImageSources);
     updateImageSourceConfig();
+  }
+
+  function renderCollectionRuntime(payload) {
+    if (!collectionRuntimeConfig) return;
+    const selector = payload.selector_profile || {};
+    const cdp = payload.cdp || {};
+    const selectorNode = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-status]",
+    );
+    const cdpNode = collectionRuntimeConfig.querySelector("[data-cdp-status]");
+    const summary = collectionRuntimeConfig.querySelector(
+      "[data-collection-runtime-summary]",
+    );
+    selectorNode.textContent = selector.configured
+      ? `选择器已验证：${selector.profile_name} · ${selector.profile_version}`
+      : `选择器待修复：${selector.reason_code || "SELECTOR_PROFILE_NOT_FOUND"}`;
+    cdpNode.textContent = cdp.connected
+      ? `CDP Chrome 已连接：${cdp.endpoint} · ${cdp.pages?.length || 0} 个页面`
+      : `CDP Chrome 未连接：${cdp.reason_code || "CDP_UNAVAILABLE"}`;
+    const session = payload.session || {};
+    if (session.session_id) {
+      const details = [
+        `登录状态 ${session.login_state || "unknown"}`,
+        session.observed_store ? `店铺 ${session.observed_store}` : "",
+        session.observed_url ? `页面 ${session.observed_url}` : "",
+        session.next_action || "",
+      ].filter(Boolean);
+      cdpNode.textContent += `；${details.join(" · ")}`;
+    }
+    const readiness = payload.collection_readiness || {};
+    const checks = Array.isArray(readiness.checks) ? readiness.checks : [];
+    const list = collectionRuntimeConfig.querySelector(
+      "[data-collection-readiness-list]",
+    );
+    list.replaceChildren(...checks.map((check) => {
+      const row = document.createElement("div");
+      row.className = "collection-readiness-item";
+      row.dataset.ready = check.ready ? "true" : "false";
+      const message = check.ready
+        ? check.message
+        : `${check.message}${check.next_action ? ` · ${check.next_action}` : ""}`;
+      row.textContent = `${check.ready ? "✓" : "!"} ${message}`;
+      row.title = check.reason_code || "";
+      return row;
+    }));
+    summary.textContent = readiness.ready
+      ? "采集前置条件已全部就绪"
+      : "需要完成本机准备或用户登录";
+    collectionRuntimeConfig.dataset.ready = readiness.ready
+      ? "true"
+      : "false";
+  }
+
+  async function refreshCollectionRuntime() {
+    if (!collectionRuntimeConfig) return;
+    try {
+      const store = activeForm()?.querySelector('[name="store"]')?.value?.trim() || "";
+      const parameters = new URLSearchParams();
+      if (sessionId) parameters.set("session_id", sessionId);
+      if (store) parameters.set("expected_store", store);
+      const query = parameters.size ? `?${parameters.toString()}` : "";
+      renderCollectionRuntime(
+        await fetchJson(`/api/runtime/collection${query}`),
+      );
+    } catch (error) {
+      collectionRuntimeConfig.querySelector(
+        "[data-collection-runtime-summary]",
+      ).textContent = error.message;
+      collectionRuntimeConfig.dataset.ready = "false";
+    }
+  }
+
+  async function saveSelectorProfile() {
+    if (!collectionRuntimeConfig) return;
+    const input = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-path]",
+    );
+    const status = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-status]",
+    );
+    status.textContent = "正在验证生产选择器配置…";
+    try {
+      await fetchJson("/api/runtime/selector-profile", {
+        method: "PUT",
+        body: JSON.stringify({ selectors_file: input.value.trim() }),
+      });
+      await refreshCollectionRuntime();
+    } catch (error) {
+      status.textContent = error.fieldErrors?.selectors_file || error.message;
+    }
+  }
+
+  async function bootstrapSelectorProfile() {
+    const input = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-path]",
+    );
+    const status = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-status]",
+    );
+    status.textContent = "正在创建或读取本机候选…";
+    try {
+      const payload = await fetchJson("/api/runtime/selector-profile/bootstrap", {
+        method: "POST",
+        body: JSON.stringify({ selectors_file: input.value.trim() }),
+      });
+      input.value = payload.path || input.value;
+      status.textContent = payload.production
+        ? "已找到本机生产配置，可直接验证当前页面。"
+        : "候选已创建；只有当前页面全部验证通过后才会提升为生产配置。";
+      await refreshCollectionRuntime();
+    } catch (error) {
+      status.textContent = error.fieldErrors?.selectors_file || error.message;
+    }
+  }
+
+  async function validateCollectionRuntime() {
+    await ensureSession();
+    const input = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-path]",
+    );
+    const store = activeForm()?.querySelector('[name="store"]')?.value?.trim() || "";
+    const status = collectionRuntimeConfig.querySelector(
+      "[data-selector-profile-status]",
+    );
+    if (!store) {
+      status.textContent = "请先填写目标店铺，再验证当前页面。";
+      return;
+    }
+    status.textContent = "正在读取 CDP Chrome 当前页面并逐项验证…";
+    try {
+      const payload = await fetchJson("/api/runtime/collection/validate", {
+        method: "POST",
+        body: JSON.stringify({
+          session_id: sessionId,
+          expected_store: store,
+          selectors_file: input.value.trim(),
+        }),
+      });
+      status.textContent = payload.validation.ready
+        ? "当前页面、店铺与选择器已验证。"
+        : `验证未通过：${payload.validation.reason_code}`;
+      await refreshCollectionRuntime();
+    } catch (error) {
+      status.textContent = error.userMessage || error.message;
+    }
+  }
+
+  function initializeCollectionRuntime() {
+    if (!collectionRuntimeConfig) return;
+    collectionRuntimeConfig.querySelector(
+      "[data-bootstrap-selector-profile]",
+    ).addEventListener("click", bootstrapSelectorProfile);
+    collectionRuntimeConfig.querySelector(
+      "[data-save-selector-profile]",
+    ).addEventListener("click", saveSelectorProfile);
+    collectionRuntimeConfig.querySelector(
+      "[data-validate-collection-runtime]",
+    ).addEventListener("click", validateCollectionRuntime);
+    collectionRuntimeConfig.querySelector(
+      "[data-refresh-collection-runtime]",
+    ).addEventListener("click", refreshCollectionRuntime);
+    refreshCollectionRuntime();
   }
 
   async function ensureSession() {
@@ -399,6 +605,87 @@
     withdrawButton.disabled = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;
     setFormLocked(uiState.serverStatus);
     updateResultsRecovery(UiState.recoveryView(uiState));
+  }
+
+  function formatClaimTime(value) {
+    const timestamp = Date.parse(value || "");
+    return Number.isFinite(timestamp)
+      ? new Date(timestamp).toLocaleString("zh-CN", { hour12: false })
+      : "未知时间";
+  }
+
+  function renderProcessingClaim(claim, collectionStatus = currentCollectionStatus) {
+    currentProcessingClaim = claim && typeof claim === "object" ? claim : null;
+    currentCollectionStatus = collectionStatus && typeof collectionStatus === "object"
+      ? collectionStatus
+      : null;
+    const processing = uiState.serverStatus === "processing";
+    const recoverable = currentCollectionStatus?.status === "recoverable";
+    recoverProcessingButton.hidden = !(
+      processing && (currentProcessingClaim?.expired || recoverable)
+    );
+    recoverProcessingButton.disabled = !(
+      processing && (currentProcessingClaim?.expired || recoverable)
+    );
+    if (!processing) return;
+    const worker = currentCollectionStatus?.worker;
+    if (currentCollectionStatus?.status === "processing" && worker) {
+      const page = worker.last_completed_page == null
+        ? "首个 checkpoint 尚未完成"
+        : `已完成第 ${worker.last_completed_page} 页 · ${worker.row_count} 行`;
+      actionMessage.textContent =
+        `采集 Worker 正在运行：${worker.phase || "启动中"}；${page}；` +
+        `心跳 ${formatClaimTime(worker.heartbeat_at)}。`;
+      return;
+    }
+    if (currentCollectionStatus?.status === "processing_indeterminate") {
+      actionMessage.textContent =
+        "Worker 归属或存活状态暂时无法确认；为避免误杀其他进程，将等待租约过期后再恢复。";
+      return;
+    }
+    if (recoverable) {
+      actionMessage.textContent =
+        "已确认本任务拥有的采集 Worker 退出；可以立即从同一任务 checkpoint 恢复。";
+      return;
+    }
+    if (!currentProcessingClaim) {
+      actionMessage.textContent =
+        "该阶段处于处理中，但没有有效租约；请刷新状态或使用恢复指令让 Agent 检查任务。";
+      return;
+    }
+    if (currentProcessingClaim.expired) {
+      actionMessage.textContent =
+        `Agent ${currentProcessingClaim.claimant_id || "未知"} 的处理租约已于 ` +
+        `${formatClaimTime(currentProcessingClaim.lease_expires_at)} 过期；` +
+        "可以恢复原任务并从已验证断点继续。";
+      return;
+    }
+    actionMessage.textContent =
+      `Agent ${currentProcessingClaim.claimant_id || "未知"} 正在处理，租约有效至 ` +
+      `${formatClaimTime(currentProcessingClaim.lease_expires_at)}；当前输入保持锁定。`;
+  }
+
+  async function recoverExpiredProcessing() {
+    if (
+      !currentProcessingClaim?.expired
+      && currentCollectionStatus?.status !== "recoverable"
+    ) return;
+    recoverProcessingButton.disabled = true;
+    actionMessage.textContent = "正在校验并恢复过期处理租约…";
+    try {
+      const payload = await fetchJson(
+        apiPath(`/stages/${currentStageId}/recover-processing`),
+        {
+          method: "POST",
+          body: JSON.stringify({ claimant_id: "codex-agent" }),
+        },
+      );
+      renderProcessingClaim(payload.processing_claim);
+      await loadStage();
+    } catch (error) {
+      actionMessage.textContent = error.userMessage || error.message;
+      recoverProcessingButton.disabled = false;
+    }
   }
 
   function setFormLocked(status) {
@@ -620,6 +907,29 @@
       summary.appendChild(card);
     });
     content.appendChild(summary);
+    const anomalies = view.result?.data?.product_row_anomalies;
+    if (anomalies?.blocked_row_count) {
+      const anomalyPanel = element("details", "inspection-anomalies");
+      const anomalySummary = document.createElement("summary");
+      anomalySummary.textContent = (
+        `商品表异常 ${anomalies.blocked_row_count} 行，`
+        + `有效 ${anomalies.valid_row_count || 0} 行`
+      );
+      const anomalyList = element("ul", "");
+      Object.entries(anomalies.reason_codes_by_row || {}).forEach(
+        ([rowNumber, reasonCodes]) => {
+          anomalyList.appendChild(
+            element(
+              "li",
+              "",
+              `源表第 ${rowNumber} 行：${(reasonCodes || []).join("、")}`,
+            ),
+          );
+        },
+      );
+      anomalyPanel.append(anomalySummary, anomalyList);
+      content.appendChild(anomalyPanel);
+    }
 
     const toolbar = element("div", "inspection-toolbar");
     const search = document.createElement("input");
@@ -710,6 +1020,11 @@
               : `候选图片 ${product.candidate_asset_count} 张`,
           ),
         );
+        if (product.promotion?.exact_slot_status !== "collected") {
+          promotion.append(
+            element("span", "", "精确空坑位尚未采集，不能推断具体坑位编号"),
+          );
+        }
         if (product.promotion?.evidence) {
           const evidence = document.createElement("details");
           const evidenceSummary = document.createElement("summary");
@@ -3421,6 +3736,8 @@
         result: payload.result,
         submission: payload.submission,
       });
+      currentProcessingClaim = payload.processing_claim || null;
+      currentCollectionStatus = payload.collection_status || null;
       if (payload.input) {
         hydrateForm(activeForm(), payload.input.values);
         const fallbackHistory = payload.input.interaction_history || [];
@@ -3432,6 +3749,7 @@
         }
       }
       renderStatus();
+      renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
     } catch (error) {
@@ -3683,12 +4001,16 @@
       const heartbeat = sessionPayload.session.last_agent_heartbeat;
       applySessionSnapshot(sessionPayload.session);
       uiState = UiState.receiveStatus(uiState, stageState.status, heartbeat);
+      currentProcessingClaim = stageState.processing_claim || null;
+      currentCollectionStatus = stageState.collection_status || null;
       const connection = UiState.connectionView(uiState, Date.now());
       connectionLabel.textContent = connection.connectionLabel;
       offlinePanel.hidden = connection.connectionLabel === "Agent 已连接";
       if (stageChanged) {
         renderStatus();
         await loadStage();
+      } else {
+        renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       }
     } catch (error) {
       offlinePanel.hidden = false;
@@ -3703,6 +4025,8 @@
     pendingPersistenceMode = null;
     currentStageId = stageId;
     uiState = UiState.switchStage(uiState, stageId);
+    currentProcessingClaim = null;
+    recoverProcessingButton.hidden = true;
     recoveryButton.disabled = true;
     revision = 0;
     revisionLabel.textContent = "0";
@@ -3734,6 +4058,7 @@
   goCurrentStageButton.addEventListener("click", () => {
     if (stages.has(sessionCurrentStageId)) activateStage(sessionCurrentStageId);
   });
+  recoverProcessingButton.addEventListener("click", recoverExpiredProcessing);
   panels.forEach((panel) => {
     panel.addEventListener("input", (event) => {
       if (!event.target?.getAttribute?.("name")) return;
@@ -3759,6 +4084,7 @@
 
   setInterval(pollStage, 2000);
   initializeImageSourceConfig();
+  initializeCollectionRuntime();
   async function bootstrap() {
     let initialStage = currentStageId;
     let warning = null;

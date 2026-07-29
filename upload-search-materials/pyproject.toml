@@ -25,7 +25,11 @@ tmall-materials = "upload_search_materials.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"upload_search_materials.interaction" = ["templates/*.html", "static/*"]
+"upload_search_materials.interaction" = [
+  "templates/*.html",
+  "static/*",
+  "native_folder_picker.ps1",
+]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

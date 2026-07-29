@@ -177,6 +177,25 @@
                   <span>搜推素材</span><strong>全量自动采集</strong>
                   <p>选择“商品分类 → 搜推高价值”，遍历全部分页并写入当前任务目录。</p>
                 </article>
+                <article class="setup-status-card setup-status-card-wide collection-runtime-config" data-component="CollectionRuntimeConfig" data-ready="pending">
+                  <span>采集运行环境</span><strong data-collection-runtime-summary>正在检测</strong>
+                  <p>当前配置页只负责工作流交互；另一个 CDP Chrome 窗口负责用户登录和只读采集。</p>
+                  <label>
+                    生产选择器配置
+                    <input data-selector-profile-path type="text" value="{{ setup_inputs.selectors_file }}" placeholder="选择或填写 selectors.local.yaml 的绝对路径">
+                  </label>
+                  <div class="image-source-actions">
+                    <button class="secondary-button" type="button" data-bootstrap-selector-profile>创建本机候选</button>
+                    <button class="secondary-button" type="button" data-save-selector-profile>保存已有生产配置</button>
+                    <button class="primary-button" type="button" data-validate-collection-runtime>验证当前页面</button>
+                    <button class="secondary-button" type="button" data-refresh-collection-runtime>重新检测</button>
+                  </div>
+                  <p data-selector-profile-status>等待检测生产选择器配置。</p>
+                  <p data-cdp-status>等待检测 CDP Chrome。</p>
+                  <div class="collection-readiness-list" data-collection-readiness-list></div>
+                  <p class="field-error" data-field-error="collection_readiness" aria-live="polite"></p>
+                  <code data-material-center-url>{{ setup_inputs.material_center_url }}</code>
+                </article>
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.folder_index_available else 'pending' }}">
                   <span>共享文件夹索引</span><strong>{{ "可复用" if setup_inputs.folder_index_available else "首次任务待建立" }}</strong>
                   <code>{{ setup_inputs.folder_index_root }}</code>
@@ -186,7 +205,7 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
                   <span>图片源配置</span><strong data-image-source-summary>{{ image_sources|length }} 个图片源</strong>
-                  <p>可配置一个或多个来源。名称和根路径会同时写入本次任务；保存本机配置后，新任务自动复用。</p>
+                  <p>可配置一个或多个来源。跨电脑优先填写 <code>\\服务器\共享目录</code>；盘符路径仅在当前服务会话已映射时可访问。</p>
                   <p>本机配置文件：<code>{{ setup_inputs.image_config_path }}</code></p>
                   <div class="image-source-list" data-image-source-list>
                     {% for source in image_sources %}
@@ -195,6 +214,7 @@
                       <label>根路径<input name="image_roots" type="text" value="{{ source.path }}" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
                       <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
                       <span class="image-source-state" data-image-source-state>尚未检测</span>
+                      <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>采用 UNC</button>
                       <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
                     </div>
                     {% else %}
@@ -203,6 +223,7 @@
                       <label>根路径<input name="image_roots" type="text" value="" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
                       <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
                       <span class="image-source-state" data-image-source-state>待配置</span>
+                      <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>采用 UNC</button>
                       <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
                     </div>
                     {% endfor %}
@@ -219,6 +240,7 @@
                       <label>根路径<input name="image_roots" type="text" value="" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
                       <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
                       <span class="image-source-state" data-image-source-state>待配置</span>
+                      <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>采用 UNC</button>
                       <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
                     </div>
                   </template>

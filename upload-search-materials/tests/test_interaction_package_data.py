@@ -10,3 +10,4 @@ def test_interaction_ui_assets_are_declared_as_setuptools_package_data():
     patterns = package_data["upload_search_materials.interaction"]
     assert "templates/*.html" in patterns
     assert "static/*" in patterns
+    assert "native_folder_picker.ps1" in patterns

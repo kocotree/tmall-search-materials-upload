@@ -1,0 +1,732 @@
+"""Deterministic setup-to-high-value collection orchestration."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import shutil
+from typing import Any, Callable
+
+from .browser.config import (
+    SelectorConfigError,
+    load_selector_profile,
+)
+from .browser.material_page import (
+    SelectorInvalidError,
+)
+from .browser.session import (
+    CdpUnavailable,
+    HumanCheckRequired,
+    LoginInteractionRequired,
+    StoreIdentityError,
+    ensure_cdp_browser,
+    open_cdp_page,
+    validate_collection_page,
+)
+from .interaction.session import (
+    InteractionConflict,
+    SessionStore,
+)
+from .io_tables import (
+    SchemaError,
+    read_product_csv,
+    sha256_file,
+    validate_product_records,
+)
+from .material_state import build_completeness_matrix
+from .runtime_config import RuntimeConfig
+from .supplement_collection import (
+    CheckpointIdentityError,
+    collect_supplement_material_status,
+    read_backend_status,
+    validate_checkpoint_identity,
+)
+from .time_utils import iso_timestamp
+
+
+def _now_iso() -> str:
+    return iso_timestamp()
+
+
+def _write_json(path: Path, document: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        document, ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(payload)
+    temporary.replace(path)
+
+
+def _input_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise InteractionConflict(f"{path.name} must contain an object")
+    return value
+
+
+def _claim_setup(
+    store: SessionStore,
+    session_id: str,
+    claimant_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    state = store.load_session(session_id)
+    existing = store.read_optional_stage_document(
+        session_id, "setup", "result"
+    )
+    handoff = store.read_optional_stage_document(
+        session_id, "setup", "handoff"
+    )
+    if handoff is None:
+        raise InteractionConflict("SETUP_HANDOFF_REQUIRED")
+    if (
+        existing
+        and existing.get("status") == "completed"
+        and existing.get("revision") == handoff.get("revision")
+        and existing.get("input_sha256") == handoff.get("input_sha256")
+    ):
+        return handoff, {"completed_result": existing}
+    if existing and (
+        existing.get("revision") != handoff.get("revision")
+        or existing.get("input_sha256") != handoff.get("input_sha256")
+    ):
+        raise InteractionConflict("BOUND_RESULT_IDENTITY_MISMATCH")
+
+    current_status = state["stages"]["setup"]["status"]
+    claim = store.processing_claim(session_id, "setup")
+    if current_status == "processing" and claim and not claim["expired"]:
+        if claim.get("claimant_id") != claimant_id:
+            raise InteractionConflict("PROCESSING_CLAIM_ACTIVE")
+        return handoff, claim
+    if current_status == "processing" and (
+        claim is None or claim.get("expired")
+    ):
+        _validate_expired_recovery(
+            store._session_path(session_id),
+            handoff,
+        )
+    store.wait_for_handoff(
+        session_id,
+        "setup",
+        timeout_seconds=0.5,
+        claimant_id=claimant_id,
+        reclaim_expired=True,
+        resume_needs_user_input=True,
+    )
+    claim = store.processing_claim(session_id, "setup")
+    if claim is None:
+        raise InteractionConflict("PROCESSING_CLAIM_REQUIRED")
+    return handoff, claim
+
+
+def _validate_expired_recovery(
+    session_path: Path,
+    handoff: dict[str, Any],
+) -> None:
+    """Validate durable partial output before replacing a stale owner."""
+
+    checkpoint = (
+        session_path
+        / "collected"
+        / "promotion"
+        / "promotion-material-status.checkpoint.json"
+    )
+    if not checkpoint.is_file():
+        return
+    document = validate_checkpoint_identity(
+        checkpoint,
+        {
+            "scan_mode": "high-value",
+            "session_id": handoff["session_id"],
+            "revision": handoff["revision"],
+            "input_sha256": handoff["input_sha256"],
+        },
+    )
+    if not document or document.get("status") not in {
+        "in_progress",
+        "complete",
+    }:
+        return
+    output = checkpoint.with_name("promotion-material-status.csv")
+    rows = read_backend_status(output)
+    row_count = document.get("row_count")
+    if isinstance(row_count, int) and row_count != len(rows):
+        raise CheckpointIdentityError(
+            "CHECKPOINT_OUTPUT_ROW_COUNT_MISMATCH"
+        )
+
+
+def _snapshot_inputs(
+    session_path: Path,
+    setup_input: dict[str, Any],
+    *,
+    session_id: str,
+    revision: int,
+    input_sha256: str,
+) -> tuple[Path, Path, list[Any], dict[str, Any]]:
+    values = setup_input.get("values")
+    if not isinstance(values, dict):
+        raise InteractionConflict("SETUP_VALUES_INVALID")
+    products_source = Path(str(values.get("products_csv", ""))).expanduser()
+    rules_source = Path(str(values.get("rules_csv", ""))).expanduser()
+    if not products_source.is_file():
+        raise InteractionConflict("PRODUCTS_FILE_REQUIRED")
+    if not rules_source.is_file():
+        raise InteractionConflict("RULES_FILE_REQUIRED")
+    inputs = session_path / "inputs"
+    inputs.mkdir(parents=True, exist_ok=True)
+    products_target = inputs / "products.csv"
+    rules_target = inputs / "rules.csv"
+    for source, target in (
+        (products_source, products_target),
+        (rules_source, rules_target),
+    ):
+        source_sha = sha256_file(source)
+        if target.is_file() and sha256_file(target) != source_sha:
+            raise InteractionConflict("INPUT_SNAPSHOT_CONFLICT")
+        if not target.is_file():
+            shutil.copy2(source, target)
+    products = read_product_csv(products_target)
+    validation = validate_product_records(products)
+    manifest = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "setup",
+        "revision": revision,
+        "input_sha256": input_sha256,
+        "created_at": _now_iso(),
+        "files": [
+            {
+                "kind": "products",
+                "source_path": str(products_source.resolve()),
+                "snapshot_path": str(products_target.resolve()),
+                "sha256": sha256_file(products_target),
+            },
+            {
+                "kind": "rules",
+                "source_path": str(rules_source.resolve()),
+                "snapshot_path": str(rules_target.resolve()),
+                "sha256": sha256_file(rules_target),
+            },
+        ],
+    }
+    _write_json(inputs / "input-manifest.json", manifest)
+    scan_summary = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "setup",
+        "revision": revision,
+        "products_sha256": sha256_file(products_target),
+        "status": (
+            "blocked"
+            if not products or validation.batch_blocking
+            else "ready"
+        ),
+        "row_count": validation.row_count,
+        "valid_row_count": validation.row_count
+        - validation.blocked_row_count,
+        "blocked_row_count": validation.blocked_row_count,
+        "reason_codes_by_row": {
+            str(row): list(reasons)
+            for row, reasons in validation.reason_codes_by_row.items()
+        },
+        "checked_at": _now_iso(),
+    }
+    _write_json(inputs / "scan-summary.json", scan_summary)
+    if not products or validation.batch_blocking:
+        raise InteractionConflict("PRODUCT_TABLE_BATCH_BLOCKED")
+    return products_target, rules_target, products, scan_summary
+
+
+def _persist_selector_error(
+    session_path: Path,
+    handoff: dict[str, Any],
+    error: Exception,
+) -> Path:
+    path = session_path / "collected" / "selector-error.json"
+    promotion_root = session_path / "collected" / "promotion"
+    profile_evidence = {}
+    page_evidence = {}
+    for source, target in (
+        (promotion_root / "selector-profile.json", profile_evidence),
+        (promotion_root / "store-page-evidence.json", page_evidence),
+    ):
+        if source.is_file():
+            try:
+                target.update(_read_json(source))
+            except (OSError, ValueError, InteractionConflict):
+                pass
+    detail = str(error)
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "session_id": handoff["session_id"],
+            "stage_id": "setup",
+            "revision": handoff["revision"],
+            "input_sha256": handoff["input_sha256"],
+            "status": "needs_manual_review",
+            "reason_code": (
+                "SELECTOR_INVALID"
+                if isinstance(error, SelectorInvalidError)
+                else "SELECTOR_PROFILE_INVALID"
+            ),
+            "detail": detail,
+            "target_field": detail.split(":", 1)[0],
+            "page_url": str(page_evidence.get("page_url", "")),
+            "selector_profile": {
+                "name": str(profile_evidence.get("profile_name", "")),
+                "version": str(
+                    profile_evidence.get("profile_version", "")
+                ),
+                "sha256": str(
+                    profile_evidence.get("profile_sha256", "")
+                ),
+            },
+            "overlay_summary": (
+                "recognized_guide_or_unknown_overlay"
+                if "popup_blocked" in detail
+                else ""
+            ),
+            "sensitive_content_persisted": False,
+            "reproducible": True,
+            "repair_boundary": (
+                "Use Playwright to reproduce against the real DOM, then repair "
+                "the maintained selector profile or collector and rerun "
+                "supplement --scan-mode high-value."
+            ),
+            "recorded_at": _now_iso(),
+        },
+    )
+    return path
+
+
+def process_setup_collection(
+    *,
+    runs_root: Path,
+    session_id: str,
+    runtime: RuntimeConfig,
+    selectors_path: Path | None = None,
+    cdp_url: str | None = None,
+    claimant_id: str = "codex-agent",
+    attempt_id: str | None = None,
+    progress_callback: Callable[..., None] | None = None,
+    page: Any | None = None,
+    page_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Process one exact setup handoff through stage-two hydration."""
+
+    store = SessionStore(runs_root)
+    handoff, claim = _claim_setup(store, session_id, claimant_id)
+    if "completed_result" in claim:
+        return {
+            "status": "completed",
+            "reused": True,
+            "result": claim["completed_result"],
+        }
+    claim_id = str(claim["claim_id"])
+    active_attempt_id = str(claim.get("attempt_id", "")).strip()
+    if attempt_id and active_attempt_id and attempt_id != active_attempt_id:
+        raise InteractionConflict("COLLECTION_ATTEMPT_STALE")
+    attempt_id = attempt_id or active_attempt_id or None
+    session_path = store._session_path(session_id)
+    setup_path = store._stage_path(session_id, "setup")
+    setup_input = _read_json(setup_path / "input.json")
+    if _input_hash(setup_path / "input.json") != handoff["input_sha256"]:
+        raise InteractionConflict("SETUP_INPUT_HASH_MISMATCH")
+
+    try:
+        products_path, _, products, scan_summary = _snapshot_inputs(
+            session_path,
+            setup_input,
+            session_id=session_id,
+            revision=int(handoff["revision"]),
+            input_sha256=str(handoff["input_sha256"]),
+        )
+    except (OSError, SchemaError, InteractionConflict) as error:
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="blocked",
+            summary="商品表或输入快照无法安全处理",
+            blocking_reasons=[str(error)],
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "blocked", "result": result}
+
+    selected_profile_path = selectors_path or runtime.selectors_file
+    if selected_profile_path is None:
+        error = SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND")
+        evidence = _persist_selector_error(session_path, handoff, error)
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="needs_user_input",
+            summary="需要在配置页设置并验证生产选择器",
+            blocking_reasons=[str(error)],
+            evidence=[str(evidence)],
+            next_action="在前端修复生产选择器后恢复同一会话",
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "needs_user_input", "result": result}
+    try:
+        if progress_callback is not None:
+            progress_callback("validating_profile")
+        profile = load_selector_profile(
+            selected_profile_path,
+            purpose="high_value_collection",
+            production=True,
+        )
+    except SelectorConfigError as error:
+        evidence = _persist_selector_error(session_path, handoff, error)
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="needs_user_input",
+            summary="生产选择器配置无效",
+            blocking_reasons=[str(error)],
+            evidence=[str(evidence)],
+            next_action="在前端修复生产选择器后恢复同一会话",
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "needs_user_input", "result": result}
+
+    collected_root = session_path / "collected" / "promotion"
+    selector_evidence = collected_root / "selector-profile.json"
+    _write_json(
+        selector_evidence,
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "setup",
+            "revision": handoff["revision"],
+            "input_sha256": handoff["input_sha256"],
+            "profile_name": profile.name,
+            "profile_version": profile.version,
+            "profile_sha256": profile.sha256,
+            "purpose": profile.purpose,
+            "profile_path": str(profile.path),
+            "validated_at": _now_iso(),
+        },
+    )
+    output = collected_root / "promotion-material-status.csv"
+    checkpoint = collected_root / "promotion-material-status.checkpoint.json"
+    collected_at = _now_iso()
+    collected_rows: list[dict[str, str]] = []
+
+    def renew_claim(
+        _page_number: int, _rows: list[dict[str, str]]
+    ) -> None:
+        store.renew_processing_claim(session_id, "setup", claim_id)
+
+    def collect(live_page: Any) -> list[dict[str, str]]:
+        if progress_callback is not None:
+            progress_callback("validating_profile")
+        page_evidence = validate_collection_page(
+            live_page,
+            profile.selectors,
+            expected_store=str(
+                setup_input.get("values", {}).get("store", "")
+            ),
+            profile_name=profile.name,
+            profile_version=profile.version,
+            profile_sha256=profile.sha256,
+        )
+        evidence_document = {
+            **page_evidence,
+            "session_id": session_id,
+            "stage_id": "setup",
+            "revision": handoff["revision"],
+            "input_sha256": handoff["input_sha256"],
+        }
+        page_evidence_path = (
+            collected_root / "store-page-evidence.json"
+        )
+        _write_json(page_evidence_path, evidence_document)
+        if progress_callback is not None:
+            progress_callback("settling_popups")
+        rows = collect_supplement_material_status(
+            live_page,
+            profile.selectors,
+            scan_mode="high-value",
+            output=output,
+            checkpoint=checkpoint,
+            collected_at=collected_at,
+            max_pages=None,
+            checkpoint_context={
+                "session_id": session_id,
+                "revision": handoff["revision"],
+                "input_sha256": handoff["input_sha256"],
+                "selector_profile_sha256": profile.sha256,
+                **(
+                    {"attempt_id": attempt_id}
+                    if attempt_id
+                    else {}
+                ),
+                "target_store": str(
+                    setup_input.get("values", {}).get("store", "")
+                ).strip(),
+            },
+            before_checkpoint=renew_claim,
+            on_checkpoint=(
+                (
+                    lambda page_number, values: progress_callback(
+                        "writing_checkpoint",
+                        current_page=page_number + 1,
+                        last_completed_page=page_number,
+                        row_count=len(values),
+                        last_checkpoint_at=_now_iso(),
+                    )
+                )
+                if progress_callback is not None
+                else None
+            ),
+            on_phase=(
+                (
+                    lambda phase, page_number: progress_callback(
+                        phase,
+                        **(
+                            {"current_page": page_number}
+                            if page_number is not None
+                            else {}
+                        ),
+                    )
+                )
+                if progress_callback is not None
+                else None
+            ),
+        )
+        evidence_document["field_results"] = {
+            field: "observed_during_collection"
+            for field in (
+                "promotion_tab",
+                "high_value_filter",
+                "promotion_rows",
+                "promotion_next_page",
+            )
+        }
+        evidence_document["collection_validated_at"] = _now_iso()
+        evidence_document["safe_actions"] = list(
+            getattr(live_page, "_tmall_collection_events", [])
+        )
+        _write_json(page_evidence_path, evidence_document)
+        return rows
+
+    try:
+        if page is not None:
+            collected_rows = collect(page)
+        elif page_factory is not None:
+            collected_rows = collect(
+                page_factory(cdp_url or runtime.cdp_url)
+            )
+        else:
+            material_center_url = (
+                profile.material_center_url
+                or runtime.material_center_url
+            )
+            ensure_cdp_browser(
+                executable=runtime.browser_executable,
+                profile_dir=runtime.browser_profile_dir,
+                cdp_url=cdp_url or runtime.cdp_url,
+                material_center_url=material_center_url,
+            )
+            if progress_callback is not None:
+                progress_callback("connecting_cdp")
+            with open_cdp_page(
+                cdp_url or runtime.cdp_url,
+                material_center_url,
+            ) as live_page:
+                collected_rows = collect(live_page)
+    except CdpUnavailable as error:
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="needs_user_input",
+            summary="需要准备用户控制的 CDP Chrome",
+            blocking_reasons=[str(error).split(":", 1)[0]],
+            next_action=(
+                "在配置页查看 CDP 状态，配置浏览器后恢复同一 session"
+            ),
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "needs_user_input", "result": result}
+    except CheckpointIdentityError as error:
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="blocked",
+            summary="已有采集 checkpoint 与当前任务身份不一致",
+            blocking_reasons=[
+                str(error).split(":", 1)[0],
+                str(error),
+            ],
+            evidence=[str(checkpoint)],
+            next_action=(
+                "保留旧 checkpoint 作为证据，为当前输入创建新的隔离采集输出"
+            ),
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "blocked", "result": result}
+    except (LoginInteractionRequired, HumanCheckRequired) as error:
+        evidence = session_path / "collected" / "login-required.json"
+        _write_json(
+            evidence,
+            {
+                "schema_version": 1,
+                "session_id": session_id,
+                "stage_id": "setup",
+                "revision": handoff["revision"],
+                "input_sha256": handoff["input_sha256"],
+                "status": "processing",
+                "reason_code": (
+                    "HUMAN_CHECK"
+                    if isinstance(error, HumanCheckRequired)
+                    else "LOGIN_INTERACTION_REQUIRED"
+                ),
+                "detail": str(error),
+                "cdp_url": cdp_url or runtime.cdp_url,
+                "material_center_url": (
+                    profile.material_center_url
+                    or runtime.material_center_url
+                ),
+                "recorded_at": _now_iso(),
+            },
+        )
+        return {
+            "status": "processing",
+            "reason_code": (
+                "HUMAN_CHECK"
+                if isinstance(error, HumanCheckRequired)
+                else "LOGIN_INTERACTION_REQUIRED"
+            ),
+            "evidence": str(evidence),
+            "processing_claim": store.processing_claim(
+                session_id, "setup"
+            ),
+        }
+    except StoreIdentityError as error:
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="blocked",
+            summary="当前登录店铺与目标店铺不一致",
+            blocking_reasons=["STORE_IDENTITY_MISMATCH", str(error)],
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "blocked", "result": result}
+    except SelectorInvalidError as error:
+        evidence = _persist_selector_error(session_path, handoff, error)
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="needs_user_input",
+            summary="现有 supplement 采集器需要 Playwright 诊断修复",
+            blocking_reasons=["SELECTOR_INVALID", str(error)],
+            evidence=[str(evidence), str(checkpoint)],
+            next_action=(
+                "使用 Playwright 复现并修复现有选择器或采集器，"
+                "通过回归测试后重新运行 supplement --scan-mode high-value"
+            ),
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        )
+        return {"status": "needs_user_input", "result": result}
+
+    if progress_callback is not None:
+        progress_callback("building_completeness")
+    matrix = build_completeness_matrix(
+        collected_rows,
+        products=[record.raw for record in products],
+    )
+    matrix["product_row_anomalies"] = {
+        "row_count": scan_summary["row_count"],
+        "valid_row_count": scan_summary["valid_row_count"],
+        "blocked_row_count": scan_summary["blocked_row_count"],
+        "reason_codes_by_row": scan_summary["reason_codes_by_row"],
+    }
+    completeness_path = (
+        store._stage_path(session_id, "completeness")
+        / "completeness-matrix.json"
+    )
+    _write_json(completeness_path, matrix)
+    result = store.write_result(
+        session_id,
+        "setup",
+        int(handoff["revision"]),
+        str(handoff["input_sha256"]),
+        status="completed",
+        summary=f"已采集 {len(collected_rows)} 个搜推高价值商品",
+        evidence=[
+            str(selector_evidence),
+            str(collected_root / "store-page-evidence.json"),
+            str(output),
+            str(checkpoint),
+            str(completeness_path),
+        ],
+        next_action="在第二阶段批量选择待补充商品",
+        data={
+            "promotion_status": str(output),
+            "checkpoint": str(checkpoint),
+            "completeness_matrix": str(completeness_path),
+            "product_row_anomalies": matrix[
+                "product_row_anomalies"
+            ],
+        },
+        claim_id=claim_id,
+        attempt_id=attempt_id,
+    )
+    completeness_state = store.load_session(session_id)
+    completeness_revision = int(
+        completeness_state["stages"]["completeness"]["revision"]
+    )
+    store.write_review_context(
+        session_id,
+        "completeness",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "completeness",
+            "revision": completeness_revision,
+            "status": "needs_user_input",
+            "summary": result["summary"],
+            "blocking_reasons": [],
+            "evidence": result["evidence"],
+            "next_action": "选择商品并提交给 Agent",
+            "created_at": _now_iso(),
+            "data": matrix,
+        },
+    )
+    state = store.load_session(session_id)
+    state["current_stage"] = "completeness"
+    store._write_session_state(session_id, state)
+    return {
+        "status": "completed",
+        "reused": False,
+        "result": result,
+        "completeness": matrix,
+    }

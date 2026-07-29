@@ -147,6 +147,7 @@ def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
     monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
+    monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     code = main(["interact", "--runs-root", str(tmp_path), "--port", "9123"])
 
@@ -178,6 +179,7 @@ def test_interact_resumes_explicit_session_without_creating_another(
 
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
     monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
+    monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     code = main(
         [
@@ -210,6 +212,7 @@ def test_interact_uses_environment_only_when_runs_root_is_absent(
     monkeypatch.setenv("TMALL_RUNS_ROOT", str(environment_root))
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
     monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
+    monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     assert main(["interact"]) == 0
     assert main(["interact", "--runs-root", str(explicit_root)]) == 0
@@ -254,6 +257,7 @@ def test_interact_defaults_to_runtime_project_runs_root(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli_module, "create_app", lambda runs_root, runtime_config=None: app
     )
+    monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     assert main(["interact"]) == 0
     assert roots == [tmp_path / "runs"]
@@ -954,6 +958,7 @@ def test_supplement_defaults_to_high_value_batch_scan_and_writes_checkpoint(
     monkeypatch,
 ):
     import upload_search_materials.cli as cli_module
+    import upload_search_materials.supplement_collection as supplement_module
 
     first = {
         "商品ID": "565628742471",
@@ -980,7 +985,11 @@ def test_supplement_defaults_to_high_value_batch_scan_and_writes_checkpoint(
         kwargs["on_page"](2, [first, second])
         return [first, second]
 
-    monkeypatch.setattr(cli_module, "scan_recommended_material_status", fake_scan)
+    monkeypatch.setattr(
+        supplement_module,
+        "scan_recommended_material_status",
+        fake_scan,
+    )
     page = CliFakePage()
     selectors = Path(__file__).parents[1] / "config" / "selectors.example.yaml"
     output = tmp_path / "promotion-material-status.csv"

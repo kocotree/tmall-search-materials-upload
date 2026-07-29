@@ -68,6 +68,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 3. 先通过 `scripts/start-ui.cmd` 创建时间戳会话并运行受管 UI；`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
 4. 让用户在阶段 1 配置页填写并确认店铺、月份和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
 5. setup handoff 尚未提交时，只等待页面提交或提供恢复指令；不得自行采集、索引、dry-run、上传或发布。
+6. 阶段一正式提交前必须读取页面返回的 `collection_readiness`。环境、生产选择器 schema、当前 DOM、CDP、登录/人机验证、官方素材中心页面和目标店铺必须逐项为 ready；缺一项只能保存草稿。缺少本机生产选择器时，先在页面创建 `production=false` 候选，再用当前 CDP 页面验证全部字段；禁止复制示例后直接标为生产。
 
 聊天中用户主动提供的值可以用于解释或预填建议，但不能代替配置页提交，也不能跳过 setup handoff。
 
@@ -83,6 +84,64 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 缺少信息时保留明确 blocked/needs_manual_review 结果，不猜测、不静默跳过。
 
 ## Workflow
+
+### 搜推高价值采集的唯一生产路径
+
+处理阶段一 handoff 时，运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m upload_search_materials.cli process-setup --runs-root "<runs-root>" --session "<session-id>"
+```
+
+该入口必须校验精确 session、stage、revision 和 `input_sha256`，然后复用现有
+`supplement --scan-mode high-value` 维护链路。正常任务禁止由 Agent 临时输出或
+保留另一份 Playwright 采集脚本，也禁止使用 `--max-pages` 截断生产采集。
+
+`process-setup` 正常模式只负责校验、创建或复用当前 `attempt_id` 并启动受管后台
+Worker，随后立即返回；不得等待全量分页完成。只有显式本地诊断才使用
+`--foreground`。使用以下命令读取唯一权威状态：
+
+```powershell
+.\.venv\Scripts\python.exe -m upload_search_materials.cli collection-status --runs-root "<runs-root>" --session "<session-id>"
+```
+
+状态必须按“当前绑定完成结果 → 活跃且归属可证的 Worker → 已确认死亡可恢复 →
+归属不确定/有效租约 → 当前阻断 → 草稿”解析。历史错误只显示在 superseded 历史，
+不能与新 Worker 同时成为当前状态。Worker 进度至少显示 phase、heartbeat、当前页、
+最后完成页、持久化行数、checkpoint 时间和日志；首个 checkpoint 前显示阶段与心跳，
+不得显示为“已采集 0 行”。
+
+checkpoint 与当前 revision、input SHA-256、选择器 SHA-256、店铺和 `attempt_id`
+绑定。每页写入前先验证当前 claim，CSV 原子写入后记录 SHA-256、唯一商品 ID、页码
+和行数。旧 Worker 的迟到写入必须被拒绝；恢复只从最后完整页之后继续。PID 只有同时
+匹配私有 ownership token、session/attempt 和进程创建身份时才可判定归属；无法证明
+时不得结束或抢占进程。
+
+生产选择器配置遵循：显式 `--selectors`、`TMALL_SELECTORS_FILE`、本机
+`config/local-paths.json`、Git 忽略的 `config/selectors.local.yaml`。优先在
+阶段一前端的“采集运行环境”组件验证并保存；仓库示例、占位选择器和用途不匹配
+的配置不得用于真实页面。
+
+配置页和 CDP Chrome 是两个窗口：配置页保存结构化决定；CDP Chrome 只用于用户
+自行登录、扫码、短信、验证码和只读采集。系统应自动打开官方素材中心。出现
+`LOGIN_INTERACTION_REQUIRED` 或 `HUMAN_CHECK` 时，提示用户在 CDP Chrome 完成
+操作，然后对同一 session 重新运行 `process-setup`；不得索取或保存登录凭据。
+
+日常命令直接使用项目 `.venv\Scripts\tmall-materials.exe`；若 console-script 尚未
+生成但项目 Python 和源码已准备，则使用 `.venv\Scripts\python.exe -m
+upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步。项目
+`.uv-cache` 和环境指纹只由 `scripts/bootstrap.cmd` 准备；恢复采集不得下载或解析
+依赖。
+
+只有现有维护链路持久化了可复现的选择器、导航、弹窗、解析、分页或页面状态错误
+后，才允许用 Playwright 检查真实 DOM。诊断结果必须用于修复现有生产选择器配置
+或现有 collector，并新增/更新回归测试；随后必须重新运行原
+`supplement --scan-mode high-value` 路径。临时诊断代码不能成为第二条生产采集
+路径。
+
+批量采集只记录 `target_capacity/current_count/missing_count`，并标记
+`exact_slot_status=not_collected`；不得把缺失数量解释成具体空坑位编号。仅在正式
+批准和发布规划前，对选中商品执行逐商品精确坑位复核。
 
 素材阶段按以下顺序执行：
 
@@ -137,7 +196,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 恢复已有 `session_id` 时，页面必须先读取 `session.json` 状态并直接进入有效的 `current_stage`，同时一次性显示全部阶段的真实状态。只打开、刷新、水合图片决定或构建默认坑位不得标记 dirty、自动保存或增加 revision。草稿保存进行中收到“提交给 Agent”时必须明确显示已排队，并在保存成功后使用最新 revision 继续提交；失败或阶段切换时必须明确暂停或取消，禁止静默丢弃点击。查看已完成阶段时显示锁定原因和“进入当前阶段”，不得重新启用写入。
 
-图片源行提供“选择文件夹”，仅由用户点击后打开本机原生目录窗口并回填完整路径；仍保留手工输入用于 UNC、远程或无界面环境。选择目录时不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
+图片源行提供“选择文件夹”，仅由用户点击后通过独立的 Windows STA 助手打开本机原生目录窗口并回填完整路径；仍保留手工输入用于 UNC、远程或无界面环境。取消、窗口不可用、忙碌、超时或返回无效路径时必须保留原输入并显示具体恢复动作。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
 
 页面无 Agent 心跳或 Codex 任务已结束时，告知用户把页面显示的恢复指令粘贴到新建或当前 Codex 任务。不得声称 Agent 仍在后台执行，也不得声称页面能够唤醒已结束的任务。
 
@@ -151,7 +210,8 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 - 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、项目内 `config/local-paths.json` 的顺序读取本机配置；该本机文件不得提交到仓库。
 - 未显式配置商品表或规则表时，从项目根目录的 `docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
-- 共享图片目录从前端配置页读取，并可保存到本机配置；不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。必须至少配置 1 个名称与路径均非空且不重复的来源。目录未配置或当前不可访问时仍允许交互页面启动，但依赖素材源的阶段必须停在待配置状态。
+- 共享图片目录从前端配置页读取，并可保存到本机配置；不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。跨电脑使用时优先保存 UNC 路径；当前受管服务身份能够访问的映射盘仍可使用。检测必须区分未映射盘符、主机不可达、共享不存在、子目录不存在、拒绝访问、超时和未知失败，并显示中文恢复动作；只有用户明确点击“采用 UNC”时才替换映射盘输入。必须至少配置 1 个名称与路径均非空且不重复的来源。目录未配置或当前不可访问时仍允许交互页面启动，但依赖素材源的阶段必须停在待配置状态。
+- 路径可用性以运行受管 UI 的 Windows 身份为准，不等同于用户在另一个资源管理器窗口中的权限。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限；需要网络/VPN、映射或授权时只能给出恢复说明，由用户或管理员在系统中完成。
 - `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用项目根目录下的 `runs/`。所有任务继续按时间戳目录隔离。
 - 共享文件夹索引路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用本机配置的 `folder_index_root`，默认使用项目根目录下 Git 忽略的 `.local-cache/folder-index/`。它是机器级缓存，不属于任何时间戳任务；任务只保存候选快照。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。

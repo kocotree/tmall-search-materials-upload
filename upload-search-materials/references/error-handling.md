@@ -17,6 +17,33 @@
 
 缺少店铺、月份、图片根目录、NAS 当前不可访问或未登录不是启动错误。
 
+## 图片源路径与目录选择
+
+| 原因码 | 含义 | 恢复 |
+|---|---|---|
+| `PATH_AVAILABLE` | 当前服务身份可访问目录 | 可继续保存配置 |
+| `INVALID_PATH` | 路径语法无效或不是绝对路径 | 修正本机、映射盘或 UNC 路径 |
+| `DRIVE_NOT_MAPPED` | 当前服务会话没有对应盘符映射 | 在同一身份连接网络盘，或手工粘贴 UNC |
+| `NETWORK_HOST_UNAVAILABLE` | NAS 主机不可达 | 检查网络、VPN 和主机状态 |
+| `NETWORK_SHARE_NOT_FOUND` | 共享不存在或当前账号不可见 | 核对共享名称和权限 |
+| `PATH_NOT_FOUND` | 目录不存在 | 核对共享内目录层级 |
+| `ACCESS_DENIED` | 当前服务身份无读取权限 | 由管理员授权；程序不得索取凭据 |
+| `PATH_CHECK_TIMEOUT` | NAS 元数据检查超时 | 检查网络后重试 |
+| `PATH_CHECK_FAILED` | 未分类的检测失败 | 重试或手工核对 |
+
+| 原因码 | 含义 | 恢复 |
+|---|---|---|
+| `FOLDER_PICKER_BUSY` | 已有目录窗口 | 完成或取消现有窗口 |
+| `FOLDER_PICKER_TIMEOUT` | 用户未在边界内完成选择 | 重试或手工粘贴路径 |
+| `FOLDER_PICKER_GUI_UNAVAILABLE` | 服务会话无法显示原生窗口 | 手工粘贴本机或 UNC 路径 |
+| `FOLDER_PICKER_UNSUPPORTED` | 非 Windows 环境 | 手工输入路径 |
+| `FOLDER_PICKER_START_FAILED` | Windows 助手未启动 | 重试或手工输入 |
+| `FOLDER_PICKER_PROTOCOL_ERROR` | 助手返回格式无效 | 重试；仍失败时手工输入 |
+| `FOLDER_PICKER_INVALID_RESULT` | 选择结果不是可访问绝对目录 | 重新选择或手工输入 |
+
+路径和窗口错误只阻断当前路径动作，不清空输入、不提交阶段。程序不得自动建立映射、
+挂载共享、保存 NAS 凭据或把资源管理器用户权限误当成受管服务身份权限。
+
 ## 确定性编排
 
 - `SLOT_AI_PLANNING_REMOVED`：新任务请求了坑位 AI；继续使用自动草稿或人工编辑。
@@ -68,6 +95,35 @@
 | `REMOTE_EVIDENCE_MISMATCH` | 远端记录与批准指纹/坑位/时间不一致 | 保持不确定并转人工 |
 | `MODERATION_FAILED` | 平台审核失败 | 记录平台原因，转人工处理 |
 | `STATE_MISSING` | `run.sqlite3`、任务状态行或状态证据缺失/损坏 | 禁止自动上传，先做可信远端核验 |
+
+## 采集、选择器和处理租约
+
+| 原因码 | 含义 | 恢复 |
+|---|---|---|
+| `SELECTOR_PROFILE_NOT_FOUND` | 未发现本机生产选择器配置 | 在阶段一“采集运行环境”组件验证并保存配置 |
+| `SELECTOR_EXAMPLE_NOT_PRODUCTION` | 尝试把仓库示例用于生产 | 改用 Git 忽略的本机 profile |
+| `SELECTOR_PURPOSE_NOT_DECLARED` | profile 不支持当前操作用途 | 补充并验证对应 purpose |
+| `SELECTOR_PLACEHOLDER_REJECTED` | profile 仍包含占位选择器 | 基于当前 DOM 修复本机 profile |
+| `CDP_UNAVAILABLE` | 用户控制的 CDP Chrome 未连接 | 启动专用 profile，并打开官方素材中心 |
+| `LOGIN_INTERACTION_REQUIRED` | 当前页面还不能验证登录店铺 | 用户在 CDP Chrome 完成登录后恢复同一 session |
+| `HUMAN_CHECK` | 出现扫码、短信、验证码或风控 | 停止自动化，等待用户处理 |
+| `STORE_IDENTITY_MISMATCH` | 当前店铺与阶段一目标不一致 | 阻断整批，不写采集行 |
+| `PROCESSING_CLAIM_ACTIVE` | 同一阶段存在未过期处理租约 | 等待当前 Agent 或租约到期 |
+| `PROCESSING_CLAIM_STALE` | 旧 Agent/旧 claim 尝试回写 | 拒绝旧写入，使用当前 claim 恢复 |
+| `SETUP_INPUT_HASH_MISMATCH` | handoff 与当前 input 不一致 | 停止并重新提交正确 revision |
+| `ENVIRONMENT_NOT_PREPARED` | 项目 `.venv` 或 `uv.lock` 不完整 | 单独运行 `scripts/bootstrap.cmd`；恢复采集不得隐式同步 |
+| `SELECTOR_DOM_NOT_VALIDATED` | profile 未通过当前素材中心 DOM 验证 | 在阶段一点击“验证当前页面” |
+| `SELECTOR_FIELD_INVALID:<field>` | 当前 DOM 中某个必需字段验证失败 | 保留非生产候选并按字段修复 |
+| `MATERIAL_PAGE_REQUIRED` | CDP 页面不是官方素材中心 | 用户在 CDP Chrome 打开官方页面 |
+| `COLLECTION_WORKER_OWNERSHIP_INDETERMINATE` | PID 存在但 token/进程身份无法证明 | 不结束、不抢占，等待租约过期 |
+| `COLLECTION_ATTEMPT_STALE` | 旧 attempt 尝试更新进度或结果 | 拒绝写入，保留当前 attempt |
+| `COLLECTION_ATTEMPT_BINDING_MISMATCH` | revision、输入、选择器或店铺绑定变化 | 禁止复用 checkpoint |
+| `CHECKPOINT_OUTPUT_SHA256_MISMATCH` | CSV 与 checkpoint 哈希不一致 | 保留证据并停止恢复 |
+| `CHECKPOINT_OUTPUT_DUPLICATE_PRODUCT` | checkpoint CSV 含重复商品 ID | 停止恢复并修复采集证据 |
+
+选择器、导航、弹窗、解析、分页或页面状态故障必须先由维护的
+`supplement --scan-mode high-value` 产生可复现错误证据。Playwright 只能用于诊断和
+修复现有 profile/collector；修复后必须增加回归测试并重跑原入口。
 
 ## 重试边界
 

@@ -1,5 +1,26 @@
 # 数据结构
 
+## 采集与处理恢复字段
+
+阶段处理 claim 保存在 `session.json.stages.<stage>.processing_claim`，包含
+`claim_id`、`claimant_id`、`claimed_at`、`heartbeat_at`、`lease_expires_at`、
+`revision` 和 `input_sha256`。`handoff.json` 是不可变提交证据，不作为第二份活动
+claim 状态源。
+
+阶段一采集证据至少包含：
+
+- `inputs/input-manifest.json`：源路径、任务快照路径和 SHA-256；
+- `inputs/scan-summary.json`：总行数、有效行数、异常行数及 source row reason codes；
+- `collected/promotion/selector-profile.json`：profile 名称、版本、purpose 和 SHA-256；
+- `collected/promotion/store-page-evidence.json`：目标/可见店铺、URL、页面身份和校验时间；
+- `promotion-material-status.csv` 与 checkpoint；
+- `02-completeness/completeness-matrix.json`；
+- 与 session、stage、revision、input SHA-256 绑定的 `result.json`。
+
+批量行使用 `目标容量/现有素材数/缺失数量`，并将 `精确坑位状态` 写为
+`not_collected`。此时 `empty_slot_indexes` 必须为 `null`；只有后续逐商品精确复核
+才能写具体空坑位编号。
+
 ## Managed UI Service
 
 每个精确 session 可有一个 `.ui-service.json`，记录 schema version、session ID、runs root、PID、ownership token、loopback 端口、精确 URL、stdout/stderr 日志、启动/检查时间、健康状态、session 可读状态和浏览器打开状态。对外 CLI 结果不返回 ownership token；浏览器失败与服务失败分开记录。
@@ -25,6 +46,20 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 ## Task Setup
 
 任务配置 handoff 的用户输入为：`store`、`store_confirmed` 和 `month`。第一阶段不接受 `product_scope`、`product_ids` 或 `promotion_max_pages`；商品范围由第二阶段的“搜推高价值”全量采集结果决定。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
+
+图片源检测 API 的每项诊断包含：
+
+- 原输入 `label`、`path`，兼容字段 `status=available|unavailable` 和布尔
+  `available`；
+- `path_kind=local|mapped_drive|unc|invalid`；
+- 稳定 `reason_code`、中文 `message`/`next_action`、`checked_at`；
+- 仅在系统可解析时返回的 `portable_path_suggestion`，以及可选数值
+  `windows_error`；不得返回凭据、用户信息、目录内容或文件名。
+
+目录选择 API 成功/取消返回 `cancelled`、`path` 和
+`FOLDER_PICKER_SELECTED|FOLDER_PICKER_CANCELLED`。失败返回安全的
+`reason_code`、`message`、`next_action` 和可选无敏感信息的 `detail`。取消或失败
+不写入 `input.json`；只有前端回填后发生的正常草稿保存才进入当前 revision。
 
 阶段根目录的 `input.json` 与 `handoff.json` 表示当前活动 revision；`revisions/<四位 revision>/input.json` 保存每次草稿或提交快照，正式提交另存同目录 `handoff.json`。草稿无 handoff。活动 handoff 被撤回或输入补充时可以失效，但历史快照不删除。
 
@@ -56,7 +91,22 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 这里的容量单位是“篇”。页面明确显示高价值商品“已上调发布坑位到 9 篇”时，`目标容量=9`；普通商品页面未明确目标时保持未知，不仅凭分类名称猜成 3。页面没有固定编号坑位时，`空坑位` 保持未知，只计算 `缺失数量=目标容量-现有素材数`。未知值保留未知；缺失选择器不能写成 0 或空列表。`证据` 至少包含商品 ID、目标容量原文、页面可见店铺、远端素材 ID、可见状态、选择器配置版本、失败字段或选择器、采集时间，以及截图或 DOM 摘要文件的路径和 SHA-256。发生 `SELECTOR_INVALID` 时，数值字段保持未知，另记录原因码和受影响商品的 `needs_manual_review` 状态。
 
-分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`last_completed_page`、`row_count` 和 `collected_at`。每完成一页必须先原子更新 CSV，再更新 checkpoint；中断后不得把未完成页写成已完成。生产阶段不传 `--max-pages`，必须遍历“搜推高价值”的全部分页；该参数只保留给显式 CLI 诊断测试，测试结果不得作为完整的第二阶段候选集。
+分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`session_id`、`revision`、`input_sha256`、`selector_profile_sha256`、`target_store`、`attempt_id`、`last_completed_page`、`row_count`、`output_sha256` 和 `collected_at`。每完成一页必须先验证当前 claim，再原子更新 CSV，校验商品 ID 唯一，最后更新 checkpoint；中断后不得把未完成页写成已完成。生产阶段不传 `--max-pages`，必须遍历“搜推高价值”的全部分页；该参数只保留给显式 CLI 诊断测试，测试结果不得作为完整的第二阶段候选集。
+
+## Collection readiness and managed attempt
+
+`collection_readiness` 使用 `schema_version=1`、整体 `ready/status/checked_at` 和独立
+`checks[]`。每项至少包含 `id`、`ready`、`reason_code`、中文 `message`、
+`category`、`next_action`、`checked_at` 和安全 evidence。固定检查为 environment、
+selector schema、selector current DOM、CDP、login/human-check、material page 和
+store identity。
+
+`current-attempt.json` 使用 `attempt_id` 绑定 session、stage、revision、input SHA、
+selector SHA、target store、claim 和 purpose。私有 worker manifest 额外包含 PID、
+ownership token 与 process identity；前端公开副本不得包含 token/process identity。
+公开进度包含 phase、heartbeat、current page、last completed page、row count、last
+checkpoint、log path 和 terminal status。旧结果进入逐 attempt 历史并标记
+`superseded=true`，不得继续作为当前 blocker。
 
 ## Completeness Matrix
 

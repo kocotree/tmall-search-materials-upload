@@ -4,6 +4,9 @@
 .uv-cache*/
 .agent-tmp-*/
 test_evidence/
+runs/
+.cdp-profile/
+.local-selectors/
 .pytest-task-*/
 .pytest-tmp-*/
 .pytest-cache-*/
@@ -18,3 +21,5 @@ __pycache__/
 feishu-auth-*.png
 .local-cache/
 upload-search-materials/config/local-paths.json
+upload-search-materials/config/selectors.local.yaml
+upload-search-materials/config/selectors.local.yml

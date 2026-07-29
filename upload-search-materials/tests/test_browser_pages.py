@@ -8,6 +8,7 @@ from upload_search_materials.browser.config import SelectorConfigError, load_sel
 from upload_search_materials.browser.export_page import export_reports
 from upload_search_materials.browser.material_page import (
     SelectorInvalidError,
+    _click_with_popup_retries,
     _settle_safe_popups,
     scan_recommended_material_status,
     supplement_material_status,
@@ -223,9 +224,10 @@ def test_material_status_supplement_reads_exact_product():
         {
             "商品ID": "123",
             "目标坑位": "3",
-            "现有素材数": "2",
-            "空坑位": "3",
-            "审核状态": "审核通过;审核中",
+                "现有素材数": "2",
+                "空坑位": "3",
+                "精确坑位状态": "collected",
+                "审核状态": "审核通过;审核中",
             "审核状态完整": "true",
             "状态": "ready_for_review",
             "原因码": "",
@@ -393,6 +395,97 @@ def test_popup_settle_advances_all_seven_scoped_guide_steps():
     assert page.clicked == ["#guide-next"] * 7
 
 
+def test_popup_settle_catches_guide_that_appears_after_initial_quiet_check():
+    page = FakePopupPage(guide_steps=1)
+    page.overlay_open = False
+    original_wait = page.wait_for_timeout
+
+    def delayed_open(milliseconds):
+        original_wait(milliseconds)
+        if len(page.waited) == 1:
+            page.overlay_open = True
+
+    page.wait_for_timeout = delayed_open
+
+    closed = _settle_safe_popups(
+        page,
+        {"safe_popup_progress": "#guide-next"},
+        delay_ms=10,
+    )
+
+    assert closed == 1
+    assert page.clicked == ["#guide-next"]
+
+
+class OverlayBlockedTarget:
+    def __init__(self):
+        self.attempts = []
+
+    def click(self, **kwargs):
+        self.attempts.append(kwargs)
+        if not kwargs.get("force"):
+            raise PlaywrightTimeoutError("guide overlay intercepts pointer events")
+
+
+def test_read_only_collection_click_forces_once_after_popup_retries():
+    page = FakePopupPage()
+    page.overlay_open = False
+    target = OverlayBlockedTarget()
+
+    _click_with_popup_retries(
+        page,
+        target,
+        {"safe_popup_progress": "#guide-next"},
+        field_name="high_value_filter",
+        delay_ms=0,
+    )
+
+    assert len(target.attempts) == 3
+    assert target.attempts[-1]["force"] is True
+    assert page._tmall_collection_events == [
+        {
+            "action": "force_click",
+            "target_field": "high_value_filter",
+            "reason": "recognized_guide_interceptor",
+            "read_only": True,
+        }
+    ]
+
+
+def test_unknown_overlay_never_uses_force_click():
+    page = FakePopupPage()
+    page.overlay_open = False
+    target = OverlayBlockedTarget()
+
+    with pytest.raises(SelectorInvalidError, match="popup_blocked"):
+        _click_with_popup_retries(
+            page,
+            target,
+            {},
+            field_name="high_value_filter",
+            delay_ms=0,
+        )
+
+    assert len(target.attempts) == 2
+
+
+def test_write_target_never_uses_force_click_even_for_recognized_guide():
+    page = FakePopupPage()
+    page.overlay_open = False
+    target = OverlayBlockedTarget()
+
+    with pytest.raises(SelectorInvalidError, match="popup_blocked"):
+        _click_with_popup_retries(
+            page,
+            target,
+            {"safe_popup_progress": "#guide-next"},
+            field_name="publish_button",
+            delay_ms=0,
+        )
+
+    assert len(target.attempts) == 2
+
+
 def test_recommended_promotion_scan_paginates_deduplicates_and_checkpoints():
     full_row = (
         "满坑商品 商品ID 565628742471 "
@@ -474,6 +567,60 @@ def test_promotion_scan_waits_until_next_page_product_ids_change():
 
     assert [row["商品ID"] for row in rows] == ["100", "200"]
     assert 250 in page.waited
+
+
+def test_promotion_scan_resumes_after_completed_pages_without_reemitting_them():
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇、当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇、当前发布 1 篇"],
+            ["商品三 商品ID 300 发布坑位到 9 篇、当前发布 2 篇"],
+        ]
+    )
+    completed = [
+        {
+            "商品ID": "100",
+            "目标容量": "9",
+            "目标坑位": "9",
+            "现有素材数": "0",
+            "缺失数量": "9",
+        },
+        {
+            "商品ID": "200",
+            "目标容量": "9",
+            "目标坑位": "9",
+            "现有素材数": "1",
+            "缺失数量": "8",
+        },
+    ]
+    checkpoints = []
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-29T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        initial_rows=completed,
+        skip_completed_pages=2,
+        on_page=lambda page_number, values: checkpoints.append(
+            (page_number, [row["商品ID"] for row in values])
+        ),
+        settle_delay_ms=0,
+    )
+
+    assert page.clicked == [
+        "#promotion",
+        "#recommended",
+        "#next",
+        "#next",
+    ]
+    assert [row["商品ID"] for row in rows] == ["100", "200", "300"]
+    assert checkpoints == [(3, ["100", "200", "300"])]
 
 
 def test_export_reports_preserves_both_downloads_and_hashes(tmp_path):

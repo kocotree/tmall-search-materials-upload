@@ -14,15 +14,52 @@ param(
 $ErrorActionPreference = "Stop"
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $executable = Join-Path $skillRoot ".venv\Scripts\tmall-materials.exe"
+$pythonExecutable = Join-Path $skillRoot ".venv\Scripts\python.exe"
+$sourcePackage = Join-Path $skillRoot "src\upload_search_materials"
+$lockPath = Join-Path $skillRoot "uv.lock"
+$fingerprintPath = Join-Path $skillRoot ".environment-fingerprint.json"
 
-if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+$runtimeExecutable = $executable
+$runtimePrefix = @()
+if (
+    -not (Test-Path -LiteralPath $runtimeExecutable -PathType Leaf) -and
+    (Test-Path -LiteralPath $pythonExecutable -PathType Leaf) -and
+    (Test-Path -LiteralPath $sourcePackage -PathType Container)
+) {
+    $runtimeExecutable = $pythonExecutable
+    $runtimePrefix = @("-m", "upload_search_materials.cli")
+}
+
+$environmentReady = Test-Path -LiteralPath $runtimeExecutable -PathType Leaf
+if ($environmentReady -and (Test-Path -LiteralPath $fingerprintPath -PathType Leaf)) {
+    try {
+        $fingerprint = Get-Content -LiteralPath $fingerprintPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $currentLock = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $environmentReady = (
+            [int]$fingerprint.schema_version -eq 1 -and
+            [string]$fingerprint.lock_sha256 -eq $currentLock
+        )
+    }
+    catch {
+        $environmentReady = $false
+    }
+}
+elseif ($environmentReady) {
+    & $runtimeExecutable @runtimePrefix environment-status --project-root $skillRoot | Out-Null
+    $environmentReady = $LASTEXITCODE -eq 0
+}
+
+if (-not $environmentReady) {
     if ($SkipBootstrap) {
-        throw "RUNTIME_NOT_READY: managed UI executable is missing."
+        throw "RUNTIME_NOT_READY: project environment is missing or does not match uv.lock."
     }
     & (Join-Path $PSScriptRoot "bootstrap.ps1") -Mirror $Mirror
     if ($LASTEXITCODE -ne 0) {
         throw "RUNTIME_BOOTSTRAP_FAILED: bootstrap did not complete."
     }
+    $runtimeExecutable = $executable
+    $runtimePrefix = @()
 }
 
 $arguments = @("ui-start", "--port-start", $PortStart, "--port-end", $PortEnd)
@@ -31,5 +68,5 @@ if ($RunsRoot) { $arguments += @("--runs-root", $RunsRoot) }
 if ($Config) { $arguments += @("--config", $Config) }
 if ($OpenSystemBrowser) { $arguments += "--open-system-browser" }
 
-& $executable @arguments
+& $runtimeExecutable @runtimePrefix @arguments
 exit $LASTEXITCODE

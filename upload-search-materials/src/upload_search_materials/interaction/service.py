@@ -232,8 +232,7 @@ def start_service(
         session_id,
         "--port",
         str(port),
-        "--ownership-token",
-        token,
+        f"--ownership-token={token}",
     ]
     if config:
         command.extend(["--config", config])

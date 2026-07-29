@@ -8,10 +8,20 @@ import os
 from pathlib import Path, PureWindowsPath
 from typing import Mapping, Sequence
 
+from .path_diagnostics import diagnose_image_sources
+
 
 PRODUCTS_PATTERN = "天猫商品信息表*产品数据表*数据总表.csv"
 RULES_PATTERN = "天猫商品信息表*每月推品规则*Grid View.csv"
 LOCAL_CONFIG_RELATIVE = Path("upload-search-materials/config/local-paths.json")
+LOCAL_SELECTORS_RELATIVE = Path(
+    "upload-search-materials/config/selectors.local.yaml"
+)
+DEFAULT_CDP_PROFILE_RELATIVE = Path(".local-cache/cdp-profile")
+DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_MATERIAL_CENTER_URL = (
+    "https://myseller.taobao.com/home.htm/material-center/material-management"
+)
 MAX_IMAGE_SOURCES = 50
 
 
@@ -30,6 +40,11 @@ class RuntimeConfig:
     image_sources: tuple[dict[str, str], ...]
     runs_root: Path
     folder_index_root: Path = Path(".local-cache/folder-index")
+    selectors_file: Path | None = None
+    cdp_url: str = DEFAULT_CDP_URL
+    browser_executable: Path | None = None
+    browser_profile_dir: Path = DEFAULT_CDP_PROFILE_RELATIVE
+    material_center_url: str = DEFAULT_MATERIAL_CENTER_URL
     config_path: Path | None = None
 
 
@@ -79,6 +94,42 @@ def load_runtime_config(
         if folder_index_value
         else workspace_root / ".local-cache" / "folder-index"
     )
+    selectors_value = env.get("TMALL_SELECTORS_FILE") or document.get(
+        "selectors_file"
+    )
+    selectors_file = (
+        _resolve_configured_path(selectors_value, workspace_root)
+        if selectors_value
+        else workspace_root / LOCAL_SELECTORS_RELATIVE
+    )
+    if not selectors_file.is_file():
+        selectors_file = None
+    cdp_url = str(
+        env.get("TMALL_CDP_URL")
+        or document.get("cdp_url")
+        or DEFAULT_CDP_URL
+    ).strip()
+    browser_value = env.get("TMALL_BROWSER_EXECUTABLE") or document.get(
+        "browser_executable"
+    )
+    browser_executable = (
+        _resolve_configured_path(browser_value, workspace_root)
+        if browser_value
+        else None
+    )
+    profile_value = env.get("TMALL_CDP_PROFILE_DIR") or document.get(
+        "browser_profile_dir"
+    )
+    browser_profile_dir = (
+        _resolve_configured_path(profile_value, workspace_root)
+        if profile_value
+        else workspace_root / DEFAULT_CDP_PROFILE_RELATIVE
+    )
+    material_center_url = str(
+        env.get("TMALL_MATERIAL_CENTER_URL")
+        or document.get("material_center_url")
+        or DEFAULT_MATERIAL_CENTER_URL
+    ).strip()
     return RuntimeConfig(
         workspace_root=workspace_root,
         products=products,
@@ -86,6 +137,11 @@ def load_runtime_config(
         image_sources=image_sources,
         runs_root=runs_root,
         folder_index_root=folder_index_root,
+        selectors_file=selectors_file,
+        cdp_url=cdp_url,
+        browser_executable=browser_executable,
+        browser_profile_dir=browser_profile_dir,
+        material_center_url=material_center_url,
         config_path=selected_config,
     )
 
@@ -143,22 +199,41 @@ def save_image_sources(
     return replace(runtime, image_sources=sources, config_path=target)
 
 
+def save_selector_profile_path(
+    runtime: RuntimeConfig, value: str | Path
+) -> RuntimeConfig:
+    """Persist one validated machine-local selector profile path."""
+
+    text = str(value).strip()
+    if not text or "\x00" in text or len(text) > 1000:
+        raise ValueError("selectors_file is required")
+    selected = _resolve_configured_path(text, runtime.workspace_root)
+    if not selected.is_file():
+        raise ValueError("selectors_file does not exist")
+    target = runtime.config_path or runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    document = _read_config(target) if target.is_file() else {}
+    document["selectors_file"] = str(selected)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+    return replace(
+        runtime,
+        selectors_file=selected,
+        config_path=target,
+    )
+
+
 def inspect_image_sources(
     runtime: RuntimeConfig, value: object
-) -> tuple[dict[str, str], ...]:
+) -> tuple[dict[str, object], ...]:
     """Return read-only reachability status for configured directories."""
 
     sources = normalize_image_sources(value, runtime.workspace_root)
-    inspected: list[dict[str, str]] = []
-    for source in sources:
-        try:
-            available = Path(source["path"]).is_dir()
-        except OSError:
-            available = False
-        inspected.append(
-            {**source, "status": "available" if available else "unavailable"}
-        )
-    return tuple(inspected)
+    return diagnose_image_sources(sources)
 
 def _find_workspace_root(configured: str | None, *, start: Path | None) -> Path:
     if configured:

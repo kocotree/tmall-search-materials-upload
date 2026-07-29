@@ -42,12 +42,10 @@ from .assets import (
     load_media_policy,
     validate_asset_group,
 )
-from .browser.config import load_selectors
+from .browser.config import SelectorConfigError, load_selectors
 from .browser.export_page import export_reports
 from .browser.material_page import (
     SelectorInvalidError,
-    scan_recommended_material_status,
-    supplement_material_status,
 )
 from .browser.session import (
     assert_store_identity,
@@ -77,7 +75,11 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
-from .interaction.session import InteractionPathError, SessionStore
+from .interaction.session import (
+    InteractionConflict,
+    InteractionPathError,
+    SessionStore,
+)
 from .interaction.service import (
     ManagedServiceError,
     restart_service,
@@ -108,13 +110,22 @@ from .reporting import (
     write_supplement_candidates,
 )
 from .runtime_config import load_runtime_config
+from .setup_collection import process_setup_collection
+from .collection_worker import (
+    collection_status,
+    environment_fingerprint,
+    launch_collection_worker,
+    run_collection_worker,
+)
 from .state_store import StateStore
 from .slot_planning import prepare_slot_board_session
+from .supplement_collection import collect_supplement_material_status
 from .tasks import build_material_items, build_product_tasks
+from .time_utils import iso_timestamp
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return iso_timestamp()
 
 
 class BrowserSessionRequired(RuntimeError):
@@ -456,7 +467,15 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
     if not Path(args.selectors).is_file():
         print("发布被阻断：选择器配置不存在", file=sys.stderr)
         return 2
-    selectors = load_selectors(Path(args.selectors))
+    try:
+        selectors = load_selectors(
+            Path(args.selectors),
+            purpose="publish",
+            production=page is None and page_factory is None,
+        )
+    except SelectorConfigError as error:
+        print(f"发布被阻断：{error}", file=sys.stderr)
+        return 2
     run = read_json(run_dir / "run.json")
     manifest = read_json(manifest_path)
     manifest_entries = manifest.get("entries")
@@ -658,7 +677,15 @@ def _export(args, page, page_factory=None) -> int:
         except OSError as error:
             print(f"导出被阻断：无法检查输出目录：{error}", file=sys.stderr)
             return 2
-    selectors = load_selectors(Path(args.selectors))
+    try:
+        selectors = load_selectors(
+            Path(args.selectors),
+            purpose="export",
+            production=page is None and page_factory is None,
+        )
+    except SelectorConfigError as error:
+        print(f"导出被阻断：{error}", file=sys.stderr)
+        return 2
     report_types = (
         ("basic", "promotion")
         if args.report == "both"
@@ -713,6 +740,7 @@ BACKEND_STATUS_FIELDS = [
     "现有素材数",
     "缺失数量",
     "空坑位",
+    "精确坑位状态",
     "远端素材ID",
     "素材状态",
     "审核状态",
@@ -737,8 +765,21 @@ def _write_backend_status(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def _supplement(args, page, page_factory=None) -> int:
-    selectors = load_selectors(Path(args.selectors))
     scan_mode = args.scan_mode or ("exact" if args.candidates else "high-value")
+    purpose = (
+        "high_value_collection"
+        if scan_mode in {"high-value", "recommended"}
+        else "exact_material_status"
+    )
+    try:
+        selectors = load_selectors(
+            Path(args.selectors),
+            purpose=purpose,
+            production=page is None and page_factory is None,
+        )
+    except SelectorConfigError as error:
+        print(f"补采被阻断：{error}", file=sys.stderr)
+        return 2
     product_ids: list[str] = []
     if scan_mode == "exact":
         if not args.candidates:
@@ -758,81 +799,29 @@ def _supplement(args, page, page_factory=None) -> int:
         if args.checkpoint
         else output.with_suffix(".checkpoint.json")
     )
-    last_completed_page = 0
-
-    def save_page(page_number: int, values: list[dict[str, str]]) -> None:
-        nonlocal last_completed_page
-        last_completed_page = page_number
-        _write_backend_status(output, values)
-        write_json(
-            checkpoint,
-            {
-                "schema_version": 1,
-                "status": "in_progress",
-                "scan_mode": scan_mode,
-                "last_completed_page": page_number,
-                "row_count": len(values),
-                "collected_at": args.collected_at,
-            },
-        )
-
     try:
         with page_context(page, args.cdp_url, page_factory) as resolved_page:
             assert_store_identity(resolved_page, selectors["store_name"], args.store)
             detect_human_check(resolved_page, selectors["human_check"])
-            if scan_mode in {"high-value", "recommended"}:
-                rows = scan_recommended_material_status(
-                    resolved_page,
-                    selectors,
-                    collected_at=args.collected_at,
-                    filter_selector_key=(
-                        "high_value_filter"
-                        if scan_mode == "high-value"
-                        else "recommended_filter"
-                    ),
-                    on_page=save_page,
-                    max_pages=args.max_pages,
-                    settle_delay_ms=args.settle_delay_ms,
-                    action_wait_ms=args.action_wait_ms,
-                )
-            else:
-                rows = supplement_material_status(
-                    resolved_page,
-                    selectors,
-                    product_ids,
-                    collected_at=args.collected_at,
-                )
+            collect_supplement_material_status(
+                resolved_page,
+                selectors,
+                scan_mode=scan_mode,
+                product_ids=product_ids,
+                output=output,
+                checkpoint=checkpoint,
+                collected_at=args.collected_at,
+                max_pages=args.max_pages,
+                settle_delay_ms=args.settle_delay_ms,
+                action_wait_ms=args.action_wait_ms,
+            )
     except BrowserSessionRequired as error:
         print(f"补采被阻断：{error}", file=sys.stderr)
         return 2
     except SelectorInvalidError as error:
-        write_json(
-            checkpoint,
-            {
-                "schema_version": 1,
-                "status": "needs_manual_review",
-                "scan_mode": scan_mode,
-                "last_completed_page": last_completed_page,
-                "reason_code": "SELECTOR_INVALID",
-                "failed_field": str(error),
-                "collected_at": args.collected_at,
-            },
-        )
         print(f"补采被阻断：SELECTOR_INVALID：{error}", file=sys.stderr)
         return 1
 
-    _write_backend_status(output, rows)
-    write_json(
-        checkpoint,
-        {
-            "schema_version": 1,
-            "status": "complete",
-            "scan_mode": scan_mode,
-            "last_completed_page": last_completed_page,
-            "row_count": len(rows),
-            "collected_at": args.collected_at,
-        },
-    )
     return 0
 
 
@@ -1555,6 +1544,51 @@ def build_parser() -> argparse.ArgumentParser:
     supplement.add_argument("--action-wait-ms", type=int, default=3000)
     supplement.add_argument("--cdp-url")
 
+    process_setup = subparsers.add_parser(
+        "process-setup",
+        help=(
+            "Process one submitted setup stage through the maintained "
+            "high-value collector and completeness hydration"
+        ),
+    )
+    process_setup.add_argument("--runs-root", required=True, metavar="DIR")
+    process_setup.add_argument("--session", required=True)
+    process_setup.add_argument("--config")
+    process_setup.add_argument("--selectors")
+    process_setup.add_argument("--cdp-url")
+    process_setup.add_argument("--claimant-id", default="codex-agent")
+    process_setup.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Debug only: keep collection in the invoking process",
+    )
+
+    collection_worker = subparsers.add_parser(
+        "collection-worker",
+        help=argparse.SUPPRESS,
+    )
+    collection_worker.add_argument("--runs-root", required=True)
+    collection_worker.add_argument("--session", required=True)
+    collection_worker.add_argument("--attempt-id", required=True)
+    collection_worker.add_argument("--ownership-token", required=True)
+    collection_worker.add_argument("--claimant-id", required=True)
+    collection_worker.add_argument("--selectors", required=True)
+    collection_worker.add_argument("--cdp-url", required=True)
+    collection_worker.add_argument("--config")
+
+    collection_status_parser = subparsers.add_parser(
+        "collection-status",
+        help="Show authoritative managed high-value collection status",
+    )
+    collection_status_parser.add_argument("--runs-root", required=True)
+    collection_status_parser.add_argument("--session", required=True)
+
+    environment_status_parser = subparsers.add_parser(
+        "environment-status",
+        help="Check the prepared project-local runtime without syncing",
+    )
+    environment_status_parser.add_argument("--project-root")
+
     interact = subparsers.add_parser("interact", help="Serve the local interaction UI")
     interact.add_argument("--runs-root")
     interact.add_argument("--config", help="Machine-local runtime path configuration JSON")
@@ -1815,6 +1849,107 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _export(args, page, page_factory)
     if args.command == "supplement":
         return _supplement(args, page, page_factory)
+    if args.command == "process-setup":
+        try:
+            runtime = load_runtime_config(args.config)
+            arguments = {
+                "runs_root": Path(args.runs_root),
+                "session_id": args.session,
+                "runtime": runtime,
+                "selectors_path": (
+                    Path(args.selectors) if args.selectors else None
+                ),
+                "cdp_url": args.cdp_url,
+                "claimant_id": args.claimant_id,
+            }
+            if args.foreground or page is not None or page_factory is not None:
+                result = process_setup_collection(
+                    **arguments,
+                    page=page,
+                    page_factory=page_factory,
+                )
+            else:
+                result = launch_collection_worker(**arguments)
+        except (
+            InteractionConflict,
+            InteractionPathError,
+            OSError,
+            SchemaError,
+        ) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return (
+            0
+            if result.get("status") in {"completed", "processing"}
+            else 1
+        )
+    if args.command == "collection-worker":
+        try:
+            result = run_collection_worker(
+                runs_root=Path(args.runs_root),
+                session_id=args.session,
+                attempt_id=args.attempt_id,
+                ownership_token=args.ownership_token,
+                claimant_id=args.claimant_id,
+                selectors_path=Path(args.selectors),
+                cdp_url=args.cdp_url,
+                config_path=args.config,
+            )
+        except Exception as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0 if result.get("status") == "completed" else 1
+    if args.command == "collection-status":
+        try:
+            result = collection_status(
+                Path(args.runs_root), args.session
+            )
+        except (InteractionConflict, InteractionPathError, OSError) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
+    if args.command == "environment-status":
+        project_root = (
+            Path(args.project_root)
+            if args.project_root
+            else Path(__file__).resolve().parents[2]
+        )
+        result = environment_fingerprint(project_root)
+        print(json.dumps({"ok": result["prepared"], **result}, ensure_ascii=False))
+        return 0 if result["prepared"] else 2
     if args.command == "interact":
         return _interact(args)
     if args.command in {"ui-start", "ui-restart", "ui-status", "ui-stop"}:

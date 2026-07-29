@@ -107,7 +107,16 @@ def merge_material_state(
         items = search_by_id.get(product_id, [])
         backend_row = backend_by_id.get(product_id)
         desired_slots = _parse_int(backend_row.get("目标坑位")) if backend_row else None
-        empty_slots = _parse_indexes(backend_row.get("空坑位")) if backend_row else None
+        exact_slot_status = (
+            str(backend_row.get("精确坑位状态", "")).strip()
+            if backend_row
+            else ""
+        )
+        empty_slots = (
+            _parse_indexes(backend_row.get("空坑位"))
+            if backend_row and exact_slot_status in {"", "collected"}
+            else None
+        )
         review_complete = _parse_bool(backend_row.get("审核状态完整")) if backend_row else False
         snapshots.append(
             MaterialSnapshot(
@@ -196,6 +205,14 @@ def build_completeness_matrix(
         promotion_status = (
             str(promotion.get("状态", "")).strip() or "needs_manual_review"
         )
+        exact_slot_status = (
+            str(promotion.get("精确坑位状态", "")).strip()
+            or (
+                "collected"
+                if str(promotion.get("空坑位", "")).strip()
+                else "not_collected"
+            )
+        )
 
         if excluded:
             overall_status = "excluded"
@@ -229,8 +246,11 @@ def build_completeness_matrix(
                     "target_slots": target_slots,
                     "current_count": current_count,
                     "missing_count": missing_count,
-                    "empty_slot_indexes": _parse_indexes(
-                        promotion.get("空坑位", "") if promotion else ""
+                    "exact_slot_status": exact_slot_status,
+                    "empty_slot_indexes": (
+                        _parse_indexes(promotion.get("空坑位", ""))
+                        if exact_slot_status == "collected"
+                        else None
                     ),
                     "remote_material_ids": remote_ids,
                     "reason_codes": reason_codes,

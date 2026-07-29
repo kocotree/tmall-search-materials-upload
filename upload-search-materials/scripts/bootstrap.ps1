@@ -88,6 +88,21 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "CLI_SMOKE_TEST_FAILED: dependencies installed, but tmall-materials did not start."
     }
+
+    $fingerprintPath = Join-Path $projectRoot ".environment-fingerprint.json"
+    $lockPath = Join-Path $projectRoot "uv.lock"
+    $fingerprint = [ordered]@{
+        schema_version = 1
+        lock_sha256 = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        python = (Resolve-Path -LiteralPath $Python).Path
+        executable = (Resolve-Path -LiteralPath $cliExecutable).Path
+        uv_cache_dir = (Resolve-Path -LiteralPath $cacheDir).Path
+        prepared_at = [DateTimeOffset]::Now.ToString("o")
+    }
+    $temporaryFingerprint = "$fingerprintPath.tmp"
+    $fingerprint | ConvertTo-Json -Depth 4 |
+        Set-Content -LiteralPath $temporaryFingerprint -Encoding UTF8
+    Move-Item -LiteralPath $temporaryFingerprint -Destination $fingerprintPath -Force
 }
 finally {
     Pop-Location

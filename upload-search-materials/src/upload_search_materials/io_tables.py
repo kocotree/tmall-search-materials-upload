@@ -41,6 +41,10 @@ class ProductValidationReport:
     def blocking(self) -> bool:
         return self.batch_blocking or bool(self.reason_codes_by_row)
 
+    @property
+    def blocked_row_count(self) -> int:
+        return len(self.reason_codes_by_row)
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()

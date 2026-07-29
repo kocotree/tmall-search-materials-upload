@@ -43,7 +43,23 @@ uv run python -X utf8 $quickValidate .
 
 首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。也可以复制 `config/local-paths.example.json` 为 `config/local-paths.json` 后手工修改。`local-paths.json` 已被 Git 忽略，不会影响其他电脑。
 
-每个图片源行的“选择文件夹”由用户点击后打开 Windows 原生目录选择窗口，只回填完整路径，不扫描图片；UNC 或无界面环境可继续手工粘贴路径。
+每个图片源行的“选择文件夹”由用户点击后启动独立的 Windows STA 助手并打开原生目录选择窗口，只回填已验证的绝对目录，不扫描图片。取消不会清空当前输入；窗口忙碌、超时、无桌面会话、启动失败或返回无效路径时，页面显示具体原因并继续允许手工输入。UNC 或无界面环境可直接粘贴路径。
+
+“检测路径”只读取目录本身的元数据，不列举子目录或图片。页面逐行返回：
+
+| 原因码 | 含义 | 恢复动作 |
+|---|---|---|
+| `PATH_AVAILABLE` | 当前服务身份可访问目录 | 可继续保存配置 |
+| `INVALID_PATH` | 不是有效绝对路径 | 修正本机、映射盘或 UNC 路径 |
+| `DRIVE_NOT_MAPPED` | 当前服务会话没有该盘符映射 | 在同一 Windows 身份建立映射，或粘贴 UNC |
+| `NETWORK_HOST_UNAVAILABLE` | NAS 主机不可达 | 检查公司网络、VPN 和主机状态 |
+| `NETWORK_SHARE_NOT_FOUND` | 共享名不存在或不可见 | 核对共享名和当前账号权限 |
+| `PATH_NOT_FOUND` | 共享内子目录不存在 | 核对目录层级和名称 |
+| `ACCESS_DENIED` | 当前服务身份无读取权限 | 由管理员授予权限；程序不索取凭据 |
+| `PATH_CHECK_TIMEOUT` | NAS 元数据响应超时 | 检查网络后重试 |
+| `PATH_CHECK_FAILED` | 未分类检测失败 | 重试并手工核对路径 |
+
+映射盘可访问且 Windows 能解析其 UNC 目标时，页面只显示“采用 UNC”建议，不会自动替换。跨电脑配置优先使用 UNC；映射盘仍可用于当前受管服务身份能够访问的电脑。路径检测不能创建映射、挂载共享、取得凭据或绕过 NAS 权限。
 
 项目内输入默认无需配置：程序先定位包含 `docs/` 与 `upload-search-materials/` 的项目根目录，再在 `docs/` 中按以下受控模式查找：
 
@@ -61,7 +77,7 @@ uv run python -X utf8 $quickValidate .
 
 共享文件夹索引路径按 `TMALL_FOLDER_INDEX_ROOT`、本机配置 `folder_index_root`、`<项目根目录>/.local-cache/folder-index/` 解析。它是每台电脑唯一维护的机器级缓存，不放入时间戳任务目录。
 
-路径未配置不会导致交互页面崩溃；只有实际依赖该输入的阶段会保持待配置。不要把个人用户名、桌面绝对路径或本机盘符写回 `SKILL.md`、Python 源码或已提交的配置。
+路径未配置不会导致交互页面崩溃；只有实际依赖该输入的阶段会保持待配置。路径可用性以受管 UI 服务的 Windows 身份为准；用户在另一个资源管理器窗口能访问，不代表服务会话拥有相同盘符映射或权限。不要把个人用户名、桌面绝对路径或本机盘符写回 `SKILL.md`、Python 源码或已提交的配置。
 
 ## 2. 创建隔离任务
 
@@ -236,7 +252,53 @@ uv run tmall-materials prepare-gallery `
 
 当后台已有素材只有远端素材 ID、没有图片 SHA-256 或等价内容指纹时，不传 `--remote-fingerprints`。此时输出和页面必须保持 `remote_dedupe_status=not_available`，不得声称已经排除与远端重复；生产上传前仍需人工核对。提供可信远端指纹后，已命中的候选才会被自动排除。
 
-## 4. 启动用户控制的 CDP 浏览器
+## 4. 阶段一提交后的受管采集
+
+优先在阶段一页面的“采集运行环境”卡片完成独立 readiness 检查。没有生产 profile
+时点击“创建本机候选”，系统只生成 `production=false` 的 Git 忽略文件；在 CDP
+Chrome 登录、打开官方素材中心并填入目标店铺后点击“验证当前页面”。全部必需字段、
+页面和店铺通过后才提升为生产 profile。配置保存到 Git 忽略的
+`upload-search-materials/config/local-paths.json`，不能使用仓库示例。
+
+提交阶段一后执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m upload_search_materials.cli process-setup `
+  --runs-root "<精确 runs_root>" `
+  --session "<精确 session_id>"
+```
+
+该命令在 readiness 通过后创建或复用 `attempt_id`，启动无可见控制台的受管 Worker，
+输出 Worker/日志身份后立即返回。Worker 内部仍只调用
+`supplement --scan-mode high-value`，不是第二个采集器。查看状态：
+
+```powershell
+.\.venv\Scripts\python.exe -m upload_search_materials.cli collection-status `
+  --runs-root "<精确 runs_root>" `
+  --session "<精确 session_id>"
+```
+
+页面和命令显示 `validating_profile`、`connecting_cdp`、`settling_popups`、
+`opening_promotion`、`selecting_high_value`、`collecting_page`、
+`writing_checkpoint`、`building_completeness` 和终态。首个 checkpoint 前只显示 phase
+与 heartbeat，不显示“0 行完成”。日志位于当前 attempt 目录。重复执行同一绑定时复用
+活 Worker 或完成结果，不启动第二个 Worker。
+
+已确认归属的 Worker 退出后，页面立即显示可恢复；未知 PID、token 不匹配或进程身份
+无法读取时必须等待租约过期，不得结束进程。恢复前核对 revision、input SHA、selector
+SHA、店铺、attempt、CSV SHA、行数、唯一商品 ID 和最后完成页；从下一页继续。
+
+若返回 `SELECTOR_INVALID`，先保留 checkpoint 和错误证据。只有错误可稳定复现时，
+才用 Playwright 检查真实 DOM；修复现有 selector profile 或 collector、增加回归
+测试，再重跑原 `process-setup`/`supplement`。不要把诊断脚本保留为第二条生产路径。
+
+日常启动和恢复直接调用 `.venv\Scripts\tmall-materials.exe`；若 console-script
+缺失但 Python 和源码已准备，调用 `.venv\Scripts\python.exe -m
+upload_search_materials.cli`，不使用 `uv run`。
+`scripts/bootstrap.cmd` 是唯一依赖同步入口，使用项目 `.uv-cache` 并写入环境指纹；
+已有环境的采集恢复不会访问全局 uv cache、解析或下载包。
+
+## 5. 启动用户控制的 CDP 浏览器
 
 关闭正在使用同一 profile 的 Chromium 后，以独立 profile 和仅本机监听的调试端口启动 Chrome 或 Edge。例如将实际可执行文件路径替换进下列命令：
 
@@ -246,7 +308,7 @@ uv run tmall-materials prepare-gallery `
 
 CDP URL 为 `http://127.0.0.1:9222`。用户必须在该窗口自行登录、处理验证码/短信/扫码/风控，并确认页面可见店铺名。不要把 profile、Cookie 或登录信息放入版本库。
 
-## 5. 导出与只读检查
+## 6. 导出与只读检查
 
 所有时间使用带时区 ISO 8601，例如 `2026-07-17T10:00:00+08:00`。导出 `run-id` 使用不可重复的可读值，例如 `20260717T100000+0800-kktree-export`。
 
@@ -256,7 +318,7 @@ uv run tmall-materials export --store "<精确店铺名>" --selectors "<生产se
 
 `--report promotion|both` 目前仅作为旧版经营数据导出兼容入口；其结果不是商品素材与坑位真相源，不得据此判定完整或作为生产批准输入。搜推素材现状必须通过 `supplement` 按精确商品 ID 从实时 DOM 采集。生产 `supplement` 尚未更新到 2026-07-24 验证的新 DOM 契约前，停止在阶段 5，不进入全量 dry-run。
 
-## 6. 首次 dry-run 与 Playwright 补采
+## 7. 首次 dry-run 与 Playwright 补采
 
 ```powershell
 uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" --products "<商品总表.csv>" --rules "<月度规则.csv>" --basic "<基础素材.xlsx>" --search "<搜推经营.xlsx>" --output "<首次批次目录>" --started-at "<ISO时间>"
@@ -266,7 +328,7 @@ uv run tmall-materials supplement --scan-mode exact --store "<店铺名>" --sele
 
 第一条 `supplement` 命令默认选择“商品分类 → 搜推高价值”，串行遍历全部分页并在每页后原子更新 CSV 与 checkpoint。生产流程不从任务配置读取页数，也不传 `--max-pages`；该参数只保留给显式 CLI 诊断测试。`--scan-mode recommended` 仅用于兼容旧证据。第二条仅用于异常商品的精确 ID 兜底。`--search` 现阶段仅保留经营指标兼容性，不能替代实时 `promotion-material-status.csv`；任何使用它推断搜推坑位完整性的结果均无效。
 
-## 7. 素材、授权、文案与最终 dry-run
+## 8. 素材、授权、文案与最终 dry-run
 
 目录型素材只搜索 `<asset-root>/<商品ID>/`，其次 `<asset-root>/<货号>/`。`--license-status confirmed` 表示用户确认该批目录中的每个文件均已授权；若授权状态不统一，当前 CLI 不能正式发布，应保持 blocked，待接入逐文件素材清单。当前视频元数据入口也未闭合，视频任务应保持 `VIDEO_METADATA_UNAVAILABLE`。
 
@@ -278,7 +340,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 打开 `review.html`，只选择 `ready_for_review` 的精确 task ID。
 
-## 8. 精确批准、发布与恢复
+## 9. 精确批准、发布与恢复
 
 ```powershell
 uv run tmall-materials approve --run-dir "<最终审核批次目录>" --task-id "<task-id-1>" --confirmed-by "<批准人>" --confirmed-at "<ISO时间>" --valid-until "<ISO时间>"
@@ -294,7 +356,7 @@ uv run tmall-materials report --run-dir "<最终审核批次目录>"
 
 生产前还必须满足 [production-acceptance.md](production-acceptance.md)。示例选择器和示例媒体策略不能直接用于生产。
 
-## 9. 交互式任务执行
+## 10. 交互式任务执行
 
 新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
 
