@@ -259,6 +259,7 @@ class SessionStore:
         allowed_current_statuses: frozenset[str] | set[str] | None = None,
         interaction_audit: dict[str, Any] | None = None,
         request_id: str | None = None,
+        handoff_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._stage_index(stage_id)
         with self._session_lock(session_id):
@@ -295,6 +296,10 @@ class SessionStore:
                 user_notes=user_notes,
                 interaction_audit=interaction_audit,
             )
+            transaction["handoff_data"] = dict(handoff_data or {})
+            self._write_json_atomic(
+                self._stage_transaction_path(stage_path), transaction
+            )
             created_at = str(input_document["created_at"])
 
             self._invalidate_after_edit(session_id, stage_id, state)
@@ -313,6 +318,7 @@ class SessionStore:
                 "revision": revision,
                 "created_at": created_at,
                 "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                **dict(handoff_data or {}),
             }
             self._write_json_atomic(stage_path / "handoff.json", handoff)
             self._write_revision_snapshot_idempotent(
@@ -394,6 +400,93 @@ class SessionStore:
                 event="draft_saved",
             )
             return document
+
+    def save_local_input(
+        self,
+        session_id: str,
+        stage_id: str,
+        values: dict[str, Any],
+        user_notes: str = "",
+        *,
+        expected_revision: int,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit an authoritative local action without creating an Agent handoff."""
+
+        self._stage_index(stage_id)
+        with self._session_lock(session_id):
+            stage_path = self._stage_path(session_id, stage_id)
+            state = self.load_session(session_id)
+            stage_state = state["stages"][stage_id]
+            persistence_request_id = self._persistence_request_id(request_id)
+            payload_sha = self._stage_payload_sha(
+                "local_action", values, user_notes
+            )
+            completed = self._completed_stage_transaction(
+                stage_path, persistence_request_id, payload_sha
+            )
+            if completed is not None:
+                return completed
+            if stage_state["status"] not in {
+                "draft",
+                "needs_user_input",
+                "blocked",
+            }:
+                raise InteractionConflict(
+                    "stage status does not allow a local action"
+                )
+            if expected_revision != int(stage_state["revision"]):
+                raise InteractionConflict("expected revision is stale")
+            revision = expected_revision + 1
+            transaction, document = self._prepare_stage_transaction(
+                session_id=session_id,
+                stage_id=stage_id,
+                stage_path=stage_path,
+                operation="local_action",
+                request_id=persistence_request_id,
+                base_revision=expected_revision,
+                target_revision=revision,
+                payload_sha=payload_sha,
+                values=values,
+                user_notes=user_notes,
+                interaction_audit=None,
+            )
+            self._invalidate_after_edit(
+                session_id, stage_id, state, remove_current_handoff=True
+            )
+            input_path = stage_path / "input.json"
+            self._write_json_atomic(input_path, document)
+            self._advance_stage_transaction(
+                stage_path, transaction, "content_written"
+            )
+            self._write_revision_snapshot_idempotent(
+                stage_path, revision, "input", document
+            )
+            self._advance_stage_transaction(
+                stage_path, transaction, "snapshot_written"
+            )
+            stage_state["revision"] = revision
+            stage_state["status"] = "draft"
+            state["current_stage"] = stage_id
+            self._write_session_state(session_id, state)
+            response = {
+                "schema_version": SCHEMA_VERSION,
+                "status": "local_committed",
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": revision,
+                "input_sha256": hashlib.sha256(
+                    input_path.read_bytes()
+                ).hexdigest(),
+                "created_at": document["created_at"],
+            }
+            self._complete_stage_transaction(
+                stage_path,
+                transaction,
+                response=response,
+                event="local_input_saved",
+            )
+            return response
 
     def withdraw_handoff(
         self, session_id: str, stage_id: str, *, expected_revision: int
@@ -1768,6 +1861,7 @@ class SessionStore:
                         "input_sha256": hashlib.sha256(
                             input_path.read_bytes()
                         ).hexdigest(),
+                        **dict(transaction.get("handoff_data") or {}),
                     }
                     self._write_json_atomic(
                         stage_path / "handoff.json", handoff
@@ -1776,7 +1870,7 @@ class SessionStore:
                         stage_path, target_revision, "handoff", handoff
                     )
                     response = handoff
-                elif operation == "draft":
+                elif operation in {"draft", "local_action"}:
                     response = document
                 else:
                     return state
@@ -1790,6 +1884,19 @@ class SessionStore:
                 response = self._read_json(
                     stage_path / "handoff.json", "handoff"
                 )
+            elif operation == "local_action":
+                input_path = stage_path / "input.json"
+                response = {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "local_committed",
+                    "session_id": session_id,
+                    "stage_id": pending_stage,
+                    "revision": target_revision,
+                    "input_sha256": hashlib.sha256(
+                        input_path.read_bytes()
+                    ).hexdigest(),
+                    "created_at": document["created_at"],
+                }
             else:
                 response = document
             self._complete_stage_transaction(
@@ -1799,7 +1906,11 @@ class SessionStore:
                 event=(
                     "input_saved"
                     if operation == "submit"
-                    else "draft_saved"
+                    else (
+                        "local_input_saved"
+                        if operation == "local_action"
+                        else "draft_saved"
+                    )
                 ),
             )
             return self._load_session_file(session_id)

@@ -9,11 +9,13 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
-from typing import Sequence
+import time
+from typing import Callable, Sequence
 import uuid
 
 from .asset_index import NamedRoot
 from .asset_matching import normalize_match_text
+from .assets import IMAGE_EXTENSIONS
 
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -58,6 +60,64 @@ def _identity(products_sha256: str, roots: Sequence[NamedRoot]) -> str:
         ],
     }
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def count_candidate_folder_images(
+    folder_path: Path,
+    *,
+    deadline_seconds: float | None = 10.0,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Count supported images without opening or hashing their contents."""
+
+    folder = Path(folder_path)
+    started_at = time.monotonic()
+    try:
+        if not folder.is_dir():
+            return {
+                "image_count_status": "unknown",
+                "raw_recursive_image_count": None,
+                "image_count_reason_code": "FOLDER_COUNT_PATH_UNAVAILABLE",
+            }
+        count = 0
+        for path in folder.rglob("*"):
+            if cancelled is not None and cancelled():
+                return {
+                    "image_count_status": "unknown",
+                    "raw_recursive_image_count": None,
+                    "image_count_reason_code": "FOLDER_COUNT_CANCELLED",
+                }
+            if (
+                deadline_seconds is not None
+                and time.monotonic() - started_at > deadline_seconds
+            ):
+                return {
+                    "image_count_status": "unknown",
+                    "raw_recursive_image_count": None,
+                    "image_count_reason_code": "FOLDER_COUNT_TIMEOUT",
+                }
+            if (
+                path.is_file()
+                and path.suffix.casefold() in IMAGE_EXTENSIONS
+            ):
+                count += 1
+    except PermissionError:
+        return {
+            "image_count_status": "unknown",
+            "raw_recursive_image_count": None,
+            "image_count_reason_code": "FOLDER_COUNT_ACCESS_DENIED",
+        }
+    except OSError:
+        return {
+            "image_count_status": "unknown",
+            "raw_recursive_image_count": None,
+            "image_count_reason_code": "FOLDER_COUNT_FAILED",
+        }
+    return {
+        "image_count_status": "ready",
+        "raw_recursive_image_count": count,
+        "image_count_reason_code": "",
+    }
 
 
 def absolute_path_without_io(path: Path) -> Path:
@@ -419,6 +479,7 @@ def build_folder_review_data(
     *,
     decisions: Sequence[dict[str, object]] = (),
     exact_folder_queries: Sequence[dict[str, object]] = (),
+    include_image_counts: bool = False,
 ) -> dict[str, object]:
     """Build deterministic UI data from folder candidates and saved decisions."""
 
@@ -468,8 +529,7 @@ def build_folder_review_data(
             if match_type == "fuzzy_name_candidate" and not is_exact_query
             else "confirmed"
         )
-        rows.append(
-            {
+        row: dict[str, object] = {
                 "folder_id": folder_id,
                 "product_id": product_id,
                 "product_title": str(candidate.get("product_title", "")).strip(),
@@ -493,8 +553,17 @@ def build_folder_review_data(
                     else default_decision
                 ),
                 "note": str(decision.get("note", "")),
+                "image_count_status": "pending",
+                "raw_recursive_image_count": None,
+                "image_count_reason_code": "",
             }
-        )
+        if include_image_counts:
+            row.update(
+                count_candidate_folder_images(
+                    Path(str(row["folder_path"]))
+                )
+            )
+        rows.append(row)
     rows.sort(
         key=lambda item: (
             item["product_id"],

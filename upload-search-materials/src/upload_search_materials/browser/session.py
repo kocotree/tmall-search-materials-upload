@@ -11,7 +11,7 @@ from typing import Mapping
 from urllib.error import URLError
 from urllib.request import build_opener, ProxyHandler
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from ..time_utils import iso_timestamp
 
@@ -33,6 +33,14 @@ class CdpUnavailable(RuntimeError):
 
 
 _LOOPBACK_OPENER = build_opener(ProxyHandler({}))
+_WINDOWS_BROWSER_CANDIDATES = (
+    ("PROGRAMFILES", "Google/Chrome/Application/chrome.exe"),
+    ("PROGRAMFILES(X86)", "Google/Chrome/Application/chrome.exe"),
+    ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+    ("PROGRAMFILES", "Microsoft/Edge/Application/msedge.exe"),
+    ("PROGRAMFILES(X86)", "Microsoft/Edge/Application/msedge.exe"),
+    ("LOCALAPPDATA", "Microsoft/Edge/Application/msedge.exe"),
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +78,25 @@ def inspect_cdp_endpoint(cdp_url: str, timeout_seconds: float = 2.0) -> CdpStatu
     return CdpStatus(connected=True, endpoint=endpoint, pages=pages)
 
 
+def discover_browser_executable(
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Find Chrome or Edge even when Windows did not add it to PATH."""
+
+    discovered = shutil.which("chrome") or shutil.which("msedge")
+    if discovered:
+        return Path(discovered)
+    env = os.environ if environ is None else environ
+    for variable, relative in _WINDOWS_BROWSER_CANDIDATES:
+        root = str(env.get(variable, "")).strip()
+        if not root:
+            continue
+        candidate = Path(root) / Path(relative)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def launch_cdp_browser(
     *,
     executable: Path | None,
@@ -89,8 +116,7 @@ def launch_cdp_browser(
         }
     candidate = Path(executable).expanduser() if executable else None
     if candidate is None:
-        discovered = shutil.which("chrome") or shutil.which("msedge")
-        candidate = Path(discovered) if discovered else None
+        candidate = discover_browser_executable()
     if candidate is None or not candidate.is_file():
         raise CdpUnavailable(
             "BROWSER_EXECUTABLE_REQUIRED: configure browser_executable"
@@ -270,7 +296,12 @@ def validate_collection_page(
 def open_cdp_page(cdp_url: str, material_center_url: str | None = None):
     """Connect to a user-launched Chromium session without persisting credentials."""
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        try:
+            browser = playwright.chromium.connect_over_cdp(cdp_url)
+        except PlaywrightError as error:
+            raise CdpUnavailable(
+                "CDP_UNAVAILABLE: open or restore the login browser"
+            ) from error
         if not browser.contexts:
             raise RuntimeError("CDP 浏览器没有可用上下文")
         context = browser.contexts[0]

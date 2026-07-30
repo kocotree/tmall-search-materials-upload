@@ -8,9 +8,11 @@ import sqlite3
 from upload_search_materials.asset_index import NamedRoot
 from upload_search_materials.asset_matching import PathMatch
 from upload_search_materials.cli import main
+import upload_search_materials.folder_index as folder_index_module
 from upload_search_materials.folder_index import (
     build_folder_review_data,
     build_folder_index,
+    count_candidate_folder_images,
     rematch_folder_index,
     snapshot_folder_candidates,
     write_folder_candidates,
@@ -31,6 +33,81 @@ class FolderMatcher:
                 (),
             ),
         )
+
+
+def test_candidate_folder_image_count_only_enumerates_supported_paths(tmp_path):
+    folder = tmp_path / "candidate"
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
+    (folder / "one.jpg").write_bytes(b"not-decoded")
+    (nested / "two.PNG").write_bytes(b"also-not-decoded")
+    (nested / "notes.txt").write_text("ignore", encoding="utf-8")
+
+    result = count_candidate_folder_images(folder)
+
+    assert result == {
+        "image_count_status": "ready",
+        "raw_recursive_image_count": 2,
+        "image_count_reason_code": "",
+    }
+
+
+def test_candidate_folder_image_count_reports_unavailable_as_unknown(tmp_path):
+    result = count_candidate_folder_images(tmp_path / "missing")
+
+    assert result["image_count_status"] == "unknown"
+    assert result["raw_recursive_image_count"] is None
+    assert result["image_count_reason_code"] == "FOLDER_COUNT_PATH_UNAVAILABLE"
+
+
+def test_candidate_folder_image_count_reports_cancellation_as_unknown(tmp_path):
+    folder = tmp_path / "candidate"
+    folder.mkdir()
+    (folder / "one.jpg").write_bytes(b"not-decoded")
+
+    result = count_candidate_folder_images(
+        folder,
+        cancelled=lambda: True,
+    )
+
+    assert result["image_count_status"] == "unknown"
+    assert result["raw_recursive_image_count"] is None
+    assert result["image_count_reason_code"] == "FOLDER_COUNT_CANCELLED"
+
+
+def test_candidate_folder_image_count_reports_access_denied(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "candidate"
+    folder.mkdir()
+
+    def denied(self, pattern):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "rglob", denied)
+    result = count_candidate_folder_images(folder)
+
+    assert result["image_count_status"] == "unknown"
+    assert result["raw_recursive_image_count"] is None
+    assert result["image_count_reason_code"] == "FOLDER_COUNT_ACCESS_DENIED"
+
+
+def test_candidate_folder_image_count_reports_timeout(tmp_path, monkeypatch):
+    folder = tmp_path / "candidate"
+    folder.mkdir()
+    (folder / "one.jpg").write_bytes(b"not-decoded")
+    ticks = iter((0.0, 11.0))
+    monkeypatch.setattr(
+        folder_index_module.time,
+        "monotonic",
+        lambda: next(ticks),
+    )
+
+    result = count_candidate_folder_images(folder, deadline_seconds=10.0)
+
+    assert result["image_count_status"] == "unknown"
+    assert result["raw_recursive_image_count"] is None
+    assert result["image_count_reason_code"] == "FOLDER_COUNT_TIMEOUT"
 
 
 def test_folder_index_never_reads_or_hashes_image_files(tmp_path, monkeypatch):

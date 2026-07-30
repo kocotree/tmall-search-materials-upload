@@ -11,6 +11,10 @@ from werkzeug.serving import make_server
 
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.interaction.web import create_app
+import upload_search_materials.interaction.web as web_module
+from upload_search_materials.final_material_handoff import (
+    process_final_material_handoff,
+)
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
@@ -183,6 +187,13 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
             page.locator("[data-submit-stage]").click()
         response = submit_response.value
         assert response.status == 202, response.text()
+        assert (
+            store.load_session(session_id)["stages"]["asset_matching"][
+                "status"
+            ]
+            == "ready_for_agent"
+        )
+        process_final_material_handoff(store, session_id)
         page.get_by_role("button", name="图片裁剪与压缩").wait_for()
         assert page.locator(".slot-workflow-step").count() == 2
         assert page.locator(".slot-card").count() == 3
@@ -249,3 +260,128 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
         store._stage_path(session_id, "slots_copy")
         / "current-slot-plan.json"
     ).is_file()
+
+
+def test_folder_prepare_refresh_and_retry_never_wake_codex(
+    tmp_path, monkeypatch
+):
+    runs = tmp_path / "runs"
+    folder = tmp_path / "adopted"
+    folder.mkdir()
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(str(tmp_path),),
+        runs_root=runs,
+    )
+    app = create_app(
+        runs, runtime_config=runtime, enforce_stage_order=False
+    )
+    store = SessionStore(runs)
+    session = store.create_session()
+    state = store.load_session(session.session_id)
+    state["current_stage"] = "asset_matching"
+    store._write_session_state(session.session_id, state)
+    store.save_draft(
+        session.session_id,
+        "asset_matching",
+        {
+            "image_roots": [str(tmp_path)],
+            "source_types": ["image"],
+            "folder_decisions": [],
+            "asset_decisions": [],
+            "license_decisions": [],
+        },
+        expected_revision=0,
+    )
+    store.write_review_context(
+        session.session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "stage_id": "asset_matching",
+            "revision": 1,
+            "status": "needs_user_input",
+            "summary": "确认文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "F1",
+                        "folder_path": str(folder),
+                        "product_id": "P1",
+                        "source_system": "nas",
+                        "match_type": "exact_product_id",
+                    }
+                ],
+            },
+        },
+    )
+    launched = []
+
+    def fake_launch(current_store, current_session, job):
+        launched.append(job["attempt_id"])
+        return {**job, "pid": 1234}
+
+    monkeypatch.setattr(web_module, "launch_gallery_worker", fake_launch)
+    with _live_server(app) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 900, "height": 800})
+        page.goto(
+            f"{base_url}/?session_id={session.session_id}",
+            wait_until="networkidle",
+        )
+        with page.expect_response(
+            lambda response: response.url.endswith("/prepare-gallery")
+        ):
+            page.get_by_role(
+                "button", name="确认文件夹并加载图片"
+            ).click()
+        stage_path = store._stage_path(
+            session.session_id, "asset_matching"
+        )
+        assert not (stage_path / "handoff.json").exists()
+        assert store.processing_claim(
+            session.session_id, "asset_matching"
+        ) is None
+        assert store.agent_wait(
+            session.session_id, "asset_matching"
+        ) is None
+        revision = store.load_session(session.session_id)["stages"][
+            "asset_matching"
+        ]["revision"]
+
+        page.reload(wait_until="networkidle")
+        assert store.load_session(session.session_id)["stages"][
+            "asset_matching"
+        ]["revision"] == revision
+        job = json.loads(
+            (stage_path / "gallery-job.json").read_text(encoding="utf-8")
+        )
+        first_attempt = job["attempt_id"]
+        job.update(
+            {
+                "status": "failed",
+                "reason_code": "GALLERY_JOB_FAILED",
+                "message": "test interruption",
+                "lease_expires_at": None,
+            }
+        )
+        store._write_json_atomic(stage_path / "gallery-job.json", job)
+        page.reload(wait_until="networkidle")
+        with page.expect_response(
+            lambda response: response.url.endswith("/gallery-job/retry")
+        ):
+            page.get_by_role("button", name="重试加载图片").click()
+        retried = json.loads(
+            (stage_path / "gallery-job.json").read_text(encoding="utf-8")
+        )
+        assert retried["attempt_id"] != first_attempt
+        assert len(launched) == 2
+        assert not (stage_path / "handoff.json").exists()
+        browser.close()

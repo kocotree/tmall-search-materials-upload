@@ -19,9 +19,9 @@ function Write-Result([hashtable]$Value) {
 }
 
 try {
-    Add-Type -AssemblyName System.Windows.Forms
     $request = Get-Content -LiteralPath $RequestPath -Raw -Encoding UTF8 |
         ConvertFrom-Json
+    Add-Type -AssemblyName System.Windows.Forms
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = [string]$request.title
     $dialog.ShowNewFolderButton = $false
@@ -68,6 +68,7 @@ catch {
         schema_version = 1
         status = "error"
         reason_code = "FOLDER_PICKER_GUI_UNAVAILABLE"
+        detail = [string]$_.Exception.Message
         path = ""
     }
 }

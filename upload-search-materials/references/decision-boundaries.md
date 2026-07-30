@@ -23,7 +23,7 @@ dry-run、批准或上传。
 
 | 阶段 / decision ID | 允许模式（默认） | Agent 可执行 | 必须等待用户 | 禁止动作 | 失败回退与继续条件 |
 | --- | --- | --- | --- | --- | --- |
-| `setup/task_configuration` | `manual_only`（默认） | 启动页面、自动探测只读路径、校验提交 | 店铺、月份、图片源及店铺一致性确认 | 猜测配置、提前采集或上传 | 保留页面并给恢复指令；setup handoff 校验通过后继续 |
+| `setup/task_configuration` | `manual_only`（默认） | 启动页面、自动探测只读路径、校验提交 | 店铺、图片源及店铺一致性确认 | 猜测配置、提前采集或上传 | 保留页面并给恢复指令；setup handoff 校验通过后继续 |
 | `completeness/product_selection` | `rules`（默认）、`manual` | 全量采集搜推高价值、规则排除、生成矩阵 | 选择进入后续阶段的商品 | 扩大实时采集商品范围、替用户选商品 | 采集异常保持人工审查；用户提交非空合法商品集合后继续 |
 | `asset_matching/asset_selection` | `manual`（默认）、`rules` | 规则匹配文件夹、生成预览；提交采用图片时增量预检并同步生成确定性坑位草稿 | 排除错误文件夹、选择及授权图片 | 用别名猜测归属、检查未采用共享盘图片、生成派生图片 | 1–2 张可保存草稿但不得提交；每个商品至少 3 张可用唯一图后继续 |
 | `image_review/suitability_review` | 历史兼容 | 只读恢复旧适用性快照 | 仅旧任务保留原决定 | 新任务显示或提交独立适用性页面 | 迁移到素材选择内的 selected-asset preflight |

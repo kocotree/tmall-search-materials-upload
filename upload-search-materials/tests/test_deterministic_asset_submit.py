@@ -6,6 +6,9 @@ import pytest
 
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.interaction.web import create_app
+from upload_search_materials.final_material_handoff import (
+    process_final_material_handoff,
+)
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
@@ -28,7 +31,7 @@ def session_id(client):
     return client.post("/api/sessions", json={}).json["session_id"]
 
 
-def test_selected_assets_submit_creates_deterministic_slot_draft(
+def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
     client, session_id, tmp_path
 ):
     sources = tmp_path / "sources"
@@ -83,10 +86,9 @@ def test_selected_assets_submit_creates_deterministic_slot_draft(
         },
     )
 
-    submitted = client.post(
-        f"/api/sessions/{session_id}/stages/asset_matching/submit",
-        json={
-            "values": {
+    final_payload = {
+        "request_id": "final-material-submit-1",
+        "values": {
                 "image_roots": [str(sources)],
                 "source_types": ["image"],
                 "asset_decisions": [
@@ -96,20 +98,43 @@ def test_selected_assets_submit_creates_deterministic_slot_draft(
                     }
                     for item in candidates
                 ],
-            }
-        },
+            },
+    }
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json=final_payload,
     )
 
     assert submitted.status_code == 202
     state = store.load_session(session_id)
-    assert state["stages"]["asset_matching"]["status"] == "completed"
+    assert state["stages"]["asset_matching"]["status"] == "ready_for_agent"
     assert state["stages"]["image_review"]["revision"] == 0
-    assert state["current_stage"] == "slots_copy"
-    assert submitted.json["next_stage"] == "slots_copy"
+    assert state["current_stage"] == "asset_matching"
+    assert submitted.json["next_stage"] is None
+    assert submitted.json["handoff_kind"] == "final_material_selection"
     plan_path = (
         store._stage_path(session_id, "slots_copy")
         / "current-slot-plan.json"
     )
+    assert not plan_path.exists()
+    handoff = store.read_optional_stage_document(
+        session_id, "asset_matching", "handoff"
+    )
+    assert handoff["handoff_kind"] == "final_material_selection"
+    retried = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json=final_payload,
+    )
+    assert retried.status_code == 202
+    assert retried.json["revision"] == submitted.json["revision"]
+    assert retried.json["input_sha256"] == submitted.json["input_sha256"]
+
+    processed = process_final_material_handoff(store, session_id)
+
+    assert processed["status"] == "completed"
+    state = store.load_session(session_id)
+    assert state["stages"]["asset_matching"]["status"] == "completed"
+    assert state["current_stage"] == "slots_copy"
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     assert plan["decision_source"] == "deterministic"
     assert [len(item["asset_ids"]) for item in plan["slot_assignments"]] == [
@@ -301,6 +326,11 @@ def test_three_images_create_one_complete_slot(client, session_id, tmp_path):
     )
 
     assert response.status_code == 202
+    assert not (
+        store._stage_path(session_id, "slots_copy")
+        / "current-slot-plan.json"
+    ).exists()
+    process_final_material_handoff(store, session_id)
     plan = json.loads(
         (
             store._stage_path(session_id, "slots_copy")

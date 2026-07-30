@@ -41,7 +41,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 
 | 阶段/动作 | 页面组件 | 默认策略 | 允许的聊天降级 |
 |---|---|---|---|
-| 任务配置：店铺、月份、图片源、高级路径 | `setup_form`、原生目录选择器 | `frontend_preferred` | UI 启动失败、不可达或无可用浏览器 |
+| 任务配置：店铺、图片源、高级路径 | `setup_form`、原生目录选择器 | `frontend_preferred` | UI 启动失败、不可达或无可用浏览器 |
 | 搜推高价值商品选择、搜索、筛选、排除 | `inspection_matrix` | `frontend_required` | 不允许业务值降级 |
 | 文件夹采用/排除、换批、图片采用、预检、重复提示 | `asset_match_gallery` | `frontend_required` | 不允许业务值降级 |
 | 坑位、顺序、比例、裁剪、压缩 | `slots_copy_editor` 第一子页 | `frontend_required` | 不允许业务值降级 |

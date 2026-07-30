@@ -26,7 +26,8 @@ RECOVERY_COPY = {
     "PATH_AVAILABLE": "路径可访问。",
     "INVALID_PATH": "路径格式无效，请填写绝对本机路径、映射盘路径或 UNC 路径。",
     "DRIVE_NOT_MAPPED": (
-        "该盘符未在当前服务会话映射；请连接网络盘或粘贴 UNC 路径。"
+        "当前窗口无法打开这个盘符。请点击“选择文件夹”重新选择一个当前可访问的目录，"
+        "或直接粘贴本机能够打开的完整文件夹路径。"
     ),
     "NETWORK_HOST_UNAVAILABLE": "NAS 主机当前不可达，请检查公司网络或 VPN。",
     "NETWORK_SHARE_NOT_FOUND": "NAS 共享目录不存在或当前账号不可见。",

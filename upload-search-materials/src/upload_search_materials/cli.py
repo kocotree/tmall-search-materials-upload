@@ -4,6 +4,7 @@ import argparse
 import csv
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,14 @@ from .asset_index import (
 from .asset_index_store import AssetIndexStore, IndexIdentity, IndexIdentityError
 from .asset_matching import ProductPathMatcher
 from .asset_selection import build_gallery_data
+from .asset_matching_workflow import (
+    CONFIRMED_FOLDER_EMPTY,
+    CONFIRMED_FOLDER_UNREADABLE,
+    FOLDER_REVIEW,
+    GALLERY_PREPARATION_FAILED,
+    IMAGE_SELECTION,
+    build_gallery_identity,
+)
 from .assets import (
     DirectoryAssetSource,
     ManifestAssetSource,
@@ -126,8 +135,11 @@ from .supplement_collection import collect_supplement_material_status
 from .runtime_identity import current_runtime_identity
 from .desktop_launcher import (
     DesktopLauncherError,
+    ensure_login_browser,
     launch_desktop_workbench,
 )
+from .final_material_handoff import process_final_material_handoff
+from .gallery_jobs import process_gallery_job
 from .tasks import build_material_items, build_product_tasks
 from .time_utils import iso_timestamp
 
@@ -911,6 +923,21 @@ def _prepare_confirmed_gallery(args) -> int:
             sampling_seed=output_path.parent.parent.name,
             preview_dir=output_path.parent / "preview-cache",
         )
+        input_document = read_json(Path(args.input))
+        session_id = str(input_document.get("session_id", ""))
+        revision = int(input_document.get("revision", 0))
+        input_sha256 = (
+            hashlib.sha256(Path(args.input).read_bytes()).hexdigest()
+            if session_id
+            else ""
+        )
+        data["workflow_step"] = IMAGE_SELECTION
+        data["gallery_identity"] = build_gallery_identity(
+            session_id=session_id,
+            revision=revision,
+            input_sha256=input_sha256,
+            folder_decisions=decisions,
+        )
         write_json(output_path, data)
         return 0
     except (OSError, SchemaError, ValueError) as error:
@@ -1145,6 +1172,211 @@ def _wait_handoff(args) -> int:
         return 0
     finally:
         store.clear_agent_wait(args.session, wait_id=wait["wait_id"])
+
+
+def _process_confirmed_gallery(args) -> int:
+    """Claim a folder-review handoff and publish its task-local image gallery."""
+
+    store = SessionStore(Path(args.runs_root))
+    handoff = None
+    try:
+        handoff = store.wait_for_handoff(
+            args.session,
+            "asset_matching",
+            timeout_seconds=0.5,
+            claimant_id=args.claimant,
+        )
+        stage_path = store._stage_path(args.session, "asset_matching")
+        session_path = store._session_path(args.session)
+        input_path = stage_path / "input.json"
+        input_document = read_json(input_path)
+        decisions = extract_folder_decisions(input_document)
+        progress_path = stage_path / "gallery-progress.json"
+        store._write_json_atomic(
+            progress_path,
+            {
+                "schema_version": 1,
+                "session_id": args.session,
+                "stage_id": "asset_matching",
+                "workflow_step": "gallery_preparing",
+                "revision": int(handoff["revision"]),
+                "input_sha256": str(handoff["input_sha256"]),
+                "current_product": None,
+                "current_folder": None,
+                "discovered_count": 0,
+                "prepared_count": 0,
+                "heartbeat_at": _now_iso(),
+                "recovery_action": (
+                    "在当前 Codex 会话输入“已提交”，按同一 session 恢复"
+                ),
+            },
+        )
+        products = read_product_csv(session_path / "inputs" / "products.csv")
+        status_path = (
+            session_path
+            / "collected"
+            / "promotion"
+            / "current"
+            / "promotion-material-status.csv"
+        )
+        if not status_path.is_file():
+            status_path = (
+                session_path
+                / "collected"
+                / "promotion"
+                / "promotion-material-status.csv"
+            )
+        with status_path.open("r", encoding="utf-8-sig", newline="") as stream:
+            status_rows = list(csv.DictReader(stream))
+        data = build_confirmed_folder_gallery(
+            products,
+            status_rows,
+            decisions,
+            candidate_limit=args.candidate_limit,
+            page_size=args.page_size,
+            sampling_seed=args.session,
+            preview_dir=stage_path / "preview-cache",
+        )
+        prior = store.read_optional_stage_document(
+            args.session, "asset_matching", "review-context"
+        )
+        prior_data = (
+            prior.get("data")
+            if isinstance(prior, dict) and isinstance(prior.get("data"), dict)
+            else {}
+        )
+        data["folder_candidates"] = list(
+            prior_data.get("folder_candidates", [])
+        )
+        data["workflow_step"] = IMAGE_SELECTION
+        data["gallery_identity"] = build_gallery_identity(
+            session_id=args.session,
+            revision=int(handoff["revision"]),
+            input_sha256=str(handoff["input_sha256"]),
+            folder_decisions=decisions,
+        )
+        output_path = stage_path / "confirmed-gallery.json"
+        write_json(output_path, data)
+        store._write_json_atomic(
+            progress_path,
+            {
+                "schema_version": 1,
+                "session_id": args.session,
+                "stage_id": "asset_matching",
+                "workflow_step": IMAGE_SELECTION,
+                "revision": int(handoff["revision"]),
+                "input_sha256": str(handoff["input_sha256"]),
+                "current_product": None,
+                "current_folder": None,
+                "discovered_count": int(
+                    data.get("scan_summary", {}).get("discovered_images", 0)
+                ),
+                "prepared_count": len(data.get("asset_candidates", [])),
+                "heartbeat_at": _now_iso(),
+                "recovery_action": None,
+            },
+        )
+        empty_products = [
+            str(item.get("product_id", ""))
+            for item in data.get("requirements", [])
+            if isinstance(item, dict)
+            and not any(
+                isinstance(candidate, dict)
+                and str(candidate.get("product_id", ""))
+                == str(item.get("product_id", ""))
+                for candidate in data.get("asset_candidates", [])
+            )
+        ]
+        result = store.write_result(
+            args.session,
+            "asset_matching",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="needs_user_input",
+            summary=(
+                f"已为 {len(data.get('requirements', []))} 个商品准备 "
+                f"{len(data.get('asset_candidates', []))} 张候选图片"
+            ),
+            blocking_reasons=(
+                [f"{CONFIRMED_FOLDER_EMPTY}:{','.join(empty_products)}"]
+                if empty_products
+                else []
+            ),
+            evidence=[str(output_path)],
+            next_action="逐个商品选择图片，然后确认选图并进入坑位编排",
+            data=data,
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (OSError, SchemaError, ValueError, InteractionConflict) as error:
+        reason = (
+            CONFIRMED_FOLDER_UNREADABLE
+            if "not readable" in str(error).casefold()
+            else GALLERY_PREPARATION_FAILED
+        )
+        if isinstance(handoff, dict):
+            prior = store.read_optional_stage_document(
+                args.session, "asset_matching", "review-context"
+            )
+            prior_data = (
+                dict(prior.get("data"))
+                if isinstance(prior, dict)
+                and isinstance(prior.get("data"), dict)
+                else {}
+            )
+            prior_data["workflow_step"] = FOLDER_REVIEW
+            try:
+                store.write_result(
+                    args.session,
+                    "asset_matching",
+                    int(handoff["revision"]),
+                    str(handoff["input_sha256"]),
+                    status="blocked",
+                    summary="采用文件夹中的图片读取失败",
+                    blocking_reasons=[reason],
+                    evidence=[],
+                    next_action="调整文件夹决定或恢复路径访问后重新提交",
+                    data=prior_data,
+                )
+            except (OSError, InteractionConflict):
+                pass
+        print(
+            json.dumps(
+                {"status": "blocked", "reason_code": reason, "message": str(error)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
+
+def _process_gallery_job(args) -> int:
+    try:
+        result = process_gallery_job(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            args.job,
+            args.attempt,
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _process_final_material_handoff(args) -> int:
+    try:
+        result = process_final_material_handoff(
+            SessionStore(Path(args.runs_root)),
+            args.session,
+            claimant_id=args.claimant,
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
 
 
 def _resume_session(args) -> int:
@@ -1575,6 +1807,7 @@ def _prepare_folder_review(args) -> int:
             decisions=decisions,
             exact_folder_queries=exact_folder_queries,
         )
+        data["workflow_step"] = FOLDER_REVIEW
         write_json(Path(args.output), data)
         return 0
     except (OSError, ValueError) as error:
@@ -1990,6 +2223,35 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
     )
+    process_gallery = subparsers.add_parser(
+        "process-confirmed-gallery",
+        help="Claim the current folder review and publish the image-selection gallery",
+    )
+    process_gallery.add_argument("--runs-root", required=True, metavar="PATH")
+    process_gallery.add_argument("--session", required=True)
+    process_gallery.add_argument("--claimant", default="codex-agent")
+    process_gallery.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=100,
+        choices=range(1, 101),
+    )
+    process_gallery.add_argument("--page-size", type=int, default=30)
+    local_gallery_job = subparsers.add_parser(
+        "process-gallery-job",
+        help="Process one durable local gallery job without claiming a Codex handoff",
+    )
+    local_gallery_job.add_argument("--runs-root", required=True, metavar="PATH")
+    local_gallery_job.add_argument("--session", required=True)
+    local_gallery_job.add_argument("--job", required=True)
+    local_gallery_job.add_argument("--attempt", required=True)
+    final_material = subparsers.add_parser(
+        "process-final-material-handoff",
+        help="Claim the final material selection and prepare the slot draft",
+    )
+    final_material.add_argument("--runs-root", required=True, metavar="PATH")
+    final_material.add_argument("--session", required=True)
+    final_material.add_argument("--claimant", default="codex-agent")
     image_review = subparsers.add_parser(
         "prepare-image-review",
         help="Prepare task-local stage-four image compliance and crop context",
@@ -2188,6 +2450,7 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         runs_root = Path(args.runs_root or runtime.runs_root)
         try:
             if args.command == "ui-start":
+                login_browser = ensure_login_browser(runtime)
                 result = start_service(
                     runs_root,
                     session_id=args.session,
@@ -2197,10 +2460,12 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     open_system_browser=args.open_system_browser,
                     config=args.config,
                 )
+                result["login_browser"] = login_browser
             elif args.command == "ui-restart":
                 if not args.session:
                     print("ui-restart requires --session", file=sys.stderr)
                     return 2
+                login_browser = ensure_login_browser(runtime)
                 result = restart_service(
                     runs_root,
                     args.session,
@@ -2210,6 +2475,7 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     open_system_browser=args.open_system_browser,
                     config=args.config,
                 )
+                result["login_browser"] = login_browser
             elif args.command == "ui-status":
                 result = status_service(runs_root, args.session)
             else:
@@ -2287,6 +2553,12 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _prepare_gallery(args)
     if args.command == "prepare-confirmed-gallery":
         return _prepare_confirmed_gallery(args)
+    if args.command == "process-confirmed-gallery":
+        return _process_confirmed_gallery(args)
+    if args.command == "process-gallery-job":
+        return _process_gallery_job(args)
+    if args.command == "process-final-material-handoff":
+        return _process_final_material_handoff(args)
     if args.command == "prepare-image-review":
         return _prepare_image_review(args)
     if args.command == "prepare-slot-board":

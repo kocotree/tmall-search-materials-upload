@@ -81,6 +81,73 @@ def test_handoff_hash_matches_atomic_input_bytes(tmp_path):
     assert handoff["revision"] == 1
 
 
+def test_local_action_commits_revision_without_touching_agent_coordination(
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    state = store.load_session(session.session_id)
+    state["current_stage"] = "asset_matching"
+    store._write_session_state(session.session_id, state)
+    wait = store.create_agent_wait(
+        session.session_id,
+        "asset_matching",
+        expected_revision=1,
+        claimant_id="codex-agent",
+    )
+
+    committed = store.save_local_input(
+        session.session_id,
+        "asset_matching",
+        {
+            "image_roots": [str(tmp_path)],
+            "folder_decisions": [],
+        },
+        expected_revision=0,
+        request_id="local-gallery-1",
+    )
+
+    stage_path = session.path / "03-asset-matching"
+    assert committed["status"] == "local_committed"
+    assert committed["revision"] == 1
+    assert not (stage_path / "handoff.json").exists()
+    assert not (stage_path / "processing-claim.json").exists()
+    assert store.agent_wait(
+        session.session_id, "asset_matching"
+    )["wait_id"] == wait["wait_id"]
+    state = store.load_session(session.session_id)
+    assert state["stages"]["asset_matching"]["status"] == "draft"
+
+
+def test_local_action_is_idempotent_for_same_request_and_payload(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    values = {
+        "image_roots": [str(tmp_path)],
+        "folder_decisions": [],
+    }
+
+    first = store.save_local_input(
+        session.session_id,
+        "asset_matching",
+        values,
+        expected_revision=0,
+        request_id="local-gallery-idempotent",
+    )
+    second = store.save_local_input(
+        session.session_id,
+        "asset_matching",
+        values,
+        expected_revision=0,
+        request_id="local-gallery-idempotent",
+    )
+
+    assert second == first
+    assert store.load_session(session.session_id)["stages"][
+        "asset_matching"
+    ]["revision"] == 1
+
+
 def test_agent_wait_is_advisory_renewable_and_cleared_by_claim(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()

@@ -8,6 +8,9 @@ from upload_search_materials.collection_readiness import (
     promote_selector_candidate,
     validate_selector_candidate,
 )
+from upload_search_materials.browser.material_page import (
+    prepare_high_value_validation_page,
+)
 from upload_search_materials.runtime_config import load_runtime_config
 
 
@@ -237,3 +240,124 @@ def test_readiness_keeps_checks_independent_without_nas_access(tmp_path, monkeyp
         == "SELECTOR_PROFILE_NOT_FOUND"
     )
     assert checks["cdp_connection"]["reason_code"] == "CDP_UNAVAILABLE"
+
+
+def test_dom_failure_does_not_misreport_authenticated_material_page_as_login(
+    tmp_path, monkeypatch
+):
+    runtime = load_runtime_config(environ={}, start=tmp_path)
+    monkeypatch.setattr(
+        "upload_search_materials.collection_readiness.inspect_cdp_endpoint",
+        lambda *_args, **_kwargs: type(
+            "Status",
+            (),
+            {
+                "connected": True,
+                "endpoint": "http://127.0.0.1:9222",
+                "reason_code": "",
+                "next_action": "",
+                "pages": (),
+            },
+        )(),
+    )
+
+    readiness = build_collection_readiness(
+        runtime,
+        expected_store="测试店铺",
+        dom_evidence={
+            "page_identity": "material_center",
+            "observed_store": "测试店铺",
+            "store_match": True,
+            "field_results": {
+                "high_value_filter": {
+                    "configured": True,
+                    "count": 0,
+                }
+            },
+            "pagination_state": {
+                "verified": False,
+                "detail": "PAGINATION_ORIGIN_UNVERIFIED",
+            },
+        },
+    )
+    checks = {item["id"]: item for item in readiness["checks"]}
+
+    assert checks["login_and_human_check"]["ready"] is True
+    assert "自动切换" in checks["selector_current_dom"]["next_action"]
+
+
+def test_validation_navigation_selects_high_value_and_returns_to_page_one():
+    selectors = {
+        "promotion_tab": "#promotion",
+        "high_value_filter": "#high-value",
+        "promotion_rows": "#rows",
+        "promotion_current_page": "#current",
+        "promotion_first_page": "#first",
+        "promotion_terminal_page": "#terminal",
+        "promotion_next_page": "#next",
+    }
+
+    class ValidationLocator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        def count(self):
+            if self.selector == "#high-value":
+                return 1 if self.page.promotion_open else 0
+            return 1
+
+        def click(self, timeout=None):
+            if self.selector == "#promotion":
+                self.page.promotion_open = True
+            elif self.selector == "#high-value":
+                self.page.high_value_checked = True
+            elif self.selector == "#first":
+                self.page.current_page = 1
+
+        def get_attribute(self, name):
+            if self.selector == "#high-value" and name == "aria-checked":
+                return "true" if self.page.high_value_checked else "false"
+            return None
+
+        def inner_text(self):
+            if self.selector == "#current":
+                return str(self.page.current_page)
+            if self.selector == "#first":
+                return "1"
+            if self.selector == "#terminal":
+                return "3"
+            return ""
+
+        def all_inner_texts(self):
+            return (
+                [f"商品 商品ID 10{self.page.current_page}"]
+                if self.selector == "#rows"
+                else []
+            )
+
+        def is_enabled(self):
+            return self.selector != "#next" or self.page.current_page < 3
+
+    class ValidationPage:
+        promotion_open = False
+        high_value_checked = False
+        current_page = 3
+
+        def locator(self, selector):
+            return ValidationLocator(self, selector)
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = ValidationPage()
+    observed = prepare_high_value_validation_page(
+        page,
+        selectors,
+        settle_delay_ms=0,
+        action_wait_ms=1,
+    )
+
+    assert page.promotion_open is True
+    assert page.high_value_checked is True
+    assert observed.current_page == 1

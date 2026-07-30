@@ -186,6 +186,48 @@ def test_native_picker_maps_helper_gui_error():
         )
 
 
+def test_native_picker_preserves_helper_error_before_window_is_visible():
+    class EarlyError:
+        returncode = 1
+        pid = 4247
+
+        def __init__(self, command):
+            request_path = Path(
+                command[command.index("-RequestPath") + 1]
+            )
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            result_path = Path(
+                command[command.index("-ResultPath") + 1]
+            )
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "error",
+                        "reason_code": "FOLDER_PICKER_GUI_UNAVAILABLE",
+                        "detail": "desktop unavailable",
+                        "request_id": request["request_id"],
+                        "ownership_token": request["ownership_token"],
+                        "helper_pid": self.pid,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        def poll(self):
+            return self.returncode
+
+    with pytest.raises(
+        FolderPickerError, match="FOLDER_PICKER_GUI_UNAVAILABLE"
+    ) as captured:
+        choose_directory(
+            platform="nt",
+            powershell="powershell.exe",
+            popen=lambda command, **_kwargs: EarlyError(command),
+        )
+    assert captured.value.detail == "desktop unavailable"
+
+
 def test_native_picker_maps_helper_start_failure():
     def fail_to_start(*_args, **_kwargs):
         raise OSError("not available")

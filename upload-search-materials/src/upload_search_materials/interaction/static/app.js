@@ -41,6 +41,12 @@
   recoverProcessingButton.textContent = "恢复过期处理";
   recoverProcessingButton.hidden = true;
   handoffActions?.prepend(recoverProcessingButton);
+  const retryGalleryButton = document.createElement("button");
+  retryGalleryButton.type = "button";
+  retryGalleryButton.className = "secondary-button";
+  retryGalleryButton.textContent = "重试加载图片";
+  retryGalleryButton.hidden = true;
+  handoffActions?.prepend(retryGalleryButton);
 
   let sessionId = shell.dataset.sessionId || "";
   let currentStageId = railButtons[0]?.dataset.stageId || "setup";
@@ -56,6 +62,11 @@
   let currentProcessingClaim = null;
   let currentCollectionStatus = null;
   let currentHandoffStatus = null;
+  let currentGalleryProgress = null;
+  let currentGalleryJob = null;
+  let isHydrating = false;
+  let folderCountsLoading = false;
+  let folderCountsLoadedFor = "";
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -403,6 +414,27 @@
     }
   }
 
+  async function openCollectionLoginBrowser() {
+    if (!collectionRuntimeConfig) return;
+    const status = collectionRuntimeConfig.querySelector("[data-cdp-status]");
+    status.textContent = "正在打开或恢复千牛登录窗口…";
+    try {
+      const payload = await fetchJson(
+        "/api/runtime/collection/login-browser",
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      );
+      status.textContent = payload.reused
+        ? "登录窗口已恢复；请在独立浏览器中确认登录状态。"
+        : "登录窗口已打开；如果尚未登录，请先完成登录。";
+      await refreshCollectionRuntime();
+    } catch (error) {
+      status.textContent = error.userMessage || error.message;
+    }
+  }
+
   async function saveSelectorProfile() {
     if (!collectionRuntimeConfig) return;
     const input = collectionRuntimeConfig.querySelector(
@@ -480,6 +512,9 @@
 
   function initializeCollectionRuntime() {
     if (!collectionRuntimeConfig) return;
+    collectionRuntimeConfig.querySelector(
+      "[data-open-login-browser]",
+    ).addEventListener("click", openCollectionLoginBrowser);
     collectionRuntimeConfig.querySelector(
       "[data-bootstrap-selector-profile]",
     ).addEventListener("click", bootstrapSelectorProfile);
@@ -617,7 +652,16 @@
     handoffStatus.textContent = copy;
     const railStatus = document.querySelector(`[data-rail-status="${currentStageId}"]`);
     if (railStatus) railStatus.textContent = copy;
-    submitButton.textContent = ["needs_user_input", "blocked"].includes(status)
+    const assetStep = currentStageId === "asset_matching"
+      ? inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
+      : "";
+    submitButton.textContent = (
+      currentStageId === "asset_matching"
+      && assetStep === "image_selection"
+      && !["ready_for_agent", "processing", "completed"].includes(status)
+    )
+      ? "确认选图并提交给 Codex"
+      : ["needs_user_input", "blocked"].includes(status)
       ? "补充后重新提交"
       : status === "ready_for_agent"
         ? "已提交，等待 Agent"
@@ -627,6 +671,12 @@
     const lockedByServer = !uiState.dirty
       && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
     submitButton.disabled = lockedByServer;
+    if (
+      currentStageId === "asset_matching"
+      && currentGalleryJob?.status === "running"
+    ) {
+      submitButton.disabled = true;
+    }
     saveButton.disabled = lockedByServer;
     goCurrentStageButton.hidden = !(
       lockedByServer
@@ -645,8 +695,16 @@
     }
     withdrawButton.hidden = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;
     withdrawButton.disabled = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;
+    retryGalleryButton.hidden = !(
+      currentStageId === "asset_matching"
+      && ["failed", "stale"].includes(currentGalleryJob?.status)
+    );
+    retryGalleryButton.disabled = retryGalleryButton.hidden;
     setFormLocked(uiState.serverStatus);
     updateResultsRecovery(UiState.recoveryView(uiState));
+    if (currentStageId === "asset_matching") {
+      submitButton.hidden = assetStep !== "image_selection";
+    }
   }
 
   function formatClaimTime(value) {
@@ -654,6 +712,52 @@
     return Number.isFinite(timestamp)
       ? new Date(timestamp).toLocaleString("zh-CN", { hour12: false })
       : "未知时间";
+  }
+
+  function hasExplicitGalleryCounts(progress) {
+    return progress
+      && Object.prototype.hasOwnProperty.call(
+        progress,
+        "planned_inspection_count",
+      );
+  }
+
+  function galleryProgressMessage(job = currentGalleryJob) {
+    const progress = job?.progress || {};
+    if (!hasExplicitGalleryCounts(progress)) {
+      return (
+        `本机正在加载图片（历史进度口径）：已发现 `
+        + `${progress.discovered_count || 0} 张，已检查 `
+        + `${progress.prepared_count || 0} 张。`
+      );
+    }
+    const failures = Number(progress.inspection_failure_count || 0);
+    const duplicates = Number(progress.content_duplicate_count || 0);
+    return (
+      `本机正在加载图片：发现 `
+      + `${Number(progress.discovered_path_count || 0)} 张，正在检查 `
+      + `${Number(progress.inspected_count || 0)}/`
+      + `${Number(progress.planned_inspection_count || 0)} 张`
+      + `${failures ? `，检查失败 ${failures} 张` : ""}`
+      + `${duplicates ? `，内容重复 ${duplicates} 张` : ""}。`
+    );
+  }
+
+  function galleryCompletionMessage(job = currentGalleryJob) {
+    const progress = job?.progress || {};
+    if (!hasExplicitGalleryCounts(progress)) {
+      return (
+        `本机图片加载完成（历史进度口径）：候选 `
+        + `${job?.result?.candidate_count ?? progress.prepared_count ?? 0} 张。`
+      );
+    }
+    return (
+      `本机图片加载完成：检查 `
+      + `${Number(progress.inspected_count || 0)} 张，失败 `
+      + `${Number(progress.inspection_failure_count || 0)} 张，内容重复 `
+      + `${Number(progress.content_duplicate_count || 0)} 张，可展示候选 `
+      + `${Number(progress.final_candidate_count || 0)} 张。`
+    );
   }
 
   function renderProcessingClaim(claim, collectionStatus = currentCollectionStatus) {
@@ -670,6 +774,13 @@
       processing && (currentProcessingClaim?.expired || recoverable)
     );
     if (!processing) return;
+    if (
+      currentStageId === "asset_matching"
+      && currentGalleryProgress?.workflow_step === "gallery_preparing"
+    ) {
+      actionMessage.textContent = galleryProgressMessage();
+      return;
+    }
     const worker = currentCollectionStatus?.worker;
     if (currentCollectionStatus?.status === "processing" && worker) {
       const page = worker.last_completed_page == null
@@ -795,6 +906,7 @@
   }
 
   function scheduleAutoSave() {
+    if (isHydrating) return;
     window.clearTimeout(autoSaveTimer);
     if (!["draft", "needs_user_input", "blocked"].includes(uiState.serverStatus)) return;
     actionMessage.textContent = "有未保存更改；停止输入后将自动保存草稿。";
@@ -1446,7 +1558,11 @@
     safety.dataset.status = "checked";
     safety.append(
       element("strong", "", "请先筛选候选文件夹"),
-      element("span", "", "精确候选默认采用；50% 粗略候选默认排除，确认后再采用。"),
+      element(
+        "span",
+        "",
+        "精确候选默认采用；50% 粗略候选默认排除。采用文件夹只会加载候选图片，不会自动采用其中图片。",
+      ),
     );
     review.appendChild(safety);
 
@@ -1497,6 +1613,35 @@
         const saved = decisionsByKey.get(key) || {};
         const card = element("article", "folder-card");
         const identity = element("div", "folder-card-identity");
+        const countStatus = String(
+          candidate.image_count_status || "pending",
+        );
+        let countText = "素材数统计中";
+        if (countStatus === "ready") {
+          countText = (
+            `原始递归素材数 `
+            + `${Number(candidate.raw_recursive_image_count || 0)} 张`
+          );
+        } else if (countStatus === "unknown") {
+          countText = (
+            `素材数未知`
+            + (
+              candidate.image_count_reason_code
+                ? `（${candidate.image_count_reason_code}）`
+                : ""
+            )
+          );
+        }
+        if (candidate.gallery_unique_path_count != null) {
+          countText += (
+            ` · 本轮去重路径 `
+            + `${Number(candidate.gallery_unique_path_count || 0)} 张`
+            + ` · 抽样检查 `
+            + `${Number(candidate.gallery_sampled_inspection_count || 0)} 张`
+            + ` · 最终唯一候选 `
+            + `${Number(candidate.gallery_final_candidate_count || 0)} 张`
+          );
+        }
         identity.append(
           element("strong", "", candidate.folder_name || "未命名文件夹"),
           element(
@@ -1511,6 +1656,7 @@
                   : "名称候选",
           ),
           element("small", "", candidate.source_system || "未知来源"),
+          element("small", "folder-image-count", countText),
           element("code", "", candidate.folder_path || ""),
         );
         const controls = element("div", "folder-card-controls");
@@ -1571,7 +1717,46 @@
       });
       updateProgress();
     });
+    if (
+      inferAssetMatchingStep(view.result?.data, uiState.serverStatus)
+      !== "image_selection"
+    ) {
+      const localAction = element("div", "local-gallery-action");
+      const localButton = element(
+        "button",
+        "primary-button",
+        "确认文件夹并加载图片",
+      );
+      localButton.type = "button";
+      localButton.disabled = currentGalleryJob?.status === "running";
+      localButton.addEventListener("click", () => {
+        prepareLocalGallery(localButton);
+      });
+      localAction.append(
+        element(
+          "p",
+          "asset-selection-summary",
+          "这是本机固定操作，只读取已采用文件夹并生成候选图片，不会触发 Codex handoff。",
+        ),
+        localButton,
+      );
+      review.appendChild(localAction);
+    }
     content.appendChild(review);
+  }
+
+  function inferAssetMatchingStep(data, status = "") {
+    if (currentGalleryJob?.status === "running") return "gallery_preparing";
+    if (status === "processing") return "gallery_preparing";
+    const explicit = String(data?.workflow_step || "");
+    if (["folder_review", "gallery_preparing", "image_selection"].includes(explicit)) {
+      return explicit;
+    }
+    if (
+      (Array.isArray(data?.asset_candidates) && data.asset_candidates.length)
+      || (Array.isArray(data?.requirements) && data.requirements.length)
+    ) return "image_selection";
+    return "folder_review";
   }
 
   function renderAssetMatchGallery(view) {
@@ -1658,7 +1843,22 @@
         prepared?.discovered_images || rawProductCandidates.length,
       );
       const preparedCandidateCount = Number(
-        prepared?.prepared_candidates ?? rawProductCandidates.length,
+        prepared?.planned_inspection_count
+          ?? prepared?.prepared_candidates
+          ?? rawProductCandidates.length,
+      );
+      const inspectedCandidateCount = Number(
+        prepared?.inspected_count ?? preparedCandidateCount,
+      );
+      const inspectionFailureCount = Number(
+        prepared?.inspection_failure_count || 0,
+      );
+      const contentDuplicateCount = Number(
+        prepared?.content_duplicate_count || 0,
+      );
+      const finalCandidateCount = Number(
+        prepared?.final_candidate_count
+          ?? rawProductCandidates.length,
       );
       const validCandidateCount = Number(
         prepared?.valid_candidates
@@ -1797,7 +1997,18 @@
           );
         pageCount = Math.max(1, Math.ceil(filteredCandidates.length / pageSize));
         pageIndex = Math.min(pageIndex, pageCount - 1);
-        candidateSummary.textContent = `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇 · 目录发现 ${discoveredCount} 张 · 准备检查 ${preparedCandidateCount} 张 · 有效候选 ${validCandidateCount} 张 · 当前可见 ${productCandidates.length} 张 / 每商品上限 ${candidateLimit} 张 · 每批显示 ${pageSize} 张`;
+        candidateSummary.textContent = (
+          `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇`
+          + ` · 目录发现 ${discoveredCount} 张`
+          + ` · 检查 ${inspectedCandidateCount}/${preparedCandidateCount} 张`
+          + ` · 失败 ${inspectionFailureCount} 张`
+          + ` · 内容重复 ${contentDuplicateCount} 张`
+          + ` · 最终候选 ${finalCandidateCount} 张`
+          + ` · 预检有效 ${validCandidateCount} 张`
+          + ` · 当前可见 ${productCandidates.length} 张`
+          + ` / 每商品检查上限 ${candidateLimit} 张`
+          + ` · 每批显示 ${pageSize} 张`
+        );
         const currentDecisions = selectedAssetDecisions();
         const hashesUsedElsewhere = new Set(
           currentDecisions
@@ -3847,12 +4058,98 @@
       renderResult(rendererName, view);
     });
     if (schemaComponent === "asset_match_gallery") {
+      const step = inferAssetMatchingStep(
+        view.result?.data,
+        uiState.serverStatus,
+      );
+      const module = document.querySelector(
+        '[data-component="AssetMatchGallery"]',
+      );
+      const content = module?.querySelector("[data-result-content]");
+      if (content) {
+        const indicator = element("div", "asset-workflow-step");
+        indicator.dataset.step = step;
+        indicator.append(
+          element(
+            "strong",
+            "",
+            step === "image_selection" ? "第 2 步：选择图片" : "第 1 步：筛选文件夹",
+          ),
+          element(
+            "span",
+            "",
+            step === "gallery_preparing"
+              ? "本机正在读取采用文件夹并准备图片预览"
+              : step === "image_selection"
+                ? "逐个商品选择图片，采用文件夹不会自动采用图片"
+                : "先确认每个商品要读取的文件夹",
+          ),
+        );
+        content.prepend(indicator);
+      }
       renderFolderOwnershipReview(view);
-      renderAssetMatchGallery(view);
+      if (
+        inferAssetMatchingStep(view.result?.data, uiState.serverStatus)
+        === "image_selection"
+      ) {
+        renderAssetMatchGallery(view);
+      }
     }
     if (schemaComponent === "image_review") renderImageReview(view);
     if (schemaComponent === "slots_copy_editor") renderSlotBoard(view);
     if (schemaComponent === "inspection_matrix") renderInspectionMatrix(view);
+  }
+
+  async function loadFolderImageCounts() {
+    if (
+      folderCountsLoading
+      || currentStageId !== "asset_matching"
+      || inferAssetMatchingStep(
+        uiState.result?.data,
+        uiState.serverStatus,
+      ) !== "folder_review"
+    ) return;
+    const candidates = uiState.result?.data?.folder_candidates;
+    if (!Array.isArray(candidates) || candidates.length === 0) return;
+    const identity = `${sessionId}:${revision}:${
+      candidates.map((item) => item.folder_id || "").join(",")
+    }`;
+    if (
+      folderCountsLoadedFor === identity
+      && candidates.every(
+        (item) => item.image_count_status !== "pending",
+      )
+    ) return;
+    folderCountsLoading = true;
+    try {
+      const payload = await fetchJson(apiPath(
+        "/stages/asset_matching/folder-image-counts",
+      ));
+      if (currentStageId !== "asset_matching") return;
+      const byFolderId = new Map(
+        (payload.folder_counts || []).map((item) => [
+          String(item.folder_id || ""),
+          item,
+        ]),
+      );
+      candidates.forEach((candidate) => {
+        const count = byFolderId.get(String(candidate.folder_id || ""));
+        if (count) Object.assign(candidate, count);
+      });
+      folderCountsLoadedFor = identity;
+      renderStageResult(stages.get("asset_matching").component);
+    } catch (error) {
+      candidates.forEach((candidate) => {
+        if (candidate.image_count_status === "pending") {
+          candidate.image_count_status = "unknown";
+          candidate.image_count_reason_code = "FOLDER_COUNT_REQUEST_FAILED";
+        }
+      });
+      folderCountsLoadedFor = identity;
+      renderStageResult(stages.get("asset_matching").component);
+    } finally {
+      folderCountsLoading = false;
+    }
   }
 
   async function loadStage() {
@@ -3879,8 +4176,18 @@
       currentProcessingClaim = payload.processing_claim || null;
       currentCollectionStatus = payload.collection_status || null;
       currentHandoffStatus = payload.handoff_status || null;
+      currentGalleryJob = payload.gallery_job || null;
+      currentGalleryProgress = currentGalleryJob?.progress || null;
+      isHydrating = true;
+      try {
+        if (payload.input) {
+          hydrateForm(activeForm(), payload.input.values);
+        }
+        renderStageResult(stages.get(requestedStageId).component);
+      } finally {
+        isHydrating = false;
+      }
       if (payload.input) {
-        hydrateForm(activeForm(), payload.input.values);
         const fallbackHistory = payload.input.interaction_history || [];
         const latestFallback = fallbackHistory[fallbackHistory.length - 1];
         if (latestFallback?.interaction_channel === "chat_fallback") {
@@ -3893,10 +4200,97 @@
       renderHandoffStatus(currentHandoffStatus);
       renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       renderSubmission();
-      renderStageResult(stages.get(requestedStageId).component);
+      if (
+        requestedStageId === "asset_matching"
+        && currentGalleryJob?.status === "running"
+      ) {
+        actionMessage.textContent = galleryProgressMessage();
+      } else if (
+        requestedStageId === "asset_matching"
+        && currentGalleryJob?.status === "completed"
+      ) {
+        actionMessage.textContent = galleryCompletionMessage();
+      }
+      if (requestedStageId === "asset_matching") {
+        loadFolderImageCounts();
+      }
     } catch (error) {
       if (requestedStageId !== currentStageId) return;
       actionMessage.textContent = error.message;
+    }
+  }
+
+  async function prepareLocalGallery(button) {
+    if (persistenceInFlight) {
+      actionMessage.textContent = "保存正在进行，请稍后再次确认文件夹。";
+      return;
+    }
+    if (
+      currentStageId !== "asset_matching"
+      || inferAssetMatchingStep(
+        uiState.result?.data,
+        uiState.serverStatus,
+      ) === "image_selection"
+    ) return;
+    const form = activeForm();
+    if (!form) return;
+    window.clearTimeout(autoSaveTimer);
+    clearFieldErrors(form);
+    let values;
+    try {
+      values = serializeForm(form);
+    } catch (error) {
+      actionMessage.textContent = error.message;
+      return;
+    }
+    persistenceInFlight = true;
+    button.disabled = true;
+    actionMessage.textContent =
+      "正在确认文件夹并启动本机图片加载…";
+    const requestedGeneration = stageGeneration;
+    try {
+      await ensureSession();
+      const persistenceIdentity = persistenceRequestId(
+        "asset_matching",
+        "local_gallery",
+      );
+      const payload = await fetchJson(apiPath(
+        "/stages/asset_matching/prepare-gallery",
+      ), {
+        method: "POST",
+        body: JSON.stringify({
+          revision,
+          request_id: persistenceIdentity.value,
+          values,
+        }),
+      });
+      if (
+        currentStageId !== "asset_matching"
+        || requestedGeneration !== stageGeneration
+      ) return;
+      revision = payload.revision;
+      revisionLabel.textContent = String(revision);
+      currentGalleryJob = payload.gallery_job || null;
+      currentGalleryProgress = currentGalleryJob?.progress || null;
+      uiState = UiState.receiveStage(uiState, {
+        stageId: "asset_matching",
+        status: "draft",
+        result: uiState.result,
+        submission: null,
+      });
+      persistenceRequestIds.delete(persistenceIdentity.key);
+      renderStatus();
+      renderSubmission();
+      renderStageResult(stages.get("asset_matching").component);
+      actionMessage.textContent =
+        "文件夹决定已保存，本机正在加载候选图片；不会触发 Codex handoff。";
+    } catch (error) {
+      const fieldErrors = error.payload?.field_errors;
+      if (fieldErrors) showFieldErrors(form, fieldErrors);
+      actionMessage.textContent = error.userMessage || error.message;
+      button.disabled = false;
+    } finally {
+      persistenceInFlight = false;
     }
   }
 
@@ -3921,6 +4315,19 @@
     if (mode === "submit") window.clearTimeout(autoSaveTimer);
     const requestedStageId = currentStageId;
     const requestedGeneration = stageGeneration;
+    if (
+      mode === "submit"
+      && requestedStageId === "asset_matching"
+      && inferAssetMatchingStep(
+        uiState.result?.data,
+        uiState.serverStatus,
+      ) !== "image_selection"
+    ) {
+      actionMessage.textContent =
+        "请使用文件夹列表下方的“确认文件夹并加载图片”。";
+      persistenceInFlight = false;
+      return;
+    }
     const form = activeForm();
     if (!form) {
       persistenceInFlight = false;
@@ -3938,6 +4345,8 @@
     if (
       mode === "submit"
       && requestedStageId === "asset_matching"
+      && inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
+        === "image_selection"
     ) {
       const decisions = Array.isArray(values.asset_decisions)
         ? values.asset_decisions.filter((item) => item?.decision === "selected")
@@ -3947,10 +4356,17 @@
         const productId = String(item.product_id || "");
         counts.set(productId, (counts.get(productId) || 0) + 1);
       });
-      const shortages = [...counts.entries()]
-        .filter(([, count]) => count < 3)
-        .map(([productId, count]) => `${productId || "当前商品"} 还差 ${3 - count} 张`);
-      if (!decisions.length || shortages.length) {
+      const requiredProducts = Array.isArray(uiState.result?.data?.requirements)
+        ? uiState.result.data.requirements
+          .map((item) => String(item?.product_id || ""))
+          .filter(Boolean)
+        : [];
+      const shortages = requiredProducts
+        .filter((productId) => (counts.get(productId) || 0) < 3)
+        .map((productId) => (
+          `${productId} 还差 ${3 - (counts.get(productId) || 0)} 张`
+        ));
+      if (!requiredProducts.length || shortages.length) {
         const message = !decisions.length
           ? "每个商品至少采用 3 张图片；当前草稿可以继续保存。"
           : `完整坑位至少需要 3 张图片：${shortages.join("；")}`;
@@ -3987,7 +4403,9 @@
         mode,
       );
       body.request_id = persistenceIdentity.value;
-      const payload = await fetchJson(apiPath(`/stages/${requestedStageId}${stageActions[mode]}`), {
+      const payload = await fetchJson(apiPath(
+        `/stages/${requestedStageId}${stageActions[mode]}`,
+      ), {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -4071,7 +4489,9 @@
         : "";
       actionMessage.textContent = pausedSubmission
         ? `保存失败，排队的提交已暂停：${error.userMessage || error.message}${suffix}`
-        : `${error.userMessage || error.message}${suffix}`;
+        : mode === "submit"
+          ? `尚未提交，未通知 Codex：${error.userMessage || error.message}${suffix}`
+          : `${error.userMessage || error.message}${suffix}`;
       uiState = UiState.markDirty(uiState);
       renderStatus();
     } finally {
@@ -4145,10 +4565,17 @@
     if (document.hidden || !sessionId) return;
     const requestedStageId = currentStageId;
     try {
-      const [stageState, sessionPayload] = await Promise.all([
+      const requests = [
         fetchJson(apiPath(`/stages/${requestedStageId}/status`)),
         fetchJson(apiPath()),
-      ]);
+      ];
+      if (requestedStageId === "asset_matching") {
+        requests.push(fetchJson(apiPath(
+          "/stages/asset_matching/gallery-job",
+        )));
+      }
+      const [stageState, sessionPayload, galleryPayload] =
+        await Promise.all(requests);
       if (requestedStageId !== currentStageId) return;
       const priorRevision = revision;
       const priorStatus = uiState.serverStatus;
@@ -4162,19 +4589,46 @@
       revisionLabel.textContent = String(revision);
       const heartbeat = sessionPayload.session.last_agent_heartbeat;
       applySessionSnapshot(sessionPayload.session);
+      if (
+        stageState.status === "completed"
+        && stages.has(sessionCurrentStageId)
+        && sessionCurrentStageId !== requestedStageId
+      ) {
+        activateStage(sessionCurrentStageId);
+        return;
+      }
       uiState = UiState.receiveStatus(uiState, stageState.status, heartbeat);
       currentProcessingClaim = stageState.processing_claim || null;
       currentCollectionStatus = stageState.collection_status || null;
       currentHandoffStatus = stageState.handoff_status || null;
+      const priorGalleryStatus = currentGalleryJob?.status || null;
+      const priorGalleryAttempt = currentGalleryJob?.attempt_id || null;
+      if (requestedStageId === "asset_matching") {
+        currentGalleryJob = galleryPayload?.gallery_job || null;
+        currentGalleryProgress = currentGalleryJob?.progress || null;
+      }
       const connection = UiState.connectionView(uiState, Date.now());
       connectionLabel.textContent = connection.connectionLabel;
       offlinePanel.hidden = connection.connectionLabel === "Agent 已连接";
-      if (stageChanged) {
+      const galleryChanged = requestedStageId === "asset_matching"
+        && (
+          priorGalleryStatus !== (currentGalleryJob?.status || null)
+          || priorGalleryAttempt !== (currentGalleryJob?.attempt_id || null)
+        );
+      if (stageChanged || galleryChanged) {
         renderStatus();
         await loadStage();
       } else {
         renderHandoffStatus(currentHandoffStatus);
         renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
+        if (currentGalleryJob?.status === "running") {
+          actionMessage.textContent = galleryProgressMessage();
+        } else if (currentGalleryJob?.status === "completed") {
+          actionMessage.textContent = galleryCompletionMessage();
+        } else if (["failed", "stale"].includes(currentGalleryJob?.status)) {
+          actionMessage.textContent =
+            `图片加载未完成：${currentGalleryJob.message || currentGalleryJob.reason_code || "未知错误"}。`;
+        }
       }
     } catch (error) {
       offlinePanel.hidden = false;
@@ -4191,6 +4645,8 @@
     uiState = UiState.switchStage(uiState, stageId);
     currentProcessingClaim = null;
     currentHandoffStatus = null;
+    currentGalleryJob = null;
+    currentGalleryProgress = null;
     recoverProcessingButton.hidden = true;
     recoveryButton.disabled = true;
     revision = 0;
@@ -4224,8 +4680,28 @@
     if (stages.has(sessionCurrentStageId)) activateStage(sessionCurrentStageId);
   });
   recoverProcessingButton.addEventListener("click", recoverExpiredProcessing);
+  retryGalleryButton.addEventListener("click", async () => {
+    retryGalleryButton.disabled = true;
+    actionMessage.textContent = "正在重新启动本地图片加载…";
+    try {
+      const payload = await fetchJson(apiPath(
+        "/stages/asset_matching/gallery-job/retry",
+      ), {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      currentGalleryJob = payload.gallery_job || null;
+      currentGalleryProgress = currentGalleryJob?.progress || null;
+      renderStatus();
+    } catch (error) {
+      actionMessage.textContent = error.userMessage || error.message;
+    } finally {
+      retryGalleryButton.disabled = false;
+    }
+  });
   panels.forEach((panel) => {
     panel.addEventListener("input", (event) => {
+      if (isHydrating) return;
       if (!event.target?.getAttribute?.("name")) return;
       if (
         !event.isTrusted

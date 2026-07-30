@@ -165,7 +165,10 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert 'name="product_scope"' not in html
     assert "在文件夹归属审查中逐步积累" not in html
     assert "视频" in html and "本轮延期" in html
-    assert f'value="{date.today():%Y-%m}"' in html
+    assert 'name="month"' not in html
+    assert "目标月份" not in html
+    assert "打开或恢复登录窗口" in html
+    assert "不要求用户手工转换为 UNC" in html
     assert 'name="products_csv"' in html and 'type="hidden"' in html
     assert 'name="rules_csv"' in html
     assert html.count('name="image_roots"') >= 3
@@ -174,6 +177,33 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert 'data-component="CollectionRuntimeConfig"' in html
     assert 'data-save-selector-profile' in html
     assert "CDP Chrome" in html
+
+
+def test_setup_login_browser_route_reuses_or_opens_visible_browser(
+    client, monkeypatch
+):
+    calls = []
+
+    def ensure(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "connected",
+            "reused": False,
+            "endpoint": kwargs["cdp_url"],
+            "pages": [{"url": kwargs["material_center_url"]}],
+        }
+
+    monkeypatch.setattr(web_module, "ensure_cdp_browser", ensure)
+
+    response = client.post(
+        "/api/runtime/collection/login-browser",
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert response.json["connected"] is True
+    assert response.json["page_count"] == 1
+    assert calls[0]["material_center_url"].startswith("https://")
 
 
 def test_collection_runtime_panel_validates_and_saves_local_profile(
@@ -371,6 +401,11 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
         endpoint="http://127.0.0.1:9222",
     )
     monkeypatch.setattr(web_module, "open_cdp_page", open_page)
+    monkeypatch.setattr(
+        web_module,
+        "prepare_high_value_validation_page",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         web_module, "inspect_cdp_endpoint", lambda *_a, **_k: connected
     )
@@ -1059,6 +1094,29 @@ def test_submit_rejects_missing_required_store(client, session_id):
     assert "store" in response.json["field_errors"]
 
 
+def test_removed_setup_month_from_stale_page_is_ignored(
+    client, session_id, tmp_path
+):
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft",
+        json={
+            "values": {
+                "store": "测试店铺",
+                "month": "2026-07",
+            },
+            "revision": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    document = json.loads(
+        (tmp_path / session_id / "01-setup" / "input.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "month" not in document["values"]
+
+
 def test_draft_is_saved_without_handoff(client, session_id, tmp_path):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/draft",
@@ -1300,7 +1358,9 @@ def test_stage_read_and_status_expose_schema_and_state(client, session_id):
 
     assert stage.status_code == 200
     assert stage.json["stage"]["id"] == "setup"
-    assert {field["name"] for field in stage.json["stage"]["fields"]} >= {"store", "month"}
+    setup_fields = {field["name"] for field in stage.json["stage"]["fields"]}
+    assert "store" in setup_fields
+    assert "month" not in setup_fields
     assert status.json["revision"] == 0
     assert status.json["status"] == "draft"
     assert status.json["collection_status"]["status"] == "draft"
@@ -1495,6 +1555,176 @@ def test_asset_matching_review_context_survives_rejected_folder_draft(
     stage_path = tmp_path / session_id / "03-asset-matching"
     assert not (stage_path / "result.json").exists()
     assert (stage_path / "review-context.json").is_file()
+
+
+def test_asset_matching_folder_review_is_a_distinct_first_submit(
+    client, session_id, tmp_path, monkeypatch
+):
+    store = SessionStore(tmp_path)
+    store.write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "exact",
+                        "folder_path": str(tmp_path / "exact"),
+                        "product_id": "P1",
+                        "source_system": "nas",
+                        "match_type": "exact_sku",
+                    },
+                    {
+                        "folder_id": "fuzzy",
+                        "folder_path": str(tmp_path / "fuzzy"),
+                        "product_id": "P1",
+                        "source_system": "nas",
+                        "match_type": "fuzzy_name_candidate",
+                    },
+                ],
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        web_module,
+        "launch_gallery_worker",
+        lambda store, current_session, job: {**job, "pid": 1234},
+    )
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
+        json={
+            "revision": 0,
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "folder_decisions": [],
+            }
+        },
+    )
+
+    assert submitted.status_code == 202
+    assert submitted.json["status"] == "local_processing"
+    persisted = store.read_optional_stage_document(
+        session_id, "asset_matching", "input"
+    )
+    assert persisted["values"]["source_types"] == ["image"]
+    assert [
+        item["decision"] for item in persisted["values"]["folder_decisions"]
+    ] == ["confirmed", "rejected"]
+    assert persisted["values"].get("asset_decisions", []) == []
+    stage_path = tmp_path / session_id / "03-asset-matching"
+    assert not (stage_path / "handoff.json").exists()
+    assert (stage_path / "gallery-job.json").is_file()
+    state = store.load_session(session_id)
+    assert state["stages"]["asset_matching"]["status"] == "draft"
+
+
+def test_asset_matching_folder_counts_are_loaded_without_opening_images(
+    client, session_id, tmp_path
+):
+    folder = tmp_path / "folder-count"
+    folder.mkdir()
+    (folder / "one.jpg").write_bytes(b"not-an-image")
+    (folder / "ignore.txt").write_text("ignore", encoding="utf-8")
+    SessionStore(tmp_path).write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "F1",
+                        "folder_path": str(folder),
+                        "product_id": "P1",
+                    }
+                ],
+            },
+        },
+    )
+
+    response = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/folder-image-counts"
+    )
+
+    assert response.status_code == 200
+    assert response.json["folder_counts"] == [
+        {
+            "folder_id": "F1",
+            "image_count_status": "ready",
+            "raw_recursive_image_count": 1,
+            "image_count_reason_code": "",
+        }
+    ]
+
+
+def test_asset_matching_rejects_all_folders_before_handoff(
+    client, session_id, tmp_path
+):
+    SessionStore(tmp_path).write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "F1",
+                        "product_id": "P1",
+                        "match_type": "fuzzy_name_candidate",
+                    }
+                ],
+            },
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
+        json={
+            "revision": 0,
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "folder_decisions": [
+                    {
+                        "folder_id": "F1",
+                        "product_id": "P1",
+                        "decision": "rejected",
+                    }
+                ],
+            }
+        },
+    )
+
+    assert response.status_code == 422
+    assert "至少采用一个" in response.json["field_errors"]["folder_decisions"]
 
 
 def test_completeness_submit_rejects_excluded_or_stale_product_ids(
@@ -1845,6 +2075,13 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         "preservesReviewContext",
     ):
         assert expected in source
+
+    assert "let isHydrating = false" in source
+    assert "if (isHydrating) return;" in source
+    assert "确认文件夹并加载图片" in source
+    assert "确认选图并提交给 Codex" in source
+    assert "第 1 步：筛选文件夹" in source
+    assert "第 2 步：选择图片" in source
     assert '["pending", "待确认"]' not in source
     assert "采用即确认该图片可用于本次发布" in source
     assert 'document.createTextNode("授权已确认")' not in source
@@ -1863,6 +2100,14 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "已选满" not in source
     assert "确认归属并记录别名" not in source
     assert 'candidate?.match_type !== "confirmed_alias"' in source
+
+
+    assert "loadFolderImageCounts" in source
+    assert "/stages/asset_matching/folder-image-counts" in source
+    assert "本机固定操作" in source
+    assert "不会触发 Codex handoff" in source
+    assert "本机正在加载图片" in source
+    assert "历史进度口径" in source
 
 
 def test_generic_result_renderer_includes_optional_agent_actions_as_safe_text():
@@ -1909,7 +2154,7 @@ def test_stage_read_returns_only_allowlisted_current_input_values(
         "revision": 1,
         "values": {
             "image_roots": roots,
-            "source_types": ["模特图", "买家秀"],
+            "source_types": ["image"],
             "include_video": False,
         },
     }

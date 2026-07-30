@@ -570,6 +570,7 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .folder-card[data-decision="confirmed"] { border-left-color: #2f6f5a; opacity: 1; }
 .folder-card[data-decision="rejected"] { border-left-color: #ad361f; opacity: 0.55; }
 .folder-card-identity, .folder-card-controls { display: grid; gap: 7px; min-width: 0; }
+.folder-image-count { color: #2f6f5a; font-weight: 700; }
 .folder-card-identity code {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -579,6 +580,15 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 }
 .folder-match-badge { color: #2f5c4c; font-size: 10px; }
 .folder-card-controls select, .folder-card-controls input { width: 100%; }
+.local-gallery-action {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 16px;
+  border: 1px solid rgba(47, 111, 90, 0.24);
+  border-radius: 14px;
+  background: rgba(47, 111, 90, 0.06);
+}
 
 .offline-panel { max-width: 1260px; margin: 22px auto 0; box-shadow: none; }
 .offline-title { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }

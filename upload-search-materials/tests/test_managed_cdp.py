@@ -106,7 +106,11 @@ def test_launch_requires_configured_or_discoverable_browser(monkeypatch, tmp_pat
         "inspect_cdp_endpoint",
         lambda value: CdpStatus(False, value),
     )
-    monkeypatch.setattr(session_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(
+        session_module,
+        "discover_browser_executable",
+        lambda: None,
+    )
 
     with pytest.raises(CdpUnavailable, match="BROWSER_EXECUTABLE_REQUIRED"):
         launch_cdp_browser(
@@ -115,6 +119,19 @@ def test_launch_requires_configured_or_discoverable_browser(monkeypatch, tmp_pat
             cdp_url="http://127.0.0.1:9222",
             material_center_url="https://example.test/materials",
         )
+
+
+def test_discovery_finds_standard_windows_browser_location(
+    monkeypatch, tmp_path
+):
+    chrome = tmp_path / "Google" / "Chrome" / "Application" / "chrome.exe"
+    chrome.parent.mkdir(parents=True)
+    chrome.write_bytes(b"fake")
+    monkeypatch.setattr(session_module.shutil, "which", lambda _: None)
+
+    assert session_module.discover_browser_executable(
+        {"PROGRAMFILES": str(tmp_path)}
+    ) == chrome
 
 
 def test_launch_passes_material_center_url_to_visible_browser(

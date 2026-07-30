@@ -140,12 +140,6 @@
                 <p class="help-text">Agent 读取页面可见店铺名后，用户在下方确认。</p>
                 <p class="field-error" id="setup-store-error" data-field-error="store" aria-live="polite"></p>
               </div>
-              <div class="field" data-field="month">
-                <label for="setup-month">目标月份<span class="required" aria-label="必填">*</span></label>
-                <input id="setup-month" name="month" type="month" value="{{ default_month }}" required aria-describedby="setup-month-error">
-                <p class="help-text">默认当前月份，可按实际推品周期修改。</p>
-                <p class="field-error" id="setup-month-error" data-field-error="month" aria-live="polite"></p>
-              </div>
               <div class="field field-wide" data-field="store_confirmed">
                 <label class="check-control">
                   <input id="setup-store-confirmed" name="store_confirmed" type="checkbox" data-value-kind="boolean" required aria-describedby="setup-store_confirmed-error">
@@ -191,6 +185,7 @@
                     <input data-selector-profile-path type="text" value="{{ setup_inputs.selectors_file }}" placeholder="选择或填写 selectors.local.yaml 的绝对路径">
                   </label>
                   <div class="image-source-actions">
+                    <button class="secondary-button" type="button" data-open-login-browser>打开或恢复登录窗口</button>
                     <button class="secondary-button" type="button" data-bootstrap-selector-profile>创建本机候选</button>
                     <button class="secondary-button" type="button" data-save-selector-profile>保存已有生产配置</button>
                     <button class="primary-button" type="button" data-validate-collection-runtime>验证当前页面</button>
@@ -211,7 +206,7 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
                   <span>图片源配置</span><strong data-image-source-summary>{{ image_sources|length }} 个图片源</strong>
-                  <p>可配置一个或多个来源。跨电脑优先填写 <code>\\服务器\共享目录</code>；盘符路径仅在当前服务会话已映射时可访问。</p>
+                  <p>可直接粘贴本机能够打开的文件夹路径，也可以点击“选择文件夹”。本地磁盘、当前用户已连接的网络盘和 UNC 路径都支持；不要求用户手工转换为 UNC。</p>
                   <p>本机配置文件：<code>{{ setup_inputs.image_config_path }}</code></p>
                   <div class="image-source-list" data-image-source-list>
                     {% for source in image_sources %}

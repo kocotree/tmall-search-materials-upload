@@ -7,7 +7,7 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 def test_skill_requires_ui_before_requesting_stage_one_business_inputs():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "不得在配置页启动前通过聊天索取店铺名、月份、图片源名称或图片根目录" in skill
+    assert "不得在配置页启动前通过聊天索取店铺名、图片源名称或图片根目录" in skill
     assert "即使尚未配置店铺或图片源，交互页面也必须正常打开" in skill
     assert "只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值" in skill
 

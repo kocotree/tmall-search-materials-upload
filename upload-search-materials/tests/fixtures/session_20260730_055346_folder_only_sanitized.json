@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "fixture": "third-stage-folder-only-regression",
+  "source_session": "20260730_055346",
+  "products": ["P-001", "P-002", "P-003"],
+  "stage_before_page_open": {
+    "stage_id": "asset_matching",
+    "revision": 0,
+    "status": "needs_user_input",
+    "workflow_step": "folder_review",
+    "folder_candidate_count": 14,
+    "asset_candidate_count": 0,
+    "source_types_present": false
+  },
+  "observed_after_read_only_page_open": {
+    "revision": 1,
+    "status": "draft",
+    "handoff_present": false,
+    "all_folder_decisions_materialized": true,
+    "source_types": []
+  },
+  "expected_after_fix": {
+    "revision": 0,
+    "status": "needs_user_input",
+    "handoff_present": false,
+    "workflow_step": "folder_review",
+    "source_types": ["image"]
+  }
+}

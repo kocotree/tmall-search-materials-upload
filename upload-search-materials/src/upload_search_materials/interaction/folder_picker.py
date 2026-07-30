@@ -157,30 +157,17 @@ def choose_directory(
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     close_fds=True,
-                    creationflags=0,
+                    creationflags=(
+                        getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                        if os.name == "nt"
+                        else 0
+                    ),
                 )
             except OSError as error:
                 raise FolderPickerError(
                     "FOLDER_PICKER_START_FAILED",
                     detail=str(getattr(error, "winerror", "") or ""),
                 ) from error
-            try:
-                with state_path.open(
-                    "x", encoding="utf-8"
-                ) as state_stream:
-                    json.dump(
-                        {
-                            "schema_version": 1,
-                            "status": "started",
-                            "request_id": request_id,
-                            "ownership_token": ownership_token,
-                            "helper_pid": int(process.pid),
-                        },
-                        state_stream,
-                        ensure_ascii=False,
-                    )
-            except FileExistsError:
-                pass
             visibility_deadline = time.monotonic() + max(
                 0.1, visibility_timeout_seconds
             )
@@ -202,12 +189,29 @@ def choose_directory(
                     if state.get("status") == "window_visible":
                         visible = True
                         break
+                if result_path.is_file():
+                    result = _validated_helper_result(
+                        result_path,
+                        request_id=request_id,
+                        ownership_token=ownership_token,
+                        helper_pid=int(process.pid),
+                    )
+                    _raise_helper_result(result)
                 if process.poll() is not None:
                     break
                 time.sleep(0.05)
             if not visible:
-                process.kill()
-                process.wait(timeout=2)
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+                if result_path.is_file():
+                    result = _validated_helper_result(
+                        result_path,
+                        request_id=request_id,
+                        ownership_token=ownership_token,
+                        helper_pid=int(process.pid),
+                    )
+                    _raise_helper_result(result)
                 raise FolderPickerError(
                     "FOLDER_PICKER_NOT_VISIBLE"
                 )
@@ -221,15 +225,12 @@ def choose_directory(
                 ) from error
             if process.returncode != 0 or not result_path.is_file():
                 raise FolderPickerError("FOLDER_PICKER_START_FAILED")
-            result = _read_result(result_path)
-            if (
-                result.get("request_id") != request_id
-                or result.get("ownership_token") != ownership_token
-                or int(result.get("helper_pid", 0)) != int(process.pid)
-            ):
-                raise FolderPickerError(
-                    "FOLDER_PICKER_PROTOCOL_ERROR"
-                )
+            result = _validated_helper_result(
+                result_path,
+                request_id=request_id,
+                ownership_token=ownership_token,
+                helper_pid=int(process.pid),
+            )
             status = str(result.get("status", ""))
             if status == "cancelled":
                 return None
@@ -259,3 +260,36 @@ def choose_directory(
             return selected
     finally:
         _PICKER_LOCK.release()
+
+
+def _validated_helper_result(
+    result_path: Path,
+    *,
+    request_id: str,
+    ownership_token: str,
+    helper_pid: int,
+) -> dict[str, Any]:
+    result = _read_result(result_path)
+    if (
+        result.get("request_id") != request_id
+        or result.get("ownership_token") != ownership_token
+        or int(result.get("helper_pid", 0)) != helper_pid
+    ):
+        raise FolderPickerError("FOLDER_PICKER_PROTOCOL_ERROR")
+    return result
+
+
+def _raise_helper_result(result: dict[str, Any]) -> None:
+    status = str(result.get("status", ""))
+    if status == "error":
+        reason = str(
+            result.get("reason_code", "FOLDER_PICKER_GUI_UNAVAILABLE")
+        )
+        if reason not in PICKER_MESSAGES:
+            reason = "FOLDER_PICKER_GUI_UNAVAILABLE"
+        raise FolderPickerError(
+            reason,
+            detail=str(result.get("detail", "")),
+        )
+    if status not in {"selected", "cancelled"}:
+        raise FolderPickerError("FOLDER_PICKER_PROTOCOL_ERROR")

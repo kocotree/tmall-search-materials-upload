@@ -224,7 +224,7 @@ def build_collection_readiness(
         next_action=(
             ""
             if dom_ready
-            else "连接 CDP Chrome 后点击“验证当前页面”"
+            else _dom_validation_next_action(evidence)
         ),
         evidence=evidence,
     )
@@ -260,7 +260,14 @@ def build_collection_readiness(
         "HUMAN_CHECK",
         "MATERIAL_PAGE_REQUIRED",
     }:
-        login_reason = "READY" if dom_ready else "LOGIN_INTERACTION_REQUIRED"
+        login_reason = (
+            "READY"
+            if (
+                evidence.get("page_identity") == "material_center"
+                and observed_store
+            )
+            else "LOGIN_INTERACTION_REQUIRED"
+        )
     login_check = _check(
         "login_and_human_check",
         ready=login_reason == "READY",
@@ -287,6 +294,39 @@ def build_collection_readiness(
         "checks": checks,
         "checked_at": iso_timestamp(),
     }
+
+
+def _dom_validation_next_action(evidence: Mapping[str, Any]) -> str:
+    fields = evidence.get("field_results", {})
+    high_value = (
+        fields.get("high_value_filter", {})
+        if isinstance(fields, Mapping)
+        else {}
+    )
+    if (
+        isinstance(high_value, Mapping)
+        and high_value.get("configured")
+        and int(high_value.get("count") or 0) == 0
+    ):
+        return (
+            "点击“验证当前页面”；系统会自动切换到"
+            "“搜推素材 → 搜推高价值”并复位到第 1 页"
+        )
+    pagination = evidence.get("pagination_state", {})
+    if (
+        isinstance(pagination, Mapping)
+        and pagination.get("verified") is False
+    ):
+        detail = str(
+            pagination.get("detail")
+            or pagination.get("reason_code")
+            or ""
+        ).strip()
+        return (
+            "点击“验证当前页面”重新确认第 1 页"
+            + (f"（{detail}）" if detail else "")
+        )
+    return "点击“验证当前页面”重新检查当前素材中心页面"
 
 
 def create_selector_candidate(

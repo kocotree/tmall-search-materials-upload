@@ -15,7 +15,7 @@
 | `FRONTEND_REQUIRED` | 指定业务字段 | 回到对应页面完成 |
 | `FALLBACK_VALIDATION_FAILED` | 当前降级草稿/提交 | 按相同字段 schema 修正，不生成 handoff |
 
-缺少店铺、月份、图片根目录、NAS 当前不可访问或未登录不是启动错误。
+缺少店铺、图片根目录、NAS 当前不可访问或未登录不是启动错误。
 
 ## 图片源路径与目录选择
 

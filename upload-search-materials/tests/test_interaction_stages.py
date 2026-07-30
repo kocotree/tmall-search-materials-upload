@@ -36,11 +36,10 @@ def test_asset_matching_defers_image_root_reachability_until_folder_confirmation
 
 def test_each_stage_declares_its_exact_fields_and_dependency():
     expected_fields = {
-        "setup": (
-            "store",
-            "store_confirmed",
-            "month",
-            "products_csv",
+            "setup": (
+                "store",
+                "store_confirmed",
+                "products_csv",
             "rules_csv",
             "folder_index_root",
             "image_source_labels",

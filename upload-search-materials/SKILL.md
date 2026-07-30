@@ -1,6 +1,6 @@
 ---
 name: upload-search-materials
-description: Use when starting, configuring, testing, preparing, validating, reviewing, resuming, auditing, dry-running, approving, publishing, or uploading Tmall search-recommendation materials. Always start or resume the managed interaction UI before requesting structured business inputs such as store, month, image-source roots, product choices, media decisions, slots, copy, approval, or production confirmation in chat.
+description: Use when starting, configuring, testing, preparing, validating, reviewing, resuming, auditing, dry-running, approving, publishing, or uploading Tmall search-recommendation materials. Always start or resume the managed interaction UI before requesting structured business inputs such as store, image-source roots, product choices, media decisions, slots, copy, approval, or production confirmation in chat.
 ---
 # Upload Search Materials
 
@@ -10,7 +10,7 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 
 1. 完整读取本文件后，从 Skill 目录执行 `scripts/start-ui.cmd`；恢复任务时必须传精确 `-Session` 和需要时的 `-RunsRoot`。该命令在后台启动服务、轮询健康状态并及时返回 JSON，不会像前台 `interact` 一样长期占用调用终端。
 2. 启动成功后，优先用 Codex 内置浏览器打开 JSON 中的精确 `url`。内置浏览器不可用时才传 `-OpenSystemBrowser` 或把 URL 交给用户。浏览器失败不等于服务失败。
-3. 新任务没有店铺、月份、图片源、NAS 映射或登录状态时仍须先打开阶段一页面；这些都是页面字段或后续原生登录动作，不是启动阻断。
+3. 新任务没有店铺、图片源、NAS 映射或登录状态时仍须先打开阶段一页面；这些都是页面字段或后续原生登录动作，不是启动阻断。
 4. 每一阶段先打开当前页面并等待精确 handoff。结构化配置和人工决定不得先在聊天中索取。
    使用 `wait-handoff` 以 30 秒片段等待：简单确认最多 5 分钟，商品/文件夹最多
    10 分钟，图片/坑位/裁剪/文案最多 15 分钟，批准与生产确认最多 10 分钟。
@@ -74,17 +74,17 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 把“运行环境准备”和“阶段 1 业务配置”严格分开：
 
 1. 启动前只检查运行条件：当前 Skill 目录、可执行的既有 `.venv`，或用于创建环境的 `uv`。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
-2. 不得在配置页启动前通过聊天索取店铺名、月份、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
+2. 不得在配置页启动前通过聊天索取店铺名、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
 3. 先通过 `scripts/start-ui.cmd` 创建时间戳会话并运行受管 UI；`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
-4. 让用户在阶段 1 配置页填写并确认店铺、月份和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
+4. 让用户在阶段 1 配置页填写并确认店铺和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
 5. setup handoff 尚未提交时，只等待页面提交或提供恢复指令；不得自行采集、索引、dry-run、上传或发布。
-6. 阶段一正式提交前必须读取页面返回的 `collection_readiness`。环境、生产选择器 schema、当前 DOM、CDP、登录/人机验证、官方素材中心页面和目标店铺必须逐项为 ready；缺一项只能保存草稿。缺少本机生产选择器时，先在页面创建 `production=false` 候选，再用当前 CDP 页面验证全部字段；禁止复制示例后直接标为生产。
+6. 阶段一正式提交前必须读取页面返回的 `collection_readiness`。环境、生产选择器 schema、当前 DOM、CDP、登录/人机验证、官方素材中心页面和目标店铺必须逐项为 ready；缺一项只能保存草稿。缺少本机生产选择器时，先在页面创建 `production=false` 候选，再用当前 CDP 页面验证全部字段；验证动作自动进入“搜推素材 → 搜推高价值”并稳定复位到第 1 页，已经处于该状态时不得重复点击激活标签。禁止复制示例后直接标为生产。
 
 聊天中用户主动提供的值可以用于解释或预填建议，但不能代替配置页提交，也不能跳过 setup handoff。
 
 ## 阶段输入（不是启动前置条件）
 
-- 用户在配置页确认页面可见的准确店铺名和目标月份；月份默认当前月。第一阶段不再配置商品范围或搜推采集页数。
+- 用户在配置页确认页面可见的准确店铺名。第一阶段不再配置目标月份、商品范围或搜推采集页数。
 - 商品总表和月度规则从项目目录自动发现。图片源在任务配置页维护，可配置 1–50 个“来源名称 + 根路径”并保存为本机配置。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
 - 本轮上传范围仅为搜推素材，不导出、不审查也不补传基础素材。搜推页的“导出数据”仅是经营指标；第二阶段商品范围必须来自正确店铺实时 DOM 中“商品分类 → 搜推高价值”的全量采集结果。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
@@ -171,7 +171,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
 2. 每台电脑只维护一份由 `folder_index_root` 指定的共享文件夹索引，不得为每个时间戳任务重新遍历全部图片 roots，也不得复制其他历史任务中的临时索引。首次缺少共享索引时运行 `index-folders`；素材目录新增、删除或改名后对同一索引运行 `--refresh`；只调整名称或货号匹配规则时运行 `--rematch-only`。这些操作只记录文件夹名称、路径和商品匹配，不读取图片内容。`--refresh` 会遍历目录树发现变化，但在同一数据库中增量维护 active/inactive 状态。
 3. 从共享 `folder-candidates.csv` 使用 `snapshot-folder-candidates` 仅提取第二阶段所选商品，把候选 CSV、扫描摘要和后续 `folder-review.json` 保存到当前任务目录；任务目录不得包含 `folder-index.sqlite3`。文件夹匹配优先使用商品 ID、完整货号和规范化商品基础名称；匹配基础名称时忽略末尾的“（主）/（副）”。除此之外，可将与基础名称具有至少 50% 最长公共连续字符、且公共连续部分不少于 5 个字符的文件夹作为粗略候选，但不得据此自动确认归属。若用户明确给出完整文件夹名，可用 `prepare-folder-review --exact-folder PRODUCT_ID=FOLDER_NAME` 做当前任务的一次性精确查询；不得把该查询写入别名表或自动复用于其他任务。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；ID、货号和完整基础名称候选默认“采用”，粗略候选默认“排除”，用户筛选后再读取采用文件夹中的图片；决定写入当前时间戳会话的 `folder_decisions`。
-4. 文件夹决定提交后，默认运行 `prepare-confirmed-gallery`：只枚举当前商品采用中的文件夹。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。
+4. “素材匹配”是同一阶段内的两步流程。`folder_review` 页面先显示目录元数据，并异步回填每个候选文件夹的原始递归素材数；该轻量计数只枚举受支持图片路径，不打开、解码或哈希图片，访问失败必须显示“素材数未知”，不能显示 0。文件夹列表下方、候选图片上方的“确认文件夹并加载图片”是页面服务的固定本机操作：它直接调用 `prepare-gallery` 并启动持久化 gallery job，不经过通用阶段提交处理器，不创建 handoff、不领取 Agent 租约，也不需要在聊天回复“已提交”。`folder_review` 和 `gallery_preparing` 时页面底部不得再显示阶段提交按钮。选图页原位置按钮为“确认选图并提交给 Codex”；只有它在每个商品至少 3 张有效唯一图片的最终校验通过后创建 `final_material_selection` handoff。Codex 使用 `process-final-material-handoff --runs-root ... --session ...` 校验最终素材包并继续确定性坑位编排，不重新扫描文件夹。采用文件夹不等于采用图片，刷新页面不得自动保存或增加 revision。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；运行中分别显示发现路径、计划检查、已检查、检查失败、内容重复、最终候选和待处理数量，完成后最终候选必须等于已检查减内容重复。结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。旧会话缺少新计数字段时只显示“历史进度口径”，不得从旧 `prepared_count` 猜测最终候选数。
 5. 人工审查并排除错误的完整名称候选、同货号不同名称文件夹，再逐文件选择本次采用素材；采用图片时同步生成本次授权。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；历史 `pending` 文件夹按默认采用读取，新提交不得继续保存 `pending`。
 6. 搜推素材实时采集完成后，运行 `tmall-materials inspect-completeness --products <商品表> --promotion-status <promotion-material-status.csv> --output <任务目录>/02-completeness/completeness-matrix.json`。只有“搜推高价值”采集结果中的商品进入第二阶段，商品表只补充名称和货号，不得扩展商品范围。把 JSON 写入当前 revision 的 `result.json.data`，页面展示搜推素材目标/已有/缺失篇数、候选素材状态和后台证据。用户可搜索、筛选、逐项或批量选择商品；提交后从 `02-completeness/input.json.values.selected_product_ids` 读取下阶段商品范围，禁止要求用户直接编辑 JSON。
 7. 完成素材完整性可视化审查后，再进入生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
@@ -182,7 +182,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 
 推广素材状态采集和文件夹归属审查完成后，默认使用 `tmall-materials prepare-confirmed-gallery` 将当前 `input.json` 的采用文件夹与 `promotion-material-status.csv` 合并为任务级候选 JSON。采用文件夹只授权生成候选，不自动采用其中图片。第三阶段不计算“必须选择的图片总数”，用户可从每商品最多 100 张候选中人工采用任意数量；提交时每个商品必须至少有 3 张预检通过且源 SHA-256 唯一的图片，后台缺失篇数只作为上下文。第五阶段按 `K=min(后台缺失坑位, floor(有效唯一采用图片数/3))` 创建坑位，最多使用 `min(有效唯一采用图片数,K*9)` 张图片，并为每个坑位安排 3–9 张、统一为 3:4 或 1:1 的图片；超出容量的采用图片进入未使用候选池，本次任务不要求填满后台全部空坑位。超过 100 张时执行覆盖优先、剩余名额按比例分配的任务内稳定伪随机抽样。只有显式离线审计场景才使用 `prepare-gallery` 从 `asset-index.sqlite3` 生成候选。
 
-首次进入“素材匹配”阶段时提交本次配置的一个或多个图片根目录，由 Agent 从本机共享文件夹索引生成当前商品候选。页面先执行文件夹归属审查，只提供“采用 / 排除该文件夹”二态决定并保存到 `folder_decisions`：确定性候选默认采用，50% 连续名称粗略候选默认排除，用户确认后才能采用。排除文件夹必须立即从同商品画廊移除其候选，并同步取消来自该文件夹的已选素材与本次授权，显示准确取消数量；重新采用只恢复已有候选，不恢复旧选择。过滤后必须重新计算候选数、30 张分页、页码和换批按钮。提交文件夹决定时只校验 `image_roots` 为非空路径列表；当前 Web 服务进程是否能读取映射盘不能阻断决定保存，只有 Agent 在准备枚举图片时才检查实时可访问性。`needs_user_input`/`blocked` 的素材匹配结果必须保存为只读 `review-context.json`。页面展示缩略图、来源、匹配方式和单一“采用”选择；勾选“采用”即确认该图片可用于本次发布。前端一次操作同时写入 `asset_decisions` 和对应的 `license_decisions`，后端必须按最终文件夹决定再次过滤并规范化授权记录。新图片候选必须携带稳定 `folder_id` 和 `folder_path`；历史候选缺少 `folder_id` 时按最长规范化父路径关联，无法关联时保留并标记。候选准备时把最长边不超过 640 像素的 JPEG 预览写入当前任务 `03-asset-matching/preview-cache/`，页面不得直接传输共享盘原图；旧任务缺少预览时按需生成。预览使用短时私有缓存，选择图片时不得重建整组图片卡片。
+首次进入“素材匹配”阶段时沿用任务配置的图片根目录，由本地页面服务从本机共享文件夹索引生成当前商品候选。`source_types` 固定规范化为 `["image"]`，不要求用户填写。页面先执行文件夹归属审查，只提供“采用 / 排除该文件夹”二态决定并保存到 `folder_decisions`：确定性候选默认采用，50% 连续名称粗略候选默认排除，用户确认后才能采用；全部排除时不得加载图片。排除文件夹必须立即从同商品画廊移除其候选，并同步取消来自该文件夹的已选素材与本次授权；重新采用未被本轮画廊准备的文件夹时必须重新加载图片，不恢复旧选择。过滤后必须重新计算候选数、30 张分页、页码和换批按钮。保存文件夹决定时只校验 `image_roots` 为非空路径列表；随后由页面服务启动的本地 Worker 在相同 Windows 身份下检查实时可访问性。不可访问或身份变化时写入稳定 gallery-job 错误并提供“重试加载图片”，不得创建 Codex handoff。画廊必须绑定 `session_id/stage_id/prepared_from_revision/prepared_from_input_sha256/folder_decisions_sha256/prepared_folder_keys`；陈旧或跨任务画廊不得用于最终提交。`needs_user_input`/`blocked` 的素材匹配结果必须保存为只读 `review-context.json`。页面展示缩略图、来源、匹配方式和单一“采用”选择；勾选“采用”即确认该图片可用于本次发布。前端一次操作同时写入 `asset_decisions` 和对应的 `license_decisions`，后端必须按最终文件夹决定再次过滤并规范化授权记录。新图片候选必须携带稳定 `folder_id` 和 `folder_path`；历史候选缺少 `folder_id` 时按最长规范化父路径关联，无法关联时保留并标记。候选准备时把最长边不超过 640 像素的 JPEG 预览写入当前任务 `03-asset-matching/preview-cache/`，页面不得直接传输共享盘原图；旧任务缺少预览时按需生成。预览使用短时私有缓存，选择图片时不得重建整组图片卡片。
 
 本地重复使用 SHA-256 排除，同一任务内同一图片不得跨商品重复选择。只有提供后台已有图片指纹时才可声称远端去重完成；后台仅提供素材 ID 而没有图片指纹时，页面必须显示“远端去重未完成”，最终上传前继续保持人工核对门禁。完整名称候选在文件夹归属确认前不可选择，逐文件授权未确认的候选也不可选择。
 
@@ -205,7 +205,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 
 1. 先解析用户指定的精确 `session_id`；不得默认选择 `runs` 中最新的会话。
 2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
-3. 任务配置页只要求店铺确认、月份和图片源配置；不提供商品范围或搜推采集页数。商品表、规则表和运行目录只读展示；图片源组件允许新增、删除、检测并保存任意 1–50 个来源，人工素材清单与历史文件只放在高级设置。
+3. 任务配置页只要求店铺确认和图片源配置；不提供目标月份、商品范围或搜推采集页数。商品表、规则表和运行目录只读展示；图片源组件允许新增、删除、检测并保存任意 1–50 个来源，人工素材清单与历史文件只放在高级设置。
 4. 启动仅监听 `localhost` 的交互页面。
 5. 第二阶段先将“搜推高价值”全量结果与商品表合并，并自动排除标题或等级命中 `uvno`、`积分`、`清仓`、`好物体验`、`会员日` 的商品。排除项保留在页面和结果中供审计，但不可选择；用户提交其余商品后直接进入第三阶段“素材匹配”，不再设置独立的“维护范围确认”阶段。
 6. 为当前 session/stage/下一 revision 注册一个 `agent_wait`。心跳租约最长 30 秒，以 10–15 秒片段续租同一 `wait_id`，不得重置 `started_at`；setup 默认总等待预算为 2 分钟。页面分别显示 Agent 在线心跳和单调递减的总预算；正常超时、错误、阶段变化或成功认领时清理租约，只有进程异常退出才等待自然过期。

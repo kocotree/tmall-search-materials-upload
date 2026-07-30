@@ -769,6 +769,85 @@ def scan_recommended_material_status(
     return list(output_by_product.values())
 
 
+def prepare_high_value_validation_page(
+    page,
+    selectors: Mapping[str, str],
+    *,
+    settle_delay_ms: int = 500,
+    action_wait_ms: int = 3000,
+) -> PaginationState:
+    """Navigate the read-only material view to high-value page 1 for validation."""
+
+    required = (
+        "promotion_tab",
+        "high_value_filter",
+        "promotion_rows",
+        "promotion_next_page",
+        *PAGINATION_SELECTOR_FIELDS,
+    )
+    missing = [
+        key for key in required if not str(selectors.get(key, "")).strip()
+    ]
+    if missing:
+        raise SelectorInvalidError(",".join(missing))
+    selected = dict(selectors)
+    category_filter = page.locator(selected["high_value_filter"])
+    filter_count = category_filter.count()
+    checked = (
+        category_filter.get_attribute("aria-checked")
+        if filter_count == 1
+        else None
+    )
+    class_name = (
+        category_filter.get_attribute("class") or ""
+        if filter_count == 1
+        else ""
+    )
+    if filter_count != 1 or (
+        checked != "true" and "checked" not in class_name.split()
+    ):
+        promotion_tab = page.locator(selected["promotion_tab"])
+        try:
+            promotion_tab.click(timeout=3000)
+        except PlaywrightError:
+            _click_with_popup_retries(
+                page,
+                promotion_tab,
+                selected,
+                field_name="promotion_tab",
+                delay_ms=settle_delay_ms,
+            )
+        if action_wait_ms:
+            page.wait_for_timeout(action_wait_ms)
+        category_filter = page.locator(selected["high_value_filter"])
+        filter_count = category_filter.count()
+    if filter_count != 1:
+        raise SelectorInvalidError(
+            f"high_value_filter:count={filter_count}"
+        )
+    checked = category_filter.get_attribute("aria-checked")
+    class_name = category_filter.get_attribute("class") or ""
+    if checked != "true" and "checked" not in class_name.split():
+        try:
+            category_filter.click(timeout=3000)
+        except PlaywrightError:
+            _click_with_popup_retries(
+                page,
+                category_filter,
+                selected,
+                field_name="high_value_filter",
+                delay_ms=settle_delay_ms,
+            )
+        if action_wait_ms:
+            page.wait_for_timeout(action_wait_ms)
+    return normalize_pagination_origin(
+        page,
+        selected,
+        action_wait_ms=action_wait_ms,
+        settle_delay_ms=settle_delay_ms,
+    )
+
+
 def _required_text(page, selector: str, field_name: str) -> str:
     locator = page.locator(selector)
     if not locator.count():

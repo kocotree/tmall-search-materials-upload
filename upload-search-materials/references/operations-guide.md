@@ -81,7 +81,7 @@ uv run python -X utf8 $quickValidate .
 
 ## 2. 创建隔离任务
 
-先创建时间戳会话并启动任务配置页，再让用户确认店铺、月份和本次图片源；不配置商品范围或搜推采集页数。缺少这些业务值不得阻止页面启动。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。搜推素材标记为“搜推高价值”全量自动采集；本分支不准备基础素材。人工图片素材清单和历史推广素材状态位于高级设置，日常执行保持为空。
+先创建时间戳会话并启动任务配置页，再让用户确认店铺和本次图片源；不配置目标月份、商品范围或搜推采集页数。缺少这些业务值不得阻止页面启动。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。搜推素材标记为“搜推高价值”全量自动采集；本分支不准备基础素材。人工图片素材清单和历史推广素材状态位于高级设置，日常执行保持为空。
 
 日常唯一推荐入口是：
 
@@ -116,7 +116,7 @@ Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入�
 
 共享文件夹索引数据库、选择器与策略配置不重复复制；任务只保存当前商品的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
 
-Agent 只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 `input_sha256` 校验后读取店铺、月份与图片源并继续。用户在聊天中主动说出的值不代替页面提交；页面未提交时保持等待，不提前运行后续动作。
+Agent 只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 `input_sha256` 校验后读取店铺与图片源并继续。用户在聊天中主动说出的值不代替页面提交；页面未提交时保持等待，不提前运行后续动作。
 
 编辑时页面停止输入约 1 秒会自动保存草稿。草稿只写当前任务，不通知 Agent；“保存为本机配置”只更新当前电脑默认图片源；“提交给 Agent”才生成可认领 handoff。提交后表单冻结。Agent 尚未认领时可撤回；进入处理中后不可撤回或覆盖。阶段目录的 `revisions/<revision>/` 保留输入和正式 handoff 快照。
 
@@ -161,7 +161,7 @@ uv run tmall-materials prepare-folder-review `
   --output "<任务目录>\03-asset-matching\folder-review.json"
 ```
 
-把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面此时只展示目录元数据，不预览、统计或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。保存草稿或提交会把二态决定写入同一阶段 `input.json.values.folder_decisions`。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定；历史 `pending` 按采用读取，新保存结果不再写入 `pending`。
+把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`，并设置 `workflow_step=folder_review`。页面先展示目录元数据，再由独立本机请求异步回填每个文件夹的原始递归素材数；计数期间显示“素材数统计中”，不可访问时显示“素材数未知”，计数过程不打开、解码或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。“确认文件夹并加载图片”必须放在文件夹列表下方、候选图片上方，是独立的本机固定操作；点击后直接调用本地 `prepare-gallery` API 保存二态决定并启动 gallery job，不经过通用阶段提交处理器。这一步不创建 handoff、不等待 Codex，也不需要回复“已提交”。文件夹审查和加载中隐藏页面底部提交按钮；进入选图后才显示原位置的“确认选图并提交给 Codex”。仅加载或刷新页面不得写草稿。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定；历史 `pending` 按采用读取，新保存结果不再写入 `pending`。
 
 只有最终采用的文件夹可进入按需图片枚举，`rejected` 不得读取。候选优先来自商品 ID、完整货号或去除末尾“（主）/（副）”后的基础名称；最长公共连续部分覆盖基础名称至少 50% 且不少于 5 个字符时，可作为默认排除的粗略候选展示。用户仍应核对同货号异名、主副链接和历史目录，并排除错误来源。
 
@@ -169,19 +169,17 @@ uv run tmall-materials prepare-folder-review `
 
 ## 3.2 默认：确认文件夹后按需准备候选
 
-正常的 1–3 商品试跑不建立全量图片索引。用户提交文件夹决定后，直接读取当前任务 `input.json` 中的 `confirmed` 目录，并结合搜推素材状态生成任务级候选清单：
+正常的 1–3 商品试跑不建立全量图片索引。用户确认文件夹后，页面服务在相同 Windows 身份下直接读取当前任务 `input.json` 中的 `confirmed` 目录，并结合搜推素材状态生成任务级候选清单。`process-gallery-job` 是页面服务维护的内部 Worker 命令，不应由 Codex 领取 handoff 后手工运行。加载失败时在页面点击“重试加载图片”，旧 attempt 保留供审计。
+
+用户完成选图并点击“确认选图并提交给 Codex”后，Codex 只处理最终素材交接：
 
 ```powershell
-uv run tmall-materials prepare-confirmed-gallery `
-  --products "<商品总表.csv>" `
-  --status "<任务目录>\promotion\promotion-material-status.csv" `
-  --input "<任务目录>\03-asset-matching\input.json" `
-  --output "<任务目录>\03-asset-matching\confirmed-gallery.json" `
-  --candidate-limit 100 `
-  --page-size 30
+uv run tmall-materials process-final-material-handoff `
+  --runs-root "<runs-root>" `
+  --session "<session-id>"
 ```
 
-该命令只遍历当前商品采用中的文件夹，候选上限按商品独立计算。每个商品发现 1–100 张唯一图片路径时全部进入候选池；超过 100 张时，先为每个非空采用文件夹分配 1 个基础名额，再按扣除基础名额后的剩余唯一图片数比例分配余量。例如单商品采用 61 个非空文件夹且发现总数超过 100 张时，先分配 61 张，再按比例分配剩余 39 张。若非空文件夹超过 100 个，候选仍限制为 100 张，确定性决定得到名额的文件夹，并返回 `FOLDER_COVERAGE_LIMIT_EXCEEDED`；空文件夹、完全重叠文件夹和未得到名额的文件夹仍保留零分配审计行。系统使用任务 ID、商品 ID、稳定文件夹 ID 和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时重跑结果一致，新任务可重新抽样。只对抽中的候选读取尺寸、校验、计算 SHA-256 并生成预览，不建立全量图片数据库。输出中的 `candidate_strategy=proportional_task_sample`、`candidate_strategy_version`、`sampling_identity_sha256`、`folder_allocations`、`scan_summary` 和逐商品 `requirements` 用于解释发现数、各目录名额、覆盖状态和候选数。
+本地 Worker 只遍历当前商品采用中的文件夹，候选上限按商品独立计算。每个商品发现 1–100 张唯一图片路径时全部进入候选池；超过 100 张时，先为每个非空采用文件夹分配 1 个基础名额，再按扣除基础名额后的剩余唯一图片数比例分配余量。例如单商品采用 61 个非空文件夹且发现总数超过 100 张时，先分配 61 张，再按比例分配剩余 39 张。若非空文件夹超过 100 个，候选仍限制为 100 张，确定性决定得到名额的文件夹，并返回 `FOLDER_COVERAGE_LIMIT_EXCEEDED`；空文件夹、完全重叠文件夹和未得到名额的文件夹仍保留零分配审计行。系统使用任务 ID、商品 ID、稳定文件夹 ID 和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时重跑结果一致，新任务可重新抽样。只对抽中的候选读取尺寸、校验、计算 SHA-256 并生成预览，不建立全量图片数据库。同一商品内 SHA-256 相同的内容只保留一张；因此“计划检查 300 张、成功检查 300 张、内容重复 14 张、最终候选 286 张”是正常且可解释的结果。运行中页面显示发现路径和检查 X/Y，并分别显示失败、重复、最终候选和待处理；完成结果必须覆盖最后一次运行消息，刷新后从完成快照恢复相同数字。旧任务没有新字段时显示“历史进度口径”，不能猜测重复数。输出中的 `candidate_strategy=proportional_task_sample`、`candidate_strategy_version`、`sampling_identity_sha256`、`folder_allocations`、`scan_summary` 和逐商品 `requirements` 用于解释发现数、各目录名额、覆盖状态和候选数。
 
 第三阶段只保留单一“采用”操作，候选首次显示时全部保持未选中；采用文件夹或进入候选池都不能自动采用图片。用户勾选即确认该图片可用于本次发布，前端同步写入采用与授权状态，后端按采用项重新生成授权记录。提交时每个商品至少需要 3 张可读、策略兼容且源 SHA-256 唯一的图片；除此之外不设置低于每商品 100 张候选池的采用上限。用户选中的图片只记录稳定 `selection_order`，不提前写入坑位分组。第五阶段按 `K=min(后台缺失坑位,floor(有效唯一采用图片数/3))` 决定坑位数，并最多使用 `min(有效唯一采用图片数,K*9)` 张图片；每个图文坑位使用 3–9 张、同坑只能使用 3:4 或 1:1 且不得混合比例，超出容量的采用图片保留在未使用候选池，未在本次填充的后台空坑位继续保留为缺失。`confirmed-gallery.json` 只属于当前时间戳任务，不作为跨任务共享索引。候选准备阶段同步生成最长边不超过 640 像素的 JPEG 到 `03-asset-matching/preview-cache/`；Web 页面只传本地预览，原图保持只读并留给最终上传。旧任务首次请求时按需补建预览。Web 预览仍只允许结果中列出的文件，并额外校验原图位于已确认文件夹下，以兼容配置中的 Y/Z 映射盘与 Agent 实际解析到的 UNC 路径不同。预览响应使用短时私有缓存，勾选时只更新当前卡片和决定，不重新创建整个图片网格。
 

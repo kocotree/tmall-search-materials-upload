@@ -4,8 +4,10 @@ import pytest
 
 from upload_search_materials.desktop_launcher import (
     DesktopLauncherError,
+    ensure_login_browser,
     validate_desktop_launch,
 )
+from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 from upload_search_materials.runtime_identity import (
     LocalResourceIdentityMismatch,
     require_local_resource_identity,
@@ -120,3 +122,36 @@ def test_runtime_identity_comparison_fails_closed(monkeypatch):
         match="LOCAL_RESOURCE_IDENTITY_MISMATCH",
     ):
         require_local_resource_identity(expected)
+
+
+def test_login_browser_is_started_before_workbench_ui(monkeypatch, tmp_path):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        browser_profile_dir=tmp_path / "profile",
+        material_center_url="https://example.test/material-center",
+    )
+    calls = []
+
+    def ensure(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "connected",
+            "reused": False,
+            "endpoint": kwargs["cdp_url"],
+            "pages": [{"url": kwargs["material_center_url"]}],
+        }
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_cdp_browser",
+        ensure,
+    )
+
+    result = ensure_login_browser(runtime)
+
+    assert result["connected"] is True
+    assert result["page_count"] == 1
+    assert calls[0]["material_center_url"] == runtime.material_center_url

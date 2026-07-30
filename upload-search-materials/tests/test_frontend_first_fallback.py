@@ -112,7 +112,7 @@ def test_fallback_rejects_stale_revision_and_field_validation(tmp_path):
         "revision": 0,
         "reason_code": "UI_UNREACHABLE",
         "reason_detail": "health endpoint failed",
-        "values": {"month": "2026-07"},
+        "values": {"store": "测试店铺"},
     }
     assert client.post(
         f"/api/sessions/{session_id}/stages/setup/chat-fallback", json=good
@@ -126,7 +126,7 @@ def test_fallback_rejects_stale_revision_and_field_validation(tmp_path):
             "revision": 1,
             "reason_code": "UI_UNREACHABLE",
             "reason_detail": "health endpoint failed",
-            "values": {"month": "July"},
+            "values": {"store": 42},
         },
     )
     assert stale.status_code == 409

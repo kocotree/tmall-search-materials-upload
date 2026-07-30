@@ -6,7 +6,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .browser.session import CdpUnavailable, ensure_cdp_browser
 from .interaction.service import start_service
+from .runtime_config import load_runtime_config
+from .runtime_config import RuntimeConfig
 
 
 SESSION_PATTERN = re.compile(r"^\d{8}_\d{6}(?:_\d{2})?$")
@@ -67,12 +70,46 @@ def validate_desktop_launch(
     }
 
 
+def ensure_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
+    """Open the visible login browser before showing configuration UI."""
+
+    try:
+        cdp = ensure_cdp_browser(
+            executable=runtime.browser_executable,
+            profile_dir=runtime.browser_profile_dir,
+            cdp_url=runtime.cdp_url,
+            material_center_url=runtime.material_center_url,
+        )
+        login_browser = {
+            "status": str(cdp.get("status", "connected")),
+            "connected": cdp.get("status") == "connected",
+            "reused": bool(cdp.get("reused")),
+            "endpoint": str(cdp.get("endpoint", runtime.cdp_url)),
+            "page_count": len(cdp.get("pages", [])),
+        }
+    except CdpUnavailable as error:
+        login_browser = {
+            "status": "unavailable",
+            "connected": False,
+            "reason_code": str(error).split(":", 1)[0],
+            "message": str(error),
+            "endpoint": runtime.cdp_url,
+        }
+    return login_browser
+
+
 def launch_desktop_workbench(**kwargs: Any) -> dict[str, Any]:
     launch = validate_desktop_launch(**kwargs)
-    return start_service(
+    runtime = load_runtime_config(
+        launch["config"],
+        start=launch["project_root"],
+    )
+    login_browser = ensure_login_browser(runtime)
+    result = start_service(
         launch["runs_root"],
         session_id=launch["session_id"],
         port_start=launch["port_start"],
         port_end=launch["port_end"],
         config=str(launch["config"]) if launch["config"] else None,
     )
+    return {**result, "login_browser": login_browser}

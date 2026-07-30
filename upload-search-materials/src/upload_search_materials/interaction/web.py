@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 import secrets
 from typing import Any
@@ -15,7 +15,13 @@ from flask import Flask, jsonify, render_template, request, send_file
 import yaml
 
 from ..browser.config import SelectorConfigError, load_selector_profile
-from ..browser.session import inspect_cdp_endpoint, open_cdp_page
+from ..browser.material_page import prepare_high_value_validation_page
+from ..browser.session import (
+    CdpUnavailable,
+    ensure_cdp_browser,
+    inspect_cdp_endpoint,
+    open_cdp_page,
+)
 from ..collection_readiness import (
     build_collection_readiness,
     create_selector_candidate,
@@ -38,8 +44,26 @@ from ..agent_handoff import (
     three_step_slot_ui_enabled,
 )
 from ..assets import build_image_preview
+from ..asset_matching_workflow import (
+    ALL_FOLDERS_REJECTED,
+    FOLDER_REVIEW,
+    GALLERY_IDENTITY_STALE,
+    IMAGE_SELECTION,
+    PRODUCT_IMAGE_SHORTAGE,
+    gallery_covers_folder_decisions,
+    infer_workflow_step,
+)
 from ..deterministic_slot_planning import build_deterministic_slot_plan
 from ..image_compliance import default_image_policy
+from ..gallery_jobs import (
+    create_or_reuse_gallery_job,
+    launch_gallery_worker,
+    migrate_legacy_gallery_handoff,
+    invalidate_gallery_if_scope_expands,
+    read_gallery_job,
+    reconcile_gallery_job,
+)
+from ..folder_index import count_candidate_folder_images
 from ..io_tables import SchemaError, read_product_csv, validate_product_records
 from ..image_review import (
     build_image_review_data,
@@ -272,7 +296,6 @@ def create_app(
             image_sources=runtime.image_sources,
             runs_root=str(store.runs_root.resolve()),
             task_directory=str(task_directory),
-            default_month=date.today().strftime("%Y-%m"),
             static_asset_version=static_asset_version,
             setup_inputs={
                 "products_csv": str(runtime.products.path or ""),
@@ -606,6 +629,15 @@ def create_app(
                 runtime.cdp_url,
                 runtime.material_center_url,
             ) as page:
+                navigation_profile = load_selector_profile(
+                    selector_path,
+                    purpose="high_value_collection",
+                    production=False,
+                )
+                prepare_high_value_validation_page(
+                    page,
+                    navigation_profile.selectors,
+                )
                 validation = validate_selector_candidate(
                     selector_path,
                     page,
@@ -664,6 +696,32 @@ def create_app(
             promoted=promoted,
             collection_readiness=readiness,
             evidence_path=str(evidence_path),
+        )
+
+    @app.post("/api/runtime/collection/login-browser")
+    def open_collection_login_browser():
+        require_desktop_identity()
+        try:
+            result = ensure_cdp_browser(
+                executable=runtime.browser_executable,
+                profile_dir=runtime.browser_profile_dir,
+                cdp_url=runtime.cdp_url,
+                material_center_url=runtime.material_center_url,
+            )
+        except CdpUnavailable as error:
+            return _error(
+                "login browser unavailable",
+                503,
+                reason_code=str(error).split(":", 1)[0],
+                message=str(error),
+                next_action="请检查 Chrome 或 Edge 是否已安装，然后重试。",
+            )
+        return jsonify(
+            status=result.get("status", "connected"),
+            connected=result.get("status") == "connected",
+            reused=bool(result.get("reused")),
+            endpoint=result.get("endpoint", runtime.cdp_url),
+            page_count=len(result.get("pages", [])),
         )
 
     @app.put("/api/runtime/selector-profile")
@@ -768,6 +826,12 @@ def create_app(
 
     @app.get("/api/sessions/<session_id>/stages/<stage_id>")
     def get_stage_route(session_id: str, stage_id: str):
+        if stage_id == "asset_matching":
+            migrated_job, migrated = migrate_legacy_gallery_handoff(
+                store, session_id
+            )
+            if migrated and migrated_job is not None:
+                launch_gallery_worker(store, session_id, migrated_job)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
         response = {
@@ -797,7 +861,163 @@ def create_app(
             response["collection_status"] = authoritative
             response["result"] = authoritative["current_result"]
             response["result_history"] = authoritative["history"]
+        elif stage_id == "asset_matching":
+            response["gallery_job"] = reconcile_gallery_job(
+                store, session_id
+            )
         return jsonify(response)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/asset_matching/prepare-gallery"
+    )
+    def prepare_asset_gallery(session_id: str):
+        payload = _json_object()
+        state = store.load_session(session_id)
+        stage = get_stage("asset_matching")
+        values = _normalize_stage_values(
+            store,
+            session_id,
+            "asset_matching",
+            state,
+            _values(payload),
+        )
+        if state["stages"]["asset_matching"]["status"] not in {
+            "draft",
+            "needs_user_input",
+            "blocked",
+        }:
+            raise InteractionConflict(
+                "stage status does not allow local gallery preparation"
+            )
+        field_errors = (
+            _unknown_value_errors(stage, values)
+            | _value_errors(stage, values)
+        )
+        current_result = _current_result(
+            store, session_id, "asset_matching", state
+        )
+        current_data = (
+            current_result.get("data")
+            if isinstance(current_result, dict)
+            and isinstance(current_result.get("data"), dict)
+            else {}
+        )
+        candidate_products = {
+            str(item.get("product_id", ""))
+            for item in current_data.get("folder_candidates", [])
+            if isinstance(item, dict) and item.get("product_id")
+        }
+        confirmed_products = {
+            str(item.get("product_id", ""))
+            for item in values.get("folder_decisions", [])
+            if isinstance(item, dict)
+            and item.get("decision") == "confirmed"
+            and item.get("product_id")
+        }
+        missing_products = sorted(candidate_products - confirmed_products)
+        if candidate_products and missing_products:
+            field_errors["folder_decisions"] = (
+                f"{ALL_FOLDERS_REJECTED}：以下商品至少采用一个候选文件夹"
+                "后才能加载图片："
+                + "、".join(missing_products)
+            )
+        if field_errors:
+            return _validation_error(field_errors)
+        expected_revision = payload.get("revision")
+        if isinstance(expected_revision, bool) or not isinstance(
+            expected_revision, int
+        ):
+            return _validation_error({"revision": "must be an integer"})
+        local_commit = store.save_local_input(
+            session_id,
+            "asset_matching",
+            _allowlisted_values(stage, values),
+            _user_notes(payload),
+            expected_revision=expected_revision,
+            request_id=_persistence_request_id(payload),
+        )
+        job, created = create_or_reuse_gallery_job(
+            store,
+            session_id,
+            local_commit,
+            values.get("folder_decisions", []),
+        )
+        if created:
+            job = launch_gallery_worker(store, session_id, job)
+        return jsonify(
+            status="local_processing",
+            revision=local_commit["revision"],
+            input_sha256=local_commit["input_sha256"],
+            gallery_job=job,
+        ), 202
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/asset_matching/folder-image-counts"
+    )
+    def get_asset_folder_image_counts(session_id: str):
+        state = store.load_session(session_id)
+        current_result = _current_result(
+            store, session_id, "asset_matching", state
+        )
+        data = (
+            current_result.get("data")
+            if isinstance(current_result, dict)
+            and isinstance(current_result.get("data"), dict)
+            else {}
+        )
+        counts = []
+        for candidate in data.get("folder_candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            folder_id = str(candidate.get("folder_id", "")).strip()
+            folder_path = str(candidate.get("folder_path", "")).strip()
+            if not folder_id or not folder_path:
+                continue
+            counts.append(
+                {
+                    "folder_id": folder_id,
+                    **count_candidate_folder_images(Path(folder_path)),
+                }
+            )
+        return jsonify(folder_counts=counts)
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/asset_matching/gallery-job"
+    )
+    def get_asset_gallery_job(session_id: str):
+        store.load_session(session_id)
+        return jsonify(
+            gallery_job=reconcile_gallery_job(store, session_id)
+        )
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/asset_matching/gallery-job/retry"
+    )
+    def retry_asset_gallery_job(session_id: str):
+        payload = _json_object()
+        state = store.load_session(session_id)
+        current = reconcile_gallery_job(store, session_id)
+        if current is None or current.get("status") not in {"failed", "stale"}:
+            raise InteractionConflict("GALLERY_JOB_NOT_RETRYABLE")
+        revision = int(state["stages"]["asset_matching"]["revision"])
+        input_path = (
+            store._stage_path(session_id, "asset_matching") / "input.json"
+        )
+        input_document = store._read_json(input_path, "input")
+        values = input_document.get("values", {})
+        local_commit = {
+            "revision": revision,
+            "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+        }
+        job, _ = create_or_reuse_gallery_job(
+            store,
+            session_id,
+            local_commit,
+            values.get("folder_decisions", []),
+            retry=True,
+        )
+        job = launch_gallery_worker(store, session_id, job)
+        return jsonify(status="local_processing", gallery_job=job), 202
 
     @app.post(
         "/api/sessions/<session_id>/stages/<stage_id>/recover-processing"
@@ -1100,6 +1320,12 @@ def create_app(
         _supersede_slot_requests_after_revision_change(
             store, session_id, stage_id
         )
+        if stage_id == "asset_matching":
+            invalidate_gallery_if_scope_expands(
+                store,
+                session_id,
+                values.get("folder_decisions", []),
+            )
         return jsonify(status="draft", revision=document["revision"])
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/submit")
@@ -1111,6 +1337,25 @@ def create_app(
         values = _normalize_stage_values(
             store, session_id, stage_id, state, values
         )
+        request_id = _persistence_request_id(payload)
+        if (
+            state["stages"][stage_id]["status"] == "ready_for_agent"
+            and request_id is not None
+        ):
+            normalized_request_id = SessionStore._persistence_request_id(
+                request_id
+            )
+            completed = store._completed_stage_transaction(
+                store._stage_path(session_id, stage_id),
+                normalized_request_id,
+                store._stage_payload_sha(
+                    "submit",
+                    _allowlisted_values(stage, values),
+                    _user_notes(payload),
+                ),
+            )
+            if completed is not None:
+                return jsonify(**completed, next_stage=None), 202
         if state["stages"][stage_id]["status"] not in {
             "draft",
             "needs_user_input",
@@ -1130,6 +1375,71 @@ def create_app(
             field_errors |= _completeness_selection_errors(
                 store, session_id, state, values
             )
+        asset_matching_result = None
+        asset_matching_data: dict[str, Any] = {}
+        asset_matching_step = FOLDER_REVIEW
+        if stage_id == "asset_matching":
+            asset_matching_result = _current_result(
+                store, session_id, "asset_matching", state
+            )
+            candidate_data = (
+                asset_matching_result.get("data")
+                if isinstance(asset_matching_result, dict)
+                else None
+            )
+            if isinstance(candidate_data, dict):
+                asset_matching_data = candidate_data
+            asset_matching_step = infer_workflow_step(
+                asset_matching_data,
+                status=str(state["stages"]["asset_matching"]["status"]),
+            )
+            if (
+                asset_matching_step == FOLDER_REVIEW
+                and (
+                    asset_matching_data.get("workflow_step") == FOLDER_REVIEW
+                    or asset_matching_data.get("folder_candidates")
+                )
+            ):
+                return _error(
+                    "folder confirmation is a local page action",
+                    409,
+                    reason_code="LOCAL_GALLERY_ACTION_REQUIRED",
+                    message="请使用“确认文件夹并加载图片”；这一步不会提交给 Codex。",
+                    next_action="确认文件夹并加载图片",
+                )
+            confirmed_folders = [
+                item
+                for item in values.get("folder_decisions", [])
+                if isinstance(item, dict)
+                and item.get("decision") == "confirmed"
+            ]
+            has_folder_boundary = bool(
+                isinstance(asset_matching_data.get("folder_candidates"), list)
+                and asset_matching_data.get("folder_candidates")
+            )
+            candidate_products = {
+                str(item.get("product_id", ""))
+                for item in asset_matching_data.get("folder_candidates", [])
+                if isinstance(item, dict) and item.get("product_id")
+            }
+            confirmed_products = {
+                str(item.get("product_id", ""))
+                for item in confirmed_folders
+                if item.get("product_id")
+            }
+            products_without_folder = sorted(
+                candidate_products - confirmed_products
+            )
+            if (
+                not field_errors
+                and has_folder_boundary
+                and products_without_folder
+            ):
+                field_errors["folder_decisions"] = (
+                    f"{ALL_FOLDERS_REJECTED}：以下商品至少采用一个"
+                    "候选文件夹后才能加载图片："
+                    + "、".join(products_without_folder)
+                )
         if not field_errors and stage_id == "setup" and enforce_stage_order:
             readiness_path = (
                 store._session_path(session_id)
@@ -1185,18 +1495,30 @@ def create_app(
         if (
             not field_errors
             and stage_id == "asset_matching"
+            and asset_matching_step == IMAGE_SELECTION
             and values.get("asset_decisions")
         ):
-            current_result = _current_result(
-                store, session_id, "asset_matching", state
-            )
-            current_data = (
-                current_result.get("data")
-                if isinstance(current_result, dict)
-                else None
-            )
+            current_data = asset_matching_data
             if (
                 isinstance(current_data, dict)
+                and isinstance(current_data.get("asset_candidates"), list)
+            ):
+                has_folder_boundary = bool(
+                    current_data.get("folder_candidates")
+                )
+                if has_folder_boundary and not gallery_covers_folder_decisions(
+                    current_data.get("gallery_identity"),
+                    values.get("folder_decisions", []),
+                    session_id=session_id,
+                ):
+                    field_errors["folder_decisions"] = (
+                        f"{GALLERY_IDENTITY_STALE}：文件夹采用范围已扩大，"
+                        "请重新确认文件夹并加载图片"
+                    )
+                    current_data = {}
+            if (
+                not field_errors
+                and isinstance(current_data, dict)
                 and isinstance(current_data.get("asset_candidates"), list)
             ):
                 policy = default_image_policy()
@@ -1223,11 +1545,11 @@ def create_app(
                     ),
                 )
                 usable_by_product: dict[str, int] = {}
-                selected_products = {
+                required_products = {
                     str(item.get("product_id", ""))
-                    for item in values.get("asset_decisions", [])
+                    for item in current_data.get("requirements", [])
                     if isinstance(item, dict)
-                    and item.get("decision") == "selected"
+                    and item.get("product_id")
                 }
                 for item in preflight.get("assets", []):
                     if (
@@ -1241,18 +1563,25 @@ def create_app(
                         )
                 shortages = {
                     product_id: 3 - usable_by_product.get(product_id, 0)
-                    for product_id in selected_products
+                    for product_id in required_products
                     if usable_by_product.get(product_id, 0) < 3
                 }
-                if not selected_products:
-                    field_errors["asset_decisions"] = "每个商品至少采用 3 张图片"
+                if not required_products:
+                    field_errors["asset_decisions"] = (
+                        "当前画廊没有有效的商品边界，请重新加载图片"
+                    )
+                elif not values.get("asset_decisions"):
+                    field_errors["asset_decisions"] = (
+                        f"{PRODUCT_IMAGE_SHORTAGE}：每个商品至少采用 3 张图片"
+                    )
                 elif shortages:
                     detail = "；".join(
                         f"{product_id} 还差 {count} 张"
                         for product_id, count in sorted(shortages.items())
                     )
                     field_errors["asset_decisions"] = (
-                        f"完整坑位至少需要 3 张可用且不重复的图片：{detail}"
+                        f"{PRODUCT_IMAGE_SHORTAGE}：完整坑位至少需要 3 张"
+                        f"可用且不重复的图片：{detail}"
                     )
                 else:
                     missing_slots = {
@@ -1267,6 +1596,14 @@ def create_app(
                         "preflight": preflight,
                         "missing_slots": missing_slots,
                     }
+        elif (
+            not field_errors
+            and stage_id == "asset_matching"
+            and asset_matching_step == IMAGE_SELECTION
+        ):
+            field_errors["asset_decisions"] = (
+                f"{PRODUCT_IMAGE_SHORTAGE}：每个商品至少采用 3 张图片"
+            )
         if not field_errors and stage_id == "slots_copy":
             slot_context = _current_result(
                 store, session_id, "slots_copy", state
@@ -1429,6 +1766,80 @@ def create_app(
                         actor="user",
                     )
 
+        final_material_identity_sha256 = None
+        if stage_id == "asset_matching" and selected_asset_bundle is not None:
+            preflight = selected_asset_bundle["preflight"]
+            preliminary_revision = int(
+                expected_revision
+                if expected_revision is not None
+                else state["stages"]["asset_matching"]["revision"] + 1
+            )
+            stage_path = store._stage_path(session_id, "asset_matching")
+            material_identity = {
+                "folder_decisions_sha256": (
+                    selected_asset_bundle["current_data"]
+                    .get("gallery_identity", {})
+                    .get("folder_decisions_sha256")
+                ),
+                "folder_decisions": values.get("folder_decisions", []),
+                "missing_slots_by_product": selected_asset_bundle[
+                    "missing_slots"
+                ],
+                "policy_sha256": preflight["policy_sha256"],
+                "assets": preflight.get("assets", []),
+            }
+            final_material_identity_sha256 = hashlib.sha256(
+                json.dumps(
+                    material_identity,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            store._write_json_atomic(
+                stage_path / "selected-asset-preflight.json",
+                {
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "stage_id": "asset_matching",
+                    "revision": preliminary_revision,
+                    "policy_sha256": preflight["policy_sha256"],
+                    "data": preflight,
+                },
+            )
+            store._write_json_atomic(
+                stage_path / "final-material-package.json",
+                {
+                    "schema_version": 1,
+                    "record_type": "final_material_selection",
+                    "session_id": session_id,
+                    "stage_id": "asset_matching",
+                    "revision": preliminary_revision,
+                    "input_sha256": None,
+                    "folder_decisions_sha256": (
+                        selected_asset_bundle["current_data"]
+                        .get("gallery_identity", {})
+                        .get("folder_decisions_sha256")
+                    ),
+                    "folder_decisions": values.get(
+                        "folder_decisions", []
+                    ),
+                    "policy_sha256": preflight["policy_sha256"],
+                    "selected_count": preflight["selected_count"],
+                    "reviewable_count": preflight["reviewable_count"],
+                    "blocked_count": preflight["blocked_count"],
+                    "duplicate_count": preflight["duplicate_count"],
+                    "missing_slots_by_product": selected_asset_bundle[
+                        "missing_slots"
+                    ],
+                    "assets": preflight.get("assets", []),
+                    "created_at": datetime.now().astimezone().isoformat(),
+                    "status": "prepared",
+                    "material_identity_sha256": (
+                        final_material_identity_sha256
+                    ),
+                },
+            )
         handoff = store.save_input(
             session_id,
             stage_id,
@@ -1439,6 +1850,45 @@ def create_app(
                 RESULTS_USER_ACTION_STATUSES if stage_id == "results" else None
             ),
             request_id=_persistence_request_id(payload),
+            handoff_data=(
+                {
+                    "handoff_kind": "final_material_selection",
+                    "final_material_package": {
+                        "path": str(
+                            store._stage_path(
+                                session_id, "asset_matching"
+                            )
+                            / "final-material-package.json"
+                        ),
+                        "selected_count": selected_asset_bundle[
+                            "preflight"
+                        ]["selected_count"],
+                        "material_identity_sha256": (
+                            final_material_identity_sha256
+                        ),
+                        "folder_decisions_sha256": (
+                            selected_asset_bundle["current_data"]
+                            .get("gallery_identity", {})
+                            .get("folder_decisions_sha256")
+                        ),
+                        "selected_asset_ids": [
+                            str(item.get("asset_id", ""))
+                            for item in selected_asset_bundle[
+                                "preflight"
+                            ].get("assets", [])
+                            if isinstance(item, dict)
+                            and item.get("status") != "blocked"
+                            and item.get("duplicate") is not True
+                        ],
+                        "product_ids": sorted(
+                            selected_asset_bundle["missing_slots"]
+                        ),
+                    },
+                }
+                if stage_id == "asset_matching"
+                and selected_asset_bundle is not None
+                else None
+            ),
         )
         _supersede_slot_requests_after_revision_change(
             store, session_id, stage_id
@@ -1478,132 +1928,75 @@ def create_app(
                     "data": preflight,
                 },
             )
-            completed_data = dict(selected_asset_bundle["current_data"])
-            completed_data["selected_asset_preflight"] = {
+            material_package = {
+                "schema_version": 1,
+                "record_type": "final_material_selection",
+                "session_id": session_id,
+                "stage_id": "asset_matching",
                 "revision": handoff["revision"],
+                "input_sha256": handoff["input_sha256"],
+                "folder_decisions_sha256": (
+                    selected_asset_bundle["current_data"]
+                    .get("gallery_identity", {})
+                    .get("folder_decisions_sha256")
+                ),
+                "policy_sha256": preflight["policy_sha256"],
                 "selected_count": preflight["selected_count"],
                 "reviewable_count": preflight["reviewable_count"],
                 "blocked_count": preflight["blocked_count"],
                 "duplicate_count": preflight["duplicate_count"],
-                "policy_sha256": preflight["policy_sha256"],
-            }
-            store.write_result(
-                session_id,
-                "asset_matching",
-                handoff["revision"],
-                handoff["input_sha256"],
-                status="completed",
-                summary=(
-                    f"已确认 {preflight['reviewable_count']} 张可用图片，"
-                    "并自动生成确定性坑位草稿"
-                ),
-                evidence=[str(stage_path / "selected-asset-preflight.json")],
-                next_action="检查坑位草稿，确认后进行图片裁剪和压缩",
-                data=completed_data,
-            )
-            planning_decisions = [
-                {
-                    "asset_id": str(item.get("asset_id", "")),
-                    "decision": (
-                        "excluded"
-                        if item.get("status") == "blocked"
-                        or item.get("duplicate") is True
-                        else "selected"
-                    ),
-                    "candidate_ratios": list(
-                        item.get("crop_options", {}).keys()
-                    ),
-                }
-                for item in preflight.get("assets", [])
-                if isinstance(item, dict)
-            ]
-            board_data = build_rule_slot_plan(
-                preflight,
-                planning_decisions,
-                image_review_revision=0,
-            )
-            planning_error = None
-            try:
-                deterministic = build_deterministic_slot_plan(
-                    board_data,
-                    missing_slots_by_product=selected_asset_bundle[
-                        "missing_slots"
-                    ],
-                )
-            except (TypeError, ValueError) as error:
-                planning_error = str(error)
-                deterministic = {
-                    "schema_version": 1,
-                    "record_type": "deterministic_slot_plan",
-                    "assignments": [],
-                    "unused_assets": [],
-                    "products": [],
-                    "error": planning_error,
-                }
-            board_data["deterministic_plan"] = deterministic
-            context = {
-                "schema_version": 1,
-                "session_id": session_id,
-                "stage_id": "slots_copy",
-                "revision": int(
-                    store.load_session(session_id)["stages"]["slots_copy"][
-                        "revision"
-                    ]
-                ),
-                "status": "needs_user_input",
-                "summary": (
-                    f"已自动创建 {len(deterministic['assignments'])} 个完整坑位"
-                    if planning_error is None
-                    else "自动编排失败，已保留空草稿供人工处理"
-                ),
-                "blocking_reasons": (
-                    [] if planning_error is None else [
-                        "DETERMINISTIC_SLOT_PLANNING_FAILED"
-                    ]
-                ),
-                "evidence": [
-                    str(stage_path / "selected-asset-preflight.json")
+                "missing_slots_by_product": selected_asset_bundle[
+                    "missing_slots"
                 ],
-                "next_action": (
-                    "检查并可人工调整坑位，然后确认进入裁剪"
-                    if planning_error is None
-                    else f"请人工添加坑位；自动编排错误：{planning_error}"
-                ),
+                "folder_decisions": values.get("folder_decisions", []),
+                "assets": preflight.get("assets", []),
+                "selected_asset_ids": [
+                    str(item.get("asset_id", ""))
+                    for item in preflight.get("assets", [])
+                    if isinstance(item, dict)
+                    and item.get("status") != "blocked"
+                    and item.get("duplicate") is not True
+                ],
                 "created_at": datetime.now().astimezone().isoformat(),
-                "data": board_data,
+                "status": "ready_for_agent",
+                "material_identity_sha256": (
+                    final_material_identity_sha256
+                ),
             }
-            store.write_review_context(session_id, "slots_copy", context)
-            if planning_error is None:
-                save_current_slot_plan(
-                    store,
-                    session_id,
-                    board_data,
-                    deterministic["assignments"],
-                    decision_source="deterministic",
-                    context_revision=int(context["revision"]),
-                    workflow_state="plan_review",
-                    confirmed=False,
-                    actor="system",
-                )
-            next_state = store.load_session(session_id)
-            next_state["current_stage"] = "slots_copy"
-            store._write_session_state(session_id, next_state)
+            package_path = stage_path / "final-material-package.json"
+            store._write_json_atomic(package_path, material_package)
+            package_sha256 = hashlib.sha256(
+                package_path.read_bytes()
+            ).hexdigest()
+            store._append_event(
+                store._session_path(session_id),
+                "final_material_handoff_created",
+                session_id=session_id,
+                stage_id="asset_matching",
+                revision=handoff["revision"],
+                input_sha256=handoff["input_sha256"],
+                material_identity_sha256=(
+                    final_material_identity_sha256
+                ),
+            )
+            return jsonify(
+                revision=handoff["revision"],
+                input_sha256=handoff["input_sha256"],
+                created_at=handoff["created_at"],
+                status="ready_for_agent",
+                handoff_kind="final_material_selection",
+                final_material_package={
+                    **handoff["final_material_package"],
+                    "sha256": package_sha256,
+                },
+                next_stage=None,
+            ), 202
         return jsonify(
             revision=handoff["revision"],
             input_sha256=handoff["input_sha256"],
             created_at=handoff["created_at"],
-            status=(
-                "completed"
-                if stage_id == "asset_matching"
-                and selected_asset_bundle is not None
-                else "ready_for_agent"
-            ),
-            next_stage=(
-                "slots_copy"
-                if stage_id == "asset_matching"
-                and selected_asset_bundle is not None
-                else None
-            ),
+            status="ready_for_agent",
+            next_stage=None,
         ), 202
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/withdraw")
@@ -3055,9 +3448,31 @@ def _normalize_stage_values(
     values: dict[str, Any],
 ) -> dict[str, Any]:
     normalized = dict(values)
+    if stage_id == "setup":
+        # Older cached setup pages still submit this removed field. Ignoring it
+        # keeps an already-open page usable without retaining it in handoffs.
+        normalized.pop("month", None)
+        return normalized
     if stage_id != "asset_matching":
         return normalized
     normalized.pop("aliases", None)
+    # The production workflow is image-only.  Older pages exposed this as a
+    # required user field and could persist an empty list during hydration.
+    prior_input = store.read_optional_stage_document(
+        session_id, stage_id, "input"
+    )
+    prior_source_types = (
+        prior_input.get("values", {}).get("source_types")
+        if isinstance(prior_input, dict)
+        and isinstance(prior_input.get("values"), dict)
+        else None
+    )
+    normalized["source_types"] = (
+        list(prior_source_types)
+        if isinstance(prior_source_types, list)
+        and any(str(item).strip() for item in prior_source_types)
+        else ["image"]
+    )
     result = _current_result(store, session_id, stage_id, state) or {}
     data = result.get("data") if isinstance(result, dict) else {}
     data = data if isinstance(data, dict) else {}

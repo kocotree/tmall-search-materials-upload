@@ -102,7 +102,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="setup",
         title="任务配置",
-        description="确认店铺和月份；后台全量采集“搜推高价值”，商品在第二阶段选择。",
+        description="确认店铺和素材来源；后台全量采集“搜推高价值”，商品在第二阶段选择。",
         component="setup_form",
         interaction_policy="frontend_preferred",
         fields=(
@@ -119,14 +119,6 @@ STAGES: tuple[StageDefinition, ...] = (
                 "store_confirmed",
                 "确认当前页面店铺与目标店铺一致",
                 "checkbox",
-                required=True,
-                interaction_policy="frontend_preferred",
-                fallback_reason_codes=UI_FALLBACK_REASONS,
-            ),
-            _field(
-                "month",
-                "目标月份",
-                "month",
                 required=True,
                 interaction_policy="frontend_preferred",
                 fallback_reason_codes=UI_FALLBACK_REASONS,
@@ -196,7 +188,13 @@ STAGES: tuple[StageDefinition, ...] = (
                 required=True,
                 help_text="沿用任务配置；确认文件夹后由 Agent 在读取图片前检查可访问性",
             ),
-            _field("source_types", "来源类型", "multi_select", required=True),
+            _field(
+                "source_types",
+                "来源类型",
+                "multi_select",
+                disabled=True,
+                help_text="固定为图片，由系统自动填写",
+            ),
             _field(
                 "folder_decisions",
                 "候选文件夹归属决定",

@@ -352,6 +352,82 @@ def test_candidate_limit_is_independent_for_each_product(tmp_path):
     assert counts == {"1": 3, "2": 3}
 
 
+def test_gallery_counts_three_hundred_inspections_and_fourteen_duplicates(
+    tmp_path,
+):
+    products = []
+    decisions = []
+    duplicate_counts = [5, 5, 4]
+    for product_index, duplicate_count in enumerate(duplicate_counts):
+        product_id = str(product_index + 1)
+        folder = tmp_path / f"product-{product_id}"
+        folder.mkdir()
+        products.append(
+            ProductRecord(
+                product_id,
+                sku=f"SKU-{product_id}",
+                title=f"Product {product_id}",
+            )
+        )
+        decisions.append(
+            {
+                "decision": "confirmed",
+                "folder_id": f"F-{product_id}",
+                "folder_path": str(folder),
+                "product_id": product_id,
+                "source_system": "test",
+            }
+        )
+        unique_count = 100 - duplicate_count
+        unique_paths = []
+        for image_index in range(unique_count):
+            path = folder / f"unique-{image_index:03}.png"
+            _image(
+                path,
+                (
+                    image_index % 251,
+                    (image_index * 3 + product_index) % 251,
+                    (image_index * 7 + product_index) % 251,
+                ),
+            )
+            unique_paths.append(path)
+        for duplicate_index in range(duplicate_count):
+            (folder / f"duplicate-{duplicate_index:03}.png").write_bytes(
+                unique_paths[duplicate_index].read_bytes()
+            )
+
+    data = build_confirmed_folder_gallery(
+        products,
+        [
+            {"商品ID": product.product_id, "缺失数量": "1"}
+            for product in products
+        ],
+        decisions,
+        candidate_limit=100,
+        sampling_seed="count-invariants",
+    )
+
+    summary = data["scan_summary"]
+    assert summary["planned_inspection_count"] == 300
+    assert summary["inspected_count"] == 300
+    assert summary["inspection_failure_count"] == 0
+    assert summary["content_duplicate_count"] == 14
+    assert summary["final_candidate_count"] == 286
+    assert len(data["asset_candidates"]) == 286
+    assert sum(
+        item["planned_inspection_count"]
+        for item in summary["per_product"]
+    ) == 300
+    assert sum(
+        item["content_duplicate_count"]
+        for item in summary["per_product"]
+    ) == 14
+    assert sum(
+        item["final_candidate_count"]
+        for item in summary["per_product"]
+    ) == 286
+
+
 def test_extract_folder_decisions_accepts_submitted_stage_input():
     assert extract_folder_decisions(
         {"values": {"folder_decisions": [{"decision": "confirmed"}]}}

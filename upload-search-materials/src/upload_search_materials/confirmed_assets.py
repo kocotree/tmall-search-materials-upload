@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import random
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .asset_selection import build_gallery_data
 from .assets import IMAGE_EXTENSIONS, build_image_preview, inspect_asset
@@ -183,6 +183,7 @@ def build_confirmed_folder_gallery(
     page_size: int = 30,
     sampling_seed: str = "stable",
     preview_dir: Path | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Build a proportional, task-stable sample from confirmed folders."""
 
@@ -218,8 +219,11 @@ def build_confirmed_folder_gallery(
 
     records: list[_GalleryRecord] = []
     discovered = 0
+    planned_inspections = 0
     inspected = 0
     inspection_failures = 0
+    content_duplicates = 0
+    final_candidates = 0
     per_product: list[dict[str, Any]] = []
     for product_id, folder_decisions in sorted(confirmed_by_product.items()):
         product = products_by_id[product_id]
@@ -229,6 +233,27 @@ def build_confirmed_folder_gallery(
         seen_paths: set[str] = set()
         for decision in sorted(folder_decisions, key=_folder_rank):
             folder = Path(str(decision["folder_path"]))
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "current_product": product_id,
+                        "current_folder": str(folder),
+                        "discovered_count": discovered,
+                        "prepared_count": inspected,
+                        "discovered_path_count": discovered,
+                        "planned_inspection_count": planned_inspections,
+                        "inspected_count": inspected,
+                        "inspection_failure_count": inspection_failures,
+                        "content_duplicate_count": content_duplicates,
+                        "final_candidate_count": final_candidates,
+                        "pending_count": max(
+                            planned_inspections
+                            - inspected
+                            - inspection_failures,
+                            0,
+                        ),
+                    }
+                )
             discovered_paths = _iter_images(folder)
             unique_paths = []
             for path in discovered_paths:
@@ -316,7 +341,18 @@ def build_confirmed_folder_gallery(
                 ).encode("utf-8")
             ).hexdigest()
         ).shuffle(selected)
+        planned_inspections += len(selected)
+        product_inspected = 0
+        product_failures = 0
+        product_duplicates = 0
+        product_final_candidates = 0
         valid = 0
+        seen_product_sha256: set[str] = set()
+        folder_summary_by_id = {
+            str(item.get("folder_id", "")): item for item in per_folder
+        }
+        for item in per_folder:
+            item["final_candidate_count"] = 0
         for decision, path in selected:
             try:
                 inspected_asset = inspect_asset(
@@ -330,8 +366,86 @@ def build_confirmed_folder_gallery(
                 )
             except Exception:
                 inspection_failures += 1
+                product_failures += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "current_product": product_id,
+                            "current_folder": str(
+                                decision["folder_path"]
+                            ),
+                            "discovered_count": discovered,
+                            "prepared_count": inspected,
+                            "discovered_path_count": discovered,
+                            "planned_inspection_count": (
+                                planned_inspections
+                            ),
+                            "inspected_count": inspected,
+                            "inspection_failure_count": (
+                                inspection_failures
+                            ),
+                            "content_duplicate_count": (
+                                content_duplicates
+                            ),
+                            "final_candidate_count": final_candidates,
+                            "pending_count": max(
+                                planned_inspections
+                                - inspected
+                                - inspection_failures,
+                                0,
+                            ),
+                        }
+                    )
                 continue
             inspected += 1
+            product_inspected += 1
+            fingerprint = str(inspected_asset.sha256 or "")
+            duplicate = bool(
+                fingerprint and fingerprint in seen_product_sha256
+            )
+            if fingerprint:
+                seen_product_sha256.add(fingerprint)
+            if duplicate:
+                content_duplicates += 1
+                product_duplicates += 1
+            else:
+                final_candidates += 1
+                product_final_candidates += 1
+                folder_summary = folder_summary_by_id.get(
+                    _decision_folder_id(decision)
+                )
+                if folder_summary is not None:
+                    folder_summary["final_candidate_count"] = (
+                        int(
+                            folder_summary.get(
+                                "final_candidate_count", 0
+                            )
+                        )
+                        + 1
+                    )
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "current_product": product_id,
+                        "current_folder": str(decision["folder_path"]),
+                        "discovered_count": discovered,
+                        "prepared_count": inspected,
+                        "discovered_path_count": discovered,
+                        "planned_inspection_count": planned_inspections,
+                        "inspected_count": inspected,
+                        "inspection_failure_count": inspection_failures,
+                        "content_duplicate_count": content_duplicates,
+                        "final_candidate_count": final_candidates,
+                        "pending_count": max(
+                            planned_inspections
+                            - inspected
+                            - inspection_failures,
+                            0,
+                        ),
+                    }
+                )
+            if duplicate:
+                continue
             if inspected_asset.validation_status == "valid":
                 valid += 1
             folder_path = str(decision["folder_path"])
@@ -382,6 +496,11 @@ def build_confirmed_folder_gallery(
                 "complete_folder_coverage": complete_folder_coverage,
                 "discovered_images": sum(counts),
                 "prepared_candidates": len(selected),
+                "planned_inspection_count": len(selected),
+                "inspected_count": product_inspected,
+                "inspection_failure_count": product_failures,
+                "content_duplicate_count": product_duplicates,
+                "final_candidate_count": product_final_candidates,
                 "valid_candidates": valid,
                 "reason_codes": (
                     []
@@ -401,6 +520,21 @@ def build_confirmed_folder_gallery(
         for item in data["requirements"]
         if str(item.get("product_id", "")) in confirmed_by_product
     ]
+    requirement_products = {
+        str(item.get("product_id", ""))
+        for item in data["requirements"]
+        if isinstance(item, dict)
+    }
+    for product_id in sorted(set(confirmed_by_product) - requirement_products):
+        product = products_by_id[product_id]
+        data["requirements"].append(
+            {
+                "product_id": product_id,
+                "sku": str(product.sku),
+                "product_title": str(product.title),
+                "missing_materials": 0,
+            }
+        )
     data["candidate_strategy"] = CANDIDATE_STRATEGY_ID
     data["candidate_strategy_version"] = CANDIDATE_STRATEGY_VERSION
     data["candidate_limit"] = candidate_limit
@@ -429,8 +563,24 @@ def build_confirmed_folder_gallery(
         "discovered_images": discovered,
         "inspected_candidates": inspected,
         "inspection_failures": inspection_failures,
+        "discovered_path_count": discovered,
+        "planned_inspection_count": planned_inspections,
+        "inspected_count": inspected,
+        "inspection_failure_count": inspection_failures,
+        "content_duplicate_count": content_duplicates,
+        "final_candidate_count": final_candidates,
+        "pending_count": max(
+            planned_inspections - inspected - inspection_failures,
+            0,
+        ),
         "per_product": per_product,
     }
+    if inspected != final_candidates + content_duplicates:
+        raise ValueError("gallery candidate count invariant failed")
+    if planned_inspections != inspected + inspection_failures:
+        raise ValueError("gallery inspection count invariant failed")
+    if len(data.get("asset_candidates", [])) != final_candidates:
+        raise ValueError("gallery final candidate count invariant failed")
     reason_codes = list(data.get("reason_codes", []))
     if any(
         not item["complete_folder_coverage"] for item in per_product
