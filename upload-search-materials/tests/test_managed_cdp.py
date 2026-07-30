@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.request import ProxyHandler
 
 import pytest
 
@@ -48,6 +49,13 @@ def selectors():
         "promotion_rows": "tbody tr",
         "promotion_next_page": "#next",
     }
+
+
+def test_cdp_health_check_bypasses_system_proxy_for_loopback():
+    assert not any(
+        isinstance(handler, ProxyHandler)
+        for handler in session_module._LOOPBACK_OPENER.handlers
+    )
 
 
 def test_collection_page_evidence_contains_no_authentication_material():

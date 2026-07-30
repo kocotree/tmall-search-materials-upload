@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import re
 from typing import Mapping, Sequence
 
 from .path_diagnostics import diagnose_image_sources
@@ -23,6 +25,7 @@ DEFAULT_MATERIAL_CENTER_URL = (
     "https://myseller.taobao.com/home.htm/material-center/material-management"
 )
 MAX_IMAGE_SOURCES = 50
+SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,7 @@ def normalize_image_sources(
     sources: list[dict[str, str]] = []
     labels: set[str] = set()
     paths: set[str] = set()
+    source_ids: set[str] = set()
     for index, item in enumerate(value, start=1):
         if not isinstance(item, Mapping):
             raise ValueError(f"image_sources[{index}] must be an object")
@@ -168,15 +172,43 @@ def normalize_image_sources(
         if not raw_path or len(raw_path) > 1000 or "\x00" in raw_path:
             raise ValueError(f"image_sources[{index}].path is required")
         normalized_path = str(_resolve_configured_path(raw_path, workspace_root))
+        source_id = str(item.get("source_id", "")).strip().casefold()
+        if not source_id:
+            source_id = "source-" + hashlib.sha256(
+                label.casefold().encode("utf-8")
+            ).hexdigest()[:12]
+        if not SOURCE_ID_PATTERN.fullmatch(source_id):
+            raise ValueError(
+                f"image_sources[{index}].source_id is invalid"
+            )
+        canonical_unc = str(item.get("canonical_unc", "")).strip()
+        if canonical_unc and not canonical_unc.startswith("\\\\"):
+            raise ValueError(
+                f"image_sources[{index}].canonical_unc must be UNC"
+            )
         label_key = label.casefold()
         path_key = normalized_path.casefold().rstrip("\\/")
         if label_key in labels:
             raise ValueError(f"duplicate image source label: {label}")
         if path_key in paths:
             raise ValueError(f"duplicate image source path: {normalized_path}")
+        if source_id in source_ids:
+            raise ValueError(f"duplicate image source id: {source_id}")
         labels.add(label_key)
         paths.add(path_key)
-        sources.append({"label": label, "path": normalized_path})
+        source_ids.add(source_id)
+        source = {
+            "source_id": source_id,
+            "label": label,
+            "path": normalized_path,
+        }
+        if canonical_unc:
+            source["canonical_unc"] = canonical_unc
+        for key in ("last_verified_sid", "last_verified_at", "last_status"):
+            text = str(item.get(key, "")).strip()
+            if text:
+                source[key] = text
+        sources.append(source)
     return tuple(sources)
 
 
@@ -320,7 +352,18 @@ def _image_sources(value: object, workspace_root: Path) -> tuple[dict[str, str],
         raw_path = str(item.get("path", "")).strip()
         if not label or not raw_path:
             continue
-        raw_sources.append({"label": label, "path": raw_path})
+        source = {"label": label, "path": raw_path}
+        for key in (
+            "source_id",
+            "canonical_unc",
+            "last_verified_sid",
+            "last_verified_at",
+            "last_status",
+        ):
+            text = str(item.get(key, "")).strip()
+            if text:
+                source[key] = text
+        raw_sources.append(source)
     if not raw_sources:
         return ()
     return normalize_image_sources(raw_sources, workspace_root)

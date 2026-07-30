@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -72,6 +73,30 @@ def test_prepared_environment_is_independent_of_global_uv_cache(tmp_path):
     assert "AppData" not in status["uv_cache_dir"]
 
 
+def test_environment_fingerprint_accepts_windows_powershell_utf8_bom(tmp_path):
+    project = tmp_path / "upload-search-materials"
+    scripts = project / ".venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "python.exe").write_bytes(b"prepared")
+    executable = scripts / "tmall-materials.exe"
+    executable.write_bytes(b"prepared")
+    lock = project / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    fingerprint = {
+        "schema_version": 1,
+        "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "executable": str(executable.resolve()),
+    }
+    (project / ".environment-fingerprint.json").write_bytes(
+        json.dumps(fingerprint).encode("utf-8-sig")
+    )
+
+    status = environment_fingerprint(project)
+
+    assert status["prepared"] is True
+    assert status["fingerprint_status"] == "matched"
+
+
 def test_missing_or_stale_prepared_environment_is_reason_coded(tmp_path):
     project = tmp_path / "upload-search-materials"
     project.mkdir()
@@ -84,3 +109,23 @@ def test_missing_or_stale_prepared_environment_is_reason_coded(tmp_path):
 
     assert missing["prepared"] is False
     assert stale["prepared"] is False
+
+
+def test_module_environment_wins_when_repository_root_also_has_venv(tmp_path):
+    workspace = tmp_path / "workspace"
+    root_python = workspace / ".venv" / "Scripts" / "python.exe"
+    module = workspace / "upload-search-materials"
+    module_python = module / ".venv" / "Scripts" / "python.exe"
+    root_python.parent.mkdir(parents=True)
+    root_python.write_bytes(b"incomplete-root")
+    module_python.parent.mkdir(parents=True)
+    module_python.write_bytes(b"prepared-module")
+    (module / "src" / "upload_search_materials").mkdir(parents=True)
+    lock = module / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+
+    status = environment_fingerprint(module)
+
+    assert status["prepared"] is True
+    assert Path(status["python"]) == module_python
+    assert Path(status["python"]) != root_python

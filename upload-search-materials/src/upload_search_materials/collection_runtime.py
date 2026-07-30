@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .time_utils import iso_timestamp
+from .persistence import atomic_write_json, read_json
 
 
 COLLECTION_RUNTIME_SCHEMA_VERSION = 1
@@ -72,22 +73,14 @@ def attempt_path(session_path: Path, attempt_id: str) -> Path:
 
 
 def write_json_atomic(path: Path, document: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A stable sibling name keeps deep Windows session paths below MAX_PATH.
-    # One owned attempt is the sole writer for each envelope.
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(dict(document), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    atomic_write_json(path, document)
 
 
 def read_json_object(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = read_json(path)
     except (OSError, json.JSONDecodeError) as error:
         raise CollectionRuntimeError(
             f"COLLECTION_RUNTIME_DOCUMENT_INVALID:{path.name}"
@@ -147,10 +140,15 @@ def create_worker_document(
         "started_at": timestamp,
         "heartbeat_at": timestamp,
         "phase": "validating_profile",
+        "action": "validate_selector_profile",
+        "target": "high_value_collection",
+        "retry_count": 0,
+        "elapsed_ms": 0,
         "current_page": None,
         "last_completed_page": None,
         "row_count": None,
         "last_checkpoint_at": None,
+        "next_recovery": "检查运行环境和选择器诊断后恢复同一 session",
         "log_path": str(log_path),
         "terminal_status": None,
         "updated_at": timestamp,
@@ -179,11 +177,16 @@ def update_worker_progress(
     attempt_id: str,
     ownership_token: str,
     phase: str,
+    action: str | None = None,
+    target: str | None = None,
+    retry_count: int | None = None,
+    elapsed_ms: int | None = None,
     current_page: int | None = None,
     last_completed_page: int | None = None,
     row_count: int | None = None,
     last_checkpoint_at: str | None = None,
     terminal_status: str | None = None,
+    next_recovery: str | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
     document = read_json_object(path)
@@ -211,12 +214,22 @@ def update_worker_progress(
     )
     if current_page is not None:
         document["current_page"] = int(current_page)
+    if action is not None:
+        document["action"] = str(action)
+    if target is not None:
+        document["target"] = str(target)
+    if retry_count is not None:
+        document["retry_count"] = max(0, int(retry_count))
+    if elapsed_ms is not None:
+        document["elapsed_ms"] = max(0, int(elapsed_ms))
     if last_completed_page is not None:
         document["last_completed_page"] = int(last_completed_page)
     if row_count is not None:
         document["row_count"] = int(row_count)
     if last_checkpoint_at is not None:
         document["last_checkpoint_at"] = last_checkpoint_at
+    if next_recovery is not None:
+        document["next_recovery"] = str(next_recovery)
     if terminal_status is not None:
         document["terminal_status"] = terminal_status
         document["finished_at"] = timestamp

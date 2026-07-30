@@ -67,9 +67,13 @@
 - [x] 7.3 Update frontend interaction, error handling, and data-schema references with readiness, attempt, worker, progress, superseded history, and recovery reason codes.
 - [x] 7.4 Update `test_plan.md` with the real fresh-session, delayed-guide, first-checkpoint, full-pagination, interruption, and duplicate-free resume acceptance sequence.
 - [x] 7.5 Regenerate the repository Skill discovery entry if canonical content changes and validate Agent metadata.
-- [ ] 7.6 Document that this change extends rather than forks `stabilize-search-material-collection-workflow`, and reconcile or supersede its remaining live tasks during archive.
+- [x] 7.6 Document that this change extends rather than forks `stabilize-search-material-collection-workflow`, and reconcile or supersede its remaining live tasks during archive. Reconciled in `harden-handoff-and-live-workflow-reliability/traceability.md`; the unchecked live tasks below remain explicit and are superseded by that change's section 12 acceptance.
 
 ## 8. Automated and Live Acceptance
+
+> Reconciliation: unchecked live tasks 8.3–8.11 remain explicit evidence gaps;
+> their unified acceptance owner is
+> `harden-handoff-and-live-workflow-reliability` tasks 12.2–12.10.
 
 - [x] 8.1 Run targeted readiness, selector, popup, worker, attempt-status, checkpoint, recovery, environment, API, and frontend tests.
 - [x] 8.2 Run the full Python and Node suites, frontend syntax checks, Skill validator, OpenSpec strict validation, `uv lock --check`, and `git diff --check`.

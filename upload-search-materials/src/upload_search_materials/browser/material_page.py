@@ -58,11 +58,18 @@ def _settle_safe_popups(
     ]
     if not popup_selectors:
         return 0
+    events = getattr(page, "_tmall_collection_events", None)
+    if not isinstance(events, list):
+        events = []
+        setattr(page, "_tmall_collection_events", events)
     closed = 0
     quiet_checks = 0
-    for _ in range(30):
+    no_change_by_control: dict[str, int] = {}
+    for _ in range(20):
         found = False
         for popup_selector in popup_selectors:
+            if no_change_by_control.get(popup_selector, 0) >= 2:
+                continue
             locator = page.locator(popup_selector)
             for index in range(locator.count()):
                 candidate = locator.nth(index)
@@ -73,13 +80,59 @@ def _settle_safe_popups(
                 if not visible:
                     continue
                 try:
-                    candidate.click(force=True, timeout=1500)
+                    before_text = candidate.inner_text().strip()
+                except (AttributeError, PlaywrightError):
+                    before_text = ""
+                before = {
+                    "selector": popup_selector,
+                    "index": index,
+                    "text": before_text[:120],
+                }
+                try:
+                    candidate.click(timeout=1500)
                 except PlaywrightError:
-                    continue
-                closed += 1
-                found = True
+                    no_change_by_control[popup_selector] = (
+                        no_change_by_control.get(popup_selector, 0) + 1
+                    )
+                    found = True
+                    break
                 if delay_ms:
                     page.wait_for_timeout(min(delay_ms, 300))
+                after_locator = page.locator(popup_selector)
+                after_visible = False
+                after_text = ""
+                if index < after_locator.count():
+                    after_candidate = after_locator.nth(index)
+                    try:
+                        after_visible = after_candidate.is_visible()
+                        if after_visible:
+                            after_text = after_candidate.inner_text().strip()
+                    except (AttributeError, PlaywrightError):
+                        after_visible = False
+                changed = (
+                    not after_visible
+                    or after_text[:120] != before["text"]
+                )
+                events.append(
+                    {
+                        "action": "close_safe_popup",
+                        "target_field": popup_selector,
+                        "before": before,
+                        "after": {
+                            "visible": after_visible,
+                            "text": after_text[:120],
+                        },
+                        "changed": changed,
+                    }
+                )
+                if changed:
+                    no_change_by_control[popup_selector] = 0
+                    closed += 1
+                else:
+                    no_change_by_control[popup_selector] = (
+                        no_change_by_control.get(popup_selector, 0) + 1
+                    )
+                found = True
                 break
             if found:
                 break
@@ -121,14 +174,14 @@ def _click_with_popup_retries(
         and overlay_identified
     ):
         try:
-            locator.click(force=True, timeout=3000)
+            locator.evaluate("element => element.click()")
             events = getattr(page, "_tmall_collection_events", None)
             if not isinstance(events, list):
                 events = []
                 setattr(page, "_tmall_collection_events", events)
             events.append(
                 {
-                    "action": "force_click",
+                    "action": "dom_click",
                     "target_field": field_name,
                     "reason": "recognized_guide_interceptor",
                     "read_only": True,
@@ -237,6 +290,14 @@ def scan_recommended_material_status(
     if action_wait_ms:
         page.wait_for_timeout(action_wait_ms)
     _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+    if not [
+        value
+        for value in page.locator(
+            selectors["promotion_rows"]
+        ).all_inner_texts()
+        if str(value).strip()
+    ]:
+        raise SelectorInvalidError("promotion_tab:outcome_unchanged")
 
     if on_phase is not None:
         on_phase("selecting_high_value", None)

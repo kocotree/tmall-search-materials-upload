@@ -41,9 +41,9 @@ uv run python -X utf8 $quickValidate .
 
 ### 1.1 每台电脑只配置一次路径
 
-首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。也可以复制 `config/local-paths.example.json` 为 `config/local-paths.json` 后手工修改。`local-paths.json` 已被 Git 忽略，不会影响其他电脑。
+首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。保存时每个来源使用稳定 `source_id + label`，实际盘符或 UNC 是当前电脑的本机绑定；旧的 `label + path` 文件读取时自动补 source ID。另一台电脑可把同一 source ID 绑定到不同盘符或 UNC，无需修改项目文件。也可以复制 `config/local-paths.example.json` 为 `config/local-paths.json` 后手工修改。`local-paths.json` 已被 Git 忽略，不会影响其他电脑，也不得保存 NAS 凭据、目录清单或图片内容。
 
-每个图片源行的“选择文件夹”由用户点击后启动独立的 Windows STA 助手并打开原生目录选择窗口，只回填已验证的绝对目录，不扫描图片。取消不会清空当前输入；窗口忙碌、超时、无桌面会话、启动失败或返回无效路径时，页面显示具体原因并继续允许手工输入。UNC 或无界面环境可直接粘贴路径。
+每个图片源行的“选择文件夹”由用户点击后启动独立的 Windows STA 助手并打开原生目录选择窗口，只回填已验证的绝对目录，不扫描图片。助手依次记录 `started`、`window_visible`、`selected/cancelled`；窗口无法在可见性期限内证明已显示时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper，保留原输入并继续允许手工输入。取消、窗口忙碌、选择超时、无桌面会话、启动失败或返回无效路径同样不会清空输入。UNC 或无界面环境可直接粘贴路径。
 
 “检测路径”只读取目录本身的元数据，不列举子目录或图片。页面逐行返回：
 
@@ -91,6 +91,22 @@ cd .\upload-search-materials
 ```
 
 它返回精确 `session_id`、PID、端口、日志和 URL 的 JSON 后立即结束。Agent 优先用 Codex 内置浏览器打开 URL；只有内置浏览器不可用时才传 `-OpenSystemBrowser`。恢复任务时使用 `-Session "<session-id>" -RunsRoot "<runs-root>"`，不得猜测最新目录。`tmall-materials interact` 只保留为会持续占用终端的前台调试入口。
+
+当任务需要映射盘、NAS 或原生目录窗口，且普通 Codex 启动上下文看不到用户桌面的盘符时，先取得页面显示的精确 session，再由用户授权运行固定桌面入口：
+
+```powershell
+cd .\upload-search-materials
+.\scripts\start-managed-workbench.ps1 `
+  -RunsRoot "<项目内精确 runs_root>" `
+  -Session "<精确 session_id>" `
+  -PortStart 8765 `
+  -PortEnd 8795 `
+  -Config ".\config\local-paths.json"
+```
+
+该入口只接受项目内 runs root、格式合法的精确 session、项目 `config/` 下的 JSON 和最多 101 个本机端口；不能传任意命令、外部监听地址、上传或发布参数。服务始终监听 `127.0.0.1`。启动状态记录服务和启动者的 Windows SID、登录会话 ID、交互桌面可用性及可见网络盘盘符，不记录共享内容。若原服务属于另一可见盘上下文，桌面入口会先安全停止其 ownership token 对应服务再启动新服务。路径检测、picker、索引和采集 Worker 在读取素材前校验同一身份，失败返回 `LOCAL_RESOURCE_IDENTITY_MISMATCH`。
+
+图片源检测可保留 canonical UNC 作为当前电脑的回退建议。映射盘缺失时仅在已配置该 UNC 的情况下做有界元数据检测；系统不会自动映射网络盘、请求密码或绕过 Windows/NAS 权限。
 
 Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
 
@@ -145,9 +161,9 @@ uv run tmall-materials prepare-folder-review `
   --output "<任务目录>\03-asset-matching\folder-review.json"
 ```
 
-把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面此时只展示目录元数据，不预览、统计或哈希图片。所有候选文件夹默认“采用”，页面只提供“采用 / 排除该文件夹”；保存草稿或提交会把二态决定写入同一阶段 `input.json.values.folder_decisions`。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定；历史 `pending` 按采用读取，新保存结果不再写入 `pending`。
+把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`。页面此时只展示目录元数据，不预览、统计或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。保存草稿或提交会把二态决定写入同一阶段 `input.json.values.folder_decisions`。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定；历史 `pending` 按采用读取，新保存结果不再写入 `pending`。
 
-只有最终采用的文件夹可进入按需图片枚举，`rejected` 不得读取。候选只来自商品 ID、完整货号或完整商品名称命中，不使用别名；仅共享“分龄成长”等部分词语不算命中。用户仍应核对同货号异名、主副链接和历史目录，并排除错误来源。
+只有最终采用的文件夹可进入按需图片枚举，`rejected` 不得读取。候选优先来自商品 ID、完整货号或去除末尾“（主）/（副）”后的基础名称；最长公共连续部分覆盖基础名称至少 50% 且不少于 5 个字符时，可作为默认排除的粗略候选展示。用户仍应核对同货号异名、主副链接和历史目录，并排除错误来源。
 
 若商品标题与素材文件夹名称不同，但用户明确提供了完整文件夹名，可在本次任务追加 `--exact-folder "PRODUCT_ID=FOLDER_NAME"`。例如 `--exact-folder "886506466908=分龄成长太阳镜"`。该参数按规范化后的完整文件夹名精确相等，只产生本次任务的 `exact_folder_query` 候选；它不是别名，不写入共享配置，也不自动影响后续任务。
 
@@ -389,7 +405,7 @@ Agent 按以下顺序处理每一阶段：
 10. 写入与同一组四个值绑定的 `result.json`。
 11. 停止，或明确进入下一阶段。
 
-`wait-handoff` 只返回已验证的当前 handoff，并领取该阶段为 `processing`。当前九阶段流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。页面阶段 07/08 只保存输入并生成 handoff；它们不直接运行 `approve` 或 `publish`。这两个命令必须由 Agent 分开调用，且 1–3 个商品的生产测试需在当前对话再次获得用户显式授权。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
+`wait-handoff` 使用最长 30 秒的心跳租约，以 10–15 秒片段续租同一 `wait_id`；setup 默认总预算为 2 分钟。页面分别显示在线心跳与总等待剩余。命令只返回已验证的当前 handoff，并领取该阶段为 `processing`；正常预算超时、错误、阶段变化或成功认领都会清理自己拥有的 wait，异常退出才依赖自然过期。当前九阶段流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。页面阶段 07/08 只保存输入并生成 handoff；它们不直接运行 `approve` 或 `publish`。这两个命令必须由 Agent 分开调用，且 1–3 个商品的生产测试需在当前对话再次获得用户显式授权。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
 若页面没有 Agent 心跳，或原 Codex 任务已结束，请用户把页面显示的恢复指令完整粘贴到新建或当前 Codex 任务。页面不会在后台继续执行 Agent，也无法唤醒已结束的任务。
 
@@ -485,3 +501,29 @@ mode 和现有草稿。AI 超时、取消、无效或过期时不清空草稿，
   锁定比例的可视化裁剪框；页面不要求用户输入归一化坐标。单图裁剪变化只使该图
   输出与所属坑位文案失效，其他坑位文案保持有效。
 - 图片输出完成后单独领取 `copy_draft` 请求；文案确认之前不得提交第五阶段。
+# 有界等待与“已提交”恢复
+
+在精确 session 的人工阶段使用 15 秒等待片段：
+
+```powershell
+tmall-materials wait-handoff --runs-root "<runs-root>" --session "<session-id>" --stage "<stage-id>" --segment-seconds 15
+```
+
+页面正式提交后，当前片段会校验并认领 handoff。命令在一个等待回合内续租同一最长
+30 秒的 `agent_wait`，不重置 `started_at` 或总预算。setup 默认总预算为 2 分钟；
+复杂人工阶段可使用更长配置值。正常总预算结束会清理 wait 并返回聊天恢复提示，批准和
+生产确认超时永远不会形成授权。
+
+Codex 等待已结束时，在原聊天收到“已提交”后运行：
+
+```powershell
+tmall-materials resume-session --runs-root "<runs-root>" --session "<session-id>" --ack "已提交"
+```
+
+必须显式提供已绑定的 session；不得按 runs 目录时间猜测。命令只解析
+completed/processing/recoverable/ready/blocked/draft 并在身份匹配时认领，不会批准、
+上传或发布。
+
+采集 attempt 的私有写入位于
+`collected/promotion/attempts/a-<attempt-prefix>/`，成功发布位于
+`collected/promotion/current/`；旧共享 CSV/checkpoint 只是兼容投影。

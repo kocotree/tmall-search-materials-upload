@@ -114,7 +114,9 @@ def test_folder_index_refresh_marks_removed_directories_inactive(tmp_path):
     assert states == {"old": 0, "new": 1}
 
 
-def test_rematch_uses_stored_folder_names_without_rescanning_root(tmp_path):
+def test_rematch_uses_stored_folder_names_without_rescanning_root(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "root"
     (root / "KQ25046").mkdir(parents=True)
     database = tmp_path / "output" / "folder-index.sqlite3"
@@ -129,6 +131,13 @@ def test_rematch_uses_stored_folder_names_without_rescanning_root(tmp_path):
     connection.commit()
     connection.close()
     root.rename(tmp_path / "root-unavailable")
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("rematch-only must not resolve or access a NAS root")
+        ),
+    )
 
     summary = rematch_folder_index(
         database_path=database,
@@ -141,6 +150,32 @@ def test_rematch_uses_stored_folder_names_without_rescanning_root(tmp_path):
     connection = sqlite3.connect(database)
     assert connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 0
     connection.close()
+
+
+def test_rematch_cli_does_not_require_the_declared_root_to_be_online(tmp_path):
+    products = tmp_path / "products.csv"
+    products.write_text(
+        "商品ID,商品名称（查找引用）,货号（查找引用）,产品等级,链接,运营,组别,品类-公司维度划分\n"
+        "898453469175,涂鸦艺术家分体泳衣,KQ25046,S级,https://example.test/item,运营,一组,泳衣\n",
+        encoding="utf-8-sig",
+    )
+    root = tmp_path / "root"
+    (root / "KQ25046").mkdir(parents=True)
+    output = tmp_path / "output"
+    common = [
+        "--products",
+        str(products),
+        "--root",
+        f"model_nas={root}",
+        "--output",
+        str(output),
+    ]
+
+    assert main(["index-folders", *common]) == 0
+    root.rename(tmp_path / "root-offline")
+
+    assert main(["index-folders", *common, "--rematch-only"]) == 0
+    assert (output / "folder-candidates.csv").is_file()
 
 
 def test_folder_candidates_csv_contains_folder_not_image_records(tmp_path):
@@ -331,6 +366,30 @@ def test_folder_review_treats_missing_and_historical_pending_as_confirmed(tmp_pa
     assert [
         item["decision"] for item in data["folder_candidates"]
     ] == ["confirmed", "confirmed"]
+
+
+def test_folder_review_defaults_fuzzy_candidates_to_rejected(tmp_path):
+    candidates = tmp_path / "folder-candidates.csv"
+    candidates.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-1,model,Y:/one,one,果立方卡片太阳镜,768088523792,KQ24027,小魔方卡片太阳镜（主）,fuzzy_name_candidate,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+
+    default_data = build_folder_review_data(candidates)
+    confirmed_data = build_folder_review_data(
+        candidates,
+        decisions=[
+            {
+                "folder_id": "F-1",
+                "product_id": "768088523792",
+                "decision": "confirmed",
+            }
+        ],
+    )
+
+    assert default_data["folder_candidates"][0]["decision"] == "rejected"
+    assert confirmed_data["folder_candidates"][0]["decision"] == "confirmed"
 
 
 def test_prepare_folder_review_cli_writes_ui_payload(tmp_path):

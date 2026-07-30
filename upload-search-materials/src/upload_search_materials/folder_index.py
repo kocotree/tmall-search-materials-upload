@@ -60,6 +60,15 @@ def _identity(products_sha256: str, roots: Sequence[NamedRoot]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def absolute_path_without_io(path: Path) -> Path:
+    """Normalize an absolute root path without touching an unavailable NAS."""
+
+    path_text = os.fspath(path)
+    if not os.path.isabs(path_text):
+        path_text = os.path.join(os.getcwd(), path_text)
+    return Path(os.path.normpath(path_text))
+
+
 def _open_database(
     path: Path,
     *,
@@ -139,7 +148,10 @@ def build_folder_index(
     normalized_roots = tuple(
         sorted(
             (
-                NamedRoot(root.source_system, root.path.resolve())
+                NamedRoot(
+                    root.source_system,
+                    root.path.resolve(),
+                )
                 for root in roots
             ),
             key=lambda item: item.source_system,
@@ -199,7 +211,12 @@ def build_folder_index(
                 # Match the folder's own name only. Ancestor matches remain
                 # represented by their own folder record and must not make
                 # generic descendants such as "KV" or "1" duplicate candidates.
-                matches = matcher.match(Path(absolute_path.name) / "__folder__.jpg")
+                folder_matcher = getattr(matcher, "match_folder_name", None)
+                matches = (
+                    folder_matcher(absolute_path.name)
+                    if callable(folder_matcher)
+                    else matcher.match(Path(absolute_path.name) / "__folder__.jpg")
+                )
                 connection.execute(
                     "DELETE FROM matches WHERE folder_id=?", (folder_id,)
                 )
@@ -335,7 +352,10 @@ def rematch_folder_index(
     normalized_roots = tuple(
         sorted(
             (
-                NamedRoot(root.source_system, root.path.resolve())
+                NamedRoot(
+                    root.source_system,
+                    absolute_path_without_io(root.path),
+                )
                 for root in roots
             ),
             key=lambda item: item.source_system,
@@ -356,7 +376,12 @@ def rematch_folder_index(
     candidate_rows = 0
     try:
         for folder_id, folder_name in rows:
-            matches = matcher.match(Path(folder_name) / "__folder__.jpg")
+            folder_matcher = getattr(matcher, "match_folder_name", None)
+            matches = (
+                folder_matcher(folder_name)
+                if callable(folder_matcher)
+                else matcher.match(Path(folder_name) / "__folder__.jpg")
+            )
             connection.execute("DELETE FROM matches WHERE folder_id=?", (folder_id,))
             for item in matches:
                 connection.execute(
@@ -429,6 +454,7 @@ def build_folder_review_data(
             "exact_product_id",
             "exact_sku",
             "name_candidate",
+            "fuzzy_name_candidate",
         } and not is_exact_query:
             # Ignore legacy alias rows from an older shared index snapshot.
             continue
@@ -437,6 +463,11 @@ def build_folder_review_data(
             continue
         decision = decision_by_key.get((product_id, folder_id), {})
         saved_decision = str(decision.get("decision", "")).strip()
+        default_decision = (
+            "rejected"
+            if match_type == "fuzzy_name_candidate" and not is_exact_query
+            else "confirmed"
+        )
         rows.append(
             {
                 "folder_id": folder_id,
@@ -457,7 +488,9 @@ def build_folder_review_data(
                     else str(candidate.get("match_status", "")).strip()
                 ),
                 "decision": (
-                    "rejected" if saved_decision == "rejected" else "confirmed"
+                    saved_decision
+                    if saved_decision in {"confirmed", "rejected"}
+                    else default_decision
                 ),
                 "note": str(decision.get("note", "")),
             }

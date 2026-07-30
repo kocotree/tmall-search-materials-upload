@@ -52,8 +52,10 @@
   let persistenceInFlight = false;
   let pendingPersistenceMode = null;
   let localEditVersion = 0;
+  const persistenceRequestIds = new Map();
   let currentProcessingClaim = null;
   let currentCollectionStatus = null;
+  let currentHandoffStatus = null;
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -118,22 +120,45 @@
     });
   }
 
-  function appendImageSource(label = "", path = "") {
+  function appendImageSource(
+    label = "",
+    path = "",
+    sourceId = "",
+    canonicalUnc = "",
+  ) {
     if (!imageSourceConfig) return null;
     const template = imageSourceConfig.querySelector("[data-image-source-template]");
     const row = template.content.firstElementChild.cloneNode(true);
     row.querySelector('[name="image_source_labels"]').value = label;
     row.querySelector('[name="image_roots"]').value = path;
+    row.dataset.sourceId = sourceId;
+    row.dataset.canonicalUnc = canonicalUnc;
     imageSourceConfig.querySelector("[data-image-source-list]").appendChild(row);
     updateImageSourceConfig();
     return row;
   }
 
   function configuredImageSources() {
-    const sources = imageSourceRows().map((row) => ({
-      label: row.querySelector('[name="image_source_labels"]').value.trim(),
-      path: row.querySelector('[name="image_roots"]').value.trim(),
-    }));
+    const sources = imageSourceRows().map((row) => {
+      const source = {
+        label: row.querySelector('[name="image_source_labels"]').value.trim(),
+        path: row.querySelector('[name="image_roots"]').value.trim(),
+      };
+      if (row.dataset.sourceId) source.source_id = row.dataset.sourceId;
+      if (row.dataset.canonicalUnc) {
+        source.canonical_unc = row.dataset.canonicalUnc;
+      }
+      if (row.dataset.lastVerifiedSid) {
+        source.last_verified_sid = row.dataset.lastVerifiedSid;
+      }
+      if (row.dataset.lastVerifiedAt) {
+        source.last_verified_at = row.dataset.lastVerifiedAt;
+      }
+      if (row.dataset.lastStatus) {
+        source.last_status = row.dataset.lastStatus;
+      }
+      return source;
+    });
     if (!sources.length || sources.some((source) => !source.label || !source.path)) {
       throw new Error("每个图片源都必须填写来源名称和根路径");
     }
@@ -143,19 +168,26 @@
   function hydrateImageSources(labels, paths) {
     if (!imageSourceConfig || !Array.isArray(paths) || !paths.length) return;
     const safeLabels = Array.isArray(labels) ? labels : [];
-    const configuredLabels = new Map(
+    const configuredSources = new Map(
       imageSourceRows().map((row) => [
         row.querySelector('[name="image_roots"]').value.trim(),
-        row.querySelector('[name="image_source_labels"]').value.trim(),
+        {
+          label: row.querySelector('[name="image_source_labels"]').value.trim(),
+          sourceId: row.dataset.sourceId || "",
+          canonicalUnc: row.dataset.canonicalUnc || "",
+        },
       ]),
     );
     const list = imageSourceConfig.querySelector("[data-image-source-list]");
     list.replaceChildren();
     paths.forEach((path, index) => {
       const textPath = String(path || "");
+      const configured = configuredSources.get(textPath) || {};
       appendImageSource(
-        safeLabels[index] || configuredLabels.get(textPath) || `图片源 ${index + 1}`,
+        safeLabels[index] || configured.label || `图片源 ${index + 1}`,
         textPath,
+        configured.sourceId || "",
+        configured.canonicalUnc || "",
       );
     });
     updateImageSourceConfig();
@@ -183,6 +215,10 @@
         ].filter(Boolean).join(" · ");
         const portable = row.querySelector("[data-use-portable-path]");
         const suggestion = diagnostic.portable_path_suggestion || "";
+        if (suggestion) row.dataset.canonicalUnc = suggestion;
+        row.dataset.lastVerifiedSid = diagnostic.last_verified_sid || "";
+        row.dataset.lastVerifiedAt = diagnostic.last_verified_at || "";
+        row.dataset.lastStatus = diagnostic.last_status || "";
         portable.hidden = !suggestion;
         portable.dataset.path = suggestion;
         portable.title = suggestion
@@ -203,6 +239,11 @@
       const payload = await fetchJson("/api/runtime/image-sources", {
         method: "PUT",
         body: JSON.stringify({ image_sources: configuredImageSources() }),
+      });
+      imageSourceRows().forEach((row, index) => {
+        const source = payload.image_sources[index] || {};
+        row.dataset.sourceId = source.source_id || "";
+        row.dataset.canonicalUnc = source.canonical_unc || "";
       });
       feedback.textContent = `已保存 ${payload.image_sources.length} 个图片源到本机配置。`;
       updateImageSourceConfig();
@@ -238,6 +279,7 @@
         || "选择窗口不可用";
       imageSourceConfig.querySelector("[data-image-source-feedback]").textContent =
         error.userMessage || error.message;
+      pathInput.focus();
     }
   }
 
@@ -634,8 +676,10 @@
         ? "首个 checkpoint 尚未完成"
         : `已完成第 ${worker.last_completed_page} 页 · ${worker.row_count} 行`;
       actionMessage.textContent =
-        `采集 Worker 正在运行：${worker.phase || "启动中"}；${page}；` +
-        `心跳 ${formatClaimTime(worker.heartbeat_at)}。`;
+        `采集 Worker 正在执行 ${worker.action || worker.phase || "启动"} ` +
+        `（目标 ${worker.target || "当前阶段"}，重试 ${worker.retry_count || 0}）；` +
+        `${page}；心跳 ${formatClaimTime(worker.heartbeat_at)}。` +
+        `${worker.next_recovery ? ` 恢复建议：${worker.next_recovery}` : ""}`;
       return;
     }
     if (currentCollectionStatus?.status === "processing_indeterminate") {
@@ -663,6 +707,32 @@
     actionMessage.textContent =
       `Agent ${currentProcessingClaim.claimant_id || "未知"} 正在处理，租约有效至 ` +
       `${formatClaimTime(currentProcessingClaim.lease_expires_at)}；当前输入保持锁定。`;
+  }
+
+  function persistenceRequestId(stageId, mode) {
+    const key = `${sessionId}:${stageId}:${mode}`;
+    if (!persistenceRequestIds.has(key)) {
+      const generated = globalThis.crypto?.randomUUID?.()
+        || `persist-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      persistenceRequestIds.set(key, generated);
+    }
+    return { key, value: persistenceRequestIds.get(key) };
+  }
+
+  function renderHandoffStatus(display) {
+    currentHandoffStatus = display && typeof display === "object" ? display : null;
+    if (!currentHandoffStatus || uiState.serverStatus === "processing") return;
+    const wait = currentHandoffStatus.agent_wait;
+    if (currentHandoffStatus.status === "waiting" && wait) {
+      actionMessage.textContent =
+        `Codex 在线（心跳租约约 ${Math.max(0, Number(wait.remaining_seconds || 0))} 秒）；` +
+        `本轮最长等待还剩约 ${Math.max(0, Number(wait.budget_remaining_seconds || 0))} 秒。` +
+        `表单仍可正常编辑。`;
+      return;
+    }
+    if (currentHandoffStatus.resume_prompt) {
+      actionMessage.textContent = currentHandoffStatus.resume_prompt;
+    }
   }
 
   async function recoverExpiredProcessing() {
@@ -1112,6 +1182,7 @@
       exact_product_id: "0",
       exact_sku: "1",
       name_candidate: "2",
+      fuzzy_name_candidate: "3",
     };
     return [
       matchRank[candidate.match_type] || "9",
@@ -1228,12 +1299,14 @@
       }));
   }
 
-  function folderDecisionState(productId, folderId) {
+  function folderDecisionState(productId, folderId, defaultDecision = "confirmed") {
     const saved = folderDecisions().find(
       (item) => String(item.product_id) === String(productId)
         && String(item.folder_id) === String(folderId),
     );
-    return saved?.decision === "rejected" ? "rejected" : "confirmed";
+    if (saved?.decision === "rejected") return "rejected";
+    if (saved?.decision === "confirmed") return "confirmed";
+    return defaultDecision === "rejected" ? "rejected" : "confirmed";
   }
 
   function normalizedAssetPath(value) {
@@ -1351,8 +1424,8 @@
     const safety = element("div", "asset-safety");
     safety.dataset.status = "checked";
     safety.append(
-      element("strong", "", "候选文件夹默认采用"),
-      element("span", "", "排除文件夹后，下方候选图片和已选素材会立即同步。"),
+      element("strong", "", "请先筛选候选文件夹"),
+      element("span", "", "精确候选默认采用；50% 粗略候选默认排除，确认后再采用。"),
     );
     review.appendChild(safety);
 
@@ -1392,6 +1465,7 @@
           (candidate) => folderDecisionState(
             productId,
             String(candidate.folder_id || ""),
+            candidate.decision,
           ) === "rejected",
         ).length;
         progress.textContent = `采用 ${productCandidates.length - rejected} · 排除 ${rejected}`;
@@ -1411,7 +1485,9 @@
               ? "货号命中"
               : candidate.match_type === "exact_folder_query"
                 ? "本次精确文件夹查询"
-                : "名称候选",
+                : candidate.match_type === "fuzzy_name_candidate"
+                  ? "50% 连续名称候选"
+                  : "名称候选",
           ),
           element("small", "", candidate.source_system || "未知来源"),
           element("code", "", candidate.folder_path || ""),
@@ -1442,7 +1518,9 @@
             ? "货号命中；如不属于本商品请排除"
             : candidate.match_type === "exact_folder_query"
               ? "用户指定的完整文件夹名；仅本次任务有效"
-              : "名称精确命中；默认采用，可手动排除",
+              : candidate.match_type === "fuzzy_name_candidate"
+                ? "粗略名称命中；默认排除，确认属于本商品后再采用"
+                : "名称精确命中；默认采用，可手动排除",
         );
         controls.append(decision, note, warning);
         card.append(identity, controls);
@@ -1617,7 +1695,14 @@
             candidate.resolved_folder_id || candidate.folder_id || "",
           );
           return !folderId
-            || folderDecisionState(productId, folderId) !== "rejected";
+            || folderDecisionState(
+              productId,
+              folderId,
+              folderCandidates.find(
+                (folder) => String(folder.product_id || "") === productId
+                  && String(folder.folder_id || "") === folderId,
+              )?.decision,
+            ) !== "rejected";
         }),
       );
 
@@ -3738,6 +3823,7 @@
       });
       currentProcessingClaim = payload.processing_claim || null;
       currentCollectionStatus = payload.collection_status || null;
+      currentHandoffStatus = payload.handoff_status || null;
       if (payload.input) {
         hydrateForm(activeForm(), payload.input.values);
         const fallbackHistory = payload.input.interaction_history || [];
@@ -3749,6 +3835,7 @@
         }
       }
       renderStatus();
+      renderHandoffStatus(currentHandoffStatus);
       renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
@@ -3840,6 +3927,11 @@
         ? UiState.draftRequestBody(values, revision)
         : { values };
       if (mode === "submit") body.revision = revision + 1;
+      const persistenceIdentity = persistenceRequestId(
+        requestedStageId,
+        mode,
+      );
+      body.request_id = persistenceIdentity.value;
       const payload = await fetchJson(apiPath(`/stages/${requestedStageId}${stageActions[mode]}`), {
         method: "POST",
         body: JSON.stringify(body),
@@ -3895,6 +3987,7 @@
           : "草稿已保存；不会创建 Agent 交接。";
       }
       revisionLabel.textContent = String(revision);
+      persistenceRequestIds.delete(persistenceIdentity.key);
       completedSuccessfully = true;
     } catch (error) {
       if (requestedStageId !== currentStageId || requestedGeneration !== stageGeneration) return;
@@ -3907,9 +4000,23 @@
       showFieldErrors(form, error.fieldErrors || {});
       const pausedSubmission = pendingPersistenceMode === "submit";
       pendingPersistenceMode = null;
+      const persistenceConflict = [
+        "REVISION_CONTENT_CONFLICT",
+        "STAGE_TRANSACTION_ACTIVE",
+        "STAGE_PERSISTENCE_INCOMPLETE",
+        "PERSISTENCE_ACCESS_DENIED",
+      ].includes(error.reasonCode);
+      if (persistenceConflict) {
+        await loadStage();
+      }
+      const waitStillLive = currentHandoffStatus?.agent_wait
+        && !currentHandoffStatus.agent_wait.expired;
+      const suffix = waitStillLive
+        ? "；Agent 仍在等待，但本次提交尚未成功"
+        : "";
       actionMessage.textContent = pausedSubmission
-        ? `保存失败，排队的提交已暂停：${error.message}`
-        : error.message;
+        ? `保存失败，排队的提交已暂停：${error.userMessage || error.message}${suffix}`
+        : `${error.userMessage || error.message}${suffix}`;
       uiState = UiState.markDirty(uiState);
       renderStatus();
     } finally {
@@ -4003,6 +4110,7 @@
       uiState = UiState.receiveStatus(uiState, stageState.status, heartbeat);
       currentProcessingClaim = stageState.processing_claim || null;
       currentCollectionStatus = stageState.collection_status || null;
+      currentHandoffStatus = stageState.handoff_status || null;
       const connection = UiState.connectionView(uiState, Date.now());
       connectionLabel.textContent = connection.connectionLabel;
       offlinePanel.hidden = connection.connectionLabel === "Agent 已连接";
@@ -4010,6 +4118,7 @@
         renderStatus();
         await loadStage();
       } else {
+        renderHandoffStatus(currentHandoffStatus);
         renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       }
     } catch (error) {
@@ -4026,6 +4135,7 @@
     currentStageId = stageId;
     uiState = UiState.switchStage(uiState, stageId);
     currentProcessingClaim = null;
+    currentHandoffStatus = null;
     recoverProcessingButton.hidden = true;
     recoveryButton.disabled = true;
     revision = 0;
@@ -4068,6 +4178,12 @@
       ) return;
       if (panel.dataset.stagePanel === currentStageId) {
         localEditVersion += 1;
+        persistenceRequestIds.delete(
+          `${sessionId}:${currentStageId}:draft`,
+        );
+        persistenceRequestIds.delete(
+          `${sessionId}:${currentStageId}:submit`,
+        );
         uiState = UiState.markDirty(uiState);
         renderStatus();
         scheduleAutoSave();

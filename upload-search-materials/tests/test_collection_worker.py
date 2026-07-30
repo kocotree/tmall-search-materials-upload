@@ -4,6 +4,8 @@ import csv
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -22,6 +24,48 @@ from upload_search_materials.runtime_config import load_runtime_config
 
 class Process:
     pid = 4321
+
+
+@pytest.fixture(autouse=True)
+def prepared_runtime_preflight(monkeypatch):
+    monkeypatch.setattr(
+        "upload_search_materials.runtime_preflight."
+        "preflight_runtime_environment",
+        lambda runtime, **_kwargs: {
+            "ready": True,
+            "environment": worker_module.environment_fingerprint(
+                runtime.workspace_root / "upload-search-materials"
+            ),
+        },
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_windows_process_identity_matches_between_parent_and_child():
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os,time;"
+                "from upload_search_materials.collection_worker "
+                "import process_identity;"
+                "print(os.getpid(), process_identity(os.getpid()), flush=True);"
+                "time.sleep(5)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        line = child.stdout.readline().strip()
+        child_pid_text, child_identity = line.split(" ", 1)
+        child_pid = int(child_pid_text)
+
+        assert worker_module.process_identity(child_pid) == child_identity
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 def write_products(path: Path) -> None:
@@ -268,3 +312,58 @@ def test_worker_persists_terminal_status_for_completion_and_crash(
     final = json.loads(private.read_text(encoding="utf-8"))
     assert final["terminal_status"] == terminal
     assert final["phase"] == terminal
+
+
+def test_worker_securely_claims_actual_pid_from_verified_python_launcher(
+    tmp_path,
+    monkeypatch,
+):
+    runtime, runs, _, session, selectors = prepare(tmp_path)
+    launcher_pid = 4321
+    current_pid = os.getpid()
+
+    monkeypatch.setattr(
+        worker_module,
+        "process_identity",
+        lambda pid: (
+            "launcher-process"
+            if pid == launcher_pid
+            else "actual-worker-process"
+            if pid == current_pid
+            else None
+        ),
+    )
+    launched = launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        popen=lambda *_args, **_kwargs: Process(),
+        identity_provider=lambda _pid: "launcher-process",
+    )
+    private = (
+        attempt_path(session.path, launched["attempt_id"])
+        / "worker.private.json"
+    )
+    manifest = json.loads(private.read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        worker_module,
+        "process_setup_collection",
+        lambda **_kwargs: {"status": "completed"},
+    )
+
+    run_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        attempt_id=launched["attempt_id"],
+        ownership_token=manifest["ownership_token"],
+        claimant_id="collection-worker",
+        selectors_path=selectors,
+        cdp_url=runtime.cdp_url,
+    )
+
+    final = json.loads(private.read_text(encoding="utf-8"))
+    assert final["launcher_pid"] == launcher_pid
+    assert final["launcher_process_identity"] == "launcher-process"
+    assert final["pid"] == current_pid
+    assert final["process_identity"] == "actual-worker-process"

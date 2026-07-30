@@ -80,6 +80,30 @@ def test_unc_reason_is_preserved_from_bounded_probe():
     assert diagnostic["windows_error"] == 53
 
 
+def test_missing_mapping_uses_configured_unc_fallback():
+    calls = []
+
+    def probe(path, **_kwargs):
+        calls.append(path)
+        return {"available": True, "reason_code": "PATH_AVAILABLE"}
+
+    diagnostic = diagnose_image_source(
+        {
+            "source_id": "source-model",
+            "label": "NAS",
+            "path": r"Y:\model",
+            "canonical_unc": r"\\nas\media\model",
+        },
+        drive_exists=lambda _root: False,
+        remote_probe=probe,
+    )
+
+    assert calls == [r"\\nas\media\model"]
+    assert diagnostic["available"] is True
+    assert diagnostic["path_kind"] == "unc_fallback"
+    assert diagnostic["source_id"] == "source-model"
+
+
 def test_windows_errors_map_to_stable_reasons():
     error = OSError("denied")
     error.winerror = 5
@@ -142,7 +166,7 @@ def test_bounded_probe_kills_only_its_owned_timed_out_process():
 def test_metadata_probe_does_not_write_or_enumerate(tmp_path, monkeypatch):
     target = tmp_path / "source"
     target.mkdir()
-    before = set(tmp_path.iterdir())
+    before = set(os.listdir(tmp_path))
     monkeypatch.setattr(
         os,
         "scandir",
@@ -152,7 +176,7 @@ def test_metadata_probe_does_not_write_or_enumerate(tmp_path, monkeypatch):
     result = probe_directory_metadata(str(target))
 
     assert result["reason_code"] == "PATH_AVAILABLE"
-    assert set(tmp_path.iterdir()) == before
+    assert set(os.listdir(tmp_path)) == before
 
 
 def test_batch_supports_fifty_local_sources_without_enumeration(

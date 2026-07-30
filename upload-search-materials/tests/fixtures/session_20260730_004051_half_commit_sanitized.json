@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "source_session": "20260730_004051",
+  "sanitized": true,
+  "session": {
+    "session_id": "fixture-half-commit",
+    "current_stage": "setup",
+    "stages": {
+      "setup": {
+        "revision": 0,
+        "status": "draft"
+      }
+    },
+    "agent_wait": {
+      "schema_version": 1,
+      "wait_id": "fixture-wait",
+      "claimant_id": "codex-agent",
+      "session_id": "fixture-half-commit",
+      "stage_id": "setup",
+      "expected_revision": 1,
+      "started_at": "2026-07-30T00:41:44+00:00",
+      "heartbeat_at": "2026-07-30T00:47:25+00:00",
+      "expires_at": "2026-07-30T00:48:55+00:00"
+    },
+    "processing_claim": null
+  },
+  "current_input": {
+    "schema_version": 1,
+    "session_id": "fixture-half-commit",
+    "stage_id": "setup",
+    "revision": 1,
+    "values": {
+      "store": "sanitized-store",
+      "month": "2026-07",
+      "store_confirmed": true,
+      "image_source_labels": [
+        "source-a"
+      ],
+      "image_roots": [
+        "X:\\sanitized\\images"
+      ]
+    },
+    "user_notes": "",
+    "interaction_history": []
+  },
+  "revision_snapshot": {
+    "revision": 1,
+    "document_name": "input",
+    "matches_current_input": true
+  },
+  "absent_documents": [
+    "handoff",
+    "result",
+    "processing_claim"
+  ],
+  "observed_failures": {
+    "first_write": "WINDOWS_REPLACE_ACCESS_DENIED",
+    "draft_retry_status": 409,
+    "submit_retry_status": 409,
+    "legacy_message": "revision snapshot already exists",
+    "agent_wait_created_count": 10,
+    "agent_wait_renewed_count": 0,
+    "agent_wait_cleared_count": 0
+  },
+  "path_identity_probe": {
+    "sandbox": {
+      "mapped_sources_available": false
+    },
+    "desktop_user": {
+      "mapped_sources_available": true
+    }
+  },
+  "excluded_sensitive_data": [
+    "credentials",
+    "cookies",
+    "qr_or_sms",
+    "nas_passwords",
+    "directory_listings",
+    "source_image_contents",
+    "approval",
+    "upload",
+    "production_publish"
+  ]
+}

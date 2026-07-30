@@ -5,21 +5,28 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any, Callable
+import uuid
 
 from ..path_diagnostics import diagnose_image_source
 
 
 DEFAULT_PICKER_TIMEOUT = 120.0
+DEFAULT_VISIBILITY_TIMEOUT = 5.0
 _PICKER_LOCK = threading.Lock()
 
 PICKER_MESSAGES = {
     "FOLDER_PICKER_BUSY": "已有一个目录选择窗口，请先完成或取消它。",
     "FOLDER_PICKER_TIMEOUT": "目录选择窗口等待超时，请重试或手工粘贴路径。",
+    "FOLDER_PICKER_NOT_VISIBLE": (
+        "目录选择窗口未能显示，请手工粘贴路径后继续。"
+    ),
     "FOLDER_PICKER_GUI_UNAVAILABLE": (
         "当前运行环境不能显示原生窗口，请手工粘贴本机或 UNC 路径。"
     ),
@@ -84,6 +91,7 @@ def choose_directory(
     initial_path: str | None = None,
     *,
     timeout_seconds: float = DEFAULT_PICKER_TIMEOUT,
+    visibility_timeout_seconds: float = DEFAULT_VISIBILITY_TIMEOUT,
     platform: str | None = None,
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
     powershell: str | None = None,
@@ -106,11 +114,16 @@ def choose_directory(
         ) as temporary:
             root = Path(temporary)
             request_path = root / "request.json"
+            state_path = root / "state.json"
             result_path = root / "result.json"
+            request_id = uuid.uuid4().hex
+            ownership_token = secrets.token_urlsafe(24)
             request_path.write_text(
                 json.dumps(
                     {
                         "schema_version": 1,
+                        "request_id": request_id,
+                        "ownership_token": ownership_token,
                         "initial_path": _validated_initial_path(
                             initial_path
                         ),
@@ -134,6 +147,8 @@ def choose_directory(
                 str(request_path),
                 "-ResultPath",
                 str(result_path),
+                "-StatePath",
+                str(state_path),
             ]
             try:
                 process = popen(
@@ -150,6 +165,53 @@ def choose_directory(
                     detail=str(getattr(error, "winerror", "") or ""),
                 ) from error
             try:
+                with state_path.open(
+                    "x", encoding="utf-8"
+                ) as state_stream:
+                    json.dump(
+                        {
+                            "schema_version": 1,
+                            "status": "started",
+                            "request_id": request_id,
+                            "ownership_token": ownership_token,
+                            "helper_pid": int(process.pid),
+                        },
+                        state_stream,
+                        ensure_ascii=False,
+                    )
+            except FileExistsError:
+                pass
+            visibility_deadline = time.monotonic() + max(
+                0.1, visibility_timeout_seconds
+            )
+            visible = False
+            while time.monotonic() < visibility_deadline:
+                if state_path.is_file():
+                    state = _read_result(state_path)
+                    if (
+                        state.get("request_id") != request_id
+                        or state.get("ownership_token") != ownership_token
+                        or int(state.get("helper_pid", 0))
+                        != int(process.pid)
+                    ):
+                        process.kill()
+                        process.wait(timeout=2)
+                        raise FolderPickerError(
+                            "FOLDER_PICKER_PROTOCOL_ERROR"
+                        )
+                    if state.get("status") == "window_visible":
+                        visible = True
+                        break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            if not visible:
+                process.kill()
+                process.wait(timeout=2)
+                raise FolderPickerError(
+                    "FOLDER_PICKER_NOT_VISIBLE"
+                )
+            try:
                 process.wait(timeout=max(1.0, timeout_seconds))
             except subprocess.TimeoutExpired as error:
                 process.kill()
@@ -160,6 +222,14 @@ def choose_directory(
             if process.returncode != 0 or not result_path.is_file():
                 raise FolderPickerError("FOLDER_PICKER_START_FAILED")
             result = _read_result(result_path)
+            if (
+                result.get("request_id") != request_id
+                or result.get("ownership_token") != ownership_token
+                or int(result.get("helper_pid", 0)) != int(process.pid)
+            ):
+                raise FolderPickerError(
+                    "FOLDER_PICKER_PROTOCOL_ERROR"
+                )
             status = str(result.get("status", ""))
             if status == "cancelled":
                 return None

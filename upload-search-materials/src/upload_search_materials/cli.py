@@ -12,6 +12,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from typing import Sequence
 from urllib.parse import urlencode
 
@@ -61,6 +62,7 @@ from .confirmed_assets import (
 )
 from .eligibility import collect_titles_by_product, evaluate_all, load_monthly_rules
 from .folder_index import (
+    absolute_path_without_io,
     build_folder_review_data,
     build_folder_index,
     rematch_folder_index,
@@ -81,6 +83,7 @@ from .interaction.session import (
     SessionStore,
 )
 from .interaction.service import (
+    dispatch_collection_start,
     ManagedServiceError,
     restart_service,
     start_service,
@@ -120,6 +123,11 @@ from .collection_worker import (
 from .state_store import StateStore
 from .slot_planning import prepare_slot_board_session
 from .supplement_collection import collect_supplement_material_status
+from .runtime_identity import current_runtime_identity
+from .desktop_launcher import (
+    DesktopLauncherError,
+    launch_desktop_workbench,
+)
 from .tasks import build_material_items, build_product_tasks
 from .time_utils import iso_timestamp
 
@@ -1011,7 +1019,8 @@ def _interact(args) -> int:
     app_kwargs = {"runtime_config": runtime}
     if args.ownership_token:
         app_kwargs["service_identity"] = {
-            "ownership_token": args.ownership_token
+            "ownership_token": args.ownership_token,
+            "runtime_identity": current_runtime_identity(),
         }
     app = create_app(Path(runs_root), **app_kwargs)
     query = urlencode({"session_id": session_id})
@@ -1062,17 +1071,148 @@ def _port_owner_pid(port: int) -> int | None:
 
 def _wait_handoff(args) -> int:
     store = SessionStore(Path(args.runs_root))
+    state = store.load_session(args.session)
+    stage_state = state["stages"][args.stage]
+    expected_revision = int(stage_state["revision"]) + (
+        0
+        if stage_state["status"] in {"ready_for_agent", "processing", "completed"}
+        else 1
+    )
+    timeout = (
+        args.timeout
+        if args.timeout is not None
+        else store.watch_budget_seconds(args.stage)
+    )
+    wait = store.create_agent_wait(
+        args.session,
+        args.stage,
+        expected_revision=expected_revision,
+        claimant_id=args.claimant,
+        lease_seconds=30,
+        budget_seconds=max(0.0, float(timeout)),
+    )
+    deadline = time.monotonic() + max(0.0, float(timeout))
     try:
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"timed out waiting for handoff for stage {args.stage}"
+                )
+            try:
+                handoff = store.wait_for_handoff(
+                    args.session,
+                    args.stage,
+                    timeout_seconds=min(
+                        remaining, max(0.1, float(args.segment_seconds))
+                    ),
+                    claimant_id=args.claimant,
+                )
+                break
+            except TimeoutError:
+                if time.monotonic() >= deadline:
+                    raise
+                wait = store.renew_agent_wait(
+                    args.session, wait["wait_id"], lease_seconds=30
+                )
+    except TimeoutError as error:
+        current = store.resolve_recovery_state(args.session, args.stage)
+        print(
+            json.dumps(
+                {
+                    "status": "timeout",
+                    "reason_code": "HANDOFF_BUDGET_TIMEOUT",
+                    "message": str(error),
+                    "agent_wait": store.agent_wait(args.session, args.stage),
+                    "recovery": current,
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except InteractionConflict as error:
+        print(
+            json.dumps(
+                {"status": "changed", "reason_code": str(error)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 3
+    else:
+        print(json.dumps(handoff, ensure_ascii=False))
+        return 0
+    finally:
+        store.clear_agent_wait(args.session, wait_id=wait["wait_id"])
+
+
+def _resume_session(args) -> int:
+    """Treat “已提交” as an acknowledgement, never as business authority."""
+
+    if args.ack.strip() != "已提交":
+        print("RECOVERY_ACK_INVALID", file=sys.stderr)
+        return 2
+    store = SessionStore(Path(args.runs_root))
+    resolved = store.resolve_recovery_state(args.session)
+    if (
+        resolved["stage_id"] == "setup"
+        and resolved["status"] in {"processing", "recoverable"}
+    ):
+        authoritative = collection_status(
+            Path(args.runs_root), args.session
+        )
+        if authoritative["status"] == "recoverable":
+            attempt_id = str(
+                authoritative.get("attempt_id", "")
+            ).strip()
+            if attempt_id:
+                store.mark_processing_claim_recoverable(
+                    args.session, "setup", attempt_id=attempt_id
+                )
+            resolved = {
+                **resolved,
+                "status": "recoverable",
+                "collection_status": authoritative,
+            }
+        elif authoritative["status"] in {
+            "processing",
+            "processing_indeterminate",
+        }:
+            resolved = {
+                **resolved,
+                "status": authoritative["status"],
+                "collection_status": authoritative,
+            }
+    if resolved["status"] in {
+        "ready",
+        "recoverable",
+        "needs_user_input",
+        "blocked",
+    }:
         handoff = store.wait_for_handoff(
             args.session,
-            args.stage,
-            timeout_seconds=args.timeout,
+            resolved["stage_id"],
+            timeout_seconds=0.5,
+            claimant_id=args.claimant,
+            reclaim_expired=resolved["status"] == "recoverable",
+            resume_needs_user_input=(
+                resolved["status"] == "needs_user_input"
+            ),
+            resume_blocked=resolved["status"] == "blocked",
         )
-    except TimeoutError as error:
-        print(str(error), file=sys.stderr)
-        return 2
-    print(json.dumps(handoff, ensure_ascii=False))
-    return 0
+        resolved = {
+            "status": "processing",
+            "session_id": args.session,
+            "stage_id": resolved["stage_id"],
+            "revision": handoff["revision"],
+            "handoff": handoff,
+            "processing_claim": store.processing_claim(
+                args.session, resolved["stage_id"]
+            ),
+        }
+    print(json.dumps(resolved, ensure_ascii=False))
+    return 0 if resolved["status"] != "draft" else 2
 
 
 def _claim_agent_request(args) -> int:
@@ -1348,6 +1488,14 @@ def _index_folders(args) -> int:
             raise ValueError("--root 来源名称不得重复")
         normalized_roots = []
         for root in roots:
+            if args.rematch_only:
+                normalized_roots.append(
+                    NamedRoot(
+                        root.source_system,
+                        absolute_path_without_io(root.path),
+                    )
+                )
+                continue
             declared_metadata = root.path.lstat()
             if stat.S_ISLNK(declared_metadata.st_mode) or (
                 getattr(declared_metadata, "st_file_attributes", 0)
@@ -1575,6 +1723,19 @@ def build_parser() -> argparse.ArgumentParser:
     collection_worker.add_argument("--selectors", required=True)
     collection_worker.add_argument("--cdp-url", required=True)
     collection_worker.add_argument("--config")
+    collection_worker.add_argument(
+        "--expected-windows-sid", help=argparse.SUPPRESS
+    )
+    collection_worker.add_argument(
+        "--expected-login-session-id",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    collection_worker.add_argument(
+        "--require-interactive-desktop",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     collection_status_parser = subparsers.add_parser(
         "collection-status",
@@ -1595,6 +1756,16 @@ def build_parser() -> argparse.ArgumentParser:
     interact.add_argument("--session")
     interact.add_argument("--port", type=int, default=8765)
     interact.add_argument("--ownership-token", help=argparse.SUPPRESS)
+
+    desktop = subparsers.add_parser(
+        "desktop-workbench",
+        help=argparse.SUPPRESS,
+    )
+    desktop.add_argument("--runs-root", required=True)
+    desktop.add_argument("--config")
+    desktop.add_argument("--session", required=True)
+    desktop.add_argument("--port-start", type=int, default=8765)
+    desktop.add_argument("--port-end", type=int, default=8795)
 
     for command, help_text in (
         ("ui-start", "Start or reuse a managed interaction UI"),
@@ -1641,6 +1812,17 @@ def build_parser() -> argparse.ArgumentParser:
     wait_handoff.add_argument("--session", required=True)
     wait_handoff.add_argument("--stage", choices=[stage.id for stage in STAGES], required=True)
     wait_handoff.add_argument("--timeout", type=float)
+    wait_handoff.add_argument("--segment-seconds", type=float, default=15)
+    wait_handoff.add_argument("--claimant", default="codex-agent")
+
+    resume_session = subparsers.add_parser(
+        "resume-session",
+        help="Resolve one explicitly bound session after an 已提交 acknowledgement",
+    )
+    resume_session.add_argument("--runs-root", required=True)
+    resume_session.add_argument("--session", required=True)
+    resume_session.add_argument("--ack", required=True)
+    resume_session.add_argument("--claimant", default="codex-agent")
 
     claim_agent = subparsers.add_parser(
         "claim-agent-request",
@@ -1869,10 +2051,17 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     page_factory=page_factory,
                 )
             else:
-                result = launch_collection_worker(**arguments)
+                result = dispatch_collection_start(
+                    Path(args.runs_root),
+                    args.session,
+                    claimant_id=args.claimant_id,
+                )
+                if result is None:
+                    result = launch_collection_worker(**arguments)
         except (
             InteractionConflict,
             InteractionPathError,
+            ManagedServiceError,
             OSError,
             SchemaError,
         ) as error:
@@ -1905,6 +2094,20 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                 selectors_path=Path(args.selectors),
                 cdp_url=args.cdp_url,
                 config_path=args.config,
+                local_resource_identity=(
+                    {
+                        "sid": args.expected_windows_sid,
+                        "login_session_id": (
+                            args.expected_login_session_id
+                        ),
+                        "interactive_desktop": bool(
+                            args.require_interactive_desktop
+                        ),
+                    }
+                    if args.expected_windows_sid
+                    and args.expected_login_session_id is not None
+                    else None
+                ),
             )
         except Exception as error:
             print(
@@ -1952,6 +2155,34 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return 0 if result["prepared"] else 2
     if args.command == "interact":
         return _interact(args)
+    if args.command == "desktop-workbench":
+        try:
+            result = launch_desktop_workbench(
+                runs_root=Path(args.runs_root),
+                session_id=args.session,
+                port_start=args.port_start,
+                port_end=args.port_end,
+                config=Path(args.config) if args.config else None,
+            )
+        except (DesktopLauncherError, ManagedServiceError) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": getattr(
+                            error,
+                            "reason_code",
+                            "DESKTOP_LAUNCH_FAILED",
+                        ),
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
     if args.command in {"ui-start", "ui-restart", "ui-status", "ui-stop"}:
         runtime = load_runtime_config(args.config)
         runs_root = Path(args.runs_root or runtime.runs_root)
@@ -2028,6 +2259,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return 0
     if args.command == "wait-handoff":
         return _wait_handoff(args)
+    if args.command == "resume-session":
+        return _resume_session(args)
     if args.command == "claim-agent-request":
         return _claim_agent_request(args)
     if args.command == "list-agent-requests":

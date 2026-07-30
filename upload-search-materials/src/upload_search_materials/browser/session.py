@@ -9,7 +9,7 @@ import subprocess
 import time
 from typing import Mapping
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import build_opener, ProxyHandler
 
 from playwright.sync_api import sync_playwright
 
@@ -32,6 +32,9 @@ class CdpUnavailable(RuntimeError):
     pass
 
 
+_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
+
+
 @dataclass(frozen=True)
 class CdpStatus:
     connected: bool
@@ -44,7 +47,9 @@ class CdpStatus:
 def inspect_cdp_endpoint(cdp_url: str, timeout_seconds: float = 2.0) -> CdpStatus:
     endpoint = str(cdp_url).rstrip("/")
     try:
-        with urlopen(f"{endpoint}/json/list", timeout=timeout_seconds) as response:
+        with _LOOPBACK_OPENER.open(
+            f"{endpoint}/json/list", timeout=timeout_seconds
+        ) as response:
             document = json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, ValueError, json.JSONDecodeError):
         return CdpStatus(

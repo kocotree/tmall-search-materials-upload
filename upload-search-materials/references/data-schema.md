@@ -23,6 +23,8 @@ claim 状态源。
 
 ## Managed UI Service
 
+`.ui-service.json` 还记录启动者与服务的 Windows SID、登录会话 ID、交互桌面可用性、PID 创建身份及仅含盘符的网络盘可见性；不得记录目录列表或凭据。路径检测、picker、索引和素材 Worker 在读取源文件前必须匹配这些身份字段。
+
 每个精确 session 可有一个 `.ui-service.json`，记录 schema version、session ID、runs root、PID、ownership token、loopback 端口、精确 URL、stdout/stderr 日志、启动/检查时间、健康状态、session 可读状态和浏览器打开状态。对外 CLI 结果不返回 ownership token；浏览器失败与服务失败分开记录。
 
 ## Interaction Policy 与聊天降级
@@ -45,6 +47,8 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 ## Task Setup
 
+每机图片源绑定项使用 `source_id`、`label`、`path`，可选 `canonical_unc`、`last_verified_sid`、`last_verified_at` 和 `last_status`。`source_id` 是跨电脑稳定业务引用；`path` 是当前电脑的盘符或 UNC。旧 `label + path` 项加载时确定性补 source ID。该配置不得进入版本库，也不得包含 NAS 凭据、目录清单或图片内容。
+
 任务配置 handoff 的用户输入为：`store`、`store_confirmed` 和 `month`。第一阶段不接受 `product_scope`、`product_ids` 或 `promotion_max_pages`；商品范围由第二阶段的“搜推高价值”全量采集结果决定。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
 
 图片源检测 API 的每项诊断包含：
@@ -64,6 +68,10 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 阶段根目录的 `input.json` 与 `handoff.json` 表示当前活动 revision；`revisions/<四位 revision>/input.json` 保存每次草稿或提交快照，正式提交另存同目录 `handoff.json`。草稿无 handoff。活动 handoff 被撤回或输入补充时可以失效，但历史快照不删除。
 
 `asset_manifest`、`historical_basic_xlsx`、`historical_promotion_csv` 和 `user_notes` 均可选。正式流程只自动采集搜推素材并写入当前时间戳任务目录；基础素材字段仅为旧批次离线恢复兼容，不参与本分支范围计算。运行目录由 SessionStore 决定，不接受页面覆盖。
+
+草稿和提交使用 `stage-transaction.json` 作为版本化事务信封，至少包含 request ID、operation、session/stage、base/target revision、规范化输入 SHA、progress state、created/updated 时间和恢复所需输入。完成后归档到 `transactions/<request-id>.json`。同一 request ID 重试返回原结果且不重复事件；不同内容命中同一 request/revision 返回 `REVISION_CONTENT_CONFLICT`。读取阶段状态时可完成遗留 half-commit 的 input、snapshot、handoff 与 session state 对齐。
+
+`agent_wait` 分别保存 `expires_at`（最长 30 秒心跳）和 `budget_expires_at`（setup 默认两分钟总预算）。同一 claimant/session/stage/expected revision 续租同一 wait ID，保留 `started_at`；正常终态清理，异常退出才自然过期。
 
 ## 输入表
 
@@ -134,7 +142,7 @@ checkpoint、log path 和 terminal status。旧结果进入逐 attempt 历史并
 
 共享 `folder-candidates.csv` 输出当前 active 且命中商品的文件夹。当前任务使用 `snapshot-folder-candidates` 按第二阶段 `selected_product_ids` 生成任务内候选快照，不复制 SQLite。候选按文件夹自身名称匹配，不继承父目录命中；`--rematch-only` 只使用本地文件夹记录重新计算匹配。确认文件夹归属前，不读取文件夹中的图片，也不计算图片 SHA-256。
 
-`prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、来源、文件夹名、完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数。候选默认 `confirmed`，页面只提供采用和排除；历史 `pending` 按采用读取。用户明确提供完整文件夹名时，当前任务可生成 `match_type=exact_folder_query` 的候选；该记录不是别名。
+`prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、来源、文件夹名、完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数。确定性候选默认 `confirmed`；`match_type=fuzzy_name_candidate` 表示基础名称至少 50% 的最长公共连续字符命中，默认 `rejected`，页面仍只提供采用和排除。历史 `pending` 按采用读取。用户明确提供完整文件夹名时，当前任务可生成 `match_type=exact_folder_query` 的候选；该记录不是别名。
 
 用户决定写入同一时间戳会话的 `input.json.values.folder_decisions`。每项必须包含：
 
@@ -254,3 +262,22 @@ Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
 - `processed-outputs.json` 同时保存计划 SHA 和包含裁剪参数的 processing SHA；输出逐图保存源/输出 SHA、宽高、大小、比例和顺序。
 - `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；响应逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
 图片分析缓存键由源 SHA-256、`codex-agent-handoff`、模型标识和 schema 版本共同确定。
+# Agent wait envelope
+
+`session.json.agent_wait` 可为空；存在时为：
+
+```json
+{
+  "schema_version": 1,
+  "wait_id": "opaque-id",
+  "claimant_id": "codex-agent",
+  "session_id": "20260729_171047",
+  "stage_id": "setup",
+  "expected_revision": 12,
+  "started_at": "ISO-8601",
+  "heartbeat_at": "ISO-8601",
+  "expires_at": "ISO-8601"
+}
+```
+
+它只用于 UI 提示。处理排他权仍只来自 `processing_claim`。

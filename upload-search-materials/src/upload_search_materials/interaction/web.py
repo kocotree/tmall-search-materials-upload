@@ -8,6 +8,7 @@ import os
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
+import secrets
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request, send_file
@@ -21,7 +22,11 @@ from ..collection_readiness import (
     promote_selector_candidate,
     validate_selector_candidate,
 )
-from ..collection_worker import collection_status as get_collection_status
+from ..collection_worker import (
+    collection_status as get_collection_status,
+    launch_collection_worker,
+)
+from ..collection_runtime import CollectionRuntimeError
 from ..agent_handoff import (
     AgentRequestError,
     ai_default_slot_planning_enabled,
@@ -35,6 +40,7 @@ from ..agent_handoff import (
 from ..assets import build_image_preview
 from ..deterministic_slot_planning import build_deterministic_slot_plan
 from ..image_compliance import default_image_policy
+from ..io_tables import SchemaError, read_product_csv, validate_product_records
 from ..image_review import (
     build_image_review_data,
     normalize_review_decisions,
@@ -67,6 +73,11 @@ from ..runtime_config import (
     save_image_sources,
     save_selector_profile_path,
 )
+from ..persistence import PersistenceAccessDenied
+from ..runtime_identity import (
+    LocalResourceIdentityMismatch,
+    require_local_resource_identity,
+)
 from ..decision_modes import get_decision_boundary
 from .folder_picker import FolderPickerError, choose_directory
 from .fallback import safety_context
@@ -83,6 +94,67 @@ from .stages import (
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
 
 
+def _input_quality_summary(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.is_file():
+        return {
+            "status": "blocked",
+            "reason_code": "PRODUCTS_FILE_REQUIRED",
+            "total": 0,
+            "valid": 0,
+            "duplicate_id": 0,
+            "missing_id": 0,
+            "invalid_id": 0,
+            "excluded": 0,
+            "processable": 0,
+        }
+    try:
+        report = validate_product_records(read_product_csv(path))
+    except (OSError, SchemaError, UnicodeError) as error:
+        return {
+            "status": "blocked",
+            "reason_code": "PRODUCT_TABLE_BATCH_BLOCKED",
+            "message": str(error),
+            "total": 0,
+            "valid": 0,
+            "duplicate_id": 0,
+            "missing_id": 0,
+            "invalid_id": 0,
+            "excluded": 0,
+            "processable": 0,
+        }
+    reason_counts = {
+        code: sum(
+            code in reasons
+            for reasons in report.reason_codes_by_row.values()
+        )
+        for code in (
+            "DUPLICATE_PRODUCT_ID",
+            "MISSING_PRODUCT_ID",
+            "INVALID_PRODUCT_ID",
+        )
+    }
+    valid = report.row_count - report.blocked_row_count
+    return {
+        "status": "ready" if valid else "blocked",
+        "reason_code": (
+            "INPUT_QUALITY_READY"
+            if valid
+            else "NO_PROCESSABLE_PRODUCTS"
+        ),
+        "total": report.row_count,
+        "valid": valid,
+        "duplicate_id": reason_counts["DUPLICATE_PRODUCT_ID"],
+        "missing_id": reason_counts["MISSING_PRODUCT_ID"],
+        "invalid_id": reason_counts["INVALID_PRODUCT_ID"],
+        "excluded": report.blocked_row_count,
+        "processable": valid,
+        "reason_codes_by_row": {
+            str(row): list(reasons)
+            for row, reasons in report.reason_codes_by_row.items()
+        },
+    }
+
+
 def create_app(
     runs_root: Path,
     runtime_config: RuntimeConfig | None = None,
@@ -95,6 +167,13 @@ def create_app(
     app = Flask(__name__)
     store = SessionStore(runs_root)
     runtime = runtime_config or load_runtime_config()
+    expected_runtime_identity = (
+        (service_identity or {}).get("runtime_identity")
+    )
+
+    def require_desktop_identity() -> None:
+        if isinstance(expected_runtime_identity, dict):
+            require_local_resource_identity(expected_runtime_identity)
     static_root = Path(app.static_folder or "")
     static_asset_version = hashlib.sha256(
         b"".join(
@@ -125,7 +204,44 @@ def create_app(
 
     @app.errorhandler(InteractionConflict)
     def conflict(error: InteractionConflict):
-        return _error(str(error), 409)
+        message = str(error)
+        reason_code = (
+            message
+            if message
+            and all(
+                character.isupper()
+                or character.isdigit()
+                or character == "_"
+                for character in message
+            )
+            else ""
+        )
+        return _error(
+            message,
+            409,
+            reason_code=reason_code,
+            message=message,
+        )
+
+    @app.errorhandler(PersistenceAccessDenied)
+    def persistence_access_denied(error: PersistenceAccessDenied):
+        return _error(
+            error.reason_code,
+            503,
+            reason_code=error.reason_code,
+            message="本地状态文件暂时无法更新，请重试；不会创建重复 revision。",
+            next_action="重试当前保存或提交；若持续失败，请检查工作目录权限。",
+        )
+
+    @app.errorhandler(LocalResourceIdentityMismatch)
+    def local_identity_mismatch(error: LocalResourceIdentityMismatch):
+        return _error(
+            "local resource identity mismatch",
+            409,
+            reason_code=error.reason_code,
+            message="本机文件访问身份已变化，请从已授权的桌面入口重启工作台。",
+            next_action="重启桌面工作台后重新检测路径。",
+        )
 
     @app.get("/")
     def index():
@@ -162,6 +278,9 @@ def create_app(
                 "products_csv": str(runtime.products.path or ""),
                 "products_available": bool(runtime.products.path and runtime.products.path.is_file()),
                 "products_status": runtime.products.status,
+                "input_quality": _input_quality_summary(
+                    runtime.products.path
+                ),
                 "rules_csv": str(runtime.rules.path or ""),
                 "rules_available": bool(runtime.rules.path and runtime.rules.path.is_file()),
                 "rules_status": runtime.rules.status,
@@ -195,6 +314,7 @@ def create_app(
             healthy=True,
             pid=os.getpid(),
             ownership_token=str(identity.get("ownership_token", "")),
+            runtime_identity=identity.get("runtime_identity"),
         )
 
     @app.get("/api/health/sessions/<session_id>")
@@ -207,6 +327,46 @@ def create_app(
             current_stage=state["current_stage"],
             revision=state["stages"][state["current_stage"]]["revision"],
         )
+
+    @app.post(
+        "/api/internal/sessions/<session_id>/collection/start"
+    )
+    def start_desktop_collection(session_id: str):
+        identity = service_identity or {}
+        supplied = str(request.headers.get("X-Ownership-Token", ""))
+        expected = str(identity.get("ownership_token", ""))
+        if not expected or not secrets.compare_digest(supplied, expected):
+            return _error(
+                "service ownership mismatch",
+                403,
+                reason_code="SERVICE_OWNERSHIP_MISMATCH",
+            )
+        require_desktop_identity()
+        payload = _json_object()
+        claimant_id = str(
+            payload.get("claimant_id", "collection-worker")
+        ).strip() or "collection-worker"
+        try:
+            result = launch_collection_worker(
+                runs_root=store.runs_root,
+                session_id=session_id,
+                runtime=runtime,
+                claimant_id=claimant_id,
+                local_resource_identity=expected_runtime_identity,
+            )
+        except (
+            CollectionRuntimeError,
+            InteractionConflict,
+            OSError,
+            SelectorConfigError,
+        ) as error:
+            return _error(
+                "desktop collection start failed",
+                409,
+                reason_code=str(error).split(":", 1)[0],
+                message=str(error),
+            )
+        return jsonify(result)
 
     @app.get("/api/runtime/image-sources")
     def get_runtime_image_sources():
@@ -533,12 +693,26 @@ def create_app(
 
     @app.post("/api/runtime/image-sources/check")
     def check_runtime_image_sources():
+        require_desktop_identity()
         payload = _json_object()
         try:
             sources = inspect_image_sources(runtime, payload.get("image_sources"))
         except ValueError as error:
             return _validation_error({"image_sources": str(error)})
-        return jsonify(image_sources=sources)
+        projected = []
+        for source in sources:
+            item = dict(source)
+            if (
+                item.get("available")
+                and isinstance(expected_runtime_identity, dict)
+            ):
+                item["last_verified_sid"] = str(
+                    expected_runtime_identity.get("sid", "")
+                )
+                item["last_verified_at"] = item.get("checked_at")
+                item["last_status"] = "available"
+            projected.append(item)
+        return jsonify(image_sources=projected)
 
     @app.put("/api/runtime/image-sources")
     def put_runtime_image_sources():
@@ -556,6 +730,7 @@ def create_app(
 
     @app.post("/api/runtime/folder-picker")
     def open_runtime_folder_picker():
+        require_desktop_identity()
         payload = _json_object()
         initial_path = payload.get("initial_path")
         if initial_path is not None and not isinstance(initial_path, str):
@@ -606,6 +781,12 @@ def create_app(
                 store, session_id, stage_id, state
             ),
             "processing_claim": store.processing_claim(
+                session_id, stage_id
+            ),
+            "handoff_status": store.handoff_display_state(
+                session_id, stage_id
+            ),
+            "stage_transaction": store.stage_transaction_status(
                 session_id, stage_id
             ),
         }
@@ -679,6 +860,50 @@ def create_app(
             session_id, stage_id, claim_id
         )
         return jsonify(status="processing", processing_claim=claim)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/<stage_id>/agent-wait"
+    )
+    def manage_agent_wait(session_id: str, stage_id: str):
+        payload = _json_object()
+        action = str(payload.get("action", "create")).strip()
+        if action == "create":
+            expected_revision = payload.get("expected_revision")
+            if isinstance(expected_revision, bool) or not isinstance(
+                expected_revision, int
+            ):
+                return _validation_error(
+                    {"expected_revision": "must be an integer"}
+                )
+            wait = store.create_agent_wait(
+                session_id,
+                stage_id,
+                expected_revision=expected_revision,
+                claimant_id=str(
+                    payload.get("claimant_id", "codex-agent")
+                ),
+            )
+        elif action == "renew":
+            wait_id = str(payload.get("wait_id", "")).strip()
+            if not wait_id:
+                return _validation_error({"wait_id": "is required"})
+            wait = store.renew_agent_wait(session_id, wait_id)
+        elif action == "clear":
+            wait_id = str(payload.get("wait_id", "")).strip()
+            if not wait_id:
+                return _validation_error({"wait_id": "is required"})
+            store.clear_agent_wait(session_id, wait_id=wait_id)
+            wait = None
+        else:
+            return _validation_error(
+                {"action": "must be create, renew, or clear"}
+            )
+        return jsonify(
+            agent_wait=wait,
+            handoff_status=store.handoff_display_state(
+                session_id, stage_id
+            ),
+        )
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/chat-fallback")
     def write_chat_fallback(session_id: str, stage_id: str):
@@ -819,6 +1044,7 @@ def create_app(
                 _user_notes(payload),
                 expected_revision=expected_revision,
                 interaction_audit=audit,
+                request_id=_persistence_request_id(payload),
             )
             return jsonify(
                 status="draft",
@@ -833,6 +1059,7 @@ def create_app(
             expected_revision=expected_revision + 1,
             allowed_current_statuses={"draft", "needs_user_input", "blocked"},
             interaction_audit=audit,
+            request_id=_persistence_request_id(payload),
         )
         return jsonify(
             status="ready_for_agent",
@@ -868,6 +1095,7 @@ def create_app(
             _allowlisted_values(stage, values),
             _user_notes(payload),
             expected_revision=expected_revision,
+            request_id=_persistence_request_id(payload),
         )
         _supersede_slot_requests_after_revision_change(
             store, session_id, stage_id
@@ -1210,6 +1438,7 @@ def create_app(
             allowed_current_statuses=(
                 RESULTS_USER_ACTION_STATUSES if stage_id == "results" else None
             ),
+            request_id=_persistence_request_id(payload),
         )
         _supersede_slot_requests_after_revision_change(
             store, session_id, stage_id
@@ -1394,6 +1623,12 @@ def create_app(
         state = store.load_session(session_id)
         get_stage(stage_id)
         payload = dict(state["stages"][stage_id])
+        payload["handoff_status"] = store.handoff_display_state(
+            session_id, stage_id
+        )
+        payload["stage_transaction"] = store.stage_transaction_status(
+            session_id, stage_id
+        )
         claim = store.processing_claim(session_id, stage_id)
         if claim is not None:
             payload["processing_claim"] = claim
@@ -2860,6 +3095,22 @@ def _normalize_stage_values(
         and item.get("product_id")
         and item.get("folder_id")
     }
+
+    def folder_decision_for(item: dict[str, Any]) -> str:
+        key = (
+            str(item.get("product_id", "")),
+            str(item.get("folder_id", "")),
+        )
+        submitted = str(decision_by_key.get(key, {}).get("decision", ""))
+        if submitted in {"confirmed", "rejected"}:
+            return submitted
+        if (
+            str(item.get("decision", "")) == "rejected"
+            or str(item.get("match_type", "")) == "fuzzy_name_candidate"
+        ):
+            return "rejected"
+        return "confirmed"
+
     if folder_rows:
         normalized["folder_decisions"] = [
             {
@@ -2867,20 +3118,7 @@ def _normalize_stage_values(
                 "product_id": str(item.get("product_id", "")),
                 "source_system": str(item.get("source_system", "")),
                 "folder_path": str(item.get("folder_path", "")),
-                "decision": (
-                    "rejected"
-                    if str(
-                        decision_by_key.get(
-                            (
-                                str(item.get("product_id", "")),
-                                str(item.get("folder_id", "")),
-                            ),
-                            {},
-                        ).get("decision", "")
-                    )
-                    == "rejected"
-                    else "confirmed"
-                ),
+                "decision": folder_decision_for(item),
                 "note": str(
                     decision_by_key.get(
                         (
@@ -3237,6 +3475,15 @@ def _user_notes(payload: dict[str, Any]) -> str:
     if not isinstance(notes, str):
         raise BadRequest("user_notes must be a string")
     return notes
+
+
+def _persistence_request_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("request_id")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise BadRequest("request_id must be a string")
+    return value
 
 
 def _value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, str]:

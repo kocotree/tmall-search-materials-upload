@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "fixture_kind": "sanitized_live_session_replay",
+  "source_session_id": "20260729_171047",
+  "safety": {
+    "contains_credentials": false,
+    "contains_cookies": false,
+    "contains_qr_or_sms_data": false,
+    "contains_source_image_contents": false,
+    "contains_approval_or_publish_authority": false,
+    "contains_upload_actions": false
+  },
+  "input_quality": {
+    "row_count": 611,
+    "valid_row_count": 567,
+    "blocked_row_count": 44,
+    "duplicate_id_rows": 11,
+    "missing_id_rows": 33,
+    "invalid_id_rows": 0
+  },
+  "failure_sequence": [
+    {
+      "kind": "selector_failure",
+      "reason_code": "SELECTOR_RUNTIME_VALIDATION_FAILED",
+      "expected_recovery": "repair maintained selector or collector and retry exact session"
+    },
+    {
+      "kind": "result_history_archive_failure",
+      "reason_code": "RESULT_HISTORY_PARENT_MISSING",
+      "expected_recovery": "atomic writer creates the first history directory"
+    },
+    {
+      "kind": "checkpoint_attempt_mismatch",
+      "reason_code": "CHECKPOINT_IDENTITY_MISMATCH",
+      "expected_recovery": "archive prior attempt and start or resume only the owning attempt"
+    },
+    {
+      "kind": "blocked_recovery",
+      "reason_code": "BLOCKED_CAUSE_REPAIRED",
+      "expected_recovery": "resume unchanged handoff without re-entering business values"
+    },
+    {
+      "kind": "popup_delay",
+      "reason_code": "SAFE_GUIDE_DELAYED",
+      "expected_recovery": "bounded identified popup state machine"
+    }
+  ],
+  "successful_completion": {
+    "visible_page_count": 26,
+    "unique_product_count": 255,
+    "checkpoint_status": "complete",
+    "completeness_matrix_present": true,
+    "production_authority_exercised": false
+  }
+}

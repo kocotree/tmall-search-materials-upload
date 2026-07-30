@@ -46,7 +46,8 @@ DEFAULT_CANDIDATE_SELECTORS = {
     ),
     "human_check": (
         'iframe[src*="captcha"], [class*="captcha"], '
-        '[class*="verify"], text=/验证码|扫码验证|安全验证/'
+        '[class*="verify"], :text-is("验证码"), '
+        ':text-is("扫码验证"), :text-is("安全验证")'
     ),
     "promotion_tab": (
         'li[role="tab"]:has-text("搜推素材"), '

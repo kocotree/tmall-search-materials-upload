@@ -112,3 +112,14 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 - stop/restart 只有在健康端点返回的 PID 和 ownership token 同时匹配时才管理进程；PID 复用必须拒绝。
 - 浏览器打开结果与服务健康分开记录；浏览器失败不等于服务失败。
 - fresh-context 恢复必须使用精确 runs root、session、stage、revision 和 input SHA，不按目录新旧猜测。
+# 等待租约和聊天恢复
+
+- `agent_wait` 是最长 30 秒的在线心跳租约，绑定 session、stage、预期 revision 和
+  独立 `budget_expires_at`；同一 waiter 在 10–15 秒片段间续租同一 wait ID。setup
+  默认总预算为两分钟。它与 `processing_claim` 分离，不能授权任何业务动作。
+- 页面只在服务端租约有效时显示“Codex 在线”，并把心跳剩余与单调递减的总等待剩余
+  分开呈现。正常超时、错误、阶段变化和成功认领必须清理匹配租约。租约过期且 handoff 已
+  ready 时，显示“在当前聊天输入已提交”。
+- 当前聊天必须先唯一绑定精确 session。“已提交”只调用权威恢复解析器；draft 不生成
+  handoff，processing 返回原进度，completed 复用原结果，身份不一致 fail closed。
+- 新聊天、上下文丢失或多 session 歧义时必须使用页面的完整恢复指令。

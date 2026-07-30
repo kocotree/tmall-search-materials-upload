@@ -165,6 +165,12 @@
                   <span>商品表</span><strong>{{ "已找到" if setup_inputs.products_available else "未找到" }}</strong>
                   <code>{{ setup_inputs.products_csv }}</code>
                   <input name="products_csv" type="hidden" value="{{ setup_inputs.products_csv }}" aria-describedby="setup-products_csv-error">
+                  {% set quality = setup_inputs.input_quality %}
+                  <p data-input-quality-summary>
+                    共 {{ quality.total }} 行；有效 {{ quality.valid }}；重复 ID {{ quality.duplicate_id }}；
+                    缺失 ID {{ quality.missing_id }}；非法 ID {{ quality.invalid_id }}；
+                    排除 {{ quality.excluded }}；可继续 {{ quality.processable }}。
+                  </p>
                   <p class="field-error" id="setup-products_csv-error" data-field-error="products_csv" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.rules_available else 'false' }}">
@@ -209,7 +215,7 @@
                   <p>本机配置文件：<code>{{ setup_inputs.image_config_path }}</code></p>
                   <div class="image-source-list" data-image-source-list>
                     {% for source in image_sources %}
-                    <div class="image-source-row" data-image-source-row>
+                    <div class="image-source-row" data-image-source-row data-source-id="{{ source.source_id|default('') }}" data-canonical-unc="{{ source.canonical_unc|default('') }}" data-last-verified-sid="{{ source.last_verified_sid|default('') }}" data-last-verified-at="{{ source.last_verified_at|default('') }}" data-last-status="{{ source.last_status|default('') }}">
                       <label>来源名称<input name="image_source_labels" type="text" value="{{ source.label }}" data-value-kind="list" maxlength="100" required aria-describedby="setup-image_source_labels-error"></label>
                       <label>根路径<input name="image_roots" type="text" value="{{ source.path }}" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
                       <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>

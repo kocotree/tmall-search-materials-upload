@@ -76,6 +76,10 @@
 
 ## 8. End-to-End Verification
 
+> Reconciliation: unchecked live tasks 8.3–8.5 are not silently completed. Their
+> acceptance scope is superseded by
+> `harden-handoff-and-live-workflow-reliability` tasks 12.2–12.6.
+
 - [x] 8.1 Run the full Python and frontend test suites, selector-profile validation tests, Skill validator, OpenSpec strict validation, lock check, and `git diff --check`.
 - [x] 8.2 Run a deterministic fake-browser acceptance covering setup submission through completeness-stage hydration.
 - [ ] 8.3 Start a fresh timestamp session on the current computer, use the frontend to configure it, and verify CDP Chrome opens the official material center instead of a blank tab.

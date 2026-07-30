@@ -75,6 +75,64 @@ def test_create_session_returns_timestamp_id(client):
     assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{2})?", response.json["session_id"])
 
 
+def test_agent_wait_api_projects_live_and_expired_recovery_status(
+    client, session_id, tmp_path
+):
+    created = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={
+            "action": "create",
+            "expected_revision": 1,
+            "claimant_id": "codex-agent",
+        },
+    )
+
+    assert created.status_code == 200
+    assert created.json["handoff_status"]["status"] == "waiting"
+    assert created.json["handoff_status"]["agent_wait"]["remaining_seconds"] > 0
+    renewed = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={
+            "action": "renew",
+            "wait_id": created.json["agent_wait"]["wait_id"],
+        },
+    )
+    assert renewed.status_code == 200
+    assert (
+        renewed.json["agent_wait"]["wait_id"]
+        == created.json["agent_wait"]["wait_id"]
+    )
+
+    store = SessionStore(tmp_path)
+    state = store.load_session(session_id)
+    state["agent_wait"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+    store._write_json_atomic(
+        store._session_path(session_id) / "session.json", state
+    )
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/setup/status"
+    ).json
+    assert status["handoff_status"]["status"] == "waiting_expired"
+
+
+def test_submitted_handoff_without_live_wait_shows_chat_recovery_prompt(
+    client, session_id
+):
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/production_confirmation/submit",
+        json={
+            "values": valid_production_confirmation(),
+        },
+    )
+
+    assert response.status_code == 202
+    stage = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation"
+    ).json
+    assert stage["handoff_status"]["base_status"] == "ready"
+    assert "当前聊天输入“已提交”" in stage["handoff_status"]["resume_prompt"]
+
+
 def test_root_renders_nine_stage_left_rail(client):
     response = client.get("/")
     html = response.get_data(as_text=True)
@@ -990,6 +1048,57 @@ def test_draft_is_saved_without_handoff(client, session_id, tmp_path):
     assert not (stage_path / "revisions" / "0001" / "handoff.json").exists()
 
 
+def test_draft_request_id_is_idempotent_and_content_bound(
+    client, session_id, tmp_path
+):
+    request = {
+        "values": {"store": "测试店铺"},
+        "revision": 0,
+        "request_id": "web-draft-idempotent-0001",
+    }
+
+    first = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft", json=request
+    )
+    duplicate = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft", json=request
+    )
+    conflict = client.post(
+        f"/api/sessions/{session_id}/stages/setup/draft",
+        json={
+            **request,
+            "revision": 1,
+            "values": {"store": "不同内容"},
+        },
+    )
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 200
+    assert duplicate.json == first.json
+    assert conflict.status_code == 409
+    assert conflict.json["reason_code"] == "REVISION_CONTENT_CONFLICT"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / session_id / "events.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert sum(
+        event.get("persistence_request_id") == request["request_id"]
+        for event in events
+    ) == 1
+
+
+def test_frontend_keeps_request_id_across_retry_and_reloads_conflict(client):
+    script = client.get("/static/app.js").get_data(as_text=True)
+
+    assert "persistenceRequestIds" in script
+    assert "body.request_id = persistenceIdentity.value" in script
+    assert "await loadStage();" in script
+    assert "waitStillLive" in script
+    assert "budget_remaining_seconds" in script
+
+
 def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/draft",
@@ -1024,10 +1133,11 @@ def test_draft_after_submit_is_rejected_until_handoff_is_withdrawn(client, sessi
 
     assert submitted.status_code == 202
     assert drafted.status_code == 409
-    assert client.get(f"/api/sessions/{session_id}/stages/production_confirmation/status").json == {
-        "revision": 1,
-        "status": "ready_for_agent",
-    }
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation/status"
+    ).json
+    assert status["revision"] == 1
+    assert status["status"] == "ready_for_agent"
     stage_path = tmp_path / session_id / "08-production-confirmation"
     assert (stage_path / "handoff.json").is_file()
     assert (stage_path / "revisions" / "0001" / "handoff.json").is_file()
@@ -1135,10 +1245,11 @@ def test_submit_rejects_stale_revision(client, session_id):
     )
 
     assert first.status_code == 409
-    assert client.get(f"/api/sessions/{session_id}/stages/production_confirmation/status").json == {
-        "revision": 0,
-        "status": "draft",
-    }
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/production_confirmation/status"
+    ).json
+    assert status["revision"] == 0
+    assert status["status"] == "draft"
 
 
 def test_validation_requires_selected_products_and_enum_values(client, session_id):
@@ -1700,7 +1811,8 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         "license_decisions",
         "folder_decisions",
         "排除该文件夹",
-        "候选文件夹默认采用",
+        "请先筛选候选文件夹",
+        "50% 粗略候选默认排除",
         "folder-decision-changed",
         "pruneSelectedCandidates",
         "历史候选未关联文件夹",

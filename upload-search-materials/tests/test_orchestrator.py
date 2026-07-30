@@ -316,6 +316,119 @@ def test_wait_handoff_timeout_returns_two_without_business_execution(
     assert "timed out waiting for handoff" in captured.err
 
 
+def test_wait_handoff_timeout_clears_owned_advisory_lease(tmp_path, capsys):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+
+    code = main(
+        [
+            "wait-handoff",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--stage", "setup",
+            "--timeout", "0",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().err)
+    assert code == 2
+    assert payload["reason_code"] == "HANDOFF_BUDGET_TIMEOUT"
+    assert payload["recovery"]["status"] == "draft"
+    assert store.agent_wait(session.session_id, "setup") is None
+
+
+def test_resume_session_requires_explicit_binding_and_ack_is_not_authority(
+    tmp_path, capsys
+):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+
+    code = main(
+        [
+            "resume-session",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--ack", "已提交",
+        ]
+    )
+
+    resolved = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert resolved["status"] == "draft"
+    state = store.load_session(session.session_id)
+    assert state["stages"]["setup"]["status"] == "draft"
+    assert state["processing_claim"] is None
+
+
+def test_duplicate_resume_session_reuses_processing_claim(tmp_path, capsys):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+    store.save_input(session.session_id, "setup", {"store": "测试店铺"})
+    command = [
+        "resume-session",
+        "--runs-root", str(tmp_path),
+        "--session", session.session_id,
+        "--ack", "已提交",
+    ]
+
+    assert main(command) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert main(command) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["status"] == second["status"] == "processing"
+    assert (
+        first["processing_claim"]["claim_id"]
+        == second["processing_claim"]["claim_id"]
+    )
+    assert (
+        first["processing_claim"]["attempt_id"]
+        == second["processing_claim"]["attempt_id"]
+    )
+
+
+def test_resume_ack_never_turns_production_confirmation_into_authority(
+    tmp_path, capsys
+):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id,
+        "production_confirmation",
+        {
+            "store": "测试店铺",
+            "final_confirmation": False,
+            "task_ids": ["task-1"],
+        },
+    )
+    before = (
+        store._stage_path(session.session_id, "production_confirmation")
+        / "input.json"
+    ).read_bytes()
+
+    code = main(
+        [
+            "resume-session",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--ack", "已提交",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "processing"
+    assert payload["handoff"] == handoff
+    assert (
+        store._stage_path(session.session_id, "production_confirmation")
+        / "input.json"
+    ).read_bytes() == before
+    assert store.read_optional_stage_document(
+        session.session_id, "production_confirmation", "result"
+    ) is None
+    assert not (session.path / "approval-manifest.json").exists()
+
+
 class CliFakeLocator:
     def __init__(self, page, selector):
         self.page = page

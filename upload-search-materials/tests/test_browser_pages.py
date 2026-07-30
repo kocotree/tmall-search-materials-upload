@@ -316,6 +316,13 @@ class FakePopupLocator:
     def is_visible(self):
         return self.page.overlay_open
 
+    def inner_text(self):
+        return (
+            f"guide-step-{self.page.guide_steps}"
+            if self.selector == "#guide-next"
+            else "popup-close"
+        )
+
     def click(self, **_kwargs):
         self.page.clicked.append(self.selector)
         if self.selector == "#guide-next":
@@ -359,6 +366,7 @@ def test_popup_settle_prioritizes_open_overlay_close_control():
 
     assert closed == 1
     assert page.clicked == ["#opened-overlay-close"]
+    assert page._tmall_collection_events[-1]["changed"] is True
 
 
 def test_popup_settle_retries_when_overlay_rerenders_during_click():
@@ -395,6 +403,25 @@ def test_popup_settle_advances_all_seven_scoped_guide_steps():
     assert page.clicked == ["#guide-next"] * 7
 
 
+def test_popup_settle_stops_one_noop_control_after_two_unchanged_actions():
+    page = FakePopupPage()
+
+    class NoOp(FakePopupLocator):
+        def click(self, **_kwargs):
+            self.page.clicked.append(self.selector)
+
+    page.locator = lambda selector: NoOp(page, selector)
+
+    closed = _settle_safe_popups(
+        page,
+        {"safe_popup_close_priority": "#noop"},
+        delay_ms=0,
+    )
+
+    assert closed == 0
+    assert page.clicked == ["#noop", "#noop"]
+
+
 def test_popup_settle_catches_guide_that_appears_after_initial_quiet_check():
     page = FakePopupPage(guide_steps=1)
     page.overlay_open = False
@@ -420,14 +447,18 @@ def test_popup_settle_catches_guide_that_appears_after_initial_quiet_check():
 class OverlayBlockedTarget:
     def __init__(self):
         self.attempts = []
+        self.evaluations = []
 
     def click(self, **kwargs):
         self.attempts.append(kwargs)
         if not kwargs.get("force"):
             raise PlaywrightTimeoutError("guide overlay intercepts pointer events")
 
+    def evaluate(self, expression):
+        self.evaluations.append(expression)
 
-def test_read_only_collection_click_forces_once_after_popup_retries():
+
+def test_read_only_collection_click_uses_dom_click_after_popup_retries():
     page = FakePopupPage()
     page.overlay_open = False
     target = OverlayBlockedTarget()
@@ -440,11 +471,11 @@ def test_read_only_collection_click_forces_once_after_popup_retries():
         delay_ms=0,
     )
 
-    assert len(target.attempts) == 3
-    assert target.attempts[-1]["force"] is True
+    assert len(target.attempts) == 2
+    assert target.evaluations == ["element => element.click()"]
     assert page._tmall_collection_events == [
         {
-            "action": "force_click",
+            "action": "dom_click",
             "target_field": "high_value_filter",
             "reason": "recognized_guide_interceptor",
             "read_only": True,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 import shutil
 from typing import Any, Callable
@@ -35,6 +34,8 @@ from .io_tables import (
     validate_product_records,
 )
 from .material_state import build_completeness_matrix
+from .collection_runtime import attempt_path, read_json_object
+from .persistence import atomic_write_bytes, atomic_write_json, read_json
 from .runtime_config import RuntimeConfig
 from .supplement_collection import (
     CheckpointIdentityError,
@@ -50,13 +51,7 @@ def _now_iso() -> str:
 
 
 def _write_json(path: Path, document: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        document, ensure_ascii=False, indent=2
-    ).encode("utf-8") + b"\n"
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(path)
+    atomic_write_json(path, document)
 
 
 def _input_hash(path: Path) -> str:
@@ -64,10 +59,57 @@ def _input_hash(path: Path) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = read_json(path)
     if not isinstance(value, dict):
         raise InteractionConflict(f"{path.name} must contain an object")
     return value
+
+
+def _archive_prior_attempt_checkpoint(
+    checkpoint: Path,
+    output: Path,
+    *,
+    checkpoint_context: dict[str, Any],
+    attempt_id: str | None,
+) -> Path | None:
+    if not attempt_id or not checkpoint.is_file():
+        return None
+    prior = validate_checkpoint_identity(
+        checkpoint,
+        {
+            "scan_mode": "high-value",
+            **{
+                key: value
+                for key, value in checkpoint_context.items()
+                if key != "attempt_id"
+            },
+        },
+        compatible_missing_fields=frozenset({"attempt_id"}),
+    )
+    if not prior:
+        return None
+    prior_attempt_id = str(prior.get("attempt_id", "")).strip()
+    if not prior_attempt_id or prior_attempt_id == attempt_id:
+        return None
+    archive = (
+        checkpoint.parent
+        / "attempts"
+        / f"a-{prior_attempt_id[:12]}"
+    )
+    archive.mkdir(parents=True, exist_ok=True)
+    for source in (checkpoint, output):
+        if not source.is_file():
+            continue
+        destination = archive / source.name
+        if destination.is_file():
+            if destination.read_bytes() != source.read_bytes():
+                raise CheckpointIdentityError(
+                    f"CHECKPOINT_ARCHIVE_CONFLICT:{destination.name}"
+                )
+            source.unlink()
+        else:
+            source.replace(destination)
+    return archive
 
 
 def _claim_setup(
@@ -117,6 +159,7 @@ def _claim_setup(
         claimant_id=claimant_id,
         reclaim_expired=True,
         resume_needs_user_input=True,
+        resume_blocked=True,
     )
     claim = store.processing_claim(session_id, "setup")
     if claim is None:
@@ -231,6 +274,22 @@ def _snapshot_inputs(
         "valid_row_count": validation.row_count
         - validation.blocked_row_count,
         "blocked_row_count": validation.blocked_row_count,
+        "duplicate_id_count": sum(
+            "DUPLICATE_PRODUCT_ID" in reasons
+            for reasons in validation.reason_codes_by_row.values()
+        ),
+        "missing_id_count": sum(
+            "MISSING_PRODUCT_ID" in reasons
+            for reasons in validation.reason_codes_by_row.values()
+        ),
+        "invalid_id_count": sum(
+            "INVALID_PRODUCT_ID" in reasons
+            for reasons in validation.reason_codes_by_row.values()
+        ),
+        "excluded_row_count": validation.blocked_row_count,
+        "processable_row_count": (
+            validation.row_count - validation.blocked_row_count
+        ),
         "reason_codes_by_row": {
             str(row): list(reasons)
             for row, reasons in validation.reason_codes_by_row.items()
@@ -247,9 +306,15 @@ def _persist_selector_error(
     session_path: Path,
     handoff: dict[str, Any],
     error: Exception,
+    *,
+    artifact_root: Path | None = None,
 ) -> Path:
-    path = session_path / "collected" / "selector-error.json"
-    promotion_root = session_path / "collected" / "promotion"
+    path = (artifact_root or session_path / "collected") / "selector-error.json"
+    promotion_root = (
+        artifact_root
+        if artifact_root is not None
+        else session_path / "collected" / "promotion"
+    )
     profile_evidence = {}
     page_evidence = {}
     for source, target in (
@@ -277,7 +342,10 @@ def _persist_selector_error(
                 else "SELECTOR_PROFILE_INVALID"
             ),
             "detail": detail,
+            "action": "verify_browser_outcome",
             "target_field": detail.split(":", 1)[0],
+            "retry_count": 2,
+            "elapsed_ms": 0,
             "page_url": str(page_evidence.get("page_url", "")),
             "selector_profile": {
                 "name": str(profile_evidence.get("profile_name", "")),
@@ -294,6 +362,7 @@ def _persist_selector_error(
                 else ""
             ),
             "sensitive_content_persisted": False,
+            "safe_evidence_reference": "attempt worker.log and selector-error.json",
             "reproducible": True,
             "repair_boundary": (
                 "Use Playwright to reproduce against the real DOM, then repair "
@@ -304,6 +373,86 @@ def _persist_selector_error(
         },
     )
     return path
+
+
+def _publish_attempt(
+    session_path: Path,
+    *,
+    attempt_id: str,
+    checkpoint: Path,
+    output: Path,
+    selector_evidence: Path,
+    page_evidence: Path,
+    checkpoint_context: dict[str, Any],
+    expected_rows: int,
+) -> dict[str, str]:
+    """Validate and atomically project one successful attempt as current."""
+
+    checkpoint_document = validate_checkpoint_identity(
+        checkpoint,
+        {"scan_mode": "high-value", **checkpoint_context},
+    )
+    if (
+        not checkpoint_document
+        or checkpoint_document.get("status") != "complete"
+        or checkpoint_document.get("row_count") != expected_rows
+        or sha256_file(output)
+        != checkpoint_document.get("output_sha256")
+    ):
+        raise CheckpointIdentityError("ATTEMPT_PUBLICATION_INVALID")
+    rows = read_backend_status(output)
+    product_ids = [str(row.get("商品ID", "")).strip() for row in rows]
+    if (
+        len(rows) != expected_rows
+        or any(not value for value in product_ids)
+        or len(set(product_ids)) != len(product_ids)
+    ):
+        raise CheckpointIdentityError(
+            "ATTEMPT_PUBLICATION_PRODUCT_ID_INVALID"
+        )
+    current_attempt = read_json_object(
+        session_path
+        / "collected"
+        / "promotion"
+        / "current-attempt.json"
+    )
+    if (
+        current_attempt is not None
+        and current_attempt.get("attempt_id") != attempt_id
+    ):
+        raise InteractionConflict("COLLECTION_ATTEMPT_STALE")
+    promotion_root = session_path / "collected" / "promotion"
+    current_root = promotion_root / "current"
+    projections = {
+        "promotion_status": current_root / output.name,
+        "checkpoint": current_root / checkpoint.name,
+        "selector_evidence": current_root / selector_evidence.name,
+        "page_evidence": current_root / page_evidence.name,
+    }
+    for source, destination in (
+        (output, projections["promotion_status"]),
+        (checkpoint, projections["checkpoint"]),
+        (selector_evidence, projections["selector_evidence"]),
+        (page_evidence, projections["page_evidence"]),
+        (output, promotion_root / output.name),
+        (checkpoint, promotion_root / checkpoint.name),
+        (selector_evidence, promotion_root / selector_evidence.name),
+        (page_evidence, promotion_root / page_evidence.name),
+    ):
+        atomic_write_bytes(destination, source.read_bytes())
+    atomic_write_json(
+        current_root / "publication.json",
+        {
+            "schema_version": 1,
+            "attempt_id": attempt_id,
+            **checkpoint_context,
+            "row_count": expected_rows,
+            "csv_sha256": sha256_file(output),
+            "checkpoint_sha256": sha256_file(checkpoint),
+            "published_at": _now_iso(),
+        },
+    )
+    return {key: str(value) for key, value in projections.items()}
 
 
 def process_setup_collection(
@@ -406,7 +555,12 @@ def process_setup_collection(
         return {"status": "needs_user_input", "result": result}
 
     collected_root = session_path / "collected" / "promotion"
-    selector_evidence = collected_root / "selector-profile.json"
+    artifact_root = (
+        attempt_path(session_path, attempt_id)
+        if attempt_id
+        else collected_root
+    )
+    selector_evidence = artifact_root / "selector-profile.json"
     _write_json(
         selector_evidence,
         {
@@ -423,10 +577,20 @@ def process_setup_collection(
             "validated_at": _now_iso(),
         },
     )
-    output = collected_root / "promotion-material-status.csv"
-    checkpoint = collected_root / "promotion-material-status.checkpoint.json"
+    output = artifact_root / "promotion-material-status.csv"
+    checkpoint = artifact_root / "promotion-material-status.checkpoint.json"
     collected_at = _now_iso()
     collected_rows: list[dict[str, str]] = []
+    checkpoint_context = {
+        "session_id": session_id,
+        "revision": handoff["revision"],
+        "input_sha256": handoff["input_sha256"],
+        "selector_profile_sha256": profile.sha256,
+        **({"attempt_id": attempt_id} if attempt_id else {}),
+        "target_store": str(
+            setup_input.get("values", {}).get("store", "")
+        ).strip(),
+    }
 
     def renew_claim(
         _page_number: int, _rows: list[dict[str, str]]
@@ -434,8 +598,22 @@ def process_setup_collection(
         store.renew_processing_claim(session_id, "setup", claim_id)
 
     def collect(live_page: Any) -> list[dict[str, str]]:
+        if attempt_id:
+            _archive_prior_attempt_checkpoint(
+                collected_root
+                / "promotion-material-status.checkpoint.json",
+                collected_root / "promotion-material-status.csv",
+                checkpoint_context=checkpoint_context,
+                attempt_id=attempt_id,
+            )
         if progress_callback is not None:
-            progress_callback("validating_profile")
+            progress_callback(
+                "validating_profile",
+                action="validate_selector_profile",
+                target=profile.name,
+                retry_count=0,
+                next_recovery="修复选择器后恢复同一 session",
+            )
         page_evidence = validate_collection_page(
             live_page,
             profile.selectors,
@@ -454,11 +632,17 @@ def process_setup_collection(
             "input_sha256": handoff["input_sha256"],
         }
         page_evidence_path = (
-            collected_root / "store-page-evidence.json"
+            artifact_root / "store-page-evidence.json"
         )
         _write_json(page_evidence_path, evidence_document)
         if progress_callback is not None:
-            progress_callback("settling_popups")
+            progress_callback(
+                "settling_popups",
+                action="close_safe_popup",
+                target="recognized_safe_guides",
+                retry_count=0,
+                next_recovery="查看弹窗证据并恢复同一 attempt",
+            )
         rows = collect_supplement_material_status(
             live_page,
             profile.selectors,
@@ -467,29 +651,20 @@ def process_setup_collection(
             checkpoint=checkpoint,
             collected_at=collected_at,
             max_pages=None,
-            checkpoint_context={
-                "session_id": session_id,
-                "revision": handoff["revision"],
-                "input_sha256": handoff["input_sha256"],
-                "selector_profile_sha256": profile.sha256,
-                **(
-                    {"attempt_id": attempt_id}
-                    if attempt_id
-                    else {}
-                ),
-                "target_store": str(
-                    setup_input.get("values", {}).get("store", "")
-                ).strip(),
-            },
+            checkpoint_context=checkpoint_context,
             before_checkpoint=renew_claim,
             on_checkpoint=(
                 (
                     lambda page_number, values: progress_callback(
                         "writing_checkpoint",
+                        action="write_checkpoint",
+                        target=f"page:{page_number}",
+                        retry_count=0,
                         current_page=page_number + 1,
                         last_completed_page=page_number,
                         row_count=len(values),
                         last_checkpoint_at=_now_iso(),
+                        next_recovery="从最后完整页之后恢复",
                     )
                 )
                 if progress_callback is not None
@@ -499,6 +674,18 @@ def process_setup_collection(
                 (
                     lambda phase, page_number: progress_callback(
                         phase,
+                        action={
+                            "opening_promotion": "open_promotion_tab",
+                            "selecting_high_value": "select_high_value_filter",
+                            "collecting_page": "collect_page_rows",
+                        }.get(phase, phase),
+                        target=(
+                            f"page:{page_number}"
+                            if page_number is not None
+                            else "promotion_materials"
+                        ),
+                        retry_count=0,
+                        next_recovery="查看当前动作证据并恢复同一 attempt",
                         **(
                             {"current_page": page_number}
                             if page_number is not None
@@ -545,7 +732,13 @@ def process_setup_collection(
                 material_center_url=material_center_url,
             )
             if progress_callback is not None:
-                progress_callback("connecting_cdp")
+                progress_callback(
+                    "connecting_cdp",
+                    action="connect_cdp",
+                    target=cdp_url or runtime.cdp_url,
+                    retry_count=0,
+                    next_recovery="在 CDP Chrome 完成登录后恢复",
+                )
             with open_cdp_page(
                 cdp_url or runtime.cdp_url,
                 material_center_url,
@@ -588,7 +781,7 @@ def process_setup_collection(
         )
         return {"status": "blocked", "result": result}
     except (LoginInteractionRequired, HumanCheckRequired) as error:
-        evidence = session_path / "collected" / "login-required.json"
+        evidence = artifact_root / "login-required.json"
         _write_json(
             evidence,
             {
@@ -638,7 +831,12 @@ def process_setup_collection(
         )
         return {"status": "blocked", "result": result}
     except SelectorInvalidError as error:
-        evidence = _persist_selector_error(session_path, handoff, error)
+        evidence = _persist_selector_error(
+            session_path,
+            handoff,
+            error,
+            artifact_root=artifact_root,
+        )
         result = store.write_result(
             session_id,
             "setup",
@@ -658,7 +856,31 @@ def process_setup_collection(
         return {"status": "needs_user_input", "result": result}
 
     if progress_callback is not None:
-        progress_callback("building_completeness")
+        progress_callback(
+            "building_completeness",
+            action="build_completeness_matrix",
+            target="stage:completeness",
+            retry_count=0,
+            next_recovery="重新校验当前 attempt 输出",
+        )
+    published = {
+        "promotion_status": str(output),
+        "checkpoint": str(checkpoint),
+        "selector_evidence": str(selector_evidence),
+        "page_evidence": str(artifact_root / "store-page-evidence.json"),
+    }
+    if attempt_id:
+        store.renew_processing_claim(session_id, "setup", claim_id)
+        published = _publish_attempt(
+            session_path,
+            attempt_id=attempt_id,
+            checkpoint=checkpoint,
+            output=output,
+            selector_evidence=selector_evidence,
+            page_evidence=artifact_root / "store-page-evidence.json",
+            checkpoint_context=checkpoint_context,
+            expected_rows=len(collected_rows),
+        )
     matrix = build_completeness_matrix(
         collected_rows,
         products=[record.raw for record in products],
@@ -682,16 +904,16 @@ def process_setup_collection(
         status="completed",
         summary=f"已采集 {len(collected_rows)} 个搜推高价值商品",
         evidence=[
-            str(selector_evidence),
-            str(collected_root / "store-page-evidence.json"),
-            str(output),
-            str(checkpoint),
+            published["selector_evidence"],
+            published["page_evidence"],
+            published["promotion_status"],
+            published["checkpoint"],
             str(completeness_path),
         ],
         next_action="在第二阶段批量选择待补充商品",
         data={
-            "promotion_status": str(output),
-            "checkpoint": str(checkpoint),
+            "promotion_status": published["promotion_status"],
+            "checkpoint": published["checkpoint"],
             "completeness_matrix": str(completeness_path),
             "product_row_anomalies": matrix[
                 "product_row_anomalies"
@@ -700,6 +922,11 @@ def process_setup_collection(
         claim_id=claim_id,
         attempt_id=attempt_id,
     )
+    if attempt_id:
+        atomic_write_json(
+            artifact_root / "result.json",
+            result,
+        )
     completeness_state = store.load_session(session_id)
     completeness_revision = int(
         completeness_state["stages"]["completeness"]["revision"]

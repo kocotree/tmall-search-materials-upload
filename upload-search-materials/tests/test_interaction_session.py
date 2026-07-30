@@ -81,6 +81,102 @@ def test_handoff_hash_matches_atomic_input_bytes(tmp_path):
     assert handoff["revision"] == 1
 
 
+def test_agent_wait_is_advisory_renewable_and_cleared_by_claim(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    wait = store.create_agent_wait(
+        session.session_id,
+        "setup",
+        expected_revision=1,
+        claimant_id="agent-a",
+        lease_seconds=90,
+    )
+    visible = store.agent_wait(session.session_id, "setup")
+    assert visible["wait_id"] == wait["wait_id"]
+    assert visible["expired"] is False
+    assert visible["remaining_seconds"] > 0
+    assert visible["remaining_seconds"] <= 30
+    assert visible["budget_remaining_seconds"] <= 120
+    assert visible["budget_remaining_seconds"] > visible["remaining_seconds"]
+
+    renewed = store.renew_agent_wait(
+        session.session_id, wait["wait_id"], lease_seconds=120
+    )
+    assert renewed["expires_at"] >= wait["expires_at"]
+    assert renewed["started_at"] == wait["started_at"]
+    lease_length = (
+        datetime.fromisoformat(renewed["expires_at"])
+        - datetime.fromisoformat(renewed["heartbeat_at"])
+    ).total_seconds()
+    assert lease_length <= 30
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+    claimed = store.wait_for_handoff(
+        session.session_id, "setup", timeout_seconds=1
+    )
+
+    assert claimed == handoff
+    assert store.agent_wait(session.session_id, "setup") is None
+    assert store.processing_claim(session.session_id, "setup") is not None
+
+
+def test_same_waiter_reuses_id_and_second_waiter_is_rejected(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    first = store.create_agent_wait(
+        session.session_id, "setup", expected_revision=1, claimant_id="agent-a"
+    )
+    same = store.create_agent_wait(
+        session.session_id, "setup", expected_revision=1, claimant_id="agent-a"
+    )
+
+    assert same["wait_id"] == first["wait_id"]
+    assert same["started_at"] == first["started_at"]
+    assert store.agent_wait(session.session_id)["claimant_id"] == "agent-a"
+    assert store.processing_claim(session.session_id, "setup") is None
+    with pytest.raises(InteractionConflict, match="AGENT_WAIT_BUSY"):
+        store.create_agent_wait(
+            session.session_id,
+            "setup",
+            expected_revision=1,
+            claimant_id="agent-b",
+        )
+
+
+def test_recovery_resolver_precedence_and_draft_are_side_effect_free(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    draft = store.resolve_recovery_state(session.session_id)
+    assert draft["status"] == "draft"
+    assert draft["reason_code"] == "NOT_FORMALLY_SUBMITTED"
+    assert store.processing_claim(session.session_id, "setup") is None
+
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+    assert store.resolve_recovery_state(session.session_id)["status"] == "ready"
+    store.wait_for_handoff(session.session_id, "setup", timeout_seconds=1)
+    assert store.resolve_recovery_state(session.session_id)["status"] == "processing"
+    claim = store.processing_claim(session.session_id, "setup")
+    result = store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="completed",
+        summary="ok",
+        claim_id=claim["claim_id"],
+        attempt_id=claim["attempt_id"],
+    )
+    resolved = store.resolve_recovery_state(session.session_id)
+    assert resolved["status"] == "completed"
+    assert resolved["result"] == result
+
+
 def test_result_with_wrong_revision_is_rejected(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()
@@ -371,6 +467,79 @@ def test_write_result_binds_identity_and_updates_session(tmp_path):
     assert result["revision"] == handoff["revision"]
     assert result["input_sha256"] == handoff["input_sha256"]
     assert store.load_session(session.session_id)["stages"]["setup"]["status"] == "needs_user_input"
+
+
+def test_blocked_handoff_can_be_reclaimed_only_when_explicitly_enabled(
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+    store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="blocked",
+        summary="repairable collector failure",
+    )
+
+    with pytest.raises(TimeoutError):
+        store.wait_for_handoff(
+            session.session_id,
+            "setup",
+            timeout_seconds=0,
+        )
+
+    claimed = store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        resume_blocked=True,
+    )
+    assert claimed == handoff
+    assert store.processing_claim(session.session_id, "setup") is not None
+
+
+def test_write_result_archives_previous_attempt_when_history_directory_is_absent(
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+
+    store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="needs_user_input",
+        summary="first attempt failed",
+        attempt_id="attempt-old",
+    )
+    store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="needs_user_input",
+        summary="second attempt failed",
+        attempt_id="attempt-new",
+    )
+
+    history = (
+        store._stage_path(session.session_id, "setup")
+        / "results"
+        / "attempt-old.json"
+    )
+    assert history.is_file()
+    assert json.loads(history.read_text(encoding="utf-8"))["attempt_id"] == (
+        "attempt-old"
+    )
 
 
 def test_write_result_persists_structured_asset_gallery_data(tmp_path):

@@ -11,21 +11,26 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import build_opener, ProxyHandler, Request
 import webbrowser
 
 from .session import InteractionPathError, SessionStore
+from ..persistence import atomic_write_json, read_json
+from ..runtime_identity import (
+    current_runtime_identity,
+    same_local_resource_identity,
+)
 
 
 SERVICE_SCHEMA_VERSION = 1
 DEFAULT_PORT_START = 8765
 DEFAULT_PORT_END = 8795
 SERVICE_STATE_FILE = ".ui-service.json"
+_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
 
 
 class ManagedServiceError(RuntimeError):
@@ -46,20 +51,7 @@ def _state_path(store: SessionStore, session_id: str) -> Path:
 
 
 def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(document, stream, ensure_ascii=False, indent=2, sort_keys=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    atomic_write_json(path, document, sort_keys=True)
 
 
 def _read_state(store: SessionStore, session_id: str) -> dict[str, Any] | None:
@@ -67,7 +59,7 @@ def _read_state(store: SessionStore, session_id: str) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = read_json(path)
     except (OSError, json.JSONDecodeError):
         return None
     return document if isinstance(document, dict) else None
@@ -75,10 +67,65 @@ def _read_state(store: SessionStore, session_id: str) -> dict[str, Any] | None:
 
 def _url_json(url: str, timeout: float = 1.0) -> dict[str, Any] | None:
     try:
-        with urlopen(url, timeout=timeout) as response:
+        with _LOOPBACK_OPENER.open(url, timeout=timeout) as response:
             value = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
+    return value if isinstance(value, dict) else None
+
+
+def dispatch_collection_start(
+    runs_root: Path,
+    session_id: str,
+    *,
+    claimant_id: str,
+) -> dict[str, Any] | None:
+    """Ask the owned desktop service to create its collection child."""
+
+    store = SessionStore(runs_root)
+    state = _read_state(store, session_id)
+    if state is None:
+        return None
+    if not _healthy_identity(state):
+        if state.get("status") in {"starting", "healthy"}:
+            raise ManagedServiceError(
+                "LOCAL_RESOURCE_IDENTITY_MISMATCH",
+                "managed desktop service identity cannot be verified",
+            )
+        return None
+    payload = json.dumps(
+        {"claimant_id": claimant_id},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        (
+            f"http://127.0.0.1:{state['port']}/api/internal/"
+            f"sessions/{session_id}/collection/start"
+        ),
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Ownership-Token": str(state["ownership_token"]),
+        },
+    )
+    try:
+        with _LOOPBACK_OPENER.open(request, timeout=15) as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        try:
+            detail = json.loads(error.read().decode("utf-8"))
+        except (ValueError, OSError):
+            detail = {}
+        raise ManagedServiceError(
+            str(detail.get("reason_code", "DESKTOP_COLLECTION_START_FAILED")),
+            str(detail.get("message", "desktop collection start failed")),
+        ) from error
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+        raise ManagedServiceError(
+            "DESKTOP_COLLECTION_START_FAILED",
+            str(error),
+        ) from error
     return value if isinstance(value, dict) else None
 
 
@@ -91,6 +138,10 @@ def _healthy_identity(state: dict[str, Any]) -> bool:
         and secrets.compare_digest(
             str(health.get("ownership_token", "")),
             str(state.get("ownership_token", "")),
+        )
+        and same_local_resource_identity(
+            state.get("runtime_identity", {}),
+            health.get("runtime_identity", {}),
         )
     )
 
@@ -113,6 +164,15 @@ def _claim_started_identity(state: dict[str, Any]) -> bool:
         return False
     state["launcher_pid"] = state.get("pid")
     state["pid"] = pid
+    runtime_identity = health.get("runtime_identity")
+    if not isinstance(runtime_identity, dict):
+        return False
+    launcher_identity = state.get("launcher_runtime_identity", {})
+    if not same_local_resource_identity(
+        launcher_identity, runtime_identity
+    ):
+        return False
+    state["runtime_identity"] = runtime_identity
     return True
 
 
@@ -197,6 +257,7 @@ def start_service(
     config: str | None = None,
 ) -> dict[str, Any]:
     store = SessionStore(runs_root)
+    launcher_runtime_identity = current_runtime_identity()
     if session_id:
         store.load_session(session_id)
     else:
@@ -206,11 +267,16 @@ def start_service(
     if existing and _healthy_identity(existing) and _session_is_readable(
         existing, session_id
     ):
-        existing["status"] = "healthy"
-        existing["healthy"] = True
-        existing["session_readable"] = True
-        existing["reused"] = True
-        return _result(existing)
+        if same_local_resource_identity(
+            launcher_runtime_identity,
+            existing.get("runtime_identity", {}),
+        ):
+            existing["status"] = "healthy"
+            existing["healthy"] = True
+            existing["session_readable"] = True
+            existing["reused"] = True
+            return _result(existing)
+        stop_service(runs_root, session_id)
 
     port = _select_port(port_start, port_end)
     token = secrets.token_urlsafe(32)
@@ -221,8 +287,13 @@ def start_service(
     stderr_path = logs_path / "ui-service.stderr.log"
     query = urlencode({"session_id": session_id})
     url = f"http://127.0.0.1:{port}/?{query}"
+    module_root = Path(__file__).resolve().parents[3]
+    prepared_python = module_root / ".venv" / "Scripts" / "python.exe"
+    runtime_python = (
+        prepared_python if prepared_python.is_file() else Path(sys.executable)
+    )
     command = [
-        sys.executable,
+        str(runtime_python),
         "-m",
         "upload_search_materials.cli",
         "interact",
@@ -244,7 +315,7 @@ def start_service(
     ) as stderr:
         process = subprocess.Popen(
             command,
-            cwd=Path(__file__).resolve().parents[3],
+            cwd=module_root,
             stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,
@@ -257,6 +328,7 @@ def start_service(
         "session_id": session_id,
         "runs_root": str(store._runs_root),
         "pid": process.pid,
+        "launcher_runtime_identity": launcher_runtime_identity,
         "ownership_token": token,
         "port": port,
         "url": url,

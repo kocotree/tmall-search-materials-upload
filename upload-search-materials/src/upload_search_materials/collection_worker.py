@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ctypes
-import hashlib
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
@@ -29,6 +29,13 @@ from .collection_runtime import (
 )
 from .interaction.session import InteractionConflict, SessionStore
 from .runtime_config import RuntimeConfig, load_runtime_config
+from .runtime_preflight import environment_fingerprint
+from .runtime_identity import (
+    LocalResourceIdentityMismatch,
+    require_local_resource_identity,
+    runtime_identity_for_pid,
+    same_local_resource_identity,
+)
 from .setup_collection import _claim_setup, process_setup_collection
 from .time_utils import iso_timestamp
 
@@ -51,6 +58,22 @@ def _windows_process_creation_identity(pid: int) -> str | None:
 
     process_query_limited_information = 0x1000
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
     handle = kernel32.OpenProcess(
         process_query_limited_information, False, int(pid)
     )
@@ -101,7 +124,12 @@ def _public_worker(worker: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in worker.items()
-        if key not in {"ownership_token", "process_identity"}
+        if key
+        not in {
+            "ownership_token",
+            "process_identity",
+            "local_resource_identity",
+        }
     }
 
 
@@ -207,17 +235,29 @@ def launch_collection_worker(
     claimant_id: str = "collection-worker",
     popen: Any = subprocess.Popen,
     identity_provider: Any = process_identity,
+    local_resource_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start or reuse one detached worker and return without waiting for scan."""
 
-    environment = environment_fingerprint(
-        runtime.workspace_root / "upload-search-materials"
+    from .runtime_preflight import (
+        RuntimePreflightError,
+        preflight_runtime_environment,
     )
-    if not environment["prepared"]:
-        raise InteractionConflict("ENVIRONMENT_NOT_PREPARED")
+
+    if local_resource_identity is not None:
+        require_local_resource_identity(local_resource_identity)
     selected_profile = selectors_path or runtime.selectors_file
     if selected_profile is None:
         raise SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND")
+    try:
+        preflight = preflight_runtime_environment(
+            runtime,
+            selectors_path=selected_profile,
+            cdp_url=cdp_url or runtime.cdp_url,
+        )
+    except RuntimePreflightError as error:
+        raise InteractionConflict(str(error)) from error
+    environment = preflight["environment"]
     profile = load_selector_profile(
         selected_profile,
         purpose="high_value_collection",
@@ -286,7 +326,7 @@ def launch_collection_worker(
 
     ownership_token = secrets.token_urlsafe(32)
     argv = [
-        sys.executable,
+        str(environment["python"]),
         "-m",
         "upload_search_materials.cli",
         "collection-worker",
@@ -307,6 +347,17 @@ def launch_collection_worker(
     ]
     if runtime.config_path is not None:
         argv.extend(["--config", str(runtime.config_path)])
+    if local_resource_identity is not None:
+        argv.extend(
+            [
+                "--expected-windows-sid",
+                str(local_resource_identity["sid"]),
+                "--expected-login-session-id",
+                str(local_resource_identity["login_session_id"]),
+            ]
+        )
+        if local_resource_identity.get("interactive_desktop"):
+            argv.append("--require-interactive-desktop")
     log_file.parent.mkdir(parents=True, exist_ok=True)
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -322,6 +373,21 @@ def launch_collection_worker(
             close_fds=True,
             creationflags=creationflags,
         )
+    if local_resource_identity is not None:
+        child_identity = runtime_identity_for_pid(int(process.pid))
+        if (
+            child_identity is None
+            or not same_local_resource_identity(
+                local_resource_identity, child_identity
+            )
+        ):
+            try:
+                process.terminate()
+            except (AttributeError, OSError):
+                pass
+            raise LocalResourceIdentityMismatch(
+                "collection_worker_identity"
+            )
     identity = identity_provider(int(process.pid))
     if identity is None:
         try:
@@ -336,6 +402,16 @@ def launch_collection_worker(
         process_identity=identity,
         log_path=log_file,
     )
+    if local_resource_identity is not None:
+        worker["local_resource_identity"] = {
+            "sid": local_resource_identity["sid"],
+            "login_session_id": local_resource_identity[
+                "login_session_id"
+            ],
+            "interactive_desktop": bool(
+                local_resource_identity.get("interactive_desktop")
+            ),
+        }
     write_json_atomic(private_file, worker)
     write_json_atomic(public_file, _public_worker(worker))
     return {
@@ -406,7 +482,10 @@ def run_collection_worker(
     selectors_path: Path,
     cdp_url: str,
     config_path: str | Path | None = None,
+    local_resource_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if local_resource_identity is not None:
+        require_local_resource_identity(local_resource_identity)
     store = SessionStore(runs_root)
     session_path = store._session_path(session_id)
     _, private_path, public_path, _ = _worker_paths(
@@ -421,8 +500,31 @@ def run_collection_worker(
         raise CollectionRuntimeError("COLLECTION_WORKER_MANIFEST_REQUIRED")
     if worker.get("ownership_token") != ownership_token:
         raise CollectionRuntimeError("COLLECTION_WORKER_OWNERSHIP_MISMATCH")
-    if worker.get("process_identity") != process_identity(os.getpid()):
-        raise CollectionRuntimeError("COLLECTION_WORKER_PROCESS_MISMATCH")
+    current_pid = os.getpid()
+    current_identity = process_identity(current_pid)
+    if current_identity is None:
+        raise CollectionRuntimeError("COLLECTION_WORKER_IDENTITY_UNAVAILABLE")
+    if (
+        int(worker.get("pid", 0)) != current_pid
+        or worker.get("process_identity") != current_identity
+    ):
+        launcher_pid = int(worker.get("pid", 0))
+        launcher_identity = str(worker.get("process_identity", ""))
+        if (
+            not launcher_identity
+            or process_identity(launcher_pid) != launcher_identity
+        ):
+            raise CollectionRuntimeError("COLLECTION_WORKER_PROCESS_MISMATCH")
+        worker = {
+            **worker,
+            "launcher_pid": launcher_pid,
+            "launcher_process_identity": launcher_identity,
+            "pid": current_pid,
+            "process_identity": current_identity,
+            "updated_at": iso_timestamp(),
+        }
+        write_json_atomic(private_path, worker)
+        write_json_atomic(public_path, _public_worker(worker))
 
     reporter = WorkerReporter(
         private_path,
@@ -462,61 +564,3 @@ def run_collection_worker(
         raise
     finally:
         reporter.stop()
-
-
-def environment_fingerprint(project_root: Path) -> dict[str, Any]:
-    project = Path(project_root).resolve()
-    lock = project / "uv.lock"
-    python = project / ".venv" / "Scripts" / "python.exe"
-    executable = project / ".venv" / "Scripts" / "tmall-materials.exe"
-    source_package = project / "src" / "upload_search_materials"
-    recorded_path = project / ".environment-fingerprint.json"
-    lock_sha = (
-        hashlib.sha256(lock.read_bytes()).hexdigest()
-        if lock.is_file()
-        else ""
-    )
-    files_ready = bool(
-        lock_sha
-        and python.is_file()
-        and (executable.is_file() or source_package.is_dir())
-    )
-    launch_identity = (
-        str(executable.resolve())
-        if executable.is_file()
-        else f"{python.resolve()} -m upload_search_materials.cli"
-    )
-    try:
-        recorded = read_json_object(recorded_path)
-    except CollectionRuntimeError:
-        recorded = {"schema_version": 0}
-    if recorded is None:
-        fingerprint_status = (
-            "legacy_prepared" if files_ready else "missing"
-        )
-        fingerprint_match = files_ready
-    else:
-        fingerprint_match = bool(
-            int(recorded.get("schema_version", 0)) == 1
-            and recorded.get("lock_sha256") == lock_sha
-            and str(recorded.get("launch_identity", recorded.get("executable", "")))
-            == launch_identity
-        )
-        fingerprint_status = (
-            "matched" if fingerprint_match else "stale"
-        )
-    return {
-        "schema_version": 1,
-        "project_root": str(project),
-        "uv_cache_dir": str(project / ".uv-cache"),
-        "lock_path": str(lock),
-        "lock_sha256": lock_sha,
-        "python": str(python),
-        "executable": str(executable),
-        "launch_identity": launch_identity,
-        "source_package": str(source_package),
-        "fingerprint_path": str(recorded_path),
-        "fingerprint_status": fingerprint_status,
-        "prepared": files_ready and fingerprint_match,
-        "checked_at": iso_timestamp(),
-    }

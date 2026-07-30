@@ -14,6 +14,7 @@ from .browser.material_page import (
     scan_recommended_material_status,
     supplement_material_status,
 )
+from .persistence import atomic_write_dict_csv, atomic_write_json, read_json
 
 
 class CheckpointIdentityError(RuntimeError):
@@ -43,18 +44,12 @@ BACKEND_STATUS_FIELDS = [
 def write_backend_status(
     path: Path, rows: Iterable[Mapping[str, str]]
 ) -> None:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(
-            stream,
-            fieldnames=BACKEND_STATUS_FIELDS,
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(temporary, output)
+    atomic_write_dict_csv(
+        Path(path),
+        rows,
+        fieldnames=BACKEND_STATUS_FIELDS,
+        extrasaction="ignore",
+    )
 
 
 def read_backend_status(path: Path) -> list[dict[str, str]]:
@@ -92,14 +87,7 @@ def _validate_unique_products(rows: Iterable[Mapping[str, str]]) -> None:
 
 
 def write_checkpoint(path: Path, document: Mapping[str, Any]) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp")
-    temporary.write_text(
-        json.dumps(dict(document), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, target)
+    atomic_write_json(Path(path), document)
 
 
 def validate_checkpoint_identity(
@@ -112,7 +100,7 @@ def validate_checkpoint_identity(
     if not target.is_file():
         return None
     try:
-        document = json.loads(target.read_text(encoding="utf-8"))
+        document = read_json(target)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise CheckpointIdentityError(
             "CHECKPOINT_INVALID: checkpoint is unreadable"

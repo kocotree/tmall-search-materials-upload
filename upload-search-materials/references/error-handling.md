@@ -35,6 +35,7 @@
 |---|---|---|
 | `FOLDER_PICKER_BUSY` | 已有目录窗口 | 完成或取消现有窗口 |
 | `FOLDER_PICKER_TIMEOUT` | 用户未在边界内完成选择 | 重试或手工粘贴路径 |
+| `FOLDER_PICKER_NOT_VISIBLE` | helper 已启动但窗口可见性无法证明 | 保留原输入并使用手工输入，或从桌面入口重启 |
 | `FOLDER_PICKER_GUI_UNAVAILABLE` | 服务会话无法显示原生窗口 | 手工粘贴本机或 UNC 路径 |
 | `FOLDER_PICKER_UNSUPPORTED` | 非 Windows 环境 | 手工输入路径 |
 | `FOLDER_PICKER_START_FAILED` | Windows 助手未启动 | 重试或手工输入 |
@@ -43,6 +44,10 @@
 
 路径和窗口错误只阻断当前路径动作，不清空输入、不提交阶段。程序不得自动建立映射、
 挂载共享、保存 NAS 凭据或把资源管理器用户权限误当成受管服务身份权限。
+
+| `LOCAL_RESOURCE_IDENTITY_MISMATCH` | 服务、picker、索引或 Worker 的 SID/登录会话不一致 | 从固定桌面入口重启工作台后重新检测 |
+| `PERSISTENCE_ACCESS_DENIED` | 本地状态文件不是短暂占用而是只读或 ACL 拒绝 | 保留事务证据，修复工作目录权限后重试原请求 |
+| `REVISION_CONTENT_CONFLICT` | 同一 request ID 或目标 revision 对应不同规范化内容 | 刷新权威状态，保留既有 revision，不自动覆盖 |
 
 ## 确定性编排
 
@@ -144,3 +149,12 @@
 - 已有远端素材 ID 或可信远端证据的 item 不得再次进入上传队列。
 
 所有异常必须记录 task ID、商品 ID、目标店铺、旧状态、新状态、原因码、时间、尝试次数和页面证据。
+# Handoff recovery reason codes
+
+- `HANDOFF_SEGMENT_TIMEOUT`: 30 秒等待片段正常结束；可在阶段总预算内继续等待。
+- `HANDOFF_STAGE_CHANGED` / `HANDOFF_SESSION_CHANGED`: 等待身份已变化，重新读取精确
+  session 当前阶段。
+- `AGENT_WAIT_STALE` / `AGENT_WAIT_IDENTITY_MISMATCH`: 不得续租旧等待者，重新注册。
+- `NOT_FORMALLY_SUBMITTED`: 页面仍是草稿；不得自行构造 handoff。
+- `RECOVERY_HANDOFF_MISSING` / `RECOVERY_HANDOFF_REVISION_MISMATCH`: 保留现场并要求页面
+  重新正式提交，禁止猜测或改写身份。

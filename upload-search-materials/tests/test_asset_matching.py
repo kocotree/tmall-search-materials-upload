@@ -40,6 +40,47 @@ def test_normalize_match_text_applies_the_required_canonicalization():
     assert normalize("  ＫＫ树 花 仙-子—帽_+· ") == "花仙子帽"
 
 
+def test_folder_matching_removes_main_sub_listing_suffixes():
+    matcher = matcher_for(
+        [product("1041562508689", sku="KQ26121", title="小萌侠分区防晒泳衣（主）")]
+    )
+
+    matches = matcher.match_folder_name("达人+小萌侠分区防晒泳衣")
+
+    assert [(match.product_id, match.match_type) for match in matches] == [
+        ("1041562508689", "name_candidate")
+    ]
+
+
+def test_folder_matching_finds_long_contiguous_name_candidate_for_screening():
+    matcher = matcher_for(
+        [product("768088523792", sku="KQ24027", title="小魔方卡片太阳镜（主）")]
+    )
+
+    matches = matcher.match_folder_name("果立方卡片太阳镜")
+
+    assert [(match.product_id, match.match_type) for match in matches] == [
+        ("768088523792", "fuzzy_name_candidate")
+    ]
+    assert matches[0].reason_codes == (
+        "CONTIGUOUS_NAME_COVERAGE_AT_LEAST_50_PERCENT",
+    )
+
+
+def test_folder_fuzzy_matching_rejects_short_shared_fragments():
+    matcher = matcher_for(
+        [
+            product(
+                "886506466908",
+                sku="KQ25029",
+                title="分龄成长软软镜/稳稳镜/酷酷镜",
+            )
+        ]
+    )
+
+    assert matcher.match_folder_name("分龄成长太阳镜") == ()
+
+
 def test_exact_product_id_component_wins_over_sku_and_name_components():
     matcher = matcher_for(
         [product("123456", sku="SKU-HAT", title="花仙子翻翻帽")]

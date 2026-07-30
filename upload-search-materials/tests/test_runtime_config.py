@@ -150,6 +150,30 @@ def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):
         )
 
 
+def test_legacy_source_migrates_to_stable_id_across_machine_bindings(
+    tmp_path
+):
+    first = normalize_image_sources(
+        [{"label": "共享模特图", "path": r"Y:\model"}],
+        tmp_path,
+    )[0]
+    second = normalize_image_sources(
+        [
+            {
+                "source_id": first["source_id"],
+                "label": "共享模特图",
+                "path": r"M:\model",
+                "canonical_unc": r"\\nas\media\model",
+            }
+        ],
+        tmp_path,
+    )[0]
+
+    assert first["source_id"] == second["source_id"]
+    assert first["path"] != second["path"]
+    assert second["canonical_unc"] == r"\\nas\media\model"
+
+
 def test_runtime_source_contains_no_machine_specific_drive_or_username():
     package = Path(__file__).parents[1] / "src" / "upload_search_materials"
     source = "\n".join(

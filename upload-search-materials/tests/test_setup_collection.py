@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 import pytest
 
+from upload_search_materials.browser.config import load_selector_profile
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.io_tables import PRODUCT_REQUIRED_COLUMNS
 from upload_search_materials.runtime_config import load_runtime_config
@@ -166,6 +167,24 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     )
 
     assert first["status"] == "completed"
+    attempt_id = first["result"]["attempt_id"]
+    attempt = (
+        session.path
+        / "collected"
+        / "promotion"
+        / "attempts"
+        / f"a-{attempt_id[:12]}"
+    )
+    assert (attempt / "promotion-material-status.csv").is_file()
+    assert (attempt / "promotion-material-status.checkpoint.json").is_file()
+    assert (attempt / "result.json").is_file()
+    assert (
+        session.path
+        / "collected"
+        / "promotion"
+        / "current"
+        / "publication.json"
+    ).is_file()
     assert second["reused"] is True
     assert calls == ["high_value_filter"]
     assert store.load_session(session.session_id)["current_stage"] == "completeness"
@@ -316,6 +335,77 @@ def test_setup_processor_rejects_checkpoint_from_other_selector_profile(
         "CHECKPOINT_IDENTITY_MISMATCH"
     )
     assert calls == []
+
+
+def test_setup_processor_archives_checkpoint_from_prior_attempt(
+    tmp_path, monkeypatch
+):
+    _, session, handoff, runtime, selectors = prepare_session(
+        tmp_path, [product_row("886506466908")]
+    )
+    checkpoint = (
+        session.path
+        / "collected"
+        / "promotion"
+        / "promotion-material-status.checkpoint.json"
+    )
+    checkpoint.parent.mkdir(parents=True)
+    profile = load_selector_profile(
+        selectors,
+        purpose="high_value_collection",
+        production=True,
+    )
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "needs_manual_review",
+                "scan_mode": "high-value",
+                "last_completed_page": 0,
+                "session_id": session.session_id,
+                "revision": handoff["revision"],
+                "input_sha256": handoff["input_sha256"],
+                "selector_profile_sha256": profile.sha256,
+                "attempt_id": "attempt-old",
+                "target_store": "测试店铺",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def scan(*args, **kwargs):
+        kwargs["on_page"](1, [collected_row()])
+        return [collected_row()]
+
+    monkeypatch.setattr(
+        "upload_search_materials.supplement_collection."
+        "scan_recommended_material_status",
+        scan,
+    )
+    result = process_setup_collection(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        page=Page(),
+    )
+
+    archived = (
+        checkpoint.parent
+        / "attempts"
+        / "a-attempt-old"
+        / checkpoint.name
+    )
+    assert result["status"] == "completed"
+    assert archived.is_file()
+    assert json.loads(archived.read_text(encoding="utf-8"))[
+        "attempt_id"
+    ] == "attempt-old"
+    current_attempt_id = result["result"]["attempt_id"]
+    assert current_attempt_id != "attempt-old"
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))[
+        "attempt_id"
+    ] == current_attempt_id
 
 
 def test_expired_claim_recovery_validates_checkpoint_before_reclaim(

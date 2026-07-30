@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 import time
 import re
 import threading
@@ -19,6 +18,7 @@ from typing import Any
 from .stages import STAGES, get_stage
 from ..decision_modes import get_decision_boundary
 from ..time_utils import iso_timestamp
+from ..persistence import atomic_write_json, read_json
 
 
 SCHEMA_VERSION = 1
@@ -35,6 +35,8 @@ STAGE_STATUSES = frozenset(
         "blocked",
     }
 )
+STAGE_TRANSACTION_SCHEMA_VERSION = 1
+PERSISTENCE_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}")
 
 
 class InteractionPathError(ValueError):
@@ -98,6 +100,7 @@ class SessionStore:
                 "video_test_deferred": True,
                 "workflow_profile": CURRENT_WORKFLOW_PROFILE,
                 "last_agent_heartbeat": None,
+                "agent_wait": None,
                 "processing_claim": None,
             }
             self._write_json_atomic(session_path / "session.json", state)
@@ -111,13 +114,12 @@ class SessionStore:
             LEGACY_AI_COMPATIBILITY_PROFILE,
         }:
             state = self._migrate_legacy_workflow(session_id, state)
-        return state
+        return self._reconcile_pending_stage_transaction(session_id, state)
 
     def _load_session_file(self, session_id: str) -> dict[str, Any]:
         path = self._session_path(session_id)
         try:
-            with (path / "session.json").open(encoding="utf-8") as stream:
-                state = json.load(stream)
+            state = read_json(path / "session.json")
         except FileNotFoundError as error:
             raise InteractionPathError(f"session does not exist: {session_id}") from error
         if not isinstance(state, dict):
@@ -256,12 +258,22 @@ class SessionStore:
         expected_revision: int | None = None,
         allowed_current_statuses: frozenset[str] | set[str] | None = None,
         interaction_audit: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         self._stage_index(stage_id)
         with self._session_lock(session_id):
             stage_path = self._stage_path(session_id, stage_id)
             state = self.load_session(session_id)
             stage_state = state["stages"][stage_id]
+            persistence_request_id = self._persistence_request_id(request_id)
+            payload_sha = self._stage_payload_sha(
+                "submit", values, user_notes
+            )
+            completed = self._completed_stage_transaction(
+                stage_path, persistence_request_id, payload_sha
+            )
+            if completed is not None:
+                return completed
             if (
                 allowed_current_statuses is not None
                 and stage_state["status"] not in allowed_current_statuses
@@ -270,26 +282,29 @@ class SessionStore:
             revision = int(stage_state["revision"]) + 1
             if expected_revision is not None and expected_revision != revision:
                 raise InteractionConflict("expected revision is stale")
-            created_at = self._iso_timestamp(datetime.now(timezone.utc))
-            interaction_history = self._next_interaction_history(
-                stage_path, interaction_audit
+            transaction, input_document = self._prepare_stage_transaction(
+                session_id=session_id,
+                stage_id=stage_id,
+                stage_path=stage_path,
+                operation="submit",
+                request_id=persistence_request_id,
+                base_revision=int(stage_state["revision"]),
+                target_revision=revision,
+                payload_sha=payload_sha,
+                values=values,
+                user_notes=user_notes,
+                interaction_audit=interaction_audit,
             )
+            created_at = str(input_document["created_at"])
 
             self._invalidate_after_edit(session_id, stage_id, state)
-            input_document = {
-                "schema_version": SCHEMA_VERSION,
-                "session_id": session_id,
-                "stage_id": stage_id,
-                "revision": revision,
-                "created_at": created_at,
-                "submitted_at": created_at,
-                "values": values,
-                "user_notes": user_notes,
-                "interaction_history": interaction_history,
-            }
             input_path = stage_path / "input.json"
             self._write_json_atomic(input_path, input_document)
-            self._write_revision_snapshot(stage_path, revision, "input", input_document)
+            self._advance_stage_transaction(stage_path, transaction, "content_written")
+            self._write_revision_snapshot_idempotent(
+                stage_path, revision, "input", input_document
+            )
+            self._advance_stage_transaction(stage_path, transaction, "snapshot_written")
             handoff = {
                 "schema_version": SCHEMA_VERSION,
                 "status": "ready_for_agent",
@@ -300,17 +315,18 @@ class SessionStore:
                 "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
             }
             self._write_json_atomic(stage_path / "handoff.json", handoff)
-            self._write_revision_snapshot(stage_path, revision, "handoff", handoff)
+            self._write_revision_snapshot_idempotent(
+                stage_path, revision, "handoff", handoff
+            )
             stage_state["revision"] = revision
             stage_state["status"] = "ready_for_agent"
             state["current_stage"] = stage_id
             self._write_session_state(session_id, state)
-            self._append_event(
-                self._session_path(session_id),
-                "input_saved",
-                session_id=session_id,
-                stage_id=stage_id,
-                revision=revision,
+            self._complete_stage_transaction(
+                stage_path,
+                transaction,
+                response=handoff,
+                event="input_saved",
             )
             return handoff
 
@@ -323,6 +339,7 @@ class SessionStore:
         *,
         expected_revision: int,
         interaction_audit: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist an editable revision and atomically revoke its handoff."""
 
@@ -331,40 +348,50 @@ class SessionStore:
             stage_path = self._stage_path(session_id, stage_id)
             state = self.load_session(session_id)
             stage_state = state["stages"][stage_id]
+            persistence_request_id = self._persistence_request_id(request_id)
+            payload_sha = self._stage_payload_sha(
+                "draft", values, user_notes
+            )
+            completed = self._completed_stage_transaction(
+                stage_path, persistence_request_id, payload_sha
+            )
+            if completed is not None:
+                return completed
             if expected_revision != stage_state["revision"]:
                 raise InteractionConflict("expected revision is stale")
             revision = int(stage_state["revision"]) + 1
-            created_at = self._iso_timestamp(datetime.now(timezone.utc))
-            interaction_history = self._next_interaction_history(
-                stage_path, interaction_audit
+            transaction, document = self._prepare_stage_transaction(
+                session_id=session_id,
+                stage_id=stage_id,
+                stage_path=stage_path,
+                operation="draft",
+                request_id=persistence_request_id,
+                base_revision=int(stage_state["revision"]),
+                target_revision=revision,
+                payload_sha=payload_sha,
+                values=values,
+                user_notes=user_notes,
+                interaction_audit=interaction_audit,
             )
 
             self._invalidate_after_edit(
                 session_id, stage_id, state, remove_current_handoff=True
             )
-            document = {
-                "schema_version": SCHEMA_VERSION,
-                "session_id": session_id,
-                "stage_id": stage_id,
-                "revision": revision,
-                "created_at": created_at,
-                "submitted_at": created_at,
-                "values": values,
-                "user_notes": user_notes,
-                "interaction_history": interaction_history,
-            }
             self._write_json_atomic(stage_path / "input.json", document)
-            self._write_revision_snapshot(stage_path, revision, "input", document)
+            self._advance_stage_transaction(stage_path, transaction, "content_written")
+            self._write_revision_snapshot_idempotent(
+                stage_path, revision, "input", document
+            )
+            self._advance_stage_transaction(stage_path, transaction, "snapshot_written")
             stage_state["revision"] = revision
             stage_state["status"] = "draft"
             state["current_stage"] = stage_id
             self._write_session_state(session_id, state)
-            self._append_event(
-                self._session_path(session_id),
-                "draft_saved",
-                session_id=session_id,
-                stage_id=stage_id,
-                revision=revision,
+            self._complete_stage_transaction(
+                stage_path,
+                transaction,
+                response=document,
+                event="draft_saved",
             )
             return document
 
@@ -601,6 +628,7 @@ class SessionStore:
         lease_seconds: int = 300,
         reclaim_expired: bool = False,
         resume_needs_user_input: bool = False,
+        resume_blocked: bool = False,
     ) -> dict[str, Any]:
         """Wait for a valid handoff, then claim it for the interaction agent."""
 
@@ -608,6 +636,11 @@ class SessionStore:
         deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         handoff_path = stage_path / "handoff.json"
         while True:
+            state = self.load_session(session_id)
+            if state.get("session_id") != session_id:
+                raise InteractionConflict("HANDOFF_SESSION_CHANGED")
+            if state.get("current_stage") != stage_id:
+                raise InteractionConflict("HANDOFF_STAGE_CHANGED")
             if handoff_path.is_file():
                 try:
                     with self._session_lock(session_id, deadline=deadline):
@@ -626,6 +659,8 @@ class SessionStore:
                             current_status == "needs_user_input"
                             and resume_needs_user_input
                         ):
+                            can_claim = True
+                        if current_status == "blocked" and resume_blocked:
                             can_claim = True
                         if (
                             current_status == "processing"
@@ -681,6 +716,15 @@ class SessionStore:
                                     else 0
                                 ),
                             }
+                            wait = state.get("agent_wait")
+                            if (
+                                isinstance(wait, dict)
+                                and wait.get("session_id") == session_id
+                                and wait.get("stage_id") == stage_id
+                                and wait.get("expected_revision")
+                                == int(handoff["revision"])
+                            ):
+                                state["agent_wait"] = None
                             self._write_session_state(session_id, state)
                             self._append_event(
                                 self._session_path(session_id),
@@ -700,6 +744,416 @@ class SessionStore:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out waiting for handoff for stage {stage_id}")
             time.sleep(0.25)
+
+    def create_agent_wait(
+        self,
+        session_id: str,
+        stage_id: str,
+        *,
+        expected_revision: int,
+        claimant_id: str = "codex-agent",
+        lease_seconds: int = 30,
+        budget_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Create an advisory wait lease without granting processing rights."""
+
+        self._stage_index(stage_id)
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            if state.get("current_stage") != stage_id:
+                raise InteractionConflict("AGENT_WAIT_STAGE_MISMATCH")
+            stage_state = state["stages"][stage_id]
+            current_revision = int(stage_state["revision"])
+            valid_expected_revision = (
+                current_revision
+                if stage_state["status"] in {
+                    "ready_for_agent",
+                    "processing",
+                    "completed",
+                }
+                else current_revision + 1
+            )
+            if valid_expected_revision != expected_revision:
+                raise InteractionConflict("AGENT_WAIT_REVISION_MISMATCH")
+            now = datetime.now(timezone.utc)
+            timestamp = self._iso_timestamp(now)
+            normalized_claimant = str(claimant_id).strip() or "codex-agent"
+            current_wait = state.get("agent_wait")
+            if isinstance(current_wait, dict) and not self._wait_is_expired(
+                current_wait
+            ):
+                same_waiter = (
+                    current_wait.get("claimant_id") == normalized_claimant
+                    and current_wait.get("session_id") == session_id
+                    and current_wait.get("stage_id") == stage_id
+                    and current_wait.get("expected_revision")
+                    == int(expected_revision)
+                )
+                if not same_waiter:
+                    raise InteractionConflict("AGENT_WAIT_BUSY")
+                budget_expires_at = datetime.fromisoformat(
+                    current_wait.get(
+                        "budget_expires_at", current_wait["expires_at"]
+                    )
+                )
+                current_wait.setdefault(
+                    "budget_expires_at",
+                    self._iso_timestamp(budget_expires_at),
+                )
+                current_wait["heartbeat_at"] = timestamp
+                current_wait["expires_at"] = self._iso_timestamp(
+                    min(
+                        now
+                        + timedelta(
+                            seconds=min(30, max(1, int(lease_seconds)))
+                        ),
+                        budget_expires_at,
+                    )
+                )
+                self._write_session_state(session_id, state)
+                self._append_event(
+                    self._session_path(session_id),
+                    "agent_wait_renewed",
+                    session_id=session_id,
+                    stage_id=stage_id,
+                    expected_revision=expected_revision,
+                    wait_id=current_wait["wait_id"],
+                )
+                return dict(current_wait)
+            total_budget = (
+                self.watch_budget_seconds(stage_id)
+                if budget_seconds is None
+                else max(0.0, float(budget_seconds))
+            )
+            budget_expires_at = now + timedelta(seconds=total_budget)
+            wait = {
+                "schema_version": 1,
+                "wait_id": uuid.uuid4().hex,
+                "claimant_id": normalized_claimant,
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "expected_revision": int(expected_revision),
+                "started_at": timestamp,
+                "heartbeat_at": timestamp,
+                "expires_at": self._iso_timestamp(
+                    min(
+                        now
+                        + timedelta(
+                            seconds=min(30, max(1, int(lease_seconds)))
+                        ),
+                        budget_expires_at,
+                    )
+                ),
+                "budget_expires_at": self._iso_timestamp(budget_expires_at),
+            }
+            state["agent_wait"] = wait
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "agent_wait_created",
+                session_id=session_id,
+                stage_id=stage_id,
+                expected_revision=expected_revision,
+                wait_id=wait["wait_id"],
+            )
+            return dict(wait)
+
+    def renew_agent_wait(
+        self,
+        session_id: str,
+        wait_id: str,
+        *,
+        lease_seconds: int = 30,
+    ) -> dict[str, Any]:
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            wait = state.get("agent_wait")
+            if (
+                not isinstance(wait, dict)
+                or wait.get("wait_id") != wait_id
+                or self._wait_is_expired(wait)
+            ):
+                raise InteractionConflict("AGENT_WAIT_STALE")
+            budget_expires_at = datetime.fromisoformat(
+                wait.get("budget_expires_at", wait["expires_at"])
+            )
+            wait.setdefault(
+                "budget_expires_at",
+                self._iso_timestamp(budget_expires_at),
+            )
+            if budget_expires_at <= datetime.now(timezone.utc):
+                raise InteractionConflict("AGENT_WAIT_BUDGET_EXPIRED")
+            stage_state = state["stages"][wait["stage_id"]]
+            current_revision = int(stage_state["revision"])
+            valid_expected_revision = (
+                current_revision
+                if stage_state["status"] in {
+                    "ready_for_agent",
+                    "processing",
+                    "completed",
+                }
+                else current_revision + 1
+            )
+            if (
+                wait.get("session_id") != session_id
+                or wait.get("stage_id") != state.get("current_stage")
+                or wait.get("expected_revision")
+                != valid_expected_revision
+            ):
+                raise InteractionConflict("AGENT_WAIT_IDENTITY_MISMATCH")
+            now = datetime.now(timezone.utc)
+            wait["heartbeat_at"] = self._iso_timestamp(now)
+            wait["expires_at"] = self._iso_timestamp(
+                min(
+                    now
+                    + timedelta(
+                        seconds=min(30, max(1, int(lease_seconds)))
+                    ),
+                    budget_expires_at,
+                )
+            )
+            self._write_session_state(session_id, state)
+            return dict(wait)
+
+    def agent_wait(
+        self, session_id: str, stage_id: str | None = None
+    ) -> dict[str, Any] | None:
+        state = self.load_session(session_id)
+        wait = state.get("agent_wait")
+        if not isinstance(wait, dict):
+            return None
+        if stage_id is not None and wait.get("stage_id") != stage_id:
+            return None
+        expired = self._wait_is_expired(wait)
+        budget_expires_at = datetime.fromisoformat(
+            wait.get("budget_expires_at", wait["expires_at"])
+        )
+        budget_remaining = max(
+            0,
+            int(
+                (
+                    budget_expires_at - datetime.now(timezone.utc)
+                ).total_seconds()
+            ),
+        )
+        remaining = 0
+        if not expired:
+            remaining = max(
+                0,
+                int(
+                    (
+                        datetime.fromisoformat(wait["expires_at"])
+                        - datetime.now(timezone.utc)
+                    ).total_seconds()
+                ),
+            )
+        return {
+            **wait,
+            "expired": expired,
+            "remaining_seconds": remaining,
+            "budget_expired": budget_remaining <= 0,
+            "budget_remaining_seconds": budget_remaining,
+        }
+
+    def clear_agent_wait(
+        self, session_id: str, *, wait_id: str
+    ) -> bool:
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            wait = state.get("agent_wait")
+            if not isinstance(wait, dict):
+                return False
+            if wait.get("wait_id") != wait_id:
+                raise InteractionConflict("AGENT_WAIT_STALE")
+            state["agent_wait"] = None
+            self._write_session_state(session_id, state)
+            return True
+
+    def stage_transaction_status(
+        self, session_id: str, stage_id: str
+    ) -> dict[str, Any] | None:
+        transaction = self._read_optional_transaction(
+            self._stage_transaction_path(
+                self._stage_path(session_id, stage_id)
+            )
+        )
+        if transaction is None:
+            return None
+        return {
+            key: transaction.get(key)
+            for key in (
+                "transaction_schema_version",
+                "session_id",
+                "stage_id",
+                "operation",
+                "request_id",
+                "base_revision",
+                "target_revision",
+                "state",
+                "created_at",
+                "updated_at",
+                "recovered_legacy_snapshot",
+            )
+        } | {
+            "recoverable": transaction.get("state") != "completed",
+            "reason_code": "STAGE_PERSISTENCE_INCOMPLETE",
+            "next_action": "重试原保存/提交请求，或刷新页面让服务完成一致性恢复。",
+        }
+
+    def resolve_recovery_state(
+        self, session_id: str, stage_id: str | None = None
+    ) -> dict[str, Any]:
+        """Resolve one explicit session using a deterministic precedence."""
+
+        state = self.load_session(session_id)
+        resolved_stage = stage_id or str(state.get("current_stage", ""))
+        self._stage_index(resolved_stage)
+        if state.get("current_stage") != resolved_stage:
+            raise InteractionConflict("RECOVERY_STAGE_NOT_CURRENT")
+        stage_state = state["stages"][resolved_stage]
+        revision = int(stage_state["revision"])
+        result = self.read_optional_stage_document(
+            session_id, resolved_stage, "result"
+        )
+        input_path = self._stage_path(session_id, resolved_stage) / "input.json"
+        input_sha = (
+            hashlib.sha256(input_path.read_bytes()).hexdigest()
+            if input_path.is_file()
+            else None
+        )
+        if (
+            isinstance(result, dict)
+            and result.get("status") == "completed"
+            and result.get("revision") == revision
+            and result.get("input_sha256") == input_sha
+        ):
+            return {
+                "status": "completed",
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": revision,
+                "result": result,
+            }
+        claim = self.processing_claim(session_id, resolved_stage)
+        if claim and not claim["expired"]:
+            return {
+                "status": "processing",
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": revision,
+                "processing_claim": claim,
+            }
+        if stage_state["status"] == "processing":
+            return {
+                "status": "recoverable",
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": revision,
+                "processing_claim": claim,
+            }
+        if stage_state["status"] == "ready_for_agent":
+            handoff = self.read_optional_stage_document(
+                session_id, resolved_stage, "handoff"
+            )
+            if handoff is None:
+                raise InteractionConflict("RECOVERY_HANDOFF_MISSING")
+            self._validate_handoff(
+                session_id,
+                resolved_stage,
+                self._stage_path(session_id, resolved_stage),
+                handoff,
+            )
+            if handoff.get("revision") != revision:
+                raise InteractionConflict("RECOVERY_HANDOFF_REVISION_MISMATCH")
+            return {
+                "status": "ready",
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": revision,
+                "handoff": handoff,
+            }
+        if stage_state["status"] in {"needs_user_input", "blocked"}:
+            return {
+                "status": stage_state["status"],
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": revision,
+                "result": result,
+            }
+        return {
+            "status": "draft",
+            "reason_code": "NOT_FORMALLY_SUBMITTED",
+            "session_id": session_id,
+            "stage_id": resolved_stage,
+            "revision": revision,
+        }
+
+    def handoff_display_state(
+        self, session_id: str, stage_id: str | None = None
+    ) -> dict[str, Any]:
+        """Project authoritative recovery and advisory wait state for the UI."""
+
+        state = self.load_session(session_id)
+        resolved_stage = stage_id or str(state.get("current_stage", ""))
+        if resolved_stage != state.get("current_stage"):
+            raw_status = state["stages"][resolved_stage]["status"]
+            return {
+                "status": (
+                    "ready" if raw_status == "ready_for_agent" else raw_status
+                ),
+                "base_status": (
+                    "ready" if raw_status == "ready_for_agent" else raw_status
+                ),
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": state["stages"][resolved_stage]["revision"],
+                "agent_wait": None,
+                "resume_prompt": None,
+            }
+        try:
+            resolved = self.resolve_recovery_state(session_id, resolved_stage)
+        except InteractionConflict as error:
+            return {
+                "status": "blocked",
+                "base_status": "blocked",
+                "reason_code": str(error),
+                "session_id": session_id,
+                "stage_id": resolved_stage,
+                "revision": state["stages"][resolved_stage]["revision"],
+                "agent_wait": self.agent_wait(session_id, resolved_stage),
+                "resume_prompt": None,
+            }
+        wait = self.agent_wait(session_id, resolved["stage_id"])
+        base_status = resolved["status"]
+        display_status = base_status
+        if base_status in {"draft", "ready"} and wait is not None:
+            display_status = (
+                "waiting_expired" if wait["expired"] else "waiting"
+            )
+        prompt = None
+        if base_status == "ready" and (
+            wait is None or wait.get("expired")
+        ):
+            prompt = "Codex 当前未监听；请在当前聊天输入“已提交”继续。"
+        return {
+            "status": display_status,
+            "base_status": base_status,
+            "session_id": session_id,
+            "stage_id": resolved["stage_id"],
+            "revision": resolved["revision"],
+            "agent_wait": wait,
+            "resume_prompt": prompt,
+        }
+
+    @staticmethod
+    def watch_budget_seconds(stage_id: str) -> int:
+        if stage_id == "setup":
+            return 2 * 60
+        if stage_id in {"asset_matching", "image_review", "slots_copy"}:
+            return 15 * 60
+        if stage_id in {"completeness", "approval", "production_confirmation"}:
+            return 10 * 60
+        return 5 * 60
 
     def processing_claim(
         self, session_id: str, stage_id: str
@@ -793,6 +1247,19 @@ class SessionStore:
         if expires.tzinfo is None:
             return True
         return expires <= datetime.now(timezone.utc)
+
+    @staticmethod
+    def _wait_is_expired(wait: object) -> bool:
+        if not isinstance(wait, dict):
+            return True
+        value = wait.get("expires_at")
+        if not isinstance(value, str) or not value:
+            return True
+        try:
+            expires = datetime.fromisoformat(value)
+        except ValueError:
+            return True
+        return expires.tzinfo is None or expires <= datetime.now(timezone.utc)
 
     def recovery_instruction(self, session_id: str, stage_id: str) -> str:
         """Describe the durable files an agent must inspect before recovering work."""
@@ -986,6 +1453,357 @@ class SessionStore:
             raise InteractionConflict("revision snapshot already exists")
         self._write_json_atomic(target, document)
 
+    @staticmethod
+    def _persistence_request_id(value: str | None) -> str:
+        request_id = value or uuid.uuid4().hex
+        if not PERSISTENCE_REQUEST_ID_PATTERN.fullmatch(request_id):
+            raise InteractionConflict("PERSISTENCE_REQUEST_ID_INVALID")
+        return request_id
+
+    @staticmethod
+    def _stage_payload_sha(
+        operation: str, values: dict[str, Any], user_notes: str
+    ) -> str:
+        payload = {
+            "operation": operation,
+            "values": values,
+            "user_notes": user_notes,
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _stage_transaction_path(stage_path: Path) -> Path:
+        return stage_path / "stage-transaction.json"
+
+    @staticmethod
+    def _stage_transaction_history_path(
+        stage_path: Path, request_id: str
+    ) -> Path:
+        return stage_path / "transactions" / f"{request_id}.json"
+
+    def _read_optional_transaction(self, path: Path) -> dict[str, Any] | None:
+        if not path.is_file():
+            return None
+        document = self._read_json(path, "stage-transaction")
+        if document.get("transaction_schema_version") != (
+            STAGE_TRANSACTION_SCHEMA_VERSION
+        ):
+            raise InteractionConflict("STAGE_TRANSACTION_SCHEMA_UNSUPPORTED")
+        return document
+
+    def _completed_stage_transaction(
+        self,
+        stage_path: Path,
+        request_id: str,
+        payload_sha: str,
+    ) -> dict[str, Any] | None:
+        candidates = (
+            self._stage_transaction_history_path(stage_path, request_id),
+            self._stage_transaction_path(stage_path),
+        )
+        for path in candidates:
+            transaction = self._read_optional_transaction(path)
+            if not transaction or transaction.get("request_id") != request_id:
+                continue
+            if transaction.get("payload_sha256") != payload_sha:
+                raise InteractionConflict("REVISION_CONTENT_CONFLICT")
+            response = transaction.get("response")
+            if transaction.get("state") == "completed" and isinstance(
+                response, dict
+            ):
+                return response
+        return None
+
+    @staticmethod
+    def _input_document_matches(
+        document: dict[str, Any],
+        *,
+        session_id: str,
+        stage_id: str,
+        revision: int,
+        values: dict[str, Any],
+        user_notes: str,
+    ) -> bool:
+        return bool(
+            document.get("session_id") == session_id
+            and document.get("stage_id") == stage_id
+            and document.get("revision") == revision
+            and document.get("values") == values
+            and document.get("user_notes", "") == user_notes
+        )
+
+    def _prepare_stage_transaction(
+        self,
+        *,
+        session_id: str,
+        stage_id: str,
+        stage_path: Path,
+        operation: str,
+        request_id: str,
+        base_revision: int,
+        target_revision: int,
+        payload_sha: str,
+        values: dict[str, Any],
+        user_notes: str,
+        interaction_audit: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        path = self._stage_transaction_path(stage_path)
+        current = self._read_optional_transaction(path)
+        if current is not None:
+            identity = (
+                current.get("request_id") == request_id
+                and current.get("operation") == operation
+                and current.get("base_revision") == base_revision
+                and current.get("target_revision") == target_revision
+                and current.get("payload_sha256") == payload_sha
+            )
+            if not identity:
+                raise InteractionConflict("STAGE_TRANSACTION_ACTIVE")
+            stored = current.get("input_document")
+            if not isinstance(stored, dict):
+                raise InteractionConflict("STAGE_TRANSACTION_INVALID")
+            return current, stored
+
+        snapshot_path = (
+            stage_path
+            / "revisions"
+            / f"{target_revision:04d}"
+            / "input.json"
+        )
+        if snapshot_path.is_file():
+            document = self._read_json(snapshot_path, "input")
+            if not self._input_document_matches(
+                document,
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=target_revision,
+                values=values,
+                user_notes=user_notes,
+            ):
+                raise InteractionConflict("REVISION_CONTENT_CONFLICT")
+            recovered_legacy_snapshot = True
+        else:
+            created_at = self._iso_timestamp(datetime.now(timezone.utc))
+            document = {
+                "schema_version": SCHEMA_VERSION,
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": target_revision,
+                "created_at": created_at,
+                "submitted_at": created_at,
+                "values": values,
+                "user_notes": user_notes,
+                "interaction_history": self._next_interaction_history(
+                    stage_path, interaction_audit
+                ),
+                "persistence_request_id": request_id,
+            }
+            recovered_legacy_snapshot = False
+        now = self._iso_timestamp(datetime.now(timezone.utc))
+        transaction = {
+            "schema_version": SCHEMA_VERSION,
+            "transaction_schema_version": STAGE_TRANSACTION_SCHEMA_VERSION,
+            "session_id": session_id,
+            "stage_id": stage_id,
+            "operation": operation,
+            "request_id": request_id,
+            "base_revision": base_revision,
+            "target_revision": target_revision,
+            "payload_sha256": payload_sha,
+            "state": "prepared",
+            "created_at": now,
+            "updated_at": now,
+            "input_document": document,
+            "recovered_legacy_snapshot": recovered_legacy_snapshot,
+        }
+        self._write_json_atomic(path, transaction)
+        return transaction, document
+
+    def _advance_stage_transaction(
+        self,
+        stage_path: Path,
+        transaction: dict[str, Any],
+        state: str,
+    ) -> None:
+        transaction["state"] = state
+        transaction["updated_at"] = self._iso_timestamp(
+            datetime.now(timezone.utc)
+        )
+        self._write_json_atomic(
+            self._stage_transaction_path(stage_path), transaction
+        )
+
+    def _event_for_request_exists(
+        self, session_path: Path, event: str, request_id: str
+    ) -> bool:
+        path = session_path / "events.ndjson"
+        if not path.is_file():
+            return False
+        try:
+            with path.open(encoding="utf-8-sig") as stream:
+                for line in stream:
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        isinstance(value, dict)
+                        and value.get("event") == event
+                        and value.get("persistence_request_id") == request_id
+                    ):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    def _complete_stage_transaction(
+        self,
+        stage_path: Path,
+        transaction: dict[str, Any],
+        *,
+        response: dict[str, Any],
+        event: str,
+    ) -> None:
+        transaction["response"] = response
+        self._advance_stage_transaction(
+            stage_path, transaction, "state_committed"
+        )
+        session_path = self._session_path(str(transaction["session_id"]))
+        request_id = str(transaction["request_id"])
+        if not self._event_for_request_exists(
+            session_path, event, request_id
+        ):
+            self._append_event(
+                session_path,
+                event,
+                session_id=transaction["session_id"],
+                stage_id=transaction["stage_id"],
+                revision=transaction["target_revision"],
+                persistence_request_id=request_id,
+            )
+        transaction["completed_at"] = self._iso_timestamp(
+            datetime.now(timezone.utc)
+        )
+        self._advance_stage_transaction(stage_path, transaction, "completed")
+        history = self._stage_transaction_history_path(
+            stage_path, request_id
+        )
+        self._write_json_atomic(history, transaction)
+        current = self._stage_transaction_path(stage_path)
+        if current.is_file():
+            current.unlink()
+
+    def _write_revision_snapshot_idempotent(
+        self,
+        stage_path: Path,
+        revision: int,
+        document_name: str,
+        document: dict[str, Any],
+    ) -> None:
+        revision_path = stage_path / "revisions" / f"{revision:04d}"
+        revision_path.mkdir(parents=True, exist_ok=True)
+        target = revision_path / f"{document_name}.json"
+        if target.is_file():
+            existing = self._read_json(target, document_name)
+            if existing != document:
+                raise InteractionConflict("REVISION_CONTENT_CONFLICT")
+            return
+        self._write_json_atomic(target, document)
+
+    def _reconcile_pending_stage_transaction(
+        self, session_id: str, initial_state: dict[str, Any]
+    ) -> dict[str, Any]:
+        pending_stage = None
+        for stage in STAGES:
+            if self._stage_transaction_path(
+                self._stage_path(session_id, stage.id)
+            ).is_file():
+                pending_stage = stage.id
+                break
+        if pending_stage is None:
+            return initial_state
+        with self._session_lock(session_id):
+            state = self._load_session_file(session_id)
+            stage_path = self._stage_path(session_id, pending_stage)
+            transaction = self._read_optional_transaction(
+                self._stage_transaction_path(stage_path)
+            )
+            if transaction is None:
+                return state
+            document = transaction.get("input_document")
+            if not isinstance(document, dict):
+                return state
+            base_revision = int(transaction.get("base_revision", -1))
+            target_revision = int(transaction.get("target_revision", -1))
+            stage_state = state["stages"][pending_stage]
+            current_revision = int(stage_state["revision"])
+            operation = str(transaction.get("operation", ""))
+            expected_status = (
+                "ready_for_agent" if operation == "submit" else "draft"
+            )
+            if current_revision == target_revision:
+                if stage_state.get("status") != expected_status:
+                    return state
+            elif current_revision == base_revision:
+                self._write_json_atomic(stage_path / "input.json", document)
+                self._write_revision_snapshot_idempotent(
+                    stage_path, target_revision, "input", document
+                )
+                if operation == "submit":
+                    input_path = stage_path / "input.json"
+                    handoff = {
+                        "schema_version": SCHEMA_VERSION,
+                        "status": "ready_for_agent",
+                        "session_id": session_id,
+                        "stage_id": pending_stage,
+                        "revision": target_revision,
+                        "created_at": document["created_at"],
+                        "input_sha256": hashlib.sha256(
+                            input_path.read_bytes()
+                        ).hexdigest(),
+                    }
+                    self._write_json_atomic(
+                        stage_path / "handoff.json", handoff
+                    )
+                    self._write_revision_snapshot_idempotent(
+                        stage_path, target_revision, "handoff", handoff
+                    )
+                    response = handoff
+                elif operation == "draft":
+                    response = document
+                else:
+                    return state
+                stage_state["revision"] = target_revision
+                stage_state["status"] = expected_status
+                state["current_stage"] = pending_stage
+                self._write_session_state(session_id, state)
+            else:
+                return state
+            if operation == "submit":
+                response = self._read_json(
+                    stage_path / "handoff.json", "handoff"
+                )
+            else:
+                response = document
+            self._complete_stage_transaction(
+                stage_path,
+                transaction,
+                response=response,
+                event=(
+                    "input_saved"
+                    if operation == "submit"
+                    else "draft_saved"
+                ),
+            )
+            return self._load_session_file(session_id)
+
     def read_optional_stage_document(
         self, session_id: str, stage_id: str, document_name: str
     ) -> dict[str, Any] | None:
@@ -1080,8 +1898,7 @@ class SessionStore:
     @staticmethod
     def _read_json(path: Path, document_name: str) -> dict[str, Any]:
         try:
-            with path.open(encoding="utf-8") as stream:
-                document = json.load(stream)
+            document = read_json(path)
         except FileNotFoundError as error:
             raise InteractionConflict(f"{document_name}.json is missing") from error
         except json.JSONDecodeError as error:
@@ -1234,20 +2051,7 @@ class SessionStore:
 
     @staticmethod
     def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
-        payload = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_name, path)
-        except BaseException:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-            raise
+        atomic_write_json(path, document)
 
     @staticmethod
     def _append_event(session_path: Path, event: str, **details: Any) -> None:

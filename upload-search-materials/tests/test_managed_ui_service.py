@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
+from urllib.request import ProxyHandler
 
 import pytest
 
+import upload_search_materials.interaction.service as service_module
 from upload_search_materials.interaction.service import (
     ManagedServiceError,
     SERVICE_STATE_FILE,
@@ -14,6 +16,13 @@ from upload_search_materials.interaction.service import (
     status_service,
     stop_service,
 )
+
+
+def test_managed_ui_health_check_bypasses_system_proxy_for_loopback():
+    assert not any(
+        isinstance(handler, ProxyHandler)
+        for handler in service_module._LOOPBACK_OPENER.handlers
+    )
 
 
 def _free_port() -> int:
@@ -36,6 +45,16 @@ def test_managed_service_starts_reuses_reports_and_stops(tmp_path):
         assert started["url"].endswith(started["session_id"])
         assert started["browser_channel"] == "codex_in_app_preferred"
         assert "ownership_token" not in started
+        assert started["runtime_identity"]["sid"]
+        assert isinstance(
+            started["runtime_identity"]["login_session_id"], int
+        )
+        assert isinstance(
+            started["runtime_identity"]["interactive_desktop"], bool
+        )
+        assert isinstance(
+            started["runtime_identity"]["remote_drive_letters"], list
+        )
 
         repeated = start_service(
             tmp_path,

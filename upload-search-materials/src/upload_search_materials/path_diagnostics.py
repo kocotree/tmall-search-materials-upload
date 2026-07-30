@@ -198,6 +198,7 @@ def _diagnostic(
     available = bool(probe.get("available")) and reason == "PATH_AVAILABLE"
     message = RECOVERY_COPY[reason]
     return {
+        "source_id": str(source.get("source_id", "")),
         "label": str(source["label"]),
         "path": str(source["path"]),
         "status": "available" if available else "unavailable",
@@ -249,6 +250,16 @@ def diagnose_image_source(
 
     root = _drive_root(path)
     if not drive_exists(root):
+        fallback = str(source.get("canonical_unc", "")).strip()
+        if fallback.startswith("\\\\"):
+            return _diagnostic(
+                source,
+                path_kind="unc_fallback",
+                probe=remote_probe(
+                    fallback, timeout_seconds=timeout_seconds
+                ),
+                suggestion=fallback,
+            )
         return _diagnostic(
             source,
             path_kind="mapped_drive",

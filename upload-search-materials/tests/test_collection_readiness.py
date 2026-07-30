@@ -72,6 +72,15 @@ def test_candidate_is_non_production_until_all_current_dom_fields_validate(
     assert final["current_dom_validation"]["observed_store"] == "测试店铺"
 
 
+def test_candidate_human_check_is_one_parseable_playwright_css_selector(tmp_path):
+    path = tmp_path / "selectors.local.yaml"
+    create_selector_candidate(path, material_center_url=Page.url)
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert "text=/" not in document["human_check"]
+    assert ':text-is("验证码")' in document["human_check"]
+
+
 def test_candidate_names_the_first_failed_field_and_is_not_promoted(tmp_path):
     path = tmp_path / "selectors.local.yaml"
     create_selector_candidate(path, material_center_url=Page.url)

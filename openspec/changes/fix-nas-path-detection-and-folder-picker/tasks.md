@@ -51,7 +51,7 @@
 - [x] 6.2 Add helper protocol tests for selection, cancellation, busy, timeout, unsupported platform, unavailable desktop, invalid path, and process ownership.
 - [x] 6.3 Add interaction API and frontend tests proving reason-specific messages and preservation of existing input values.
 - [x] 6.4 Run the full Python and Node suites, Skill validator, OpenSpec strict validation, `uv lock --check`, and `git diff --check`.
-- [ ] 6.5 On the current computer, verify an ordinary local directory is detected and can be selected through the native helper.
+- [ ] 6.5 On the current computer, verify an ordinary local directory is detected and can be selected through the native helper. Superseded by `stabilize-live-ui-persistence-and-local-access` tasks 7.1-7.7 and 8.5, which also require verified desktop identity and window visibility.
 - [ ] 6.6 With user-provided NAS access, verify one real UNC image root reports `PATH_AVAILABLE` without enumerating its contents.
 - [x] 6.7 Verify the current unavailable `Y:`/`Z:` mappings report `DRIVE_NOT_MAPPED` with UNC/manual-entry recovery instead of the generic message.
 - [x] 6.8 Confirm no credentials, mappings, source-file reads, source mutations, indexing, collection, approval, or upload occurred during configuration tests.

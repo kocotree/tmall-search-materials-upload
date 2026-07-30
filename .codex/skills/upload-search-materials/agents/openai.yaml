@@ -1,4 +1,4 @@
 interface:
   display_name: "天猫搜推素材上传"
-  short_description: "前端优先配置、审查并安全发布搜推素材"
-  default_prompt: "Use $upload-search-materials. Read the canonical Skill, start or resume its managed interaction UI first, and wait for the validated frontend handoff. Do not ask for store names or NAS roots in chat unless an allowed frontend fallback reason was recorded."
+  short_description: "前端优先交接、可恢复搜推采集、素材审查与安全发布工作流"
+  default_prompt: "Use $upload-search-materials to read the canonical Skill, open the exact managed UI session, wait with a bounded lease, and use chat only for explicit-session recovery."

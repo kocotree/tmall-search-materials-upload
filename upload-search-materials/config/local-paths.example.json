@@ -6,8 +6,10 @@
   "folder_index_root": ".local-cache/folder-index",
   "image_sources": [
     {
+      "source_id": "visual-model-images",
       "label": "视觉部 · 模特图",
-      "path": "Y:\\视觉部\\1-模特图"
+      "path": "Y:\\视觉部\\1-模特图",
+      "canonical_unc": "\\\\nas.example\\media\\model-images"
     },
     {
       "label": "小红书 KOC 置换 · 淘宝买家秀",
