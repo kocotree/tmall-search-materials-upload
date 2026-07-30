@@ -383,11 +383,35 @@ def _publish_attempt(
     output: Path,
     selector_evidence: Path,
     page_evidence: Path,
+    pagination_evidence: Path,
     checkpoint_context: dict[str, Any],
     expected_rows: int,
 ) -> dict[str, str]:
     """Validate and atomically project one successful attempt as current."""
 
+    pagination_document = (
+        read_json(pagination_evidence)
+        if pagination_evidence.is_file()
+        else {}
+    )
+    pagination_events = (
+        pagination_document.get("events", [])
+        if isinstance(pagination_document, dict)
+        else []
+    )
+    origin_verified = any(
+        isinstance(event, dict)
+        and event.get("event_type") == "origin"
+        and event.get("current_page") == 1
+        for event in pagination_events
+    )
+    terminal_verified = any(
+        isinstance(event, dict)
+        and event.get("event_type") == "terminal"
+        and event.get("current_page") == event.get("terminal_page")
+        and event.get("next_enabled") is False
+        for event in pagination_events
+    )
     checkpoint_document = validate_checkpoint_identity(
         checkpoint,
         {"scan_mode": "high-value", **checkpoint_context},
@@ -398,6 +422,11 @@ def _publish_attempt(
         or checkpoint_document.get("row_count") != expected_rows
         or sha256_file(output)
         != checkpoint_document.get("output_sha256")
+        or not pagination_evidence.is_file()
+        or sha256_file(pagination_evidence)
+        != checkpoint_document.get("pagination_evidence_sha256")
+        or not origin_verified
+        or not terminal_verified
     ):
         raise CheckpointIdentityError("ATTEMPT_PUBLICATION_INVALID")
     rows = read_backend_status(output)
@@ -428,16 +457,19 @@ def _publish_attempt(
         "checkpoint": current_root / checkpoint.name,
         "selector_evidence": current_root / selector_evidence.name,
         "page_evidence": current_root / page_evidence.name,
+        "pagination_evidence": current_root / pagination_evidence.name,
     }
     for source, destination in (
         (output, projections["promotion_status"]),
         (checkpoint, projections["checkpoint"]),
         (selector_evidence, projections["selector_evidence"]),
         (page_evidence, projections["page_evidence"]),
+        (pagination_evidence, projections["pagination_evidence"]),
         (output, promotion_root / output.name),
         (checkpoint, promotion_root / checkpoint.name),
         (selector_evidence, promotion_root / selector_evidence.name),
         (page_evidence, promotion_root / page_evidence.name),
+        (pagination_evidence, promotion_root / pagination_evidence.name),
     ):
         atomic_write_bytes(destination, source.read_bytes())
     atomic_write_json(
@@ -449,6 +481,9 @@ def _publish_attempt(
             "row_count": expected_rows,
             "csv_sha256": sha256_file(output),
             "checkpoint_sha256": sha256_file(checkpoint),
+            "pagination_evidence_sha256": sha256_file(
+                pagination_evidence
+            ),
             "published_at": _now_iso(),
         },
     )
@@ -579,6 +614,7 @@ def process_setup_collection(
     )
     output = artifact_root / "promotion-material-status.csv"
     checkpoint = artifact_root / "promotion-material-status.checkpoint.json"
+    pagination_evidence = artifact_root / "pagination-evidence.json"
     collected_at = _now_iso()
     collected_rows: list[dict[str, str]] = []
     checkpoint_context = {
@@ -596,6 +632,55 @@ def process_setup_collection(
         _page_number: int, _rows: list[dict[str, str]]
     ) -> None:
         store.renew_processing_claim(session_id, "setup", claim_id)
+
+    def report_pagination(event: dict[str, Any]) -> None:
+        if progress_callback is None:
+            return
+        event_type = str(event.get("event_type", ""))
+        current_page = event.get("current_page")
+        terminal_page = event.get("terminal_page")
+        progress_callback(
+            (
+                "verifying_terminal"
+                if event_type in {"terminal", "failure"}
+                else "normalizing_pagination"
+            ),
+            action=f"pagination_{event_type or 'observation'}",
+            target=(
+                f"page:{current_page}"
+                if current_page is not None
+                else "pagination"
+            ),
+            retry_count=0,
+            **(
+                {"current_page": int(current_page)}
+                if isinstance(current_page, int)
+                else {}
+            ),
+            **(
+                {"observed_page": int(current_page)}
+                if isinstance(current_page, int)
+                else {}
+            ),
+            **(
+                {"pagination_origin_page": 1}
+                if event_type == "origin"
+                else {}
+            ),
+            **(
+                {"terminal_page": int(terminal_page)}
+                if isinstance(terminal_page, int)
+                else {}
+            ),
+            terminal_proof=event_type == "terminal",
+            pagination_reason_code=str(
+                event.get("reason_code", "")
+            ),
+            next_recovery=(
+                str(event.get("recovery_guidance", ""))
+                or "根据分页证据恢复同一采集任务"
+            ),
+        )
 
     def collect(live_page: Any) -> list[dict[str, str]]:
         if attempt_id:
@@ -652,6 +737,8 @@ def process_setup_collection(
             collected_at=collected_at,
             max_pages=None,
             checkpoint_context=checkpoint_context,
+            pagination_evidence=pagination_evidence,
+            on_pagination_event=report_pagination,
             before_checkpoint=renew_claim,
             on_checkpoint=(
                 (
@@ -868,6 +955,7 @@ def process_setup_collection(
         "checkpoint": str(checkpoint),
         "selector_evidence": str(selector_evidence),
         "page_evidence": str(artifact_root / "store-page-evidence.json"),
+        "pagination_evidence": str(pagination_evidence),
     }
     if attempt_id:
         store.renew_processing_claim(session_id, "setup", claim_id)
@@ -878,6 +966,7 @@ def process_setup_collection(
             output=output,
             selector_evidence=selector_evidence,
             page_evidence=artifact_root / "store-page-evidence.json",
+            pagination_evidence=pagination_evidence,
             checkpoint_context=checkpoint_context,
             expected_rows=len(collected_rows),
         )
@@ -885,6 +974,44 @@ def process_setup_collection(
         collected_rows,
         products=[record.raw for record in products],
     )
+    pagination_document = read_json(pagination_evidence)
+    pagination_events = pagination_document.get("events", [])
+    origin_event = next(
+        (
+            event
+            for event in pagination_events
+            if event.get("event_type") == "origin"
+        ),
+        {},
+    )
+    terminal_event = next(
+        (
+            event
+            for event in reversed(pagination_events)
+            if event.get("event_type") == "terminal"
+        ),
+        {},
+    )
+    failure_event = next(
+        (
+            event
+            for event in reversed(pagination_events)
+            if event.get("event_type") == "failure"
+        ),
+        {},
+    )
+    matrix["pagination"] = {
+        "origin_page": origin_event.get("current_page"),
+        "current_page": terminal_event.get("current_page"),
+        "terminal_page": terminal_event.get("terminal_page"),
+        "terminal_proof": bool(terminal_event),
+        "reason_code": (
+            failure_event.get("reason_code")
+            or terminal_event.get("reason_code")
+            or origin_event.get("reason_code")
+        ),
+        "evidence": published["pagination_evidence"],
+    }
     matrix["product_row_anomalies"] = {
         "row_count": scan_summary["row_count"],
         "valid_row_count": scan_summary["valid_row_count"],
@@ -908,12 +1035,15 @@ def process_setup_collection(
             published["page_evidence"],
             published["promotion_status"],
             published["checkpoint"],
+            published["pagination_evidence"],
             str(completeness_path),
         ],
         next_action="在第二阶段批量选择待补充商品",
         data={
             "promotion_status": published["promotion_status"],
             "checkpoint": published["checkpoint"],
+            "pagination_evidence": published["pagination_evidence"],
+            "pagination": matrix["pagination"],
             "completeness_matrix": str(completeness_path),
             "product_row_anomalies": matrix[
                 "product_row_anomalies"

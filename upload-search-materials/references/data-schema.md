@@ -13,7 +13,7 @@ claim 状态源。
 - `inputs/scan-summary.json`：总行数、有效行数、异常行数及 source row reason codes；
 - `collected/promotion/selector-profile.json`：profile 名称、版本、purpose 和 SHA-256；
 - `collected/promotion/store-page-evidence.json`：目标/可见店铺、URL、页面身份和校验时间；
-- `promotion-material-status.csv` 与 checkpoint；
+- `promotion-material-status.csv`、checkpoint 与 `pagination-evidence.json`；
 - `02-completeness/completeness-matrix.json`；
 - 与 session、stage、revision、input SHA-256 绑定的 `result.json`。
 
@@ -99,7 +99,7 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 这里的容量单位是“篇”。页面明确显示高价值商品“已上调发布坑位到 9 篇”时，`目标容量=9`；普通商品页面未明确目标时保持未知，不仅凭分类名称猜成 3。页面没有固定编号坑位时，`空坑位` 保持未知，只计算 `缺失数量=目标容量-现有素材数`。未知值保留未知；缺失选择器不能写成 0 或空列表。`证据` 至少包含商品 ID、目标容量原文、页面可见店铺、远端素材 ID、可见状态、选择器配置版本、失败字段或选择器、采集时间，以及截图或 DOM 摘要文件的路径和 SHA-256。发生 `SELECTOR_INVALID` 时，数值字段保持未知，另记录原因码和受影响商品的 `needs_manual_review` 状态。
 
-分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`session_id`、`revision`、`input_sha256`、`selector_profile_sha256`、`target_store`、`attempt_id`、`last_completed_page`、`row_count`、`output_sha256` 和 `collected_at`。每完成一页必须先验证当前 claim，再原子更新 CSV，校验商品 ID 唯一，最后更新 checkpoint；中断后不得把未完成页写成已完成。生产阶段不传 `--max-pages`，必须遍历“搜推高价值”的全部分页；该参数只保留给显式 CLI 诊断测试，测试结果不得作为完整的第二阶段候选集。
+分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`session_id`、`revision`、`input_sha256`、`selector_profile_sha256`、`target_store`、`attempt_id`、`last_completed_page`、`row_count`、`output_sha256`、`pagination_evidence_sha256` 和 `collected_at`。`pagination-evidence.json` 是版本化 attempt 证据，包含绑定后的 origin、transition、terminal 或 failure 事件；每个事件只保存真实页码、末页、下一页状态、有序商品 ID 哈希、选择器身份和时间，不保存凭据或完整 DOM。每完成一页必须先验证当前 claim，再原子更新 CSV，校验商品 ID 唯一，最后更新 checkpoint；中断后不得把未完成页写成已完成。生产阶段不传 `--max-pages`，必须遍历“搜推高价值”的全部分页；该参数只保留给显式 CLI 诊断测试，测试结果不得作为完整的第二阶段候选集。
 
 ## Collection readiness and managed attempt
 
@@ -112,8 +112,8 @@ store identity。
 `current-attempt.json` 使用 `attempt_id` 绑定 session、stage、revision、input SHA、
 selector SHA、target store、claim 和 purpose。私有 worker manifest 额外包含 PID、
 ownership token 与 process identity；前端公开副本不得包含 token/process identity。
-公开进度包含 phase、heartbeat、current page、last completed page、row count、last
-checkpoint、log path 和 terminal status。旧结果进入逐 attempt 历史并标记
+公开进度包含 phase、heartbeat、分页起点、页面真实当前页、可见末页、末页证明、
+last completed page、row count、last checkpoint、log path 和 terminal status。旧结果进入逐 attempt 历史并标记
 `superseded=true`，不得继续作为当前 blocker。
 
 ## Completeness Matrix
@@ -164,9 +164,9 @@ checkpoint、log path 和 terminal status。旧结果进入逐 attempt 历史并
 
 - `requirements`：逐商品 `product_id`、`product_title`、后台 `missing_materials`、本阶段实际 `candidate_count`、`slot_image_min=3`、`slot_image_max=9` 和 `slot_planning_stage=slots_copy`。第三阶段不得生成 `required_images`，因为后台缺失篇数不等于本次必须创建的篇数。
 - `asset_candidates`：逐候选 `asset_id`、商品、稳定 `folder_id`、可审计 `folder_path`、来源、绝对只读路径、SHA-256、尺寸、匹配类型、匹配状态、授权状态、校验状态与远端重复标记。
-- `candidate_strategy`：默认按使用中的文件夹比例抽样时为 `proportional_task_sample`；只有显式离线审计流程才从全量图片索引生成。
-- `candidate_limit` 默认 100，`page_size` 默认 30，`sampling_seed` 使用当前任务 ID。
-- `scan_summary`：记录使用中文件夹数、发现图片路径数、实际检查候选数、检查失败数，以及逐商品 `folder_allocations`；每项包含文件夹路径、发现数和抽样数。任务级按需候选不得把“发现路径数”表述成“已完成全量图片索引”。
+- `candidate_strategy`：默认覆盖优先、剩余名额按文件夹图片数比例抽样时为 `proportional_task_sample`；`candidate_strategy_version` 固定策略版本，只有显式离线审计流程才从全量图片索引生成。
+- `candidate_limit` 默认按商品独立限制为 100，`page_size` 默认 30；`sampling_seed` 使用当前任务 ID，`sampling_identity_sha256` 记录策略 ID、版本与任务身份的稳定摘要。
+- `scan_summary`：记录采用文件夹总数、发现的任务内唯一图片路径数、实际检查候选数、检查失败数，以及逐商品 `folder_allocations`。逐商品还包含 `nonempty_folders`、`represented_folders`、`uncovered_folders`、`complete_folder_coverage` 和 `reason_codes`。每个采用文件夹都必须保留分配行，包含 `folder_id`、路径、来源、原始发现数、唯一发现数、`base_allocation`、`proportional_allocation`、`sampled_images` 和 `zero_allocation_reason`。任务级按需候选不得把“发现路径数”表述成“已完成全量图片索引”。
 - `remote_dedupe_status`：仅在提供可信远端内容指纹并完成比对时为 `checked`；后台只有素材 ID 时为 `not_available`。
 - `reason_codes`：包含远端指纹不可用等批次级原因。
 
@@ -175,7 +175,7 @@ checkpoint、log path 和 terminal status。旧结果进入逐 attempt 历史并
 - `license_decisions`：`asset_id` 与 `status=confirmed`；由同一批 `asset_decisions` 中的采用项自动生成，不要求用户逐图重复勾选授权。
 - `asset_decisions`：`product_id`、`asset_id`、`sha256`、来源、`decision=selected`、`selection_order`。第三阶段不写 `group_index` 或坑位内 `position`；第五阶段完成编排后再生成。
 
-候选选择按稳定顺序和固定窗口执行，不保存随机种子，也不随机抽样。默认只对当前任务预备窗口计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。
+候选选择按固定窗口执行任务内稳定伪随机抽样：路径先规范化排序，抽样身份绑定策略版本、任务、商品和稳定文件夹；相同任务输入不变时必须得到相同候选，新任务可以得到不同窗口。默认只对当前任务预备窗口计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。
 
 ## AI 文案响应
 

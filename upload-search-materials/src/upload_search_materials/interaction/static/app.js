@@ -675,10 +675,31 @@
       const page = worker.last_completed_page == null
         ? "首个 checkpoint 尚未完成"
         : `已完成第 ${worker.last_completed_page} 页 · ${worker.row_count} 行`;
+      const pagination = worker.pagination_origin_page == null
+        ? "分页起点尚未验证"
+        : (
+          `分页起点 ${worker.pagination_origin_page} · 当前页 `
+          + `${worker.observed_page ?? worker.current_page ?? "未知"}`
+          + (
+            worker.terminal_page == null
+              ? ""
+              : `/${worker.terminal_page}`
+          )
+          + (
+            worker.terminal_proof
+              ? " · 末页已验证"
+              : ""
+          )
+          + (
+            worker.pagination_reason_code
+              ? ` · ${worker.pagination_reason_code}`
+              : ""
+          )
+        );
       actionMessage.textContent =
         `采集 Worker 正在执行 ${worker.action || worker.phase || "启动"} ` +
         `（目标 ${worker.target || "当前阶段"}，重试 ${worker.retry_count || 0}）；` +
-        `${page}；心跳 ${formatClaimTime(worker.heartbeat_at)}。` +
+        `${page}；${pagination}；心跳 ${formatClaimTime(worker.heartbeat_at)}。` +
         `${worker.next_recovery ? ` 恢复建议：${worker.next_recovery}` : ""}`;
       return;
     }
@@ -1636,6 +1657,14 @@
       const discoveredCount = Number(
         prepared?.discovered_images || rawProductCandidates.length,
       );
+      const preparedCandidateCount = Number(
+        prepared?.prepared_candidates ?? rawProductCandidates.length,
+      );
+      const validCandidateCount = Number(
+        prepared?.valid_candidates
+          ?? rawProductCandidates.filter((candidate) => candidate.validation_status === "valid").length,
+      );
+      const candidateLimit = Math.max(1, Number(data.candidate_limit || 100));
       const pageSize = Math.max(1, Number(data.page_size || 30));
       let pageCount = 1;
       let pageIndex = 0;
@@ -1671,6 +1700,32 @@
       const synchronizationNotice = element("p", "asset-warning");
       synchronizationNotice.setAttribute("role", "status");
       product.appendChild(synchronizationNotice);
+      const coverageNotice = element("p", "asset-warning");
+      coverageNotice.setAttribute("role", "status");
+      const allocations = Array.isArray(prepared?.folder_allocations)
+        ? prepared.folder_allocations
+        : [];
+      const zeroAllocations = allocations.filter(
+        (item) => Number(item?.sampled_images || 0) === 0,
+      );
+      if (prepared && typeof prepared.complete_folder_coverage === "boolean") {
+        if (!prepared.complete_folder_coverage) {
+          const uncovered = Number(
+            prepared.uncovered_folders || zeroAllocations.length,
+          );
+          const samplePaths = zeroAllocations
+            .filter((item) => item?.zero_allocation_reason === "FOLDER_COVERAGE_LIMIT_EXCEEDED")
+            .slice(0, 5)
+            .map((item) => item.folder_path || item.folder_id)
+            .filter(Boolean);
+          coverageNotice.textContent = `每商品候选上限 ${candidateLimit} 张，无法覆盖全部非空文件夹；${uncovered} 个文件夹本次为 0 张${samplePaths.length ? `：${samplePaths.join("、")}` : ""}。`;
+        } else if (zeroAllocations.length) {
+          coverageNotice.textContent = `${zeroAllocations.length} 个采用文件夹为空或未贡献新的唯一图片，已保留 0 张分配记录。`;
+        }
+      } else {
+        coverageNotice.textContent = "历史候选未记录文件夹覆盖审计；保留现有候选和已选图片，不会自动重新抽样。";
+      }
+      if (coverageNotice.textContent) product.appendChild(coverageNotice);
       const selectedSection = element("section", "selected-assets");
       const selectedHeading = element("strong", "", "已选素材");
       const duplicateWarning = element("p", "asset-warning");
@@ -1742,7 +1797,7 @@
           );
         pageCount = Math.max(1, Math.ceil(filteredCandidates.length / pageSize));
         pageIndex = Math.min(pageIndex, pageCount - 1);
-        candidateSummary.textContent = `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇 · 候选池 ${productCandidates.length} 张（目录发现 ${discoveredCount} 张）`;
+        candidateSummary.textContent = `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇 · 目录发现 ${discoveredCount} 张 · 准备检查 ${preparedCandidateCount} 张 · 有效候选 ${validCandidateCount} 张 · 当前可见 ${productCandidates.length} 张 / 每商品上限 ${candidateLimit} 张 · 每批显示 ${pageSize} 张`;
         const currentDecisions = selectedAssetDecisions();
         const hashesUsedElsewhere = new Set(
           currentDecisions

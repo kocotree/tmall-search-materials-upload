@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from .browser.material_page import (
+    PAGINATION_RECOVERY_GUIDANCE,
+    PaginationStateError,
     SelectorInvalidError,
     scan_recommended_material_status,
     supplement_material_status,
@@ -19,6 +21,12 @@ from .persistence import atomic_write_dict_csv, atomic_write_json, read_json
 
 class CheckpointIdentityError(RuntimeError):
     """Raised when persisted collection state belongs to another input."""
+
+
+PAGINATION_EVIDENCE_SCHEMA_VERSION = 1
+QUARANTINED_PAGINATION_SESSIONS = frozenset(
+    {"20260730_032916", "20260730_051941"}
+)
 
 
 BACKEND_STATUS_FIELDS = [
@@ -69,6 +77,62 @@ def read_backend_status(path: Path) -> list[dict[str, str]]:
 
 def _status_sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _read_pagination_evidence(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not Path(path).is_file():
+        return None
+    try:
+        document = read_json(Path(path))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise CheckpointIdentityError(
+            "PAGINATION_EVIDENCE_INVALID"
+        ) from error
+    if not isinstance(document, dict) or not isinstance(
+        document.get("events"), list
+    ):
+        raise CheckpointIdentityError("PAGINATION_EVIDENCE_INVALID")
+    return document
+
+
+def _page_hashes_from_evidence(
+    document: Mapping[str, Any] | None,
+) -> dict[int, str]:
+    hashes: dict[int, str] = {}
+    for event in (document or {}).get("events", []):
+        if not isinstance(event, Mapping):
+            continue
+        page = event.get("current_page")
+        identity = str(event.get("ordered_product_id_hash", "")).strip()
+        if isinstance(page, int) and page > 0 and identity:
+            hashes[page] = identity
+    return hashes
+
+
+def _pagination_evidence_verified(
+    document: Mapping[str, Any] | None,
+) -> bool:
+    events = (document or {}).get("events", [])
+    return bool(
+        events
+        and any(
+            isinstance(event, Mapping)
+            and event.get("event_type") == "origin"
+            and event.get("current_page") == 1
+            for event in events
+        )
+        and any(
+            isinstance(event, Mapping)
+            and event.get("event_type") == "terminal"
+            and event.get("current_page") == event.get("terminal_page")
+            and event.get("next_enabled") is False
+            for event in events
+        )
+    )
 
 
 def _validate_unique_products(rows: Iterable[Mapping[str, str]]) -> None:
@@ -138,10 +202,20 @@ def collect_supplement_material_status(
     | None = None,
     on_checkpoint: Callable[[int, list[dict[str, str]]], None] | None = None,
     on_phase: Callable[[str, int | None], None] | None = None,
+    pagination_evidence: Path | None = None,
+    on_pagination_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, str]]:
     """Collect through the one maintained supplement implementation."""
 
     context = dict(checkpoint_context or {})
+    session_id = str(context.get("session_id", "")).strip()
+    if (
+        scan_mode == "high-value"
+        and session_id in QUARANTINED_PAGINATION_SESSIONS
+    ):
+        raise CheckpointIdentityError(
+            "PAGINATION_HISTORICAL_OUTPUT_QUARANTINED"
+        )
     checkpoint_document = validate_checkpoint_identity(
         checkpoint,
         {"scan_mode": scan_mode, **context},
@@ -158,11 +232,68 @@ def collect_supplement_material_status(
     last_completed_page = 0
     skip_completed_pages = 0
     initial_rows: list[dict[str, str]] = []
+    evidence_document = _read_pagination_evidence(pagination_evidence)
+    expected_page_hashes = _page_hashes_from_evidence(evidence_document)
+
+    def persist_pagination_event(event: dict[str, Any]) -> None:
+        nonlocal evidence_document, expected_page_hashes
+        if pagination_evidence is None:
+            if on_pagination_event is not None:
+                on_pagination_event(dict(event))
+            return
+        evidence_document = dict(
+            evidence_document
+            or {
+                "schema_version": PAGINATION_EVIDENCE_SCHEMA_VERSION,
+                "scan_mode": scan_mode,
+                **context,
+                "events": [],
+            }
+        )
+        events = list(evidence_document.get("events", []))
+        enriched = {
+            "schema_version": PAGINATION_EVIDENCE_SCHEMA_VERSION,
+            **context,
+            **event,
+            "recorded_at": collected_at,
+        }
+        events.append(enriched)
+        evidence_document["events"] = events
+        evidence_document["status"] = (
+            "failed"
+            if enriched.get("event_type") == "failure"
+            else (
+                "verified"
+                if enriched.get("event_type") == "terminal"
+                else "in_progress"
+            )
+        )
+        evidence_document["updated_at"] = collected_at
+        atomic_write_json(Path(pagination_evidence), evidence_document)
+        expected_page_hashes = _page_hashes_from_evidence(evidence_document)
+        if on_pagination_event is not None:
+            on_pagination_event(dict(enriched))
+
+    def pagination_checkpoint_fields() -> dict[str, str]:
+        if (
+            pagination_evidence is None
+            or not Path(pagination_evidence).is_file()
+        ):
+            return {}
+        return {
+            "pagination_evidence_sha256": _file_sha256(
+                Path(pagination_evidence)
+            )
+        }
     if checkpoint_document:
         last_completed_page = int(
             checkpoint_document.get("last_completed_page") or 0
         )
         if checkpoint_document.get("status") in {"in_progress", "complete"}:
+            if scan_mode == "high-value" and not evidence_document:
+                raise CheckpointIdentityError(
+                    "PAGINATION_EVIDENCE_LEGACY"
+                )
             skip_completed_pages = last_completed_page
             initial_rows = read_backend_status(output)
             expected_count = checkpoint_document.get("row_count")
@@ -182,6 +313,13 @@ def collect_supplement_material_status(
                     "CHECKPOINT_OUTPUT_SHA256_MISMATCH"
                 )
         if checkpoint_document.get("status") == "complete":
+            if (
+                scan_mode == "high-value"
+                and not _pagination_evidence_verified(evidence_document)
+            ):
+                raise CheckpointIdentityError(
+                    "PAGINATION_TERMINAL_UNVERIFIED"
+                )
             return initial_rows
 
     def save_page(page_number: int, values: list[dict[str, str]]) -> None:
@@ -194,13 +332,14 @@ def collect_supplement_material_status(
         write_checkpoint(
             checkpoint,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": "in_progress",
                 "scan_mode": scan_mode,
                 "last_completed_page": page_number,
                 "row_count": len(values),
                 "output_sha256": _status_sha256(output),
                 "collected_at": collected_at,
+                **pagination_checkpoint_fields(),
                 **context,
             },
         )
@@ -225,6 +364,8 @@ def collect_supplement_material_status(
                 initial_rows=initial_rows,
                 skip_completed_pages=skip_completed_pages,
                 on_phase=on_phase,
+                on_pagination_event=persist_pagination_event,
+                expected_page_hashes=expected_page_hashes,
             )
         else:
             rows = supplement_material_status(
@@ -234,16 +375,35 @@ def collect_supplement_material_status(
                 collected_at=collected_at,
             )
     except SelectorInvalidError as error:
+        if isinstance(error, PaginationStateError):
+            code = str(error).split(":", 1)[0]
+            events = (evidence_document or {}).get("events", [])
+            if not events or events[-1].get("detail") != str(error):
+                persist_pagination_event(
+                    {
+                        "event_type": "failure",
+                        "reason_code": code,
+                        "detail": str(error),
+                        "recovery_guidance": PAGINATION_RECOVERY_GUIDANCE.get(
+                            code, ""
+                        ),
+                    }
+                )
         write_checkpoint(
             checkpoint,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": "needs_manual_review",
                 "scan_mode": scan_mode,
                 "last_completed_page": last_completed_page,
-                "reason_code": "SELECTOR_INVALID",
+                "reason_code": (
+                    str(error).split(":", 1)[0]
+                    if isinstance(error, PaginationStateError)
+                    else "SELECTOR_INVALID"
+                ),
                 "failed_field": str(error),
                 "collected_at": collected_at,
+                **pagination_checkpoint_fields(),
                 **context,
             },
         )
@@ -254,13 +414,14 @@ def collect_supplement_material_status(
     write_checkpoint(
         checkpoint,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "complete",
             "scan_mode": scan_mode,
             "last_completed_page": last_completed_page,
             "row_count": len(rows),
             "output_sha256": _status_sha256(output),
             "collected_at": collected_at,
+            **pagination_checkpoint_fields(),
             **context,
         },
     )

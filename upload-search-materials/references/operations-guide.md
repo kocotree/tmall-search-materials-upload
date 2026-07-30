@@ -111,7 +111,7 @@ cd .\upload-search-materials
 Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
 
 - `inputs/`：复制商品表、规则表并生成输入清单与 SHA-256。
-- `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint 和页面证据。
+- `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint、分页起点/翻页/末页证据和页面证据。
 - `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
 
 共享文件夹索引数据库、选择器与策略配置不重复复制；任务只保存当前商品的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
@@ -181,9 +181,9 @@ uv run tmall-materials prepare-confirmed-gallery `
   --page-size 30
 ```
 
-该命令只遍历当前商品使用中的文件夹。每个商品发现 1–100 张时全部进入候选池；超过 100 张时，先按各文件夹图片数量占比分配 100 个名额，再使用任务 ID 作为种子在每个文件夹内稳定随机抽取。例如三个文件夹数量比例为 5:3:2，则 100 张候选分别抽取 50、30、20 张。同一任务重跑结果一致，新任务可重新抽样。只对抽中的候选读取尺寸、校验、计算 SHA-256 并生成预览，不建立全量图片数据库。输出中的 `candidate_strategy=proportional_task_sample`、`folder_allocations`、`scan_summary` 和逐商品 `requirements` 用于解释发现数、各目录抽样数和候选数。
+该命令只遍历当前商品采用中的文件夹，候选上限按商品独立计算。每个商品发现 1–100 张唯一图片路径时全部进入候选池；超过 100 张时，先为每个非空采用文件夹分配 1 个基础名额，再按扣除基础名额后的剩余唯一图片数比例分配余量。例如单商品采用 61 个非空文件夹且发现总数超过 100 张时，先分配 61 张，再按比例分配剩余 39 张。若非空文件夹超过 100 个，候选仍限制为 100 张，确定性决定得到名额的文件夹，并返回 `FOLDER_COVERAGE_LIMIT_EXCEEDED`；空文件夹、完全重叠文件夹和未得到名额的文件夹仍保留零分配审计行。系统使用任务 ID、商品 ID、稳定文件夹 ID 和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时重跑结果一致，新任务可重新抽样。只对抽中的候选读取尺寸、校验、计算 SHA-256 并生成预览，不建立全量图片数据库。输出中的 `candidate_strategy=proportional_task_sample`、`candidate_strategy_version`、`sampling_identity_sha256`、`folder_allocations`、`scan_summary` 和逐商品 `requirements` 用于解释发现数、各目录名额、覆盖状态和候选数。
 
-第三阶段只保留单一“采用”操作，勾选即确认该图片可用于本次发布；前端同步写入采用与授权状态，后端按采用项重新生成授权记录。不设置“应选满 N 张”的上限或不足判定。用户选中的图片只记录稳定 `selection_order`，不提前写入坑位分组。第五阶段再决定本次编排的坑位数量，并按每个图文坑位 3–9 张、同坑位只能使用 3:4 或 1:1 且不得混合比例的规则分组；未在本次填充的后台空坑位继续保留为缺失。`confirmed-gallery.json` 只属于当前时间戳任务，不作为跨任务共享索引。候选准备阶段同步生成最长边不超过 640 像素的 JPEG 到 `03-asset-matching/preview-cache/`；Web 页面只传本地预览，原图保持只读并留给最终上传。旧任务首次请求时按需补建预览。Web 预览仍只允许结果中列出的文件，并额外校验原图位于已确认文件夹下，以兼容配置中的 Y/Z 映射盘与 Agent 实际解析到的 UNC 路径不同。预览响应使用短时私有缓存，勾选时只更新当前卡片和决定，不重新创建整个图片网格。
+第三阶段只保留单一“采用”操作，候选首次显示时全部保持未选中；采用文件夹或进入候选池都不能自动采用图片。用户勾选即确认该图片可用于本次发布，前端同步写入采用与授权状态，后端按采用项重新生成授权记录。提交时每个商品至少需要 3 张可读、策略兼容且源 SHA-256 唯一的图片；除此之外不设置低于每商品 100 张候选池的采用上限。用户选中的图片只记录稳定 `selection_order`，不提前写入坑位分组。第五阶段按 `K=min(后台缺失坑位,floor(有效唯一采用图片数/3))` 决定坑位数，并最多使用 `min(有效唯一采用图片数,K*9)` 张图片；每个图文坑位使用 3–9 张、同坑只能使用 3:4 或 1:1 且不得混合比例，超出容量的采用图片保留在未使用候选池，未在本次填充的后台空坑位继续保留为缺失。`confirmed-gallery.json` 只属于当前时间戳任务，不作为跨任务共享索引。候选准备阶段同步生成最长边不超过 640 像素的 JPEG 到 `03-asset-matching/preview-cache/`；Web 页面只传本地预览，原图保持只读并留给最终上传。旧任务首次请求时按需补建预览。Web 预览仍只允许结果中列出的文件，并额外校验原图位于已确认文件夹下，以兼容配置中的 Y/Z 映射盘与 Agent 实际解析到的 UNC 路径不同。预览响应使用短时私有缓存，勾选时只更新当前卡片和决定，不重新创建整个图片网格。
 
 每条新候选同时记录 `folder_id` 和 `folder_path`。文件夹改为排除后，页面立即移除对应候选并同步取消其已选和授权记录，显示取消数量，随后重新计算候选数和分页；重新采用只恢复候选，不恢复旧选择。后端保存和提交时再次按最终文件夹决定过滤矛盾图片。历史候选缺少 `folder_id` 时按规范化后的最长父目录路径归属，无法唯一归属时保留并显示“历史候选未关联文件夹”。
 
@@ -295,10 +295,17 @@ Chrome 登录、打开官方素材中心并填入目标店铺后点击“验证�
 ```
 
 页面和命令显示 `validating_profile`、`connecting_cdp`、`settling_popups`、
-`opening_promotion`、`selecting_high_value`、`collecting_page`、
+`opening_promotion`、`selecting_high_value`、`normalizing_pagination`、
+`collecting_page`、`verifying_terminal`、
 `writing_checkpoint`、`building_completeness` 和终态。首个 checkpoint 前只显示 phase
 与 heartbeat，不显示“0 行完成”。日志位于当前 attempt 目录。重复执行同一绑定时复用
 活 Worker 或完成结果，不启动第二个 Worker。
+
+新采集即使复用已有 CDP 标签页，也必须读取可见当前页；若不是第 1 页，使用经过
+当前 DOM 验证的第一页控件返回并等待页码和有序商品 ID 稳定后才能写首个
+checkpoint。恢复时同样先回到第 1 页，再按照 pagination evidence 重放到最后完整页。
+下一页 disabled 只是一项信号；必须同时证明当前页等于可见末页且行身份稳定，才能
+发布 `current/`。无法证明时保留 attempt 并返回稳定分页原因码。
 
 已确认归属的 Worker 退出后，页面立即显示可恢复；未知 PID、token 不匹配或进程身份
 无法读取时必须等待租约过期，不得结束进程。恢复前核对 revision、input SHA、selector

@@ -18,6 +18,9 @@ SELECTOR_PURPOSES: dict[str, frozenset[str]] = {
             "promotion_tab",
             "high_value_filter",
             "promotion_rows",
+            "promotion_current_page",
+            "promotion_first_page",
+            "promotion_terminal_page",
             "promotion_next_page",
         }
     ),
@@ -142,6 +145,9 @@ PLACEHOLDER_VALUES = frozenset(
         "#remote-status",
         "#remote-slot",
         "#remote-time",
+        "#promotion-current-page",
+        "#promotion-first-page",
+        "#promotion-terminal-page",
     }
 )
 
@@ -233,6 +239,19 @@ def load_selector_profile(
         raise SelectorConfigError(
             "SELECTOR_FIELDS_MISSING: " + ", ".join(missing)
         )
+    if not legacy and purpose == "high_value_collection":
+        pagination_fields = (
+            "promotion_current_page",
+            "promotion_first_page",
+            "promotion_terminal_page",
+        )
+        pagination_values = [
+            normalized[field] for field in pagination_fields
+        ]
+        if len(set(pagination_values)) != len(pagination_values):
+            raise SelectorConfigError(
+                "SELECTOR_PAGINATION_FIELDS_AMBIGUOUS"
+            )
 
     supported = values.get("supported_purposes")
     if (

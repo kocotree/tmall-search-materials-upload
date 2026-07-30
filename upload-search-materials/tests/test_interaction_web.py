@@ -193,6 +193,9 @@ def test_collection_runtime_panel_validates_and_saves_local_profile(
                 "promotion_tab": '[role="tab"]:has-text("搜推素材")',
                 "high_value_filter": '[role="checkbox"]:has-text("搜推高价值")',
                 "promotion_rows": "tbody tr",
+                "promotion_current_page": "[aria-current=page]",
+                "promotion_first_page": "[data-page='1']",
+                "promotion_terminal_page": "[data-page-last=true]",
                 "promotion_next_page": 'button:has-text("下一页")',
             },
             allow_unicode=True,
@@ -318,11 +321,34 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
     )
 
     class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+
         def count(self):
             return 1
 
         def inner_text(self):
+            if any(
+                marker in self.selector
+                for marker in (
+                    "aria-current",
+                    "first-of-type",
+                    "last-of-type",
+                )
+            ):
+                return "1"
             return "测试店铺"
+
+        def all_inner_texts(self):
+            if self.selector == "tbody tr":
+                return ["商品 商品ID 100"]
+            return []
+
+        def get_attribute(self, _name):
+            return None
+
+        def is_enabled(self):
+            return "下一页" not in self.selector
 
         def is_visible(self):
             return False
@@ -333,8 +359,8 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
             "material-center/material-management"
         )
 
-        def locator(self, _selector):
-            return Locator()
+        def locator(self, selector):
+            return Locator(selector)
 
     @contextmanager
     def open_page(*_args, **_kwargs):
@@ -1829,6 +1855,11 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "已选素材" in source
     assert "发现 ${duplicateCount} 张完全重复图片" in source
     assert "data.page_size || 30" in source
+    assert "每商品候选上限 ${candidateLimit} 张" in source
+    assert "每批显示 ${pageSize} 张" in source
+    assert "无法覆盖全部非空文件夹" in source
+    assert "历史候选未记录文件夹覆盖审计" in source
+    assert "FOLDER_COVERAGE_LIMIT_EXCEEDED" in source
     assert "已选满" not in source
     assert "确认归属并记录别名" not in source
     assert 'candidate?.match_type !== "confirmed_alias"' in source

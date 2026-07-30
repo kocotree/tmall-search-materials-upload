@@ -1,8 +1,10 @@
 import json
+import hashlib
 
 import pytest
 
 from upload_search_materials.supplement_collection import (
+    CheckpointIdentityError,
     collect_supplement_material_status,
 )
 
@@ -57,7 +59,7 @@ def test_stale_claim_is_rejected_before_checkpoint_write(
     assert not checkpoint.exists()
 
 
-def test_legacy_checkpoint_is_bound_to_current_attempt_on_resume(
+def test_legacy_checkpoint_without_pagination_evidence_is_rejected(
     tmp_path, monkeypatch
 ):
     output = tmp_path / "status.csv"
@@ -100,18 +102,55 @@ def test_legacy_checkpoint_is_bound_to_current_attempt_on_resume(
         "scan_recommended_material_status",
         scan,
     )
-    rows = collect_supplement_material_status(
-        object(),
-        {},
-        scan_mode="high-value",
-        output=output,
-        checkpoint=checkpoint,
-        collected_at="2026-07-29T10:01:00+08:00",
-        checkpoint_context=context,
-    )
+    with pytest.raises(
+        CheckpointIdentityError, match="PAGINATION_EVIDENCE_LEGACY"
+    ):
+        collect_supplement_material_status(
+            object(),
+            {},
+            scan_mode="high-value",
+            output=output,
+            checkpoint=checkpoint,
+            collected_at="2026-07-29T10:01:00+08:00",
+            checkpoint_context=context,
+        )
 
     final = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert [item["商品ID"] for item in rows] == ["100", "200"]
     assert final["attempt_id"] == "attempt-current"
-    assert final["last_completed_page"] == 2
-    assert final["row_count"] == 2
+    assert final["identity_upgraded_at"]
+
+
+def test_quarantined_false_success_preserves_original_files(tmp_path):
+    output = tmp_path / "status.csv"
+    checkpoint = tmp_path / "checkpoint.json"
+    output.write_text("商品ID\n100\n", encoding="utf-8")
+    checkpoint.write_text(
+        json.dumps({"status": "complete"}),
+        encoding="utf-8",
+    )
+    before = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (output, checkpoint)
+    }
+
+    with pytest.raises(
+        CheckpointIdentityError,
+        match="PAGINATION_HISTORICAL_OUTPUT_QUARANTINED",
+    ):
+        collect_supplement_material_status(
+            object(),
+            {},
+            scan_mode="high-value",
+            output=output,
+            checkpoint=checkpoint,
+            collected_at="2026-07-30T10:00:00+08:00",
+            checkpoint_context={
+                "session_id": "20260730_032916",
+            },
+        )
+
+    after = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (output, checkpoint)
+    }
+    assert after == before

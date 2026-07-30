@@ -186,7 +186,40 @@ def test_worker_progress_rejects_stale_attempt_and_ownership(tmp_path):
         last_completed_page=1,
         row_count=20,
         last_checkpoint_at="2026-07-29T10:00:00+08:00",
+        pagination_origin_page=1,
+        observed_page=2,
+        terminal_page=26,
+        terminal_proof=False,
+        pagination_reason_code="PAGINATION_TRANSITION_VERIFIED",
     )
     assert progress["current_page"] == 2
     assert progress["last_completed_page"] == 1
     assert progress["row_count"] == 20
+    assert progress["pagination_origin_page"] == 1
+    assert progress["observed_page"] == 2
+    assert progress["terminal_page"] == 26
+    assert progress["terminal_proof"] is False
+
+
+def test_known_false_success_session_is_quarantined():
+    attempt = {
+        "attempt_id": "attempt",
+        "session_id": "20260730_032916",
+    }
+    result = {
+        "attempt_id": "attempt",
+        "status": "completed",
+    }
+
+    status = resolve_collection_status(
+        stage_status="completed",
+        current_attempt=attempt,
+        current_result=result,
+        worker=None,
+        worker_state="absent",
+        processing_claim=None,
+    )
+
+    assert status["status"] == "blocked"
+    assert status["source"] == "pagination_audit"
+    assert status["recovery_action"] == "start_fresh_timestamp_session"

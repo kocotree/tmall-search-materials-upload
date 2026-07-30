@@ -14,6 +14,11 @@ from .browser.config import (
     load_selector_profile,
     required_selectors,
 )
+from .browser.material_page import (
+    PAGINATION_SELECTOR_FIELDS,
+    PaginationStateError,
+    read_pagination_state,
+)
 from .browser.session import (
     HumanCheckRequired,
     LoginInteractionRequired,
@@ -32,6 +37,7 @@ READINESS_REASON_MESSAGES = {
     "SELECTOR_PROFILE_NOT_FOUND": "尚未配置本机生产选择器",
     "SELECTOR_PROFILE_INVALID": "本机选择器配置无效",
     "SELECTOR_DOM_NOT_VALIDATED": "选择器尚未通过当前页面验证",
+    "PAGINATION_ORIGIN_UNVERIFIED": "无法确认搜推高价值列表的当前页码",
     "CDP_UNAVAILABLE": "用于登录和采集的 CDP Chrome 尚未连接",
     "LOGIN_INTERACTION_REQUIRED": "需要用户在 CDP Chrome 完成登录",
     "HUMAN_CHECK": "需要用户在 CDP Chrome 完成人机验证",
@@ -58,6 +64,18 @@ DEFAULT_CANDIDATE_SELECTORS = {
         'label:has-text("搜推高价值")'
     ),
     "promotion_rows": "tbody tr",
+    "promotion_current_page": (
+        'nav[aria-label*="分页"] [aria-current="page"], '
+        '.next-pagination-list > .next-pagination-item.next-current'
+    ),
+    "promotion_first_page": (
+        'nav[aria-label*="分页"] [data-page="1"], '
+        '.next-pagination-list > .next-pagination-item:first-of-type'
+    ),
+    "promotion_terminal_page": (
+        'nav[aria-label*="分页"] [data-page]:last-of-type, '
+        '.next-pagination-list > .next-pagination-item:last-of-type'
+    ),
     "promotion_next_page": (
         'button:has-text("下一页"), [aria-label="下一页"]'
     ),
@@ -194,6 +212,7 @@ def build_collection_readiness(
     dom_ready = bool(
         evidence.get("store_match")
         and evidence.get("page_identity") == "material_center"
+        and evidence.get("pagination_state", {}).get("verified") is True
         and evidence.get("selector_profile", {}).get("sha256")
         == selector.get("evidence", {}).get("profile_sha256")
     )
@@ -348,10 +367,33 @@ def validate_selector_candidate(
                 "detail": type(error).__name__,
             }
         else:
-            field_results[field] = {"ready": count > 0, "count": count}
+            exact_one = field in {
+                *PAGINATION_SELECTOR_FIELDS,
+                "promotion_next_page",
+            }
+            field_results[field] = {
+                "ready": count == 1 if exact_one else count > 0,
+                "count": count,
+                "expected_count": 1 if exact_one else "at_least_one",
+            }
     failed = [
         field for field, result in field_results.items() if not result["ready"]
     ]
+    pagination_evidence: dict[str, Any]
+    try:
+        pagination_state = read_pagination_state(page, profile.selectors)
+    except PaginationStateError as error:
+        pagination_evidence = {
+            "verified": False,
+            "reason_code": str(error).split(":", 1)[0],
+            "detail": str(error),
+        }
+        failed.append("pagination_origin")
+    else:
+        pagination_evidence = {
+            "verified": True,
+            **pagination_state.as_dict(),
+        }
     try:
         page_evidence = validate_collection_page(
             page,
@@ -372,6 +414,7 @@ def validate_selector_candidate(
         page_evidence = {"reason_code": reason_code, "detail": str(error)}
     else:
         reason_code = "READY"
+    page_evidence["pagination_state"] = pagination_evidence
     ready = not failed and reason_code == "READY"
     return {
         "schema_version": COLLECTION_RUNTIME_SCHEMA_VERSION,
@@ -381,7 +424,16 @@ def validate_selector_candidate(
             "READY"
             if ready
             else (
-                f"SELECTOR_FIELD_INVALID:{failed[0]}"
+                (
+                    str(
+                        pagination_evidence.get(
+                            "reason_code",
+                            "PAGINATION_ORIGIN_UNVERIFIED",
+                        )
+                    )
+                    if failed[0] == "pagination_origin"
+                    else f"SELECTOR_FIELD_INVALID:{failed[0]}"
+                )
                 if failed
                 else reason_code
             )
@@ -425,6 +477,9 @@ def promote_selector_candidate(
         "page_identity": validation["page_evidence"].get("page_identity"),
         "observed_store": validation["page_evidence"].get("observed_store"),
         "page_url": validation["page_evidence"].get("page_url"),
+        "pagination_state": validation["page_evidence"].get(
+            "pagination_state"
+        ),
         "candidate_sha256": validation["candidate_sha256"],
     }
     temporary = target.with_name(f".{target.name}.tmp")

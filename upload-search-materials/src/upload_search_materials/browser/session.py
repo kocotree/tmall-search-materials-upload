@@ -215,17 +215,38 @@ def validate_collection_page(
         raise LoginInteractionRequired(
             "MATERIAL_PAGE_REQUIRED: navigate to the official material center"
         )
-    field_results: dict[str, str] = {}
+    field_results: dict[str, object] = {}
     for field in (
         "promotion_tab",
         "high_value_filter",
         "promotion_rows",
+        "promotion_current_page",
+        "promotion_first_page",
+        "promotion_terminal_page",
         "promotion_next_page",
     ):
         selector = str(selectors.get(field, "")).strip()
-        field_results[field] = (
-            "configured" if selector else "missing"
-        )
+        count = int(page.locator(selector).count()) if selector else 0
+        field_results[field] = {
+            "configured": bool(selector),
+            "count": count,
+        }
+    pagination_state: dict[str, object]
+    try:
+        from .material_page import read_pagination_state
+
+        observed_pagination = read_pagination_state(page, selectors)
+    except RuntimeError as error:
+        pagination_state = {
+            "verified": False,
+            "reason_code": str(error).split(":", 1)[0],
+            "detail": str(error),
+        }
+    else:
+        pagination_state = {
+            "verified": True,
+            **observed_pagination.as_dict(),
+        }
     return {
         "schema_version": 1,
         "target_store": expected_store.strip(),
@@ -240,6 +261,7 @@ def validate_collection_page(
             "purpose": "high_value_collection",
         },
         "field_results": field_results,
+        "pagination_state": pagination_state,
         "verified_at": checked_at,
     }
 

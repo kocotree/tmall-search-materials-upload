@@ -24,7 +24,28 @@ class Locator:
         return 1
 
     def inner_text(self):
+        if self.selector in {
+            self.page.selectors["promotion_first_page"],
+        }:
+            return "1"
+        if self.selector == self.page.selectors["promotion_current_page"]:
+            return str(self.page.current_page)
+        if self.selector == self.page.selectors["promotion_terminal_page"]:
+            return str(self.page.terminal_page)
         return self.page.store
+
+    def all_inner_texts(self):
+        if self.selector == self.page.selectors["promotion_rows"]:
+            return ["商品 商品ID 100"]
+        return []
+
+    def get_attribute(self, _name):
+        return None
+
+    def is_enabled(self):
+        if self.selector == self.page.selectors["promotion_next_page"]:
+            return self.page.current_page < self.page.terminal_page
+        return True
 
     def is_visible(self):
         return False
@@ -36,8 +57,18 @@ class Page:
         "material-center/material-management"
     )
 
-    def __init__(self, selectors, store="测试店铺"):
+    def __init__(
+        self,
+        selectors,
+        store="测试店铺",
+        *,
+        current_page=1,
+        terminal_page=1,
+    ):
         self.store = store
+        self.selectors = selectors
+        self.current_page = current_page
+        self.terminal_page = terminal_page
         self.store_selector = selectors["store_name"]
         self.human_selector = selectors["human_check"]
 
@@ -102,6 +133,52 @@ def test_candidate_names_the_first_failed_field_and_is_not_promoted(tmp_path):
     assert validation["ready"] is False
     assert validation["reason_code"] == "SELECTOR_FIELD_INVALID:promotion_rows"
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["production"] is False
+
+
+def test_candidate_rejects_ambiguous_current_page_control(tmp_path):
+    path = tmp_path / "selectors.local.yaml"
+    create_selector_candidate(path, material_center_url=Page.url)
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    class AmbiguousPage(Page):
+        def locator(self, selector):
+            locator = super().locator(selector)
+            if selector == document["promotion_current_page"]:
+                locator.count = lambda: 2
+            return locator
+
+    validation = validate_selector_candidate(
+        path,
+        AmbiguousPage(document),
+        expected_store="测试店铺",
+    )
+
+    assert validation["ready"] is False
+    assert (
+        validation["field_results"]["promotion_current_page"]["count"]
+        == 2
+    )
+
+
+def test_candidate_interprets_first_middle_final_and_single_page(tmp_path):
+    path = tmp_path / "selectors.local.yaml"
+    create_selector_candidate(path, material_center_url=Page.url)
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    for current, terminal in ((1, 3), (2, 3), (3, 3), (1, 1)):
+        validation = validate_selector_candidate(
+            path,
+            Page(
+                document,
+                current_page=current,
+                terminal_page=terminal,
+            ),
+            expected_store="测试店铺",
+        )
+        state = validation["page_evidence"]["pagination_state"]
+        assert state["verified"] is True
+        assert state["current_page"] == current
+        assert state["terminal_page"] == terminal
 
 
 def test_candidate_reports_login_and_wrong_store_as_user_actions(tmp_path):

@@ -1,5 +1,7 @@
+from dataclasses import asdict, dataclass
+import hashlib
 import re
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -12,6 +14,243 @@ class ProductIdentityError(RuntimeError):
     pass
 
 
+class PaginationStateError(SelectorInvalidError):
+    """Stable fail-closed pagination contract failure."""
+
+
+PAGINATION_RECOVERY_GUIDANCE = {
+    "PAGINATION_ORIGIN_UNVERIFIED": (
+        "无法确认当前分页位置，请重新验证本机选择器后重试。"
+    ),
+    "PAGINATION_ORIGIN_RESET_FAILED": (
+        "无法返回并稳定在第 1 页，请保持素材中心页面打开后重试。"
+    ),
+    "PAGINATION_CHECKPOINT_MISMATCH": (
+        "页面商品顺序与采集断点不一致，请保留证据并开始新的采集。"
+    ),
+    "PAGINATION_TRANSITION_MISMATCH": (
+        "翻页后页码或商品没有按预期变化，请检查页面加载状态后重试。"
+    ),
+    "PAGINATION_TERMINAL_UNVERIFIED": (
+        "下一页不可用，但无法证明当前确为末页，采集已安全停止。"
+    ),
+}
+PAGINATION_SELECTOR_FIELDS = (
+    "promotion_current_page",
+    "promotion_first_page",
+    "promotion_terminal_page",
+)
+
+
+@dataclass(frozen=True)
+class PaginationState:
+    current_page: int
+    terminal_page: int
+    next_enabled: bool
+    ordered_product_id_hash: str
+    product_count: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _pagination_error(code: str, detail: str = "") -> PaginationStateError:
+    suffix = f":{detail}" if detail else ""
+    return PaginationStateError(f"{code}{suffix}")
+
+
+def _single_locator(page, selectors: Mapping[str, str], field: str):
+    selector = str(selectors.get(field, "")).strip()
+    if not selector:
+        raise _pagination_error("PAGINATION_ORIGIN_UNVERIFIED", field)
+    locator = page.locator(selector)
+    try:
+        count = int(locator.count())
+    except (AttributeError, PlaywrightError) as error:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", field
+        ) from error
+    if count != 1:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", f"{field}:count={count}"
+        )
+    return locator
+
+
+def _page_number(locator, field: str) -> int:
+    candidates: list[str] = []
+    try:
+        candidates.append(str(locator.inner_text() or ""))
+    except (AttributeError, PlaywrightError):
+        pass
+    for attribute in ("aria-label", "title", "data-page"):
+        try:
+            candidates.append(str(locator.get_attribute(attribute) or ""))
+        except (AttributeError, PlaywrightError):
+            continue
+    for candidate in candidates:
+        match = re.search(r"\d+", candidate)
+        if match and int(match.group(0)) > 0:
+            return int(match.group(0))
+    raise _pagination_error(
+        "PAGINATION_ORIGIN_UNVERIFIED", f"{field}:page_number"
+    )
+
+
+def _ordered_product_ids(row_texts: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        match.group(1)
+        for text in row_texts
+        if (match := re.search(r"商品ID\s*(\d+)", str(text)))
+    )
+
+
+def _product_id_hash(product_ids: Iterable[str]) -> str:
+    joined = "\0".join(str(value) for value in product_ids)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def read_pagination_state(
+    page,
+    selectors: Mapping[str, str],
+) -> PaginationState:
+    """Read one bounded, non-mutating pagination observation."""
+
+    current = _single_locator(page, selectors, "promotion_current_page")
+    _single_locator(page, selectors, "promotion_first_page")
+    terminal = _single_locator(page, selectors, "promotion_terminal_page")
+    next_page = _single_locator(page, selectors, "promotion_next_page")
+    rows_selector = str(selectors.get("promotion_rows", "")).strip()
+    if not rows_selector:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", "promotion_rows"
+        )
+    rows = page.locator(rows_selector)
+    try:
+        row_count = int(rows.count())
+    except (AttributeError, PlaywrightError) as error:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", "promotion_rows"
+        ) from error
+    if row_count < 1:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", "promotion_rows:count=0"
+        )
+    try:
+        row_texts = [
+            str(value).strip()
+            for value in rows.all_inner_texts()
+            if str(value).strip()
+        ]
+    except (AttributeError, PlaywrightError) as error:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", "promotion_rows"
+        ) from error
+    product_ids = _ordered_product_ids(row_texts)
+    if not product_ids:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", "promotion_product_ids"
+        )
+    current_page = _page_number(current, "promotion_current_page")
+    terminal_page = _page_number(terminal, "promotion_terminal_page")
+    if current_page > terminal_page:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED",
+            f"current={current_page}:terminal={terminal_page}",
+        )
+    try:
+        next_enabled = bool(next_page.is_enabled())
+    except (AttributeError, PlaywrightError) as error:
+        raise _pagination_error(
+            "PAGINATION_ORIGIN_UNVERIFIED", "promotion_next_page"
+        ) from error
+    return PaginationState(
+        current_page=current_page,
+        terminal_page=terminal_page,
+        next_enabled=next_enabled,
+        ordered_product_id_hash=_product_id_hash(product_ids),
+        product_count=len(product_ids),
+    )
+
+
+def _wait_for_stable_pagination(
+    page,
+    selectors: Mapping[str, str],
+    *,
+    expected_page: int,
+    action_wait_ms: int,
+    failure_code: str,
+    different_from_hash: str | None = None,
+) -> PaginationState:
+    poll_ms = 250
+    elapsed_ms = 0
+    prior: PaginationState | None = None
+    stable_checks = 0
+    last_error: PaginationStateError | None = None
+    while elapsed_ms <= max(action_wait_ms, poll_ms):
+        try:
+            observed = read_pagination_state(page, selectors)
+        except PaginationStateError as error:
+            last_error = error
+            stable_checks = 0
+        else:
+            identity_changed = (
+                not different_from_hash
+                or observed.ordered_product_id_hash != different_from_hash
+            )
+            if (
+                observed.current_page == expected_page
+                and identity_changed
+                and observed == prior
+            ):
+                stable_checks += 1
+            elif observed.current_page == expected_page and identity_changed:
+                stable_checks = 1
+            else:
+                stable_checks = 0
+            prior = observed
+            if stable_checks >= 2:
+                return observed
+        page.wait_for_timeout(poll_ms)
+        elapsed_ms += poll_ms
+    detail = str(last_error or f"expected_page={expected_page}")
+    raise _pagination_error(failure_code, detail)
+
+
+def normalize_pagination_origin(
+    page,
+    selectors: Mapping[str, str],
+    *,
+    action_wait_ms: int,
+    settle_delay_ms: int,
+) -> PaginationState:
+    """Prove page 1 before any rows are emitted or checkpointed."""
+
+    initial = read_pagination_state(page, selectors)
+    reset_required = initial.current_page != 1
+    if reset_required:
+        first_page = _single_locator(
+            page, selectors, "promotion_first_page"
+        )
+        _click_with_popup_retries(
+            page,
+            first_page,
+            dict(selectors),
+            field_name="promotion_first_page",
+            delay_ms=settle_delay_ms,
+        )
+    return _wait_for_stable_pagination(
+        page,
+        selectors,
+        expected_page=1,
+        action_wait_ms=action_wait_ms,
+        failure_code="PAGINATION_ORIGIN_RESET_FAILED",
+        different_from_hash=(
+            initial.ordered_product_id_hash if reset_required else None
+        ),
+    )
+
+
 VISIBLE_MATERIAL_WARNINGS = (
     "重复或图片有删除",
     "素材获流风险",
@@ -19,7 +258,12 @@ VISIBLE_MATERIAL_WARNINGS = (
     "审核不通过",
 )
 READ_ONLY_FORCE_TARGETS = frozenset(
-    {"promotion_tab", "high_value_filter", "promotion_next_page"}
+    {
+        "promotion_tab",
+        "high_value_filter",
+        "promotion_first_page",
+        "promotion_next_page",
+    }
 )
 RECOGNIZED_GUIDE_KEYS = (
     "safe_popup_progress",
@@ -267,6 +511,8 @@ def scan_recommended_material_status(
     initial_rows: Iterable[dict[str, str]] = (),
     skip_completed_pages: int = 0,
     on_phase: Callable[[str, int | None], None] | None = None,
+    on_pagination_event: Callable[[dict[str, Any]], None] | None = None,
+    expected_page_hashes: Mapping[int, str] | None = None,
 ) -> list[dict[str, str]]:
     required = (
         "promotion_tab",
@@ -274,6 +520,8 @@ def scan_recommended_material_status(
         "promotion_rows",
         "promotion_next_page",
     )
+    if filter_selector_key == "high_value_filter":
+        required = (*required, *PAGINATION_SELECTOR_FIELDS)
     missing = [key for key in required if not str(selectors.get(key, "")).strip()]
     if missing:
         raise SelectorInvalidError(",".join(missing))
@@ -320,6 +568,34 @@ def scan_recommended_material_status(
     if checked != "true" and "checked" not in class_name.split():
         raise SelectorInvalidError(filter_selector_key)
 
+    pagination_state: PaginationState | None = None
+    if filter_selector_key == "high_value_filter":
+        try:
+            pagination_state = normalize_pagination_origin(
+                page,
+                selectors,
+                action_wait_ms=action_wait_ms,
+                settle_delay_ms=settle_delay_ms,
+            )
+        except PaginationStateError as error:
+            if on_pagination_event is not None:
+                on_pagination_event(
+                    {
+                        "event_type": "failure",
+                        "reason_code": str(error).split(":", 1)[0],
+                        "detail": str(error),
+                    }
+                )
+            raise
+        if on_pagination_event is not None:
+            on_pagination_event(
+                {
+                    "event_type": "origin",
+                    "reason_code": "PAGINATION_ORIGIN_VERIFIED",
+                    **pagination_state.as_dict(),
+                }
+            )
+
     output_by_product: dict[str, dict[str, str]] = {
         str(row.get("商品ID", "")): dict(row)
         for row in initial_rows
@@ -328,6 +604,30 @@ def scan_recommended_material_status(
     page_number = 0
     while True:
         page_number += 1
+        if pagination_state is not None:
+            if pagination_state.current_page != page_number:
+                raise _pagination_error(
+                    "PAGINATION_TRANSITION_MISMATCH",
+                    (
+                        f"internal={page_number}:"
+                        f"observed={pagination_state.current_page}"
+                    ),
+                )
+            expected_hash = str(
+                (expected_page_hashes or {}).get(page_number, "")
+            ).strip()
+            if (
+                page_number <= skip_completed_pages
+                and (
+                    not expected_hash
+                    or expected_hash
+                    != pagination_state.ordered_product_id_hash
+                )
+            ):
+                raise _pagination_error(
+                    "PAGINATION_CHECKPOINT_MISMATCH",
+                    f"page={page_number}",
+                )
         if on_phase is not None:
             on_phase("collecting_page", page_number)
         row_texts = [
@@ -360,7 +660,52 @@ def scan_recommended_material_status(
             break
         next_page = page.locator(selectors["promotion_next_page"])
         if not next_page.is_enabled():
-            break
+            if pagination_state is not None:
+                try:
+                    terminal_state = _wait_for_stable_pagination(
+                        page,
+                        selectors,
+                        expected_page=page_number,
+                        action_wait_ms=action_wait_ms,
+                        failure_code="PAGINATION_TERMINAL_UNVERIFIED",
+                    )
+                except PaginationStateError as error:
+                    if on_pagination_event is not None:
+                        on_pagination_event(
+                            {
+                                "event_type": "failure",
+                                "reason_code": str(error).split(":", 1)[0],
+                                "detail": str(error),
+                            }
+                        )
+                    raise
+                if terminal_state.next_enabled:
+                    pagination_state = terminal_state
+                elif (
+                    terminal_state.current_page
+                    != terminal_state.terminal_page
+                ):
+                    raise _pagination_error(
+                        "PAGINATION_TERMINAL_UNVERIFIED",
+                        (
+                            f"current={terminal_state.current_page}:"
+                            f"terminal={terminal_state.terminal_page}:"
+                            f"next={terminal_state.next_enabled}"
+                        ),
+                    )
+                elif on_pagination_event is not None:
+                    on_pagination_event(
+                        {
+                            "event_type": "terminal",
+                            "reason_code": "PAGINATION_TERMINAL_VERIFIED",
+                            **terminal_state.as_dict(),
+                        }
+                    )
+                if not terminal_state.next_enabled:
+                    break
+            else:
+                break
+        previous_state = pagination_state
         _click_with_popup_retries(
             page,
             next_page,
@@ -390,9 +735,37 @@ def scan_recommended_material_status(
             if next_ids and next_ids != previous_ids:
                 break
             if elapsed_ms >= action_wait_ms:
-                raise SelectorInvalidError("promotion_next_page:rows_unchanged")
+                raise _pagination_error(
+                    "PAGINATION_TRANSITION_MISMATCH",
+                    "promotion_next_page:rows_unchanged",
+                )
             page.wait_for_timeout(poll_ms)
             elapsed_ms += poll_ms
+        if previous_state is not None:
+            pagination_state = _wait_for_stable_pagination(
+                page,
+                selectors,
+                expected_page=page_number + 1,
+                action_wait_ms=action_wait_ms,
+                failure_code="PAGINATION_TRANSITION_MISMATCH",
+            )
+            if (
+                pagination_state.ordered_product_id_hash
+                == previous_state.ordered_product_id_hash
+            ):
+                raise _pagination_error(
+                    "PAGINATION_TRANSITION_MISMATCH",
+                    f"page={page_number + 1}:identity_unchanged",
+                )
+            if on_pagination_event is not None:
+                on_pagination_event(
+                    {
+                        "event_type": "transition",
+                        "reason_code": "PAGINATION_TRANSITION_VERIFIED",
+                        "from_page": page_number,
+                        **pagination_state.as_dict(),
+                    }
+                )
     return list(output_by_product.values())
 
 

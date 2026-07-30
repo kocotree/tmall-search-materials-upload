@@ -63,6 +63,7 @@
 | `DUPLICATE_PRODUCT_ID` | 多条来源记录共享 ID | 阻断所有重复行 |
 | `RULE_CONFLICT` | 月度来源冲突 | 转人工审核 |
 | `ASSET_NOT_FOUND` | 没有匹配素材 | 阻断对应坑位 |
+| `FOLDER_COVERAGE_LIMIT_EXCEEDED` | 单商品非空采用文件夹超过 100 个，100 张候选窗口无法覆盖全部文件夹 | 保留确定性候选和零名额审计行；提示用户筛减文件夹或在新任务中重新抽样，不自动扩大上限 |
 | `ASSET_INVALID` | 数量、比例、尺寸、格式或可读性失败 | 修复本地素材，不上传 |
 | `SOURCE_UNREADABLE` | 原图不存在、无权限、损坏或无法解析 | 阻断该图片，重新连接素材源或更换素材 |
 | `SOURCE_METADATA_MISSING` | 历史候选缺少原图大小、宽高或比例 | 重新运行当前任务的图片预检 |
@@ -125,6 +126,13 @@
 | `COLLECTION_ATTEMPT_BINDING_MISMATCH` | revision、输入、选择器或店铺绑定变化 | 禁止复用 checkpoint |
 | `CHECKPOINT_OUTPUT_SHA256_MISMATCH` | CSV 与 checkpoint 哈希不一致 | 保留证据并停止恢复 |
 | `CHECKPOINT_OUTPUT_DUPLICATE_PRODUCT` | checkpoint CSV 含重复商品 ID | 停止恢复并修复采集证据 |
+| `PAGINATION_ORIGIN_UNVERIFIED` | 无法唯一识别当前页、第一页控件或末页 | 修复本机选择器并重新验证当前 DOM |
+| `PAGINATION_ORIGIN_RESET_FAILED` | 请求第一页后无法验证页面稳定在第 1 页 | 保持素材中心打开并重新开始采集 |
+| `PAGINATION_CHECKPOINT_MISMATCH` | 恢复时逐页商品身份与 checkpoint 证据不一致 | 保留旧 attempt，创建新时间戳任务采集 |
+| `PAGINATION_TRANSITION_MISMATCH` | 翻页后页码未加一、跳页或商品身份未变化 | 停止在最后完整 checkpoint 并检查页面加载 |
+| `PAGINATION_TERMINAL_UNVERIFIED` | 下一页不可用，但当前页不能证明是稳定末页 | 不发布结果，修复末页选择器后重试 |
+| `PAGINATION_EVIDENCE_LEGACY` | 历史 checkpoint 没有分页起点证据 | 分类为 legacy，不作为完整采集复用 |
+| `PAGINATION_HISTORICAL_OUTPUT_QUARANTINED` | 命中已知错误起点产生的历史结果 | 保留原文件，使用新时间戳任务重新采集 |
 
 选择器、导航、弹窗、解析、分页或页面状态故障必须先由维护的
 `supplement --scan-mode high-value` 产生可复现错误证据。Playwright 只能用于诊断和

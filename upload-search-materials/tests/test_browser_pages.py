@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from upload_search_materials.browser.config import SelectorConfigError, load_selectors
 from upload_search_materials.browser.export_page import export_reports
 from upload_search_materials.browser.material_page import (
+    PaginationStateError,
     SelectorInvalidError,
     _click_with_popup_retries,
     _settle_safe_popups,
@@ -23,6 +25,23 @@ from upload_search_materials.browser.upload_page import upload_approved_item
 from upload_search_materials.browser.verifier import verify_remote_item
 from upload_search_materials.approval import create_manifest
 from upload_search_materials.models import AssetRecord, MaterialItem, MaterialStatus
+
+
+def test_false_success_fixture_matches_previous_final_page():
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures"
+            / "session_20260730_032916_pagination_origin_sanitized.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert fixture["preceding_collection"]["row_count"] == 255
+    assert fixture["preceding_collection"]["page_count"] == 26
+    assert (
+        fixture["preceding_collection"]["final_page_product_ids"]
+        == fixture["false_success_collection"]["all_product_ids"]
+    )
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
@@ -246,8 +265,15 @@ class FakePromotionLocator:
         self.page.clicked.append(self.selector)
         if self.selector == "#next":
             self.page.page_index += 1
+        elif self.selector == "#first":
+            self.page.page_index = 0
         elif self.selector == "#recommended":
             self.page.recommended_checked = True
+
+    def count(self):
+        if self.selector == ".promotion-row":
+            return len(self.page.pages[self.page.page_index])
+        return 1
 
     def all_inner_texts(self):
         if self.selector == ".promotion-row":
@@ -259,14 +285,23 @@ class FakePromotionLocator:
             return "true" if self.page.recommended_checked else "false"
         return None
 
+    def inner_text(self):
+        if self.selector == "#current":
+            return str(self.page.page_index + 1)
+        if self.selector == "#first":
+            return "1"
+        if self.selector == "#terminal":
+            return str(len(self.page.pages))
+        return ""
+
     def is_enabled(self):
         return self.page.page_index < len(self.page.pages) - 1
 
 
 class FakePromotionPage:
-    def __init__(self, pages):
+    def __init__(self, pages, *, page_index=0):
         self.pages = pages
-        self.page_index = 0
+        self.page_index = page_index
         self.recommended_checked = False
         self.clicked = []
         self.waited = []
@@ -546,6 +581,9 @@ def test_recommended_promotion_scan_paginates_deduplicates_and_checkpoints():
             "promotion_tab": "#promotion",
             "recommended_filter": "#recommended",
             "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
             "promotion_next_page": "#next",
         },
         collected_at="2026-07-24T01:57:30+08:00",
@@ -588,6 +626,9 @@ def test_promotion_scan_waits_until_next_page_product_ids_change():
             "promotion_tab": "#promotion",
             "high_value_filter": "#recommended",
             "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
             "promotion_next_page": "#next",
         },
         collected_at="2026-07-24T01:57:30+08:00",
@@ -600,13 +641,300 @@ def test_promotion_scan_waits_until_next_page_product_ids_change():
     assert 250 in page.waited
 
 
+@pytest.mark.parametrize("initial_page", [0, 1, 2])
+def test_high_value_scan_normalizes_reused_tab_to_first_page(initial_page):
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 1 篇"],
+            ["商品三 商品ID 300 发布坑位到 9 篇，当前发布 2 篇"],
+        ],
+        page_index=initial_page,
+    )
+    events = []
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-30T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=1000,
+        on_pagination_event=events.append,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200", "300"]
+    assert ("#first" in page.clicked) is (initial_page > 0)
+    assert events[0]["event_type"] == "origin"
+    assert events[0]["current_page"] == 1
+    assert events[-1]["event_type"] == "terminal"
+    assert events[-1]["current_page"] == 3
+
+
+def test_high_value_scan_fails_when_first_page_reset_does_not_move():
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 1 篇"],
+        ],
+        page_index=1,
+    )
+    original_locator = page.locator
+
+    class NoOpFirst(FakePromotionLocator):
+        def click(self, **_kwargs):
+            if self.selector == "#first":
+                self.page.clicked.append(self.selector)
+                return
+            super().click(**_kwargs)
+
+    page.locator = lambda selector: NoOpFirst(page, selector)
+
+    with pytest.raises(
+        PaginationStateError, match="PAGINATION_ORIGIN_RESET_FAILED"
+    ):
+        scan_recommended_material_status(
+            page,
+            {
+                "promotion_tab": "#promotion",
+                "high_value_filter": "#recommended",
+                "promotion_rows": ".promotion-row",
+                "promotion_current_page": "#current",
+                "promotion_first_page": "#first",
+                "promotion_terminal_page": "#terminal",
+                "promotion_next_page": "#next",
+            },
+            collected_at="2026-07-30T10:00:00+08:00",
+            filter_selector_key="high_value_filter",
+            settle_delay_ms=0,
+            action_wait_ms=500,
+        )
+
+    page.locator = original_locator
+
+
+def test_high_value_scan_waits_for_first_page_rows_to_replace_final_rows():
+    class StaleRowsLocator(FakePromotionLocator):
+        def click(self, **_kwargs):
+            if self.selector == "#first":
+                self.page.clicked.append(self.selector)
+                self.page.stale_rows = list(
+                    self.page.pages[self.page.page_index]
+                )
+                self.page.stale_reads = 2
+                self.page.page_index = 0
+                return
+            super().click(**_kwargs)
+
+        def all_inner_texts(self):
+            if (
+                self.selector == ".promotion-row"
+                and self.page.stale_reads > 0
+            ):
+                return self.page.stale_rows
+            return super().all_inner_texts()
+
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 1 篇"],
+            ["商品三 商品ID 300 发布坑位到 9 篇，当前发布 2 篇"],
+        ],
+        page_index=2,
+    )
+    page.stale_rows = []
+    page.stale_reads = 0
+    page.locator = lambda selector: StaleRowsLocator(page, selector)
+    original_wait = page.wait_for_timeout
+
+    def settle_rows(milliseconds):
+        original_wait(milliseconds)
+        if page.stale_reads > 0:
+            page.stale_reads -= 1
+
+    page.wait_for_timeout = settle_rows
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-30T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=1500,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200", "300"]
+
+
+def test_high_value_scan_waits_through_transient_disabled_next():
+    class TransientLocator(FakePromotionLocator):
+        def is_enabled(self):
+            if self.selector == "#next" and self.page.disabled_reads:
+                self.page.disabled_reads -= 1
+                return False
+            return super().is_enabled()
+
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 1 篇"],
+        ]
+    )
+    page.disabled_reads = 1
+    page.locator = lambda selector: TransientLocator(page, selector)
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-30T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=1000,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200"]
+
+
+def test_high_value_scan_rejects_disabled_next_before_observed_terminal():
+    class WrongTerminalLocator(FakePromotionLocator):
+        def inner_text(self):
+            if self.selector == "#terminal":
+                return "2"
+            return super().inner_text()
+
+        def is_enabled(self):
+            if self.selector == "#next":
+                return False
+            return super().is_enabled()
+
+    page = FakePromotionPage(
+        [["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"]]
+    )
+    page.locator = lambda selector: WrongTerminalLocator(page, selector)
+
+    with pytest.raises(
+        PaginationStateError, match="PAGINATION_TERMINAL_UNVERIFIED"
+    ):
+        scan_recommended_material_status(
+            page,
+            {
+                "promotion_tab": "#promotion",
+                "high_value_filter": "#recommended",
+                "promotion_rows": ".promotion-row",
+                "promotion_current_page": "#current",
+                "promotion_first_page": "#first",
+                "promotion_terminal_page": "#terminal",
+                "promotion_next_page": "#next",
+            },
+            collected_at="2026-07-30T10:00:00+08:00",
+            filter_selector_key="high_value_filter",
+            settle_delay_ms=0,
+            action_wait_ms=500,
+        )
+
+
+def test_high_value_scan_accepts_verified_single_page():
+    page = FakePromotionPage(
+        [["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"]]
+    )
+    events = []
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-30T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+        on_pagination_event=events.append,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100"]
+    assert [event["event_type"] for event in events] == [
+        "origin",
+        "terminal",
+    ]
+
+
+def test_high_value_scan_rejects_skipped_page_transition():
+    class SkippingLocator(FakePromotionLocator):
+        def click(self, **_kwargs):
+            if self.selector == "#next":
+                self.page.clicked.append(self.selector)
+                self.page.page_index += 2
+                return
+            super().click(**_kwargs)
+
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 1 篇"],
+            ["商品三 商品ID 300 发布坑位到 9 篇，当前发布 2 篇"],
+        ]
+    )
+    page.locator = lambda selector: SkippingLocator(page, selector)
+
+    with pytest.raises(
+        PaginationStateError, match="PAGINATION_TRANSITION_MISMATCH"
+    ):
+        scan_recommended_material_status(
+            page,
+            {
+                "promotion_tab": "#promotion",
+                "high_value_filter": "#recommended",
+                "promotion_rows": ".promotion-row",
+                "promotion_current_page": "#current",
+                "promotion_first_page": "#first",
+                "promotion_terminal_page": "#terminal",
+                "promotion_next_page": "#next",
+            },
+            collected_at="2026-07-30T10:00:00+08:00",
+            filter_selector_key="high_value_filter",
+            settle_delay_ms=0,
+            action_wait_ms=500,
+        )
+
+
 def test_promotion_scan_resumes_after_completed_pages_without_reemitting_them():
     page = FakePromotionPage(
         [
             ["商品一 商品ID 100 发布坑位到 9 篇、当前发布 0 篇"],
             ["商品二 商品ID 200 发布坑位到 9 篇、当前发布 1 篇"],
             ["商品三 商品ID 300 发布坑位到 9 篇、当前发布 2 篇"],
-        ]
+        ],
+        page_index=2,
     )
     completed = [
         {
@@ -632,12 +960,19 @@ def test_promotion_scan_resumes_after_completed_pages_without_reemitting_them():
             "promotion_tab": "#promotion",
             "high_value_filter": "#recommended",
             "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
             "promotion_next_page": "#next",
         },
         collected_at="2026-07-29T10:00:00+08:00",
         filter_selector_key="high_value_filter",
         initial_rows=completed,
         skip_completed_pages=2,
+        expected_page_hashes={
+            1: hashlib.sha256(b"100").hexdigest(),
+            2: hashlib.sha256(b"200").hexdigest(),
+        },
         on_page=lambda page_number, values: checkpoints.append(
             (page_number, [row["商品ID"] for row in values])
         ),
@@ -647,6 +982,7 @@ def test_promotion_scan_resumes_after_completed_pages_without_reemitting_them():
     assert page.clicked == [
         "#promotion",
         "#recommended",
+        "#first",
         "#next",
         "#next",
     ]

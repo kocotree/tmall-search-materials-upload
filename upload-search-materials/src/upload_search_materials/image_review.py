@@ -120,6 +120,12 @@ def build_image_review_data(
                 "product_id": str(candidate.get("product_id", "")),
                 "product_title": str(candidate.get("product_title", "")),
                 "source_system": str(candidate.get("source_system", "")),
+                "folder_id": str(candidate.get("folder_id", "")),
+                "folder_path": str(
+                    candidate.get("folder_path")
+                    or candidate.get("candidate_directory")
+                    or ""
+                ),
                 "candidate_directory": str(
                     candidate.get("candidate_directory")
                     or candidate.get("folder_path")

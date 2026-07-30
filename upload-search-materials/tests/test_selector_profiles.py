@@ -27,6 +27,9 @@ def write_profile(path: Path, **overrides) -> None:
         "promotion_tab": 'li[role="tab"]:has-text("搜推素材")',
         "high_value_filter": '[role="checkbox"]:has-text("搜推高价值")',
         "promotion_rows": "tbody tr",
+        "promotion_current_page": "[aria-current=page]",
+        "promotion_first_page": "[data-page='1']",
+        "promotion_terminal_page": "[data-page-last=true]",
         "promotion_next_page": 'button:has-text("下一页")',
     }
     document.update(overrides)
@@ -68,6 +71,22 @@ def test_profile_must_declare_requested_purpose(tmp_path):
 
     with pytest.raises(
         SelectorConfigError, match="SELECTOR_PURPOSE_NOT_DECLARED"
+    ):
+        load_selector_profile(
+            path, purpose="high_value_collection", production=True
+        )
+
+
+def test_pagination_origin_fields_must_be_distinct(tmp_path):
+    path = tmp_path / "selectors.local.yaml"
+    write_profile(
+        path,
+        promotion_first_page="[aria-current=page]",
+    )
+
+    with pytest.raises(
+        SelectorConfigError,
+        match="SELECTOR_PAGINATION_FIELDS_AMBIGUOUS",
     ):
         load_selector_profile(
             path, purpose="high_value_collection", production=True

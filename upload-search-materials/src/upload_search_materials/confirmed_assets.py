@@ -13,6 +13,11 @@ from .assets import IMAGE_EXTENSIONS, build_image_preview, inspect_asset
 from .models import ProductRecord
 
 
+CANDIDATE_STRATEGY_ID = "proportional_task_sample"
+CANDIDATE_STRATEGY_VERSION = 2
+COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
+
+
 @dataclass(frozen=True)
 class _GalleryRecord:
     folder_id: str
@@ -80,17 +85,34 @@ def _proportional_allocations(
 ) -> list[int]:
     """Allocate a bounded sample proportionally while representing each folder."""
 
+    allocations, _, _ = _allocation_breakdown(counts, target)
+    return allocations
+
+
+def _allocation_breakdown(
+    counts: Sequence[int],
+    target: int,
+) -> tuple[list[int], list[int], list[int]]:
+    """Return total, coverage-base and proportional-remainder allocations."""
+
     allocations = [0] * len(counts)
+    base_allocations = [0] * len(counts)
+    proportional_allocations = [0] * len(counts)
     nonempty = [index for index, count in enumerate(counts) if count > 0]
     if target <= 0 or not nonempty:
-        return allocations
+        return allocations, base_allocations, proportional_allocations
     total = sum(counts)
     if target >= total:
-        return list(counts)
+        allocations = list(counts)
+        for index in nonempty:
+            base_allocations[index] = 1
+            proportional_allocations[index] = counts[index] - 1
+        return allocations, base_allocations, proportional_allocations
 
     if target >= len(nonempty):
         for index in nonempty:
             allocations[index] = 1
+            base_allocations[index] = 1
         remaining = target - len(nonempty)
         capacities = [max(count - allocations[index], 0) for index, count in enumerate(counts)]
     else:
@@ -107,6 +129,7 @@ def _proportional_allocations(
         if added_total:
             for index, value in enumerate(added):
                 allocations[index] += value
+                proportional_allocations[index] += value
                 capacities[index] -= value
             remaining -= added_total
             continue
@@ -120,9 +143,10 @@ def _proportional_allocations(
         )
         for _, _, _, index in ranked[:remaining]:
             allocations[index] += 1
+            proportional_allocations[index] += 1
             capacities[index] -= 1
         remaining = 0
-    return allocations
+    return allocations, base_allocations, proportional_allocations
 
 
 def _sample_paths(
@@ -131,10 +155,11 @@ def _sample_paths(
     *,
     seed: str,
 ) -> list[Path]:
-    if count >= len(paths):
-        selected = list(paths)
+    stable_paths = sorted(paths, key=lambda path: str(path).casefold())
+    if count >= len(stable_paths):
+        selected = stable_paths
     else:
-        selected = random.Random(seed).sample(list(paths), count)
+        selected = random.Random(seed).sample(stable_paths, count)
     return sorted(selected, key=lambda path: str(path).casefold())
 
 
@@ -198,49 +223,97 @@ def build_confirmed_folder_gallery(
     per_product: list[dict[str, Any]] = []
     for product_id, folder_decisions in sorted(confirmed_by_product.items()):
         product = products_by_id[product_id]
-        candidates_by_folder: list[tuple[dict[str, Any], list[Path]]] = []
+        candidates_by_folder: list[
+            tuple[dict[str, Any], list[Path], int]
+        ] = []
         seen_paths: set[str] = set()
         for decision in sorted(folder_decisions, key=_folder_rank):
             folder = Path(str(decision["folder_path"]))
+            discovered_paths = _iter_images(folder)
             unique_paths = []
-            for path in _iter_images(folder):
+            for path in discovered_paths:
                 key = str(path.resolve()).casefold()
                 if key in seen_paths:
                     continue
                 seen_paths.add(key)
                 unique_paths.append(path)
             discovered += len(unique_paths)
-            if unique_paths:
-                candidates_by_folder.append((decision, unique_paths))
+            candidates_by_folder.append(
+                (decision, unique_paths, len(discovered_paths))
+            )
 
-        counts = [len(paths) for _, paths in candidates_by_folder]
+        counts = [len(paths) for _, paths, _ in candidates_by_folder]
         sample_size = min(candidate_limit, sum(counts))
-        allocations = _proportional_allocations(counts, sample_size)
+        (
+            allocations,
+            base_allocations,
+            proportional_allocations,
+        ) = _allocation_breakdown(counts, sample_size)
+        nonempty_folder_count = sum(count > 0 for count in counts)
+        represented_folder_count = sum(
+            allocation > 0 for allocation in allocations
+        )
+        uncovered_folder_count = max(
+            nonempty_folder_count - represented_folder_count,
+            0,
+        )
+        complete_folder_coverage = uncovered_folder_count == 0
         selected: list[tuple[dict[str, Any], Path]] = []
         per_folder = []
-        for (decision, paths), allocation in zip(
+        for (
+            (decision, paths, raw_discovered_count),
+            allocation,
+            base_allocation,
+            proportional_allocation,
+        ) in zip(
             candidates_by_folder,
             allocations,
+            base_allocations,
+            proportional_allocations,
             strict=True,
         ):
             folder_path = str(decision["folder_path"])
             folder_id = _decision_folder_id(decision)
             folder_seed = hashlib.sha256(
-                f"{sampling_seed}\0{product_id}\0{folder_path}".encode("utf-8")
+                (
+                    f"{CANDIDATE_STRATEGY_ID}\0"
+                    f"{CANDIDATE_STRATEGY_VERSION}\0"
+                    f"{sampling_seed}\0{product_id}\0{folder_id}"
+                ).encode("utf-8")
             ).hexdigest()
             sampled_paths = _sample_paths(paths, allocation, seed=folder_seed)
             selected.extend((decision, path) for path in sampled_paths)
+            zero_allocation_reason = ""
+            if not paths:
+                zero_allocation_reason = (
+                    "EMPTY_FOLDER"
+                    if raw_discovered_count == 0
+                    else "FULLY_OVERLAPPED_FOLDER"
+                )
+            elif allocation == 0:
+                zero_allocation_reason = COVERAGE_LIMIT_REASON
             per_folder.append(
                 {
                     "folder_id": folder_id,
                     "folder_path": folder_path,
+                    "source_system": str(
+                        decision.get("source_system", "confirmed_folder")
+                    ),
+                    "raw_discovered_images": raw_discovered_count,
                     "discovered_images": len(paths),
+                    "base_allocation": base_allocation,
+                    "proportional_allocation": proportional_allocation,
                     "sampled_images": len(sampled_paths),
+                    "zero_allocation_reason": zero_allocation_reason,
                 }
             )
         random.Random(
             hashlib.sha256(
-                f"{sampling_seed}\0{product_id}\0combined".encode("utf-8")
+                (
+                    f"{CANDIDATE_STRATEGY_ID}\0"
+                    f"{CANDIDATE_STRATEGY_VERSION}\0"
+                    f"{sampling_seed}\0{product_id}\0combined"
+                ).encode("utf-8")
             ).hexdigest()
         ).shuffle(selected)
         valid = 0
@@ -303,9 +376,18 @@ def build_confirmed_folder_gallery(
             {
                 "product_id": product_id,
                 "confirmed_folders": len(folder_decisions),
+                "nonempty_folders": nonempty_folder_count,
+                "represented_folders": represented_folder_count,
+                "uncovered_folders": uncovered_folder_count,
+                "complete_folder_coverage": complete_folder_coverage,
                 "discovered_images": sum(counts),
                 "prepared_candidates": len(selected),
                 "valid_candidates": valid,
+                "reason_codes": (
+                    []
+                    if complete_folder_coverage
+                    else [COVERAGE_LIMIT_REASON]
+                ),
                 "folder_allocations": per_folder,
             }
         )
@@ -319,10 +401,17 @@ def build_confirmed_folder_gallery(
         for item in data["requirements"]
         if str(item.get("product_id", "")) in confirmed_by_product
     ]
-    data["candidate_strategy"] = "proportional_task_sample"
+    data["candidate_strategy"] = CANDIDATE_STRATEGY_ID
+    data["candidate_strategy_version"] = CANDIDATE_STRATEGY_VERSION
     data["candidate_limit"] = candidate_limit
     data["page_size"] = page_size
     data["sampling_seed"] = sampling_seed
+    data["sampling_identity_sha256"] = hashlib.sha256(
+        (
+            f"{CANDIDATE_STRATEGY_ID}\0"
+            f"{CANDIDATE_STRATEGY_VERSION}\0{sampling_seed}"
+        ).encode("utf-8")
+    ).hexdigest()
     candidate_count_by_product: dict[str, int] = {}
     for candidate in data["asset_candidates"]:
         product_id = str(candidate.get("product_id", ""))
@@ -342,4 +431,10 @@ def build_confirmed_folder_gallery(
         "inspection_failures": inspection_failures,
         "per_product": per_product,
     }
+    reason_codes = list(data.get("reason_codes", []))
+    if any(
+        not item["complete_folder_coverage"] for item in per_product
+    ) and COVERAGE_LIMIT_REASON not in reason_codes:
+        reason_codes.append(COVERAGE_LIMIT_REASON)
+    data["reason_codes"] = reason_codes
     return data

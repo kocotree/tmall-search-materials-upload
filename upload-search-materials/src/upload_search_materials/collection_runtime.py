@@ -22,7 +22,9 @@ COLLECTION_PHASES = frozenset(
         "settling_popups",
         "opening_promotion",
         "selecting_high_value",
+        "normalizing_pagination",
         "collecting_page",
+        "verifying_terminal",
         "writing_checkpoint",
         "building_completeness",
         "completed",
@@ -30,6 +32,9 @@ COLLECTION_PHASES = frozenset(
     }
 )
 TERMINAL_WORKER_STATUSES = frozenset({"completed", "failed", "stopped"})
+QUARANTINED_PAGINATION_SESSIONS = frozenset(
+    {"20260730_032916", "20260730_051941"}
+)
 
 
 class CollectionRuntimeError(RuntimeError):
@@ -148,6 +153,11 @@ def create_worker_document(
         "last_completed_page": None,
         "row_count": None,
         "last_checkpoint_at": None,
+        "pagination_origin_page": None,
+        "observed_page": None,
+        "terminal_page": None,
+        "terminal_proof": False,
+        "pagination_reason_code": None,
         "next_recovery": "检查运行环境和选择器诊断后恢复同一 session",
         "log_path": str(log_path),
         "terminal_status": None,
@@ -185,6 +195,11 @@ def update_worker_progress(
     last_completed_page: int | None = None,
     row_count: int | None = None,
     last_checkpoint_at: str | None = None,
+    pagination_origin_page: int | None = None,
+    observed_page: int | None = None,
+    terminal_page: int | None = None,
+    terminal_proof: bool | None = None,
+    pagination_reason_code: str | None = None,
     terminal_status: str | None = None,
     next_recovery: str | None = None,
     now: str | None = None,
@@ -228,6 +243,20 @@ def update_worker_progress(
         document["row_count"] = int(row_count)
     if last_checkpoint_at is not None:
         document["last_checkpoint_at"] = last_checkpoint_at
+    if pagination_origin_page is not None:
+        document["pagination_origin_page"] = int(
+            pagination_origin_page
+        )
+    if observed_page is not None:
+        document["observed_page"] = int(observed_page)
+    if terminal_page is not None:
+        document["terminal_page"] = int(terminal_page)
+    if terminal_proof is not None:
+        document["terminal_proof"] = bool(terminal_proof)
+    if pagination_reason_code is not None:
+        document["pagination_reason_code"] = str(
+            pagination_reason_code
+        )
     if next_recovery is not None:
         document["next_recovery"] = str(next_recovery)
     if terminal_status is not None:
@@ -315,7 +344,15 @@ def resolve_collection_status(
         )
         else None
     )
-    if bound_result and bound_result.get("status") == "completed":
+    quarantined = (
+        str((current_attempt or {}).get("session_id", ""))
+        in QUARANTINED_PAGINATION_SESSIONS
+    )
+    if quarantined:
+        status = "blocked"
+        source = "pagination_audit"
+        recovery_action = "start_fresh_timestamp_session"
+    elif bound_result and bound_result.get("status") == "completed":
         status = "completed"
         source = "result"
         recovery_action = None

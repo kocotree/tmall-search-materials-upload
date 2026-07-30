@@ -27,6 +27,9 @@ def _candidate(source: Path, *, asset_id: str = "asset-a") -> dict:
         "product_id": "P1",
         "product_title": "测试商品",
         "source_system": "test",
+        "folder_id": "folder-1",
+        "folder_path": str(source.parent),
+        "candidate_directory": str(source.parent),
         "source_path": str(source),
     }
 
@@ -57,6 +60,10 @@ def test_build_review_reinspects_selected_assets_and_computes_both_boxes(tmp_pat
     assert data["selected_count"] == data["reviewable_count"] == 1
     assert set(data["assets"][0]["crop_options"]) == {"3:4", "1:1"}
     assert data["assets"][0]["asset_matching_revision"] == 4
+    assert data["assets"][0]["folder_id"] == "folder-1"
+    assert data["assets"][0]["folder_path"] == str(tmp_path)
+    assert data["assets"][0]["selection_order"] == 1
+    assert len(data["assets"][0]["source_sha256"]) == 64
     assert data["capabilities"] == {
         "manual_crop": True,
         "ai_crop": False,

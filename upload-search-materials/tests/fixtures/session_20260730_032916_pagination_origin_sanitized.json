@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "preceding_collection": {
+    "session_id": "20260730_015301",
+    "row_count": 255,
+    "page_count": 26,
+    "final_page_product_ids": [
+      "1030373622686",
+      "1027111997294",
+      "1056949280276",
+      "1063598744860",
+      "775074342974"
+    ]
+  },
+  "false_success_collection": {
+    "session_id": "20260730_032916",
+    "reported_page_count": 1,
+    "row_count": 5,
+    "all_product_ids": [
+      "1030373622686",
+      "1027111997294",
+      "1056949280276",
+      "1063598744860",
+      "775074342974"
+    ],
+    "classification": "pagination_origin_unverified"
+  }
+}

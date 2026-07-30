@@ -47,6 +47,9 @@ def selectors():
         "promotion_tab": "#promotion",
         "high_value_filter": "#high-value",
         "promotion_rows": "tbody tr",
+        "promotion_current_page": "#current",
+        "promotion_first_page": "#first",
+        "promotion_terminal_page": "#terminal",
         "promotion_next_page": "#next",
     }
 

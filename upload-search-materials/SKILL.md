@@ -127,7 +127,14 @@ checkpoint 与当前 revision、input SHA-256、选择器 SHA-256、店铺和 `a
 匹配私有 ownership token、session/attempt 和进程创建身份时才可判定归属；无法证明
 时不得结束或抢占进程。
 
-每个 attempt 的 Worker、日志、CSV、checkpoint、选择器证据和结果只写入
+每次新的“搜推高价值”采集在读取第一行或写入首个 checkpoint 前，必须从页面可见
+分页控件确认真实当前页，并在必要时返回、稳定验证为第 1 页。点击已经激活的搜推
+标签或已经选中的高价值筛选项不能视为分页重置。恢复任务同样先回到第 1 页，再按
+checkpoint 中已验证的逐页商品身份重放导航。完成采集必须同时满足：当前页等于可见
+末页、下一页稳定不可用、当前页商品身份稳定；不得只凭 `is_enabled() == false`
+宣告完成。无法证明起点、翻页或末页时必须 fail closed，并保存分页证据。
+
+每个 attempt 的 Worker、日志、CSV、checkpoint、分页起点/翻页/末页证据、选择器证据和结果只写入
 `collected/promotion/attempts/a-<attempt-prefix>/`。只有通过 revision、输入、选择器、
 店铺、CSV/checkpoint SHA、行数和商品 ID 唯一性校验的成功 attempt，才原子发布到
 `collected/promotion/current/`，并投影到旧兼容路径。恢复只能复用同一 attempt 的
@@ -164,7 +171,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
 2. 每台电脑只维护一份由 `folder_index_root` 指定的共享文件夹索引，不得为每个时间戳任务重新遍历全部图片 roots，也不得复制其他历史任务中的临时索引。首次缺少共享索引时运行 `index-folders`；素材目录新增、删除或改名后对同一索引运行 `--refresh`；只调整名称或货号匹配规则时运行 `--rematch-only`。这些操作只记录文件夹名称、路径和商品匹配，不读取图片内容。`--refresh` 会遍历目录树发现变化，但在同一数据库中增量维护 active/inactive 状态。
 3. 从共享 `folder-candidates.csv` 使用 `snapshot-folder-candidates` 仅提取第二阶段所选商品，把候选 CSV、扫描摘要和后续 `folder-review.json` 保存到当前任务目录；任务目录不得包含 `folder-index.sqlite3`。文件夹匹配优先使用商品 ID、完整货号和规范化商品基础名称；匹配基础名称时忽略末尾的“（主）/（副）”。除此之外，可将与基础名称具有至少 50% 最长公共连续字符、且公共连续部分不少于 5 个字符的文件夹作为粗略候选，但不得据此自动确认归属。若用户明确给出完整文件夹名，可用 `prepare-folder-review --exact-folder PRODUCT_ID=FOLDER_NAME` 做当前任务的一次性精确查询；不得把该查询写入别名表或自动复用于其他任务。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；ID、货号和完整基础名称候选默认“采用”，粗略候选默认“排除”，用户筛选后再读取采用文件夹中的图片；决定写入当前时间戳会话的 `folder_decisions`。
-4. 文件夹决定提交后，默认运行 `prepare-confirmed-gallery`：只枚举当前商品使用中的文件夹。每个商品候选池最少 1 张、最多 100 张；发现不足 100 张时全部采用，超过 100 张时按照各文件夹图片数占比分配名额，并用当前任务 `session_id` 作为种子在各文件夹内稳定随机抽样。同一任务重复生成结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。
+4. 文件夹决定提交后，默认运行 `prepare-confirmed-gallery`：只枚举当前商品采用中的文件夹。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。
 5. 人工审查并排除错误的完整名称候选、同货号不同名称文件夹，再逐文件选择本次采用素材；采用图片时同步生成本次授权。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；历史 `pending` 文件夹按默认采用读取，新提交不得继续保存 `pending`。
 6. 搜推素材实时采集完成后，运行 `tmall-materials inspect-completeness --products <商品表> --promotion-status <promotion-material-status.csv> --output <任务目录>/02-completeness/completeness-matrix.json`。只有“搜推高价值”采集结果中的商品进入第二阶段，商品表只补充名称和货号，不得扩展商品范围。把 JSON 写入当前 revision 的 `result.json.data`，页面展示搜推素材目标/已有/缺失篇数、候选素材状态和后台证据。用户可搜索、筛选、逐项或批量选择商品；提交后从 `02-completeness/input.json.values.selected_product_ids` 读取下阶段商品范围，禁止要求用户直接编辑 JSON。
 7. 完成素材完整性可视化审查后，再进入生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
@@ -173,7 +180,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 
 ### 素材可视化选择
 
-推广素材状态采集和文件夹归属审查完成后，默认使用 `tmall-materials prepare-confirmed-gallery` 将当前 `input.json` 的采用文件夹与 `promotion-material-status.csv` 合并为任务级候选 JSON。第三阶段不计算“必须选择的图片总数”，用户可从实际候选中选择任意数量；后台缺失篇数只作为上下文。第五阶段才决定本次创建几个坑位，并为每个坑位安排 3–9 张、统一为 3:4 或 1:1 的图片；本次任务不要求填满后台全部空坑位。超过 100 张时按文件夹图片数量比例、以任务 ID 为种子稳定随机抽样；同一任务结果稳定。只有显式离线审计场景才使用 `prepare-gallery` 从 `asset-index.sqlite3` 生成候选。
+推广素材状态采集和文件夹归属审查完成后，默认使用 `tmall-materials prepare-confirmed-gallery` 将当前 `input.json` 的采用文件夹与 `promotion-material-status.csv` 合并为任务级候选 JSON。采用文件夹只授权生成候选，不自动采用其中图片。第三阶段不计算“必须选择的图片总数”，用户可从每商品最多 100 张候选中人工采用任意数量；提交时每个商品必须至少有 3 张预检通过且源 SHA-256 唯一的图片，后台缺失篇数只作为上下文。第五阶段按 `K=min(后台缺失坑位, floor(有效唯一采用图片数/3))` 创建坑位，最多使用 `min(有效唯一采用图片数,K*9)` 张图片，并为每个坑位安排 3–9 张、统一为 3:4 或 1:1 的图片；超出容量的采用图片进入未使用候选池，本次任务不要求填满后台全部空坑位。超过 100 张时执行覆盖优先、剩余名额按比例分配的任务内稳定伪随机抽样。只有显式离线审计场景才使用 `prepare-gallery` 从 `asset-index.sqlite3` 生成候选。
 
 首次进入“素材匹配”阶段时提交本次配置的一个或多个图片根目录，由 Agent 从本机共享文件夹索引生成当前商品候选。页面先执行文件夹归属审查，只提供“采用 / 排除该文件夹”二态决定并保存到 `folder_decisions`：确定性候选默认采用，50% 连续名称粗略候选默认排除，用户确认后才能采用。排除文件夹必须立即从同商品画廊移除其候选，并同步取消来自该文件夹的已选素材与本次授权，显示准确取消数量；重新采用只恢复已有候选，不恢复旧选择。过滤后必须重新计算候选数、30 张分页、页码和换批按钮。提交文件夹决定时只校验 `image_roots` 为非空路径列表；当前 Web 服务进程是否能读取映射盘不能阻断决定保存，只有 Agent 在准备枚举图片时才检查实时可访问性。`needs_user_input`/`blocked` 的素材匹配结果必须保存为只读 `review-context.json`。页面展示缩略图、来源、匹配方式和单一“采用”选择；勾选“采用”即确认该图片可用于本次发布。前端一次操作同时写入 `asset_decisions` 和对应的 `license_decisions`，后端必须按最终文件夹决定再次过滤并规范化授权记录。新图片候选必须携带稳定 `folder_id` 和 `folder_path`；历史候选缺少 `folder_id` 时按最长规范化父路径关联，无法关联时保留并标记。候选准备时把最长边不超过 640 像素的 JPEG 预览写入当前任务 `03-asset-matching/preview-cache/`，页面不得直接传输共享盘原图；旧任务缺少预览时按需生成。预览使用短时私有缓存，选择图片时不得重建整组图片卡片。
 

@@ -81,7 +81,7 @@
 - [ ] 8.4 Verify the managed CDP Chrome opens the official material center, user-controlled login succeeds, and the exact target store/page identity is displayed before submission.
 - [ ] 8.5 Use only the maintained `supplement --scan-mode high-value` collector to handle the real delayed guide and write the first page CSV/checkpoint while the invoking command has already returned.
 - [ ] 8.6 Verify the page shows live pre-checkpoint phase, heartbeat, page/row progress, checkpoint time, logs, and no stale historical error as the active state.
-- [ ] 8.7 Complete every visible high-value page exactly once and reconcile page count, unique product IDs, checkpoint, selector/store evidence, and completeness matrix.
+- [x] 8.7 Complete every visible high-value page exactly once and reconcile page count, unique product IDs, checkpoint, selector/store evidence, and completeness matrix.
 - [ ] 8.8 In a separate isolated run, interrupt the owned worker after at least one completed page, verify proven-dead immediate recovery, reclaim the exact session, and complete without duplicate rows or repeated pages.
 - [ ] 8.9 Verify an indeterminate or ownership-mismatched process is not killed or reclaimed before lease expiry.
 - [ ] 8.10 Confirm no temporary production collector, credential persistence, approve, publish, upload, source-material read, or source-material mutation occurred.

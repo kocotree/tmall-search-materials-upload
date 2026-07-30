@@ -78,6 +78,9 @@ def write_profile(path: Path) -> None:
                 "promotion_tab": '[role="tab"]:has-text("搜推素材")',
                 "high_value_filter": '[role="checkbox"]:has-text("搜推高价值")',
                 "promotion_rows": "tbody tr",
+                "promotion_current_page": "[aria-current=page]",
+                "promotion_first_page": "[data-page='1']",
+                "promotion_terminal_page": "[data-page-last=true]",
                 "promotion_next_page": 'button:has-text("下一页")',
             },
             allow_unicode=True,
@@ -131,6 +134,33 @@ def collected_row(product_id="886506466908"):
     }
 
 
+def emit_verified_single_page(kwargs, rows):
+    identity = "a" * 64
+    kwargs["on_pagination_event"](
+        {
+            "event_type": "origin",
+            "reason_code": "PAGINATION_ORIGIN_VERIFIED",
+            "current_page": 1,
+            "terminal_page": 1,
+            "next_enabled": False,
+            "ordered_product_id_hash": identity,
+            "product_count": len(rows),
+        }
+    )
+    kwargs["on_page"](1, rows)
+    kwargs["on_pagination_event"](
+        {
+            "event_type": "terminal",
+            "reason_code": "PAGINATION_TERMINAL_VERIFIED",
+            "current_page": 1,
+            "terminal_page": 1,
+            "next_enabled": False,
+            "ordered_product_id_hash": identity,
+            "product_count": len(rows),
+        }
+    )
+
+
 def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     tmp_path, monkeypatch
 ):
@@ -142,7 +172,7 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     def scan(page, selector_values, **kwargs):
         calls.append(kwargs["filter_selector_key"])
         rows = [collected_row()]
-        kwargs["on_page"](1, rows)
+        emit_verified_single_page(kwargs, rows)
         return rows
 
     monkeypatch.setattr(
@@ -217,7 +247,7 @@ def test_setup_processor_pauses_for_login_and_resumes_same_session(
 
     def scan(page, selector_values, **kwargs):
         rows = [collected_row()]
-        kwargs["on_page"](1, rows)
+        emit_verified_single_page(kwargs, rows)
         return rows
 
     monkeypatch.setattr(
@@ -258,7 +288,7 @@ def test_setup_processor_reports_mixed_product_row_anomalies(
 
     def scan(page, selector_values, **kwargs):
         rows = [collected_row()]
-        kwargs["on_page"](1, rows)
+        emit_verified_single_page(kwargs, rows)
         return rows
 
     monkeypatch.setattr(
@@ -374,8 +404,9 @@ def test_setup_processor_archives_checkpoint_from_prior_attempt(
     )
 
     def scan(*args, **kwargs):
-        kwargs["on_page"](1, [collected_row()])
-        return [collected_row()]
+        rows = [collected_row()]
+        emit_verified_single_page(kwargs, rows)
+        return rows
 
     monkeypatch.setattr(
         "upload_search_materials.supplement_collection."
