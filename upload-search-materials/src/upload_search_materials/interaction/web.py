@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 import secrets
-from typing import Any
+from typing import Any, Callable
 
 from flask import Flask, jsonify, render_template, request, send_file
 import yaml
@@ -57,13 +57,12 @@ from ..deterministic_slot_planning import build_deterministic_slot_plan
 from ..image_compliance import default_image_policy
 from ..gallery_jobs import (
     create_or_reuse_gallery_job,
-    launch_gallery_worker,
     migrate_legacy_gallery_handoff,
     invalidate_gallery_if_scope_expands,
     read_gallery_job,
     reconcile_gallery_job,
 )
-from ..folder_index import count_candidate_folder_images
+from ..material_executor_launcher import MaterialExecutorLaunchError
 from ..io_tables import SchemaError, read_product_csv, validate_product_records
 from ..image_review import (
     build_image_review_data,
@@ -185,6 +184,9 @@ def create_app(
     *,
     enforce_stage_order: bool = True,
     service_identity: dict[str, Any] | None = None,
+    material_executor_launcher: (
+        Callable[[RuntimeConfig, str], dict[str, Any]] | None
+    ) = None,
 ) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
@@ -194,6 +196,48 @@ def create_app(
     expected_runtime_identity = (
         (service_identity or {}).get("runtime_identity")
     )
+
+    def request_material_executor(
+        session_id: str,
+        job: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if material_executor_launcher is None:
+            return job, None
+        try:
+            launch = material_executor_launcher(runtime, session_id)
+            return job, launch
+        except MaterialExecutorLaunchError as error:
+            with store._session_lock(session_id):
+                current = read_gallery_job(store, session_id)
+                if (
+                    current is not None
+                    and current.get("job_id") == job.get("job_id")
+                    and current.get("attempt_id") == job.get("attempt_id")
+                    and current.get("status") == "queued"
+                ):
+                    current.update(
+                        {
+                            "status": "failed",
+                            "reason_code": error.reason_code,
+                            "message": str(error),
+                            "updated_at": datetime.now().astimezone().isoformat(),
+                            "lease_expires_at": None,
+                            "recovery_action": "重试加载图片",
+                        }
+                    )
+                    store._write_json_atomic(
+                        store._stage_path(
+                            session_id, "asset_matching"
+                        )
+                        / "gallery-job.json",
+                        current,
+                    )
+                    job = current
+            return job, {
+                "status": "failed",
+                "reason_code": error.reason_code,
+                "message": str(error),
+            }
 
     def require_desktop_identity() -> None:
         if isinstance(expected_runtime_identity, dict):
@@ -831,7 +875,7 @@ def create_app(
                 store, session_id
             )
             if migrated and migrated_job is not None:
-                launch_gallery_worker(store, session_id, migrated_job)
+                request_material_executor(session_id, migrated_job)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
         response = {
@@ -936,19 +980,23 @@ def create_app(
             expected_revision=expected_revision,
             request_id=_persistence_request_id(payload),
         )
-        job, created = create_or_reuse_gallery_job(
+        job, _created = create_or_reuse_gallery_job(
             store,
             session_id,
             local_commit,
             values.get("folder_decisions", []),
         )
-        if created:
-            job = launch_gallery_worker(store, session_id, job)
+        executor_launch = None
+        if _created:
+            job, executor_launch = request_material_executor(
+                session_id, job
+            )
         return jsonify(
             status="local_processing",
             revision=local_commit["revision"],
             input_sha256=local_commit["input_sha256"],
             gallery_job=job,
+            executor_launch=executor_launch,
         ), 202
 
     @app.get(
@@ -970,13 +1018,25 @@ def create_app(
             if not isinstance(candidate, dict):
                 continue
             folder_id = str(candidate.get("folder_id", "")).strip()
-            folder_path = str(candidate.get("folder_path", "")).strip()
-            if not folder_id or not folder_path:
+            if not folder_id:
                 continue
+            ready = candidate.get("image_count_status") == "ready"
             counts.append(
                 {
                     "folder_id": folder_id,
-                    **count_candidate_folder_images(Path(folder_path)),
+                    "image_count_status": (
+                        "ready" if ready else "unknown"
+                    ),
+                    "raw_recursive_image_count": (
+                        candidate.get("raw_recursive_image_count")
+                        if ready
+                        else None
+                    ),
+                    "image_count_reason_code": (
+                        ""
+                        if ready
+                        else "MATERIAL_EXECUTOR_REQUIRED"
+                    ),
                 }
             )
         return jsonify(folder_counts=counts)
@@ -1016,8 +1076,14 @@ def create_app(
             values.get("folder_decisions", []),
             retry=True,
         )
-        job = launch_gallery_worker(store, session_id, job)
-        return jsonify(status="local_processing", gallery_job=job), 202
+        job, executor_launch = request_material_executor(
+            session_id, job
+        )
+        return jsonify(
+            status="local_processing",
+            gallery_job=job,
+            executor_launch=executor_launch,
+        ), 202
 
     @app.post(
         "/api/sessions/<session_id>/stages/<stage_id>/recover-processing"
@@ -1375,6 +1441,33 @@ def create_app(
             field_errors |= _completeness_selection_errors(
                 store, session_id, state, values
             )
+        if not field_errors and stage_id == "setup":
+            labels = values.get("image_source_labels", [])
+            roots = values.get("image_roots", [])
+            submitted_sources = [
+                {"label": str(label), "path": str(root)}
+                for label, root in zip(labels, roots, strict=False)
+            ]
+            try:
+                source_diagnostics = inspect_image_sources(
+                    runtime, submitted_sources
+                )
+            except ValueError as error:
+                field_errors["image_roots"] = str(error)
+            else:
+                unavailable = [
+                    source
+                    for source in source_diagnostics
+                    if source.get("status") != "available"
+                ]
+                if unavailable:
+                    field_errors["image_roots"] = "；".join(
+                        (
+                            f"{source.get('label', '图片源')}："
+                            f"{source.get('message') or source.get('reason_code') or '路径不可访问'}"
+                        )
+                        for source in unavailable
+                    )
         asset_matching_result = None
         asset_matching_data: dict[str, Any] = {}
         asset_matching_step = FOLDER_REVIEW
@@ -3532,6 +3625,10 @@ def _normalize_stage_values(
                 "folder_id": str(item.get("folder_id", "")),
                 "product_id": str(item.get("product_id", "")),
                 "source_system": str(item.get("source_system", "")),
+                "source_id": str(
+                    item.get("source_id") or item.get("source_system", "")
+                ),
+                "relative_path": str(item.get("relative_path", "")),
                 "folder_path": str(item.get("folder_path", "")),
                 "decision": folder_decision_for(item),
                 "note": str(
@@ -3552,6 +3649,10 @@ def _normalize_stage_values(
                 "folder_id": str(item.get("folder_id", "")),
                 "product_id": str(item.get("product_id", "")),
                 "source_system": str(item.get("source_system", "")),
+                "source_id": str(
+                    item.get("source_id") or item.get("source_system", "")
+                ),
+                "relative_path": str(item.get("relative_path", "")),
                 "folder_path": str(item.get("folder_path", "")),
                 "decision": (
                     "rejected"

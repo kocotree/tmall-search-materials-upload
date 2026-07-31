@@ -538,6 +538,14 @@ class SessionStore:
         self._stage_index(stage_id)
         if status not in STAGE_STATUSES:
             raise InteractionConflict("result status is not supported")
+        for field_name, value in (
+            ("summary", summary),
+            ("next_action", next_action),
+        ):
+            if isinstance(value, str) and re.search(r"\?{3,}", value):
+                raise InteractionConflict(
+                    f"RESULT_TEXT_ENCODING_INVALID:{field_name}"
+                )
         with self._session_lock(session_id):
             stage_path = self._stage_path(session_id, stage_id)
             state = self.load_session(session_id)

@@ -9,11 +9,13 @@ from upload_search_materials.gallery_jobs import (
     read_gallery_job,
     reconcile_gallery_job,
     migrate_legacy_gallery_handoff,
+    resolve_material_folders,
 )
 from upload_search_materials.interaction.session import (
     InteractionConflict,
     SessionStore,
 )
+from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
 def _local_gallery_session(tmp_path: Path):
@@ -58,6 +60,79 @@ def _local_gallery_session(tmp_path: Path):
         "unused\n", encoding="utf-8"
     )
     return store, session.session_id, stage_path, decisions, committed
+
+
+def test_material_folder_resolution_uses_source_id_and_relative_path(
+    tmp_path,
+):
+    source_root = tmp_path / "mounted-source"
+    folder = source_root / "year" / "product"
+    folder.mkdir(parents=True)
+    stage_path = tmp_path / "stage"
+    stage_path.mkdir()
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(
+            {
+                "source_id": "model-materials",
+                "label": "model",
+                "path": str(source_root),
+            },
+        ),
+        runs_root=tmp_path,
+    )
+
+    resolved = resolve_material_folders(
+        [
+            {
+                "folder_id": "F1",
+                "product_id": "P1",
+                "source_id": "model-materials",
+                "relative_path": "year/product",
+                "folder_path": r"Y:\old-machine\year\product",
+                "decision": "confirmed",
+            }
+        ],
+        stage_path=stage_path,
+        runtime=runtime,
+    )
+
+    assert resolved[0]["folder_path"] == str(folder)
+    assert resolved[0]["source_id"] == "model-materials"
+    assert resolved[0]["relative_path"] == "year/product"
+
+
+def test_material_folder_resolution_rejects_parent_traversal(tmp_path):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(
+            {
+                "source_id": "model-materials",
+                "label": "model",
+                "path": str(tmp_path),
+            },
+        ),
+        runs_root=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="SOURCE_PATH_INVALID"):
+        resolve_material_folders(
+            [
+                {
+                    "folder_id": "F1",
+                    "product_id": "P1",
+                    "source_id": "model-materials",
+                    "relative_path": "../outside",
+                    "decision": "confirmed",
+                }
+            ],
+            stage_path=tmp_path,
+            runtime=runtime,
+        )
 
 
 def test_gallery_job_success_publishes_review_without_handoff(
@@ -140,6 +215,7 @@ def test_expired_gallery_job_becomes_retryable_and_keeps_old_attempt(
     first, _ = create_or_reuse_gallery_job(
         store, session_id, committed, decisions
     )
+    first = gallery_module.claim_queued_gallery_job(store, session_id)
     first["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
     store._write_json_atomic(stage_path / "gallery-job.json", first)
 
@@ -255,7 +331,7 @@ def test_unclaimed_legacy_folder_handoff_migrates_to_local_job(tmp_path):
         session.session_id, "asset_matching"
     )
     assert migrated is True
-    assert job["status"] == "running"
+    assert job["status"] == "queued"
     assert not (stage_path / "handoff.json").exists()
     assert (
         stage_path
@@ -339,7 +415,7 @@ def test_expired_legacy_folder_claim_migrates_to_local_retry(tmp_path):
     )
 
     assert migrated is True
-    assert job["status"] == "running"
+    assert job["status"] == "queued"
     assert store.processing_claim(
         session.session_id, "asset_matching"
     ) is None

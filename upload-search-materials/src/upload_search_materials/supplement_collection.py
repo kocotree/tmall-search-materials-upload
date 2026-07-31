@@ -17,6 +17,7 @@ from .browser.material_page import (
     supplement_material_status,
 )
 from .persistence import atomic_write_dict_csv, atomic_write_json, read_json
+from .time_utils import iso_timestamp
 
 
 class CheckpointIdentityError(RuntimeError):
@@ -237,9 +238,12 @@ def collect_supplement_material_status(
 
     def persist_pagination_event(event: dict[str, Any]) -> None:
         nonlocal evidence_document, expected_page_hashes
+        recorded_at = iso_timestamp()
         if pagination_evidence is None:
             if on_pagination_event is not None:
-                on_pagination_event(dict(event))
+                on_pagination_event(
+                    {**event, "recorded_at": recorded_at}
+                )
             return
         evidence_document = dict(
             evidence_document
@@ -255,7 +259,7 @@ def collect_supplement_material_status(
             "schema_version": PAGINATION_EVIDENCE_SCHEMA_VERSION,
             **context,
             **event,
-            "recorded_at": collected_at,
+            "recorded_at": recorded_at,
         }
         events.append(enriched)
         evidence_document["events"] = events
@@ -268,7 +272,7 @@ def collect_supplement_material_status(
                 else "in_progress"
             )
         )
-        evidence_document["updated_at"] = collected_at
+        evidence_document["updated_at"] = recorded_at
         atomic_write_json(Path(pagination_evidence), evidence_document)
         expected_page_hashes = _page_hashes_from_evidence(evidence_document)
         if on_pagination_event is not None:

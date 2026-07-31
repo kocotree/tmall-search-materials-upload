@@ -436,6 +436,7 @@ class WorkerReporter:
         self.attempt_id = attempt_id
         self.ownership_token = ownership_token
         self.phase = "validating_profile"
+        self.started_monotonic = time.monotonic()
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._thread = threading.Thread(
@@ -454,6 +455,10 @@ class WorkerReporter:
     def update(self, phase: str, **progress: Any) -> dict[str, Any]:
         with self._lock:
             self.phase = phase
+            progress.setdefault(
+                "elapsed_ms",
+                int((time.monotonic() - self.started_monotonic) * 1000),
+            )
             worker = update_worker_progress(
                 self.private_path,
                 attempt_id=self.attempt_id,

@@ -493,6 +493,33 @@ class OverlayBlockedTarget:
         self.evaluations.append(expression)
 
 
+def test_successful_collection_click_does_not_scan_popup_controls():
+    class DirectTarget:
+        def __init__(self):
+            self.attempts = []
+
+        def click(self, **kwargs):
+            self.attempts.append(kwargs)
+
+    page = FakePopupPage()
+    target = DirectTarget()
+
+    _click_with_popup_retries(
+        page,
+        target,
+        {
+            "safe_popup_progress": "#guide-next",
+            "safe_popup_close_priority": "#opened-overlay-close",
+        },
+        field_name="promotion_next_page",
+        delay_ms=1000,
+    )
+
+    assert target.attempts == [{"timeout": 3000}]
+    assert page.clicked == []
+    assert page.waited == []
+
+
 def test_read_only_collection_click_uses_dom_click_after_popup_retries():
     page = FakePopupPage()
     page.overlay_open = False

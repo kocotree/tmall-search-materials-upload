@@ -6,9 +6,9 @@ import csv
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
-import subprocess
-import sys
+import time
 import uuid
 from typing import Any
 
@@ -34,11 +34,12 @@ from .runtime_identity import (
     current_runtime_identity,
     require_local_resource_identity,
 )
+from .runtime_config import RuntimeConfig
 
 
 GALLERY_JOB_SCHEMA_VERSION = 1
 GALLERY_JOB_STATUSES = frozenset(
-    {"running", "completed", "failed", "stale"}
+    {"queued", "running", "completed", "failed", "stale"}
 )
 GALLERY_JOB_LEASE_SECONDS = 300
 GALLERY_JOB_FAILED = "GALLERY_JOB_FAILED"
@@ -46,6 +47,9 @@ GALLERY_PATH_UNREADABLE = "CONFIRMED_FOLDER_UNREADABLE"
 GALLERY_IDENTITY_STALE = "GALLERY_IDENTITY_STALE"
 GALLERY_RESOURCE_IDENTITY_MISMATCH = "LOCAL_RESOURCE_IDENTITY_MISMATCH"
 GALLERY_WORKER_HEARTBEAT_EXPIRED = "GALLERY_WORKER_HEARTBEAT_EXPIRED"
+GALLERY_SOURCE_BINDING_MISSING = "SOURCE_BINDING_MISSING"
+GALLERY_SOURCE_ACCESS_DENIED = "SOURCE_ACCESS_DENIED"
+GALLERY_SOURCE_PATH_INVALID = "SOURCE_PATH_INVALID"
 
 
 def _now() -> datetime:
@@ -318,7 +322,7 @@ def create_or_reuse_gallery_job(
             existing
             and existing.get("identity", {}).get("identity_sha256")
             == identity["identity_sha256"]
-            and existing.get("status") in {"running", "completed"}
+            and existing.get("status") in {"queued", "running", "completed"}
             and not retry
         ):
             return existing, False
@@ -342,16 +346,14 @@ def create_or_reuse_gallery_job(
             "job_schema_version": GALLERY_JOB_SCHEMA_VERSION,
             "job_id": job_id,
             "attempt_id": attempt_id,
-            "status": "running",
+            "status": "queued",
             "identity": identity,
             "created_at": (
                 existing.get("created_at") if existing else _iso(now)
             ),
             "updated_at": _iso(now),
             "heartbeat_at": _iso(now),
-            "lease_expires_at": _iso(
-                now + timedelta(seconds=GALLERY_JOB_LEASE_SECONDS)
-            ),
+            "lease_expires_at": None,
             "pid": None,
             "progress": {
                 "workflow_step": "gallery_preparing",
@@ -368,8 +370,8 @@ def create_or_reuse_gallery_job(
                 "pending_count": 0,
             },
             "reason_code": "",
-            "message": "",
-            "recovery_action": "重试加载图片",
+            "message": "等待本机素材执行器",
+            "recovery_action": "在能访问素材盘的桌面会话启动素材执行器",
         }
         store._write_json_atomic(gallery_job_path(store, session_id), job)
         store._write_json_atomic(attempt_dir / "progress.json", job)
@@ -385,63 +387,15 @@ def create_or_reuse_gallery_job(
         return job, True
 
 
-def launch_gallery_worker(
-    store: SessionStore, session_id: str, job: dict[str, Any]
-) -> dict[str, Any]:
-    stage_path = store._stage_path(session_id, "asset_matching")
-    log_dir = store._session_path(session_id) / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = log_dir / "gallery-worker.stdout.log"
-    stderr_path = log_dir / "gallery-worker.stderr.log"
-    command = [
-        sys.executable,
-        "-m",
-        "upload_search_materials.cli",
-        "process-gallery-job",
-        "--runs-root",
-        str(store.runs_root),
-        "--session",
-        session_id,
-        "--job",
-        str(job["job_id"]),
-        "--attempt",
-        str(job["attempt_id"]),
-    ]
-    creationflags = 0
-    startupinfo = None
-    if sys.platform == "win32":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-    with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
-        process = subprocess.Popen(
-            command,
-            cwd=str(Path(__file__).resolve().parents[2]),
-            stdin=subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
-            close_fds=True,
-            creationflags=creationflags,
-            startupinfo=startupinfo,
-        )
-    with store._session_lock(session_id):
-        current = read_gallery_job(store, session_id)
-        if (
-            current is None
-            or current.get("job_id") != job.get("job_id")
-            or current.get("attempt_id") != job.get("attempt_id")
-        ):
-            raise InteractionConflict(GALLERY_IDENTITY_STALE)
-        current["pid"] = int(process.pid)
-        current["updated_at"] = _iso()
-        store._write_json_atomic(stage_path / "gallery-job.json", current)
-        return current
-
-
 def _classify_error(error: Exception) -> str:
     if isinstance(error, LocalResourceIdentityMismatch):
         return GALLERY_RESOURCE_IDENTITY_MISMATCH
+    if GALLERY_SOURCE_BINDING_MISSING in str(error):
+        return GALLERY_SOURCE_BINDING_MISSING
+    if GALLERY_SOURCE_ACCESS_DENIED in str(error):
+        return GALLERY_SOURCE_ACCESS_DENIED
+    if GALLERY_SOURCE_PATH_INVALID in str(error):
+        return GALLERY_SOURCE_PATH_INVALID
     if "not readable" in str(error).casefold():
         return GALLERY_PATH_UNREADABLE
     if isinstance(error, InteractionConflict):
@@ -449,15 +403,274 @@ def _classify_error(error: Exception) -> str:
     return GALLERY_JOB_FAILED
 
 
+def _folder_binding_rows(stage_path: Path) -> dict[str, dict[str, str]]:
+    """Read stable folder bindings from the task-local candidate snapshot."""
+
+    path = stage_path / "folder-candidates.csv"
+    if not path.is_file():
+        return {}
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        return {
+            str(row.get("folder_id", "")).strip(): {
+                "source_id": str(
+                    row.get("source_id") or row.get("source_system", "")
+                ).strip(),
+                "source_system": str(row.get("source_system", "")).strip(),
+                "relative_path": str(row.get("relative_path", "")).strip(),
+                "absolute_path": str(row.get("absolute_path", "")).strip(),
+            }
+            for row in csv.DictReader(stream)
+            if str(row.get("folder_id", "")).strip()
+        }
+
+
+def _safe_relative_path(value: str) -> Path:
+    text = str(value).strip().replace("\\", "/")
+    parts = [part for part in text.split("/") if part not in {"", "."}]
+    relative = Path(*parts)
+    if (
+        not parts
+        or relative.is_absolute()
+        or any(part == ".." for part in parts)
+        or ":" in parts[0]
+    ):
+        raise ValueError(f"{GALLERY_SOURCE_PATH_INVALID}: {value}")
+    return relative
+
+
+def _select_local_source(
+    binding: dict[str, str],
+    sources: tuple[dict[str, str], ...],
+) -> dict[str, str]:
+    by_id = {
+        str(source.get("source_id", "")).strip(): source
+        for source in sources
+    }
+    requested = str(binding.get("source_id", "")).strip()
+    if requested in by_id:
+        return by_id[requested]
+
+    # Compatibility for indexes made before source_id was recorded. This
+    # executes in the user's material-access process, where mapped roots can
+    # be resolved. New snapshots do not depend on the old absolute path.
+    old_absolute = str(binding.get("absolute_path", "")).casefold()
+    if old_absolute:
+        matching: list[tuple[int, dict[str, str]]] = []
+        for source in sources:
+            try:
+                root = str(Path(source["path"]).resolve()).casefold().rstrip("\\/")
+            except OSError:
+                continue
+            if old_absolute == root or old_absolute.startswith(root + "\\"):
+                matching.append((len(root), source))
+        if matching:
+            return max(matching, key=lambda item: item[0])[1]
+
+    legacy = str(binding.get("source_system", "")).strip().casefold()
+    if legacy == "model_nas" and sources:
+        return sources[0]
+    if legacy == "xhs_taobao" and sources:
+        return sources[-1]
+    if legacy == "xhs_buyer" and len(sources) >= 2:
+        return sources[-2]
+    raise ValueError(
+        f"{GALLERY_SOURCE_BINDING_MISSING}: "
+        f"{requested or legacy or 'unknown'}"
+    )
+
+
+def resolve_material_folders(
+    decisions: list[dict[str, Any]],
+    *,
+    stage_path: Path,
+    runtime: RuntimeConfig,
+) -> list[dict[str, Any]]:
+    """Resolve source_id/relative_path against this machine's local roots."""
+
+    indexed = _folder_binding_rows(stage_path)
+    resolved: list[dict[str, Any]] = []
+    for decision in decisions:
+        item = dict(decision)
+        if item.get("decision") != "confirmed":
+            resolved.append(item)
+            continue
+        candidate = indexed.get(str(item.get("folder_id", "")).strip(), {})
+        binding = {
+            "source_id": str(
+                item.get("source_id")
+                or candidate.get("source_id")
+                or item.get("source_system", "")
+            ),
+            "source_system": str(
+                item.get("source_system")
+                or candidate.get("source_system", "")
+            ),
+            "relative_path": str(
+                item.get("relative_path")
+                or candidate.get("relative_path", "")
+            ),
+            "absolute_path": str(candidate.get("absolute_path", "")),
+        }
+        source = _select_local_source(binding, runtime.image_sources)
+        relative = _safe_relative_path(binding["relative_path"])
+        root = Path(source["path"])
+        folder = root.joinpath(relative)
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved_folder = folder.resolve(strict=True)
+            readable = (
+                resolved_folder.is_relative_to(resolved_root)
+                and resolved_folder.is_dir()
+            )
+        except PermissionError as error:
+            raise PermissionError(
+                f"{GALLERY_SOURCE_ACCESS_DENIED}: "
+                f"{source['source_id']}/{relative.as_posix()}"
+            ) from error
+        except (OSError, RuntimeError) as error:
+            raise ValueError(
+                f"{GALLERY_SOURCE_ACCESS_DENIED}: "
+                f"{source['source_id']}/{relative.as_posix()}"
+            ) from error
+        if not resolved_folder.is_relative_to(resolved_root):
+            raise ValueError(
+                f"{GALLERY_SOURCE_PATH_INVALID}: "
+                f"{source['source_id']}/{relative.as_posix()}"
+            )
+        if not readable:
+            raise ValueError(
+                f"{GALLERY_SOURCE_ACCESS_DENIED}: "
+                f"{source['source_id']}/{relative.as_posix()}"
+            )
+        item.update(
+            {
+                "source_id": str(source["source_id"]),
+                "relative_path": relative.as_posix(),
+                "folder_path": str(folder),
+            }
+        )
+        resolved.append(item)
+    return resolved
+
+
+def claim_queued_gallery_job(
+    store: SessionStore, session_id: str
+) -> dict[str, Any] | None:
+    with store._session_lock(session_id):
+        job = read_gallery_job(store, session_id)
+        if job is None or job.get("status") != "queued":
+            return None
+        now = _now()
+        job.update(
+            {
+                "status": "running",
+                "pid": os.getpid(),
+                "helper_identity": _identity_projection(
+                    current_runtime_identity()
+                ),
+                "heartbeat_at": _iso(now),
+                "updated_at": _iso(now),
+                "lease_expires_at": _iso(
+                    now + timedelta(seconds=GALLERY_JOB_LEASE_SECONDS)
+                ),
+                "message": "本机素材执行器正在读取图片",
+            }
+        )
+        store._write_json_atomic(gallery_job_path(store, session_id), job)
+        return job
+
+
+def run_material_executor(
+    *,
+    runtime: RuntimeConfig,
+    session_id: str = "",
+    watch: bool = False,
+    idle_timeout_seconds: float = 600,
+    poll_seconds: float = 1,
+) -> int:
+    """Process queued gallery work in the current desktop user session."""
+
+    store = SessionStore(runtime.runs_root)
+    handled = 0
+    last_work = time.monotonic()
+    status_path = runtime.runs_root / ".material-executor-status.json"
+
+    def write_executor_status(status: str) -> None:
+        document = {
+            "schema_version": 1,
+            "status": status,
+            "session_id": session_id,
+            "handled_jobs": handled,
+            "updated_at": _iso(),
+            "runtime_identity": current_runtime_identity(),
+        }
+        temporary = status_path.with_name(
+            f".{status_path.name}.{os.getpid()}.tmp"
+        )
+        temporary.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, status_path)
+
+    write_executor_status("running")
+    while True:
+        session_ids = (
+            [session_id]
+            if session_id
+            else sorted(
+                (
+                    path.name
+                    for path in runtime.runs_root.iterdir()
+                    if path.is_dir() and (path / "session.json").is_file()
+                ),
+                reverse=True,
+            )
+        )
+        for current_session in session_ids:
+            job = claim_queued_gallery_job(store, current_session)
+            if job is None:
+                continue
+            handled += 1
+            last_work = time.monotonic()
+            try:
+                process_gallery_job(
+                    store,
+                    current_session,
+                    str(job["job_id"]),
+                    str(job["attempt_id"]),
+                    runtime=runtime,
+                )
+            except (OSError, RuntimeError, SchemaError, ValueError):
+                pass
+        if not watch:
+            write_executor_status("completed")
+            return handled
+        if time.monotonic() - last_work >= max(idle_timeout_seconds, 1):
+            write_executor_status("completed")
+            return handled
+        time.sleep(max(poll_seconds, 0.2))
+
+
 def process_gallery_job(
     store: SessionStore,
     session_id: str,
     job_id: str,
     attempt_id: str,
+    *,
+    runtime: RuntimeConfig | None = None,
 ) -> dict[str, Any]:
     stage_path = store._stage_path(session_id, "asset_matching")
     attempt_dir = stage_path / "gallery-attempts" / attempt_id
     try:
+        queued = read_gallery_job(store, session_id)
+        if (
+            queued is not None
+            and queued.get("job_id") == job_id
+            and queued.get("attempt_id") == attempt_id
+            and queued.get("status") == "queued"
+        ):
+            claim_queued_gallery_job(store, session_id)
         with store._session_lock(session_id):
             job = read_gallery_job(store, session_id)
             if (
@@ -467,20 +680,28 @@ def process_gallery_job(
                 or job.get("status") != "running"
             ):
                 raise InteractionConflict(GALLERY_IDENTITY_STALE)
-        require_local_resource_identity(
-            job["identity"]["local_resource_identity"]
-        )
+        if runtime is None:
+            require_local_resource_identity(
+                job["identity"]["local_resource_identity"]
+            )
         input_path = stage_path / "input.json"
         actual_input_sha = hashlib.sha256(input_path.read_bytes()).hexdigest()
         if actual_input_sha != job["identity"]["input_sha256"]:
             raise InteractionConflict(GALLERY_IDENTITY_STALE)
         input_document = store._read_json(input_path, "input")
         decisions = extract_folder_decisions(input_document)
+        submitted_decisions = decisions
         if (
             folder_decisions_sha256(decisions)
             != job["identity"]["folder_decisions_sha256"]
         ):
             raise InteractionConflict(GALLERY_IDENTITY_STALE)
+        if runtime is not None:
+            decisions = resolve_material_folders(
+                decisions,
+                stage_path=stage_path,
+                runtime=runtime,
+            )
         session_path = store._session_path(session_id)
         products = read_product_csv(session_path / "inputs" / "products.csv")
         status_path = (
@@ -606,7 +827,7 @@ def process_gallery_job(
             session_id=session_id,
             revision=int(job["identity"]["revision"]),
             input_sha256=str(job["identity"]["input_sha256"]),
-            folder_decisions=decisions,
+            folder_decisions=submitted_decisions,
         )
         data["gallery_job_id"] = job_id
         with store._session_lock(session_id):

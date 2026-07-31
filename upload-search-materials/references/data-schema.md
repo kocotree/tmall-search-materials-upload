@@ -142,15 +142,15 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 共享 `folder-candidates.csv` 输出当前 active 且命中商品的文件夹。当前任务使用 `snapshot-folder-candidates` 按第二阶段 `selected_product_ids` 生成任务内候选快照，不复制 SQLite。候选按文件夹自身名称匹配，不继承父目录命中；`--rematch-only` 只使用本地文件夹记录重新计算匹配。确认文件夹归属前，不读取文件夹中的图片，也不计算图片 SHA-256。
 
-`prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、来源、文件夹名、完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数。文件夹计数初始为 `image_count_status=pending`，页面首屏后通过本机计数接口按稳定 `folder_id` 回填 `ready + raw_recursive_image_count`，或者回填 `unknown + image_count_reason_code`；未知不得降级成 0。计数只枚举受支持图片路径，不读取图片内容。确定性候选默认 `confirmed`；`match_type=fuzzy_name_candidate` 表示基础名称至少 50% 的最长公共连续字符命中，默认 `rejected`，页面仍只提供采用和排除。历史 `pending` 按采用读取。用户明确提供完整文件夹名时，当前任务可生成 `match_type=exact_folder_query` 的候选；该记录不是别名。
+`prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、`source_id`、`relative_path`、来源、文件夹名、仅供审计的历史完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数。新任务读取图片只使用 `source_id + relative_path`，不得使用绝对路径作为跨电脑业务标识。文件夹计数由素材执行器在访问本机绑定后回填 `ready + raw_recursive_image_count`，或者回填 `unknown + image_count_reason_code`；未知不得降级成 0。计数只枚举受支持图片路径，不读取图片内容。确定性候选默认 `confirmed`；`match_type=fuzzy_name_candidate` 表示基础名称至少 50% 的最长公共连续字符命中，默认 `rejected`，页面仍只提供采用和排除。历史 `pending` 按采用读取。用户明确提供完整文件夹名时，当前任务可生成 `match_type=exact_folder_query` 的候选；该记录不是别名。
 
 用户决定写入同一时间戳会话的 `input.json.values.folder_decisions`。每项必须包含：
 
-- `folder_id`、`product_id`、`source_system`、`folder_path`，用于绑定明确目录和商品。
+- `folder_id`、`product_id`、`source_id`、`relative_path`，用于跨电脑绑定明确目录和商品；`source_system` 与 `folder_path` 只作为兼容或审计字段。
 - `decision`：`confirmed` 或 `rejected`；未处理项不写入决定数组。
 - `note`：可选人工说明。
 
-最终采用决定可以驱动后续按需图片枚举；保存决定本身不读取图片。`rejected` 只排除其绑定的 `folder_id + product_id`，但必须立即从画廊移除对应候选并同步清理其采用和授权记录，不得推进阶段。素材匹配阶段保存文件夹决定时，`image_roots` 只校验为非空路径列表；随后由页面服务启动的本地 Worker 在相同 Windows 身份下检查根目录和文件夹的实时可访问性。不可访问时记录 gallery job 的稳定失败原因并允许本地重试，不得创建 Codex handoff，也不得把文件夹决定误报为 validation failed。
+最终采用决定可以驱动后续按需图片枚举；保存决定本身不读取图片。`rejected` 只排除其绑定的 `folder_id + product_id`，但必须立即从画廊移除对应候选并同步清理其采用和授权记录，不得推进阶段。素材匹配阶段保存文件夹决定时，页面创建 `status=queued` 的 gallery job，并自动请求操作系统桌面启动一次性执行器。Windows 启动通道为现有 Explorer shell，避免继承 UI/Codex 看不到映射盘的令牌；macOS/Linux 使用当前登录用户。执行器使用每机配置解析 source ID，并在读取前拒绝绝对相对路径、`..` 和目录逃逸。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；不可访问时记录 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并允许页面重试，不得创建 Codex handoff，也不得把文件夹决定误报为 validation failed。
 
 ## Asset Record
 

@@ -83,16 +83,30 @@ uv run python -X utf8 $quickValidate .
 
 先创建时间戳会话并启动任务配置页，再让用户确认店铺和本次图片源；不配置目标月份、商品范围或搜推采集页数。缺少这些业务值不得阻止页面启动。商品表、规则表及运行目录自动发现并只读展示；图片源可配置一个或多个，检测只读可访问性后可保存为本机默认值。搜推素材标记为“搜推高价值”全量自动采集；本分支不准备基础素材。人工图片素材清单和历史推广素材状态位于高级设置，日常执行保持为空。
 
-日常唯一推荐入口是：
+交互页面与素材读取进程分离。Windows 使用受管桌面入口：
 
 ```powershell
 cd .\upload-search-materials
-.\scripts\start-ui.cmd
+.\scripts\start-managed-workbench.ps1 `
+  -RunsRoot "<项目内精确 runs_root>" `
+  -PortStart 8765 `
+  -PortEnd 8795 `
+  -Config ".\config\local-paths.json"
 ```
 
-它返回精确 `session_id`、PID、端口、日志和 URL 的 JSON 后立即结束。Agent 优先用 Codex 内置浏览器打开 URL；只有内置浏览器不可用时才传 `-OpenSystemBrowser`。恢复任务时使用 `-Session "<session-id>" -RunsRoot "<runs-root>"`，不得猜测最新目录。`tmall-materials interact` 只保留为会持续占用终端的前台调试入口。
+用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动启动一次性素材执行器，不需要另开终端。Windows 通过现有 Explorer shell 的普通桌面令牌启动，以继承 RaiDrive/Y:/Z:；macOS/Linux 使用当前登录用户挂载。执行器按 `source_id + relative_path` 绑定当前电脑的根目录，处理任务后立即退出，不安装系统服务。`start-material-executor.ps1` 和 `start-material-executor.sh` 仅用于开发诊断。
 
-当任务需要映射盘、NAS 或原生目录窗口，且普通 Codex 启动上下文看不到用户桌面的盘符时，先取得页面显示的精确 session，再由用户授权运行固定桌面入口：
+Windows 中由 Codex 启动上述工作台时，必须为固定的
+`start-managed-workbench.ps1` 请求宿主桌面权限。启动返回后核对
+`launcher_runtime_identity.sid == runtime_identity.sid`，并核对登录会话一致。
+`remote_drive_letters` 只用于诊断展示，不参与启动验收，也不得用历史本机配置中的
+盘符阻止配置页打开。`healthy=true` 只代表 HTTP 服务可用；用户提交配置页时才检测
+本次页面里最终填写的图片源。若服务运行在 Codex 沙箱账户，先停止该精确 session
+的服务，再以桌面权限恢复；不要让用户通过重复点击图片按钮解决身份错误。
+
+它返回精确 `session_id`、PID、端口、日志、URL、Windows SID、登录会话、交互桌面状态和可见网络盘。Agent 优先用 Codex 内置浏览器打开 URL；恢复任务时增加 `-Session "<session-id>"`，不得猜测最新目录。只有明确不访问任何本机素材资源的只读流程才使用 `scripts\start-ui.cmd`；`tmall-materials interact` 只保留为会持续占用终端的前台调试入口。
+
+恢复已有任务时：
 
 ```powershell
 cd .\upload-search-materials
@@ -104,7 +118,7 @@ cd .\upload-search-materials
   -Config ".\config\local-paths.json"
 ```
 
-该入口只接受项目内 runs root、格式合法的精确 session、项目 `config/` 下的 JSON 和最多 101 个本机端口；不能传任意命令、外部监听地址、上传或发布参数。服务始终监听 `127.0.0.1`。启动状态记录服务和启动者的 Windows SID、登录会话 ID、交互桌面可用性及可见网络盘盘符，不记录共享内容。若原服务属于另一可见盘上下文，桌面入口会先安全停止其 ownership token 对应服务再启动新服务。路径检测、picker、索引和采集 Worker 在读取素材前校验同一身份，失败返回 `LOCAL_RESOURCE_IDENTITY_MISMATCH`。
+该入口只接受项目内 runs root、格式合法的精确 session、项目 `config/` 下的 JSON 和最多 101 个本机端口；不能传任意命令、外部监听地址、上传或发布参数。服务始终监听 `127.0.0.1`。启动后可以查看 `visible_network_drives` 诊断，但不得据此假定历史图片源就是本次配置，也不得阻止用户进入配置页。用户提交配置页时先检测本次最终填写的路径；通过后才生成 setup handoff。若原服务属于另一个桌面身份，桌面入口会先安全停止其 ownership token 对应服务再启动新服务。路径检测、picker、索引和采集 Worker 在读取素材前校验同一 SID 与登录会话，失败返回 `LOCAL_RESOURCE_IDENTITY_MISMATCH`，保留文件夹决定并允许同一 session 重试。
 
 图片源检测可保留 canonical UNC 作为当前电脑的回退建议。映射盘缺失时仅在已配置该 UNC 的情况下做有界元数据检测；系统不会自动映射网络盘、请求密码或绕过 Windows/NAS 权限。
 
@@ -169,7 +183,7 @@ uv run tmall-materials prepare-folder-review `
 
 ## 3.2 默认：确认文件夹后按需准备候选
 
-正常的 1–3 商品试跑不建立全量图片索引。用户确认文件夹后，页面服务在相同 Windows 身份下直接读取当前任务 `input.json` 中的 `confirmed` 目录，并结合搜推素材状态生成任务级候选清单。`process-gallery-job` 是页面服务维护的内部 Worker 命令，不应由 Codex 领取 handoff 后手工运行。加载失败时在页面点击“重试加载图片”，旧 attempt 保留供审计。
+正常的 1–3 商品试跑不建立全量图片索引。用户确认文件夹后，页面把当前 `source_id + relative_path` 决定写入 `input.json`、创建 `queued` gallery job，并自动请求操作系统桌面启动一次性素材执行器。执行器把 source ID 绑定到本机盘符、UNC 或 macOS `/Volumes/...` 根目录后生成任务级候选清单。Windows 不得直接继承 UI/Codex 令牌，而必须委托 Explorer 启动。页面服务和 Codex 都不直接读取 NAS。加载失败时在页面点击“重试加载图片”，页面会自动启动新的 attempt；旧 attempt 保留供审计。
 
 用户完成选图并点击“确认选图并提交给 Codex”后，Codex 只处理最终素材交接：
 

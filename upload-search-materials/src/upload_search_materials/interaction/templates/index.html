@@ -205,7 +205,8 @@
                   <p class="field-error" id="setup-folder_index_root-error" data-field-error="folder_index_root" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
-                  <span>图片源配置</span><strong data-image-source-summary>{{ image_sources|length }} 个图片源</strong>
+                  <span>图片源配置</span><strong data-image-source-summary>{% if image_sources %}上次保存的 {{ image_sources|length }} 个（仅预填）{% else %}本次尚未配置{% endif %}</strong>
+                  <p>这里显示的是本机历史预填项，不是本次任务已经确认的图片源。可以删除、替换或新增；提交时才检测页面中的最终路径。</p>
                   <p>可直接粘贴本机能够打开的文件夹路径，也可以点击“选择文件夹”。本地磁盘、当前用户已连接的网络盘和 UNC 路径都支持；不要求用户手工转换为 UNC。</p>
                   <p>本机配置文件：<code>{{ setup_inputs.image_config_path }}</code></p>
                   <div class="image-source-list" data-image-source-list>

@@ -124,7 +124,8 @@
       row.querySelector('[name="image_source_labels"]')?.value.trim()
       && row.querySelector('[name="image_roots"]')?.value.trim()
     ).length;
-    imageSourceConfig.querySelector("[data-image-source-summary]").textContent = `${rows.length} 个图片源`;
+    imageSourceConfig.querySelector("[data-image-source-summary]").textContent =
+      `${rows.length} 个图片源 · 本次尚未提交`;
     imageSourceConfig.dataset.ready = validCount === rows.length && rows.length > 0 ? "true" : "false";
     rows.forEach((row) => {
       row.querySelector("[data-remove-image-source]").disabled = rows.length <= 1;
@@ -238,8 +239,10 @@
       });
       const available = payload.image_sources.filter((source) => source.status === "available").length;
       feedback.textContent = `检测完成：${available} / ${payload.image_sources.length} 个路径可访问。`;
+      return available === payload.image_sources.length;
     } catch (error) {
       feedback.textContent = error.message;
+      return false;
     }
   }
 
@@ -673,7 +676,7 @@
     submitButton.disabled = lockedByServer;
     if (
       currentStageId === "asset_matching"
-      && currentGalleryJob?.status === "running"
+      && ["queued", "running"].includes(currentGalleryJob?.status)
     ) {
       submitButton.disabled = true;
     }
@@ -733,11 +736,14 @@
     }
     const failures = Number(progress.inspection_failure_count || 0);
     const duplicates = Number(progress.content_duplicate_count || 0);
+    const inspected = Number(progress.inspected_count || 0);
     return (
       `本机正在加载图片：发现 `
-      + `${Number(progress.discovered_path_count || 0)} 张，正在检查 `
-      + `${Number(progress.inspected_count || 0)}/`
+      + `${Number(progress.discovered_path_count || 0)} 张，本轮进入候选检查 `
+      + `${Number(progress.planned_inspection_count || 0)} 张，已处理 `
+      + `${inspected + failures}/`
       + `${Number(progress.planned_inspection_count || 0)} 张`
+      + `，检查成功 ${inspected} 张`
       + `${failures ? `，检查失败 ${failures} 张` : ""}`
       + `${duplicates ? `，内容重复 ${duplicates} 张` : ""}。`
     );
@@ -753,7 +759,7 @@
     }
     return (
       `本机图片加载完成：检查 `
-      + `${Number(progress.inspected_count || 0)} 张，失败 `
+      + `成功 ${Number(progress.inspected_count || 0)} 张，失败 `
       + `${Number(progress.inspection_failure_count || 0)} 张，内容重复 `
       + `${Number(progress.content_duplicate_count || 0)} 张，可展示候选 `
       + `${Number(progress.final_candidate_count || 0)} 张。`
@@ -1426,6 +1432,8 @@
         folder_id: String(item.folder_id),
         product_id: String(item.product_id),
         source_system: String(item.source_system || ""),
+        source_id: String(item.source_id || item.source_system || ""),
+        relative_path: String(item.relative_path || ""),
         folder_path: String(item.folder_path || ""),
         decision: String(item.decision),
         note: String(item.note || ""),
@@ -1532,6 +1540,8 @@
         folder_id: folderId,
         product_id: productId,
         source_system: String(candidate.source_system || ""),
+        source_id: String(candidate.source_id || candidate.source_system || ""),
+        relative_path: String(candidate.relative_path || ""),
         folder_path: String(candidate.folder_path || ""),
         decision,
         note: String(note || "").trim(),
@@ -1619,7 +1629,7 @@
         let countText = "素材数统计中";
         if (countStatus === "ready") {
           countText = (
-            `原始递归素材数 `
+            `文件夹内素材（递归统计）：`
             + `${Number(candidate.raw_recursive_image_count || 0)} 张`
           );
         } else if (countStatus === "unknown") {
@@ -1634,11 +1644,11 @@
         }
         if (candidate.gallery_unique_path_count != null) {
           countText += (
-            ` · 本轮去重路径 `
+            ` · 去重后可分配 `
             + `${Number(candidate.gallery_unique_path_count || 0)} 张`
-            + ` · 抽样检查 `
+            + ` · 本轮进入候选检查 `
             + `${Number(candidate.gallery_sampled_inspection_count || 0)} 张`
-            + ` · 最终唯一候选 `
+            + ` · 最终可选素材 `
             + `${Number(candidate.gallery_final_candidate_count || 0)} 张`
           );
         }
@@ -1728,7 +1738,9 @@
         "确认文件夹并加载图片",
       );
       localButton.type = "button";
-      localButton.disabled = currentGalleryJob?.status === "running";
+      localButton.disabled = ["queued", "running"].includes(
+        currentGalleryJob?.status,
+      );
       localButton.addEventListener("click", () => {
         prepareLocalGallery(localButton);
       });
@@ -1746,7 +1758,9 @@
   }
 
   function inferAssetMatchingStep(data, status = "") {
-    if (currentGalleryJob?.status === "running") return "gallery_preparing";
+    if (["queued", "running"].includes(currentGalleryJob?.status)) {
+      return "gallery_preparing";
+    }
     if (status === "processing") return "gallery_preparing";
     const explicit = String(data?.workflow_step || "");
     if (["folder_review", "gallery_preparing", "image_selection"].includes(explicit)) {
@@ -1999,11 +2013,12 @@
         pageIndex = Math.min(pageIndex, pageCount - 1);
         candidateSummary.textContent = (
           `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇`
-          + ` · 目录发现 ${discoveredCount} 张`
-          + ` · 检查 ${inspectedCandidateCount}/${preparedCandidateCount} 张`
-          + ` · 失败 ${inspectionFailureCount} 张`
+          + ` · 文件夹内共发现 ${discoveredCount} 张`
+          + ` · 本轮计划检查 ${preparedCandidateCount} 张`
+          + ` · 检查成功 ${inspectedCandidateCount} 张`
+          + ` · 检查失败 ${inspectionFailureCount} 张`
           + ` · 内容重复 ${contentDuplicateCount} 张`
-          + ` · 最终候选 ${finalCandidateCount} 张`
+          + ` · 最终可选素材 ${finalCandidateCount} 张`
           + ` · 预检有效 ${validCandidateCount} 张`
           + ` · 当前可见 ${productCandidates.length} 张`
           + ` / 每商品检查上限 ${candidateLimit} 张`
@@ -2491,6 +2506,7 @@
     const stateByProduct = new Map();
     let currentPlanRevision = 0;
     let slotPlanDirty = false;
+    let processedOutputs = null;
     const cropParameters = {};
     const candidatePageByProduct = new Map();
     products.forEach((product) => {
@@ -2549,6 +2565,11 @@
       if (page === "process" && plan.confirmed === true) {
         processPanel.hidden = false;
         renderProcessingPage();
+      } else if (
+        page === "copy"
+        && processedOutputs?.workflow_state === "outputs_ready"
+      ) {
+        renderCopyEditor(processedOutputs);
       }
     };
     const wizard = element("nav", "slot-workflow-steps");
@@ -3335,16 +3356,22 @@
           .filter((item) => item?.slot_id)
           .map((item) => [String(item.slot_id), item]),
       );
-      const form = element("div", "slot-list");
+      const form = element("div", "copy-slot-list");
       const copyState = [];
       let finishButton = null;
-      const copyActions = element("div", "decision-mode-controls");
-      const copyStatus = element("span", "", "AI 文案绑定当前最终图片和顺序；生成后仍需逐坑人工确认。");
+      const copyActions = element("div", "copy-toolbar");
+      const copyStatus = element(
+        "span",
+        "copy-toolbar-status",
+        "AI 文案绑定当前最终图片和顺序；生成后仍需逐坑人工确认。",
+      );
       const copyButton = element("button", "primary-button", "AI 生成标题与描述");
       copyButton.type = "button";
       const copyVersions = document.createElement("select");
       copyVersions.setAttribute("aria-label", "AI 文案版本");
-      copyActions.append(copyButton, copyVersions, copyStatus);
+      const copyToolbarActions = element("div", "copy-toolbar-actions");
+      copyToolbarActions.append(copyButton, copyVersions);
+      copyActions.append(copyStatus, copyToolbarActions);
       const updateCopyActions = () => {
         const hasCompleteDrafts = copyState.length > 0
           && copyState.every((draft) => draft.title && draft.description);
@@ -3358,8 +3385,11 @@
           );
         }
       };
-      assignments.forEach((assignment) => {
+      assignments.forEach((assignment, assignmentIndex) => {
         const existing = savedCopy.get(String(assignment.slot_id)) || {};
+        const processedSlot = (processed.slots || []).find(
+          (slot) => String(slot.slot_id) === String(assignment.slot_id),
+        ) || {};
         const item = {
           slot_id: assignment.slot_id,
           product_id: assignment.product_id,
@@ -3377,75 +3407,164 @@
               || [],
         };
         copyState.push(item);
-        const card = element("article", "slot-card");
+        const card = element("article", "copy-slot-card");
+        card.dataset.slotId = String(assignment.slot_id);
+
+        const cardHeading = element("header", "copy-slot-heading");
+        const headingIdentity = element("div", "copy-slot-identity");
+        const slotNumber = element(
+          "span",
+          "copy-slot-number",
+          `坑位 ${assignmentIndex + 1}`,
+        );
+        headingIdentity.append(
+          slotNumber,
+          element("strong", "", String(assignment.slot_id)),
+          element(
+            "small",
+            "",
+            `商品 ${assignment.product_id} · ${assignment.target_ratio} · ${assignment.asset_ids.length} 张素材`,
+          ),
+        );
+        const confirmationState = element(
+          "span",
+          "copy-confirmation-state",
+          item.confirmed ? "已确认" : "待确认",
+        );
+        confirmationState.dataset.confirmed = String(item.confirmed);
+        cardHeading.append(headingIdentity, confirmationState);
+
+        const mediaPanel = element("section", "copy-media-panel");
+        mediaPanel.setAttribute("aria-label", `${assignment.slot_id} 最终素材`);
+        mediaPanel.append(
+          element("span", "copy-section-label", "该坑位最终素材"),
+          element(
+            "p",
+            "copy-media-theme",
+            processedSlot.theme
+              || assignment.theme
+              || "按当前顺序生成文案",
+          ),
+        );
+        const strip = element("div", "copy-story-strip");
+        strip.dataset.ratio = String(assignment.target_ratio || "");
+        (processedSlot.outputs || []).forEach((output) => {
+          const figure = document.createElement("figure");
+          figure.className = "copy-story-frame";
+          const image = document.createElement("img");
+          image.loading = "lazy";
+          image.alt = `${assignment.slot_id} 第 ${output.order} 张最终素材`;
+          image.src = apiPath(
+            `/stages/slots_copy/processed-assets/${encodeURIComponent(assignment.slot_id)}/${output.order}`,
+          );
+          const caption = element(
+            "figcaption",
+            "",
+            `第 ${output.order} 张`,
+          );
+          figure.append(image, caption);
+          strip.appendChild(figure);
+        });
+        mediaPanel.appendChild(strip);
+
+        const editor = element("section", "copy-editor-panel");
+        editor.setAttribute("aria-label", `${assignment.slot_id} 标题和描述`);
         const title = document.createElement("input");
-        title.placeholder = "标题（必填）";
+        title.type = "text";
+        title.maxLength = 30;
+        title.placeholder = "输入与该组素材一致的标题";
         title.value = item.title;
+        const titleCount = element(
+          "span",
+          "copy-character-count",
+          `${title.value.length}/30`,
+        );
+        const titleLabel = element("label", "copy-field");
+        const titleLabelRow = element("span", "copy-field-label");
+        titleLabelRow.append(
+          element("strong", "", "标题"),
+          titleCount,
+        );
+        titleLabel.append(titleLabelRow, title);
+
         const description = document.createElement("textarea");
-        description.placeholder = "描述（必填）";
-        description.rows = 3;
+        description.maxLength = 1000;
+        description.placeholder = "描述这组素材呈现的卖点、场景和使用感受";
+        description.rows = 5;
         description.value = item.description;
+        const descriptionCount = element(
+          "span",
+          "copy-character-count",
+          `${description.value.length}/1000`,
+        );
+        const descriptionLabel = element("label", "copy-field");
+        const descriptionLabelRow = element("span", "copy-field-label");
+        descriptionLabelRow.append(
+          element("strong", "", "描述"),
+          descriptionCount,
+        );
+        descriptionLabel.append(descriptionLabelRow, description);
+
         const confirmation = document.createElement("input");
         confirmation.type = "checkbox";
         confirmation.checked = item.confirmed;
-        const confirmationLabel = element("label", "check-control");
+        const confirmationLabel = element(
+          "label",
+          "check-control copy-confirmation-control",
+        );
         confirmationLabel.append(
           confirmation,
-          element("span", "", "确认该文案可进入 dry-run"),
+          element(
+            "span",
+            "",
+            "我已核对该标题、描述与左侧素材一致，可进入 dry-run",
+          ),
         );
+        const reviewMeta = element("div", "copy-review-meta");
+        const evidence = element("div", "copy-review-note");
+        evidence.append(
+          element("span", "", "生成依据"),
+          element(
+            "p",
+            "",
+            item.evidence.join("；") || "人工填写，或等待 AI 生成后显示",
+          ),
+        );
+        const risks = element("div", "copy-review-note");
+        risks.dataset.kind = item.risks.length ? "warning" : "clear";
+        risks.append(
+          element("span", "", "风险提示"),
+          element("p", "", item.risks.join("；") || "暂无风险标记"),
+        );
+        reviewMeta.append(evidence, risks);
+
         const save = () => {
           item.title = title.value;
           item.description = description.value;
           item.confirmed = confirmation.checked;
+          titleCount.textContent = `${title.value.length}/30`;
+          descriptionCount.textContent = `${description.value.length}/1000`;
+          confirmationState.textContent = item.confirmed ? "已确认" : "待确认";
+          confirmationState.dataset.confirmed = String(item.confirmed);
           writeJsonListControl("copy_edits", copyState, { notify: true });
           updateCopyActions();
         };
         title.addEventListener("input", save);
         description.addEventListener("input", save);
         confirmation.addEventListener("change", save);
-        card.append(
-          element(
-            "strong",
-            "",
-            `${assignment.slot_id} · ${assignment.target_ratio} · ${assignment.asset_ids.length} 张`,
-          ),
-          title,
-          description,
-          element(
-            "small",
-            "",
-            `依据：${item.evidence.join("；") || "人工填写/等待 AI"} · 风险：${item.risks.join("；") || "未标记"}`,
-          ),
+        editor.append(
+          titleLabel,
+          descriptionLabel,
+          reviewMeta,
           confirmationLabel,
         );
+        const cardBody = element("div", "copy-slot-body");
+        cardBody.append(mediaPanel, editor);
+        card.append(cardHeading, cardBody);
         form.appendChild(card);
       });
-      const storyBoard = element("aside", "copy-story-board");
-      (processed.slots || []).forEach((slot) => {
-        const story = element("article", "slot-card");
-        story.append(
-          element(
-            "strong",
-            "",
-            `${slot.slot_id} · ${slot.target_ratio} · ${slot.outputs?.length || 0} 张`,
-          ),
-          element("span", "", slot.theme || "当前坑位故事板"),
-        );
-        const strip = element("div", "copy-story-strip");
-        (slot.outputs || []).forEach((output) => {
-          const image = document.createElement("img");
-          image.loading = "lazy";
-          image.alt = `${slot.slot_id} 第 ${output.order} 张`;
-          image.src = apiPath(
-            `/stages/slots_copy/processed-assets/${encodeURIComponent(slot.slot_id)}/${output.order}`,
-          );
-          strip.appendChild(image);
-        });
-        story.appendChild(strip);
-        storyBoard.appendChild(story);
-      });
       const copyWorkspace = element("div", "copy-workspace");
-      copyWorkspace.append(storyBoard, form);
+      copyWorkspace.appendChild(form);
       const copyHeading = element("div", "slot-page-heading");
       copyHeading.append(
         element("strong", "", "AI 标题与描述"),
@@ -3668,6 +3787,7 @@
             }),
           },
         );
+        processedOutputs = processed;
         processStatus.textContent = `处理完成：${processed.slots?.length || 0} 个坑位已通过校验；现在确认文案。`;
         renderProcessedPreview(processed);
         renderCopyEditor(processed);
@@ -3687,6 +3807,7 @@
     fetchJson(apiPath("/stages/slots_copy/processed-outputs"))
       .then((processed) => {
         if (processed.workflow_state === "outputs_ready" && processed.plan_sha256) {
+          processedOutputs = processed;
           processStatus.textContent = "当前坑位计划已有通过校验的输出；可以继续确认文案。";
           renderProcessedPreview(processed);
           renderCopyEditor(processed);
@@ -4202,9 +4323,11 @@
       renderSubmission();
       if (
         requestedStageId === "asset_matching"
-        && currentGalleryJob?.status === "running"
+        && ["queued", "running"].includes(currentGalleryJob?.status)
       ) {
-        actionMessage.textContent = galleryProgressMessage();
+        actionMessage.textContent = currentGalleryJob.status === "queued"
+          ? "文件夹决定已保存，正在等待本机素材执行器。"
+          : galleryProgressMessage();
       } else if (
         requestedStageId === "asset_matching"
         && currentGalleryJob?.status === "completed"
@@ -4339,6 +4462,16 @@
       values = serializeForm(form);
     } catch (error) {
       actionMessage.textContent = error.message;
+      persistenceInFlight = false;
+      return;
+    }
+    if (
+      mode === "submit"
+      && requestedStageId === "setup"
+      && !(await checkImageSources())
+    ) {
+      actionMessage.textContent =
+        "图片源检测未通过；请修改本次配置后再提交，尚未通知 Codex。";
       persistenceInFlight = false;
       return;
     }
@@ -4621,7 +4754,10 @@
       } else {
         renderHandoffStatus(currentHandoffStatus);
         renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
-        if (currentGalleryJob?.status === "running") {
+        if (currentGalleryJob?.status === "queued") {
+          actionMessage.textContent =
+            "文件夹决定已保存，正在等待本机素材执行器。";
+        } else if (currentGalleryJob?.status === "running") {
           actionMessage.textContent = galleryProgressMessage();
         } else if (currentGalleryJob?.status === "completed") {
           actionMessage.textContent = galleryCompletionMessage();

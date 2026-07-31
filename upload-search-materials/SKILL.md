@@ -8,7 +8,7 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 
 ## 前端优先启动与交互路由（每次触发首先执行）
 
-1. 完整读取本文件后，从 Skill 目录执行 `scripts/start-ui.cmd`；恢复任务时必须传精确 `-Session` 和需要时的 `-RunsRoot`。该命令在后台启动服务、轮询健康状态并及时返回 JSON，不会像前台 `interact` 一样长期占用调用终端。
+1. 完整读取本文件后先启动或恢复交互页面。Windows 上必须以宿主提供的已授权桌面权限运行 `scripts/start-managed-workbench.ps1`，不能从 Codex 沙箱身份直接启动；启动结果只核对 `launcher_runtime_identity` 与 `runtime_identity` 的 SID 和登录会话相同。`remote_drive_letters` 仅作诊断展示：本机已保存图片源只是配置页历史预填项，不得把其盘符可见性作为工作台启动条件。用户提交配置页时，才检测页面中本次最终填写的图片源。服务显示 `healthy` 但桌面身份不符时，立即停止该精确 session 的服务并用桌面权限恢复，不得让用户反复点击图片重试。真正读取图片时使用项目自带的跨平台一次性素材执行器：用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动请求操作系统桌面会话启动它；用户不运行终端命令。Windows 必须通过同一普通桌面身份启动，以继承本次所选路径需要的映射；macOS/Linux 使用当前登录用户挂载。执行器只按 `source_id + relative_path` 读取本机绑定，处理当前任务后退出，不安装系统服务、不保存 NAS 凭据。只有最终选图提交才触发 Codex handoff。
 2. 启动成功后，优先用 Codex 内置浏览器打开 JSON 中的精确 `url`。内置浏览器不可用时才传 `-OpenSystemBrowser` 或把 URL 交给用户。浏览器失败不等于服务失败。
 3. 新任务没有店铺、图片源、NAS 映射或登录状态时仍须先打开阶段一页面；这些都是页面字段或后续原生登录动作，不是启动阻断。
 4. 每一阶段先打开当前页面并等待精确 handoff。结构化配置和人工决定不得先在聊天中索取。
@@ -28,7 +28,7 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 日常状态与恢复：
 
 ```powershell
-scripts\start-ui.cmd
+scripts\start-managed-workbench.ps1 -RunsRoot "<runs-root>" -Session "<session-id>"
 tmall-materials ui-status --runs-root <runs-root> --session <session-id>
 tmall-materials ui-restart --runs-root <runs-root> --session <session-id>
 tmall-materials ui-stop --runs-root <runs-root> --session <session-id>
@@ -75,7 +75,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 1. 启动前只检查运行条件：当前 Skill 目录、可执行的既有 `.venv`，或用于创建环境的 `uv`。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
 2. 不得在配置页启动前通过聊天索取店铺名、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
-3. 先通过 `scripts/start-ui.cmd` 创建时间戳会话并运行受管 UI；`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
+3. 日常素材任务先通过 `scripts/start-managed-workbench.ps1` 在实际桌面用户会话创建或恢复时间戳会话；Windows 中 Agent 必须为该固定脚本请求宿主桌面权限，并在启动 JSON 中验证 SID 和登录会话，不能把沙箱用户的同会话进程误当成 Explorer 桌面身份。可见网络盘只用于诊断，不得根据历史本机配置阻止配置页启动。只有已经明确不使用图片源、NAS、映射盘和原生目录窗口时才可使用 `scripts/start-ui.cmd`。`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
 4. 让用户在阶段 1 配置页填写并确认店铺和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
 5. setup handoff 尚未提交时，只等待页面提交或提供恢复指令；不得自行采集、索引、dry-run、上传或发布。
 6. 阶段一正式提交前必须读取页面返回的 `collection_readiness`。环境、生产选择器 schema、当前 DOM、CDP、登录/人机验证、官方素材中心页面和目标店铺必须逐项为 ready；缺一项只能保存草稿。缺少本机生产选择器时，先在页面创建 `production=false` 候选，再用当前 CDP 页面验证全部字段；验证动作自动进入“搜推素材 → 搜推高价值”并稳定复位到第 1 页，已经处于该状态时不得重复点击激活标签。禁止复制示例后直接标为生产。
@@ -169,9 +169,10 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 素材阶段按以下顺序执行：
 
 1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
-2. 每台电脑只维护一份由 `folder_index_root` 指定的共享文件夹索引，不得为每个时间戳任务重新遍历全部图片 roots，也不得复制其他历史任务中的临时索引。首次缺少共享索引时运行 `index-folders`；素材目录新增、删除或改名后对同一索引运行 `--refresh`；只调整名称或货号匹配规则时运行 `--rematch-only`。这些操作只记录文件夹名称、路径和商品匹配，不读取图片内容。`--refresh` 会遍历目录树发现变化，但在同一数据库中增量维护 active/inactive 状态。
+2. 每台电脑只维护一份由 `folder_index_root` 指定的共享文件夹索引，不得为每个时间戳任务重新遍历全部图片 roots，也不得复制其他历史任务中的临时索引。首次缺少共享索引时运行 `index-folders`；每个 `--root SOURCE=PATH` 的 `SOURCE` 必须使用当前图片源配置中的稳定 `source_id`，不得另造 `model_nas` 等机器相关别名。素材目录新增、删除或改名后对同一索引运行 `--refresh`；只调整名称或货号匹配规则时运行 `--rematch-only`。这些操作只记录文件夹名称、相对路径、审计路径和商品匹配，不读取图片内容。`--refresh` 会遍历目录树发现变化，但在同一数据库中增量维护 active/inactive 状态。
 3. 从共享 `folder-candidates.csv` 使用 `snapshot-folder-candidates` 仅提取第二阶段所选商品，把候选 CSV、扫描摘要和后续 `folder-review.json` 保存到当前任务目录；任务目录不得包含 `folder-index.sqlite3`。文件夹匹配优先使用商品 ID、完整货号和规范化商品基础名称；匹配基础名称时忽略末尾的“（主）/（副）”。除此之外，可将与基础名称具有至少 50% 最长公共连续字符、且公共连续部分不少于 5 个字符的文件夹作为粗略候选，但不得据此自动确认归属。若用户明确给出完整文件夹名，可用 `prepare-folder-review --exact-folder PRODUCT_ID=FOLDER_NAME` 做当前任务的一次性精确查询；不得把该查询写入别名表或自动复用于其他任务。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；ID、货号和完整基础名称候选默认“采用”，粗略候选默认“排除”，用户筛选后再读取采用文件夹中的图片；决定写入当前时间戳会话的 `folder_decisions`。
-4. “素材匹配”是同一阶段内的两步流程。`folder_review` 页面先显示目录元数据，并异步回填每个候选文件夹的原始递归素材数；该轻量计数只枚举受支持图片路径，不打开、解码或哈希图片，访问失败必须显示“素材数未知”，不能显示 0。文件夹列表下方、候选图片上方的“确认文件夹并加载图片”是页面服务的固定本机操作：它直接调用 `prepare-gallery` 并启动持久化 gallery job，不经过通用阶段提交处理器，不创建 handoff、不领取 Agent 租约，也不需要在聊天回复“已提交”。`folder_review` 和 `gallery_preparing` 时页面底部不得再显示阶段提交按钮。选图页原位置按钮为“确认选图并提交给 Codex”；只有它在每个商品至少 3 张有效唯一图片的最终校验通过后创建 `final_material_selection` handoff。Codex 使用 `process-final-material-handoff --runs-root ... --session ...` 校验最终素材包并继续确定性坑位编排，不重新扫描文件夹。采用文件夹不等于采用图片，刷新页面不得自动保存或增加 revision。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；运行中分别显示发现路径、计划检查、已检查、检查失败、内容重复、最终候选和待处理数量，完成后最终候选必须等于已检查减内容重复。结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。旧会话缺少新计数字段时只显示“历史进度口径”，不得从旧 `prepared_count` 猜测最终候选数。
+4. “素材匹配”是同一阶段内的两步流程。`folder_review` 页面展示目录元数据；文件夹列表下方、候选图片上方的“确认文件夹并加载图片”保存决定、创建 `queued` gallery job，并自动启动一次性素材执行器，不经过通用阶段提交处理器、不创建 handoff、不领取 Agent 租约，也不需要在聊天回复“已提交”。Windows 启动必须委托给现有 Explorer shell，不能直接从 UI/Codex 创建继承其令牌的子进程；macOS/Linux 可直接创建脱离页面生命周期的当前用户进程。执行器认领任务后，使用当前电脑 `config/local-paths.json` 中相同 `source_id` 的本机根目录拼接已校验的 `relative_path`，再枚举图片、回填递归素材数、生成预览与候选；业务数据不得依赖盘符、RaiDrive 虚拟 UNC 或 `/Volumes/...` 绝对路径。Windows 的 Y:/Z:、macOS 的 `/Volumes/...` 可以绑定同一 source ID。旧索引可在执行器中用绝对路径做一次兼容识别，新索引和新决定必须使用稳定标识。`folder_review` 和 `gallery_preparing` 时页面底部不得再显示阶段提交按钮。选图页原位置按钮为“确认选图并提交给 Codex”；只有它在每个商品至少 3 张有效唯一图片的最终校验通过后创建 `final_material_selection` handoff。Codex 使用 `process-final-material-handoff --runs-root ... --session ...` 校验最终素材包并继续确定性坑位编排，不重新扫描文件夹。采用文件夹不等于采用图片，刷新页面不得自动保存或增加 revision。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；运行中分别显示发现路径、计划检查、已检查、检查失败、内容重复、最终候选和待处理数量，完成后最终候选必须等于已检查减内容重复。结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。旧会话缺少新计数字段时只显示“历史进度口径”，不得从旧 `prepared_count` 猜测最终候选数。
+   页面计数必须使用三个固定名称：点击前为“文件夹内素材（递归统计）”，点击后为“本轮进入候选检查”和“最终可选素材”；不得再用含义不明的“已准备”混合原始路径数、计划检查数和最终候选数。检查成功数不包含检查失败，最终可选素材等于检查成功减内容重复。
 5. 人工审查并排除错误的完整名称候选、同货号不同名称文件夹，再逐文件选择本次采用素材；采用图片时同步生成本次授权。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；历史 `pending` 文件夹按默认采用读取，新提交不得继续保存 `pending`。
 6. 搜推素材实时采集完成后，运行 `tmall-materials inspect-completeness --products <商品表> --promotion-status <promotion-material-status.csv> --output <任务目录>/02-completeness/completeness-matrix.json`。只有“搜推高价值”采集结果中的商品进入第二阶段，商品表只补充名称和货号，不得扩展商品范围。把 JSON 写入当前 revision 的 `result.json.data`，页面展示搜推素材目标/已有/缺失篇数、候选素材状态和后台证据。用户可搜索、筛选、逐项或批量选择商品；提交后从 `02-completeness/input.json.values.selected_product_ids` 读取下阶段商品范围，禁止要求用户直接编辑 JSON。
 7. 完成素材完整性可视化审查后，再进入生产选择器、全量 dry-run、1–3 商品生产验收，以及文档/发布状态更新。
@@ -212,7 +213,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 7. 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256` 与当前 `input.json` 全部一致。
 8. 将该阶段标记为 `processing`。
 9. 只执行该 `stage_id` 允许的动作。
-10. 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`。
+10. 只通过项目的 Python `SessionStore.write_result`/正式 CLI 以 UTF-8 写入与同一组 `session_id`、`stage_id`、`revision` 和 `input_sha256` 绑定的 `result.json`；不得用 PowerShell 管道、重定向或命令行字符串拼接直接生成含中文的 JSON。`summary` 或 `next_action` 出现连续三个问号时必须以 `RESULT_TEXT_ENCODING_INVALID` 拒绝发布。
 11. 根据结果停止，或明确进入下一阶段。
 
 提交前允许编辑并在停止输入约 1 秒后自动保存草稿；草稿不得生成 handoff 或触发 Agent。每次草稿或正式提交携带在重试期间保持不变的 request ID，并通过版本化 stage transaction 原子推进 input、revision snapshot、handoff、session state 与审计事件。中途失败后读取状态或重试原请求必须幂等修复；相同 request ID 但内容不同返回 `REVISION_CONTENT_CONFLICT`，不得删除或覆盖既有证据。正式提交后冻结该阶段的全部配置。只有状态仍为 `ready_for_agent`、尚未被 Agent 认领时，用户才能显式撤回并继续修改；`processing` 和 `completed` 禁止覆盖。`needs_user_input` 或 `blocked` 才重新开放输入。每次草稿和正式提交都保存到阶段目录的 `revisions/<revision>/`，活动 `handoff.json` 只代表当前可认领提交。
@@ -235,8 +236,8 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 
 - 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、项目内 `config/local-paths.json` 的顺序读取本机配置；该本机文件不得提交到仓库。
 - 未显式配置商品表或规则表时，从项目根目录的 `docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
-- 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符或 UNC 只保存到 Git 忽略的每机 `config/local-paths.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台电脑可把同一 source ID 绑定到不同盘符或 UNC，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。检测必须区分缺少本机绑定、未映射盘符、主机不可达、共享不存在、子目录不存在、拒绝访问、超时和未知失败，并显示中文恢复动作；只有用户明确点击“采用 UNC”时才替换映射盘输入。必须至少配置 1 个名称与路径均非空且不重复的来源。目录未配置或当前不可访问时仍允许交互页面启动，但依赖素材源的阶段必须停在待配置状态。
-- 需要映射盘、NAS 或原生目录窗口时，必须通过固定的 `scripts/start-managed-workbench.ps1` 入口在用户明确授权的桌面会话中启动。服务只监听 `127.0.0.1`，记录 ownership token、Windows SID、登录会话 ID、交互桌面状态和安全的可见网络盘盘符；路径诊断、picker、索引和素材 Worker 必须继承并匹配该身份，变化时在读取源文件前返回 `LOCAL_RESOURCE_IDENTITY_MISMATCH`。不访问本机资源的流程仍可使用普通沙箱入口，但不得据此声称另一身份中的映射盘可用。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限；需要网络/VPN、映射或授权时只能给出恢复说明，由用户或管理员在系统中完成。
+- 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符、UNC 或 macOS 挂载点只保存到 Git 忽略的每机 `config/local-paths.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台电脑可把同一 source ID 绑定到不同本机路径，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:` 或相同 `/Volumes` 名称。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。必须至少配置 1 个名称与路径均非空且不重复的来源。
+- NAS 原图只能由素材执行器读取。页面通过 `gallery-job.json` 排队并自动请求桌面启动；执行器必须在能访问本机挂载的用户会话中运行，校验 source ID 和相对路径，拒绝绝对路径、盘符、`..` 与目录逃逸，只把任务所需预览和校验元数据写回会话目录。每个按钮任务启动一个一次性进程，任务结束即退出，不注册系统服务。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；挂载不可用返回 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并保留用户决定。手工 PowerShell/shell 启动脚本只用于开发诊断，不得作为日常用户步骤。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限。
 - `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用项目根目录下的 `runs/`。所有任务继续按时间戳目录隔离。
 - 共享文件夹索引路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用本机配置的 `folder_index_root`，默认使用项目根目录下 Git 忽略的 `.local-cache/folder-index/`。它是机器级缓存，不属于任何时间戳任务；任务只保存候选快照。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。

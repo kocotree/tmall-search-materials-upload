@@ -396,8 +396,16 @@ def _click_with_popup_retries(
     field_name: str,
     delay_ms: int,
 ) -> None:
-    last_error = None
-    for _ in range(2):
+    try:
+        locator.click(timeout=3000)
+        return
+    except PlaywrightError as error:
+        last_error = error
+    error_summary = str(last_error).casefold()
+    overlay_identified = any(
+        marker in error_summary for marker in OVERLAY_INTERCEPTION_MARKERS
+    )
+    if overlay_identified:
         _settle_safe_popups(page, selectors, delay_ms=delay_ms)
         try:
             locator.click(timeout=3000)
@@ -537,7 +545,6 @@ def scan_recommended_material_status(
     )
     if action_wait_ms:
         page.wait_for_timeout(action_wait_ms)
-    _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
     if not [
         value
         for value in page.locator(
@@ -562,7 +569,6 @@ def scan_recommended_material_status(
         )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
-        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
         checked = category_filter.get_attribute("aria-checked")
         class_name = category_filter.get_attribute("class") or ""
     if checked != "true" and "checked" not in class_name.split():
@@ -713,7 +719,6 @@ def scan_recommended_material_status(
             field_name="promotion_next_page",
             delay_ms=settle_delay_ms,
         )
-        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
         previous_ids = tuple(
             match.group(1)
             for text in row_texts

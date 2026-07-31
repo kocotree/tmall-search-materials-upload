@@ -139,7 +139,8 @@ from .desktop_launcher import (
     launch_desktop_workbench,
 )
 from .final_material_handoff import process_final_material_handoff
-from .gallery_jobs import process_gallery_job
+from .gallery_jobs import process_gallery_job, run_material_executor
+from .material_executor_launcher import launch_material_executor
 from .tasks import build_material_items, build_product_tasks
 from .time_utils import iso_timestamp
 
@@ -1043,7 +1044,10 @@ def _interact(args) -> int:
     else:
         session_id = store.create_session().session_id
 
-    app_kwargs = {"runtime_config": runtime}
+    app_kwargs = {
+        "runtime_config": runtime,
+        "material_executor_launcher": launch_material_executor,
+    }
     if args.ownership_token:
         app_kwargs["service_identity"] = {
             "ownership_token": args.ownership_token,
@@ -1362,6 +1366,28 @@ def _process_gallery_job(args) -> int:
         print(str(error), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _run_material_executor(args) -> int:
+    try:
+        runtime = load_runtime_config(args.config)
+        handled = run_material_executor(
+            runtime=runtime,
+            session_id=args.session,
+            watch=args.watch,
+            idle_timeout_seconds=args.idle_timeout,
+            poll_seconds=args.poll_interval,
+        )
+    except (OSError, RuntimeError, SchemaError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {"status": "completed", "handled_jobs": handled},
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -1996,7 +2022,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     desktop.add_argument("--runs-root", required=True)
     desktop.add_argument("--config")
-    desktop.add_argument("--session", required=True)
+    desktop.add_argument("--session")
     desktop.add_argument("--port-start", type=int, default=8765)
     desktop.add_argument("--port-end", type=int, default=8795)
 
@@ -2245,6 +2271,15 @@ def build_parser() -> argparse.ArgumentParser:
     local_gallery_job.add_argument("--session", required=True)
     local_gallery_job.add_argument("--job", required=True)
     local_gallery_job.add_argument("--attempt", required=True)
+    material_executor = subparsers.add_parser(
+        "material-executor",
+        help="Process queued image work using this machine's local source bindings",
+    )
+    material_executor.add_argument("--config", metavar="JSON")
+    material_executor.add_argument("--session", default="")
+    material_executor.add_argument("--watch", action="store_true")
+    material_executor.add_argument("--idle-timeout", type=float, default=600)
+    material_executor.add_argument("--poll-interval", type=float, default=1)
     final_material = subparsers.add_parser(
         "process-final-material-handoff",
         help="Claim the final material selection and prepare the slot draft",
@@ -2557,6 +2592,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _process_confirmed_gallery(args)
     if args.command == "process-gallery-job":
         return _process_gallery_job(args)
+    if args.command == "material-executor":
+        return _run_material_executor(args)
     if args.command == "process-final-material-handoff":
         return _process_final_material_handoff(args)
     if args.command == "prepare-image-review":

@@ -276,6 +276,33 @@ def test_result_with_wrong_input_hash_is_rejected(tmp_path):
         )
 
 
+@pytest.mark.parametrize("field_name", ["summary", "next_action"])
+def test_result_with_question_mark_mojibake_is_rejected(tmp_path, field_name):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+    kwargs = {
+        "status": "completed",
+        "summary": "采集完成",
+        "next_action": "进入下一阶段",
+    }
+    kwargs[field_name] = "??? ?????"
+
+    with pytest.raises(
+        InteractionConflict,
+        match=f"RESULT_TEXT_ENCODING_INVALID:{field_name}",
+    ):
+        store.write_result(
+            session.session_id,
+            "setup",
+            handoff["revision"],
+            handoff["input_sha256"],
+            **kwargs,
+        )
+
+
 @pytest.mark.parametrize("session_id", ["../escape", "C:/escape", "..\\escape"])
 def test_session_id_cannot_escape_runs_root(tmp_path, session_id):
     with pytest.raises(InteractionPathError):

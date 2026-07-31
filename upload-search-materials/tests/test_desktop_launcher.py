@@ -48,6 +48,21 @@ def test_desktop_launcher_accepts_only_structured_project_arguments(tmp_path):
     }
 
 
+def test_desktop_launcher_allows_new_session_in_desktop_identity(tmp_path):
+    project = _project(tmp_path)
+
+    result = validate_desktop_launch(
+        runs_root=project.parent / "runs",
+        session_id=None,
+        port_start=8765,
+        port_end=8795,
+        config=None,
+        project_root=project,
+    )
+
+    assert result["session_id"] is None
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -122,6 +137,23 @@ def test_runtime_identity_comparison_fails_closed(monkeypatch):
         match="LOCAL_RESOURCE_IDENTITY_MISMATCH",
     ):
         require_local_resource_identity(expected)
+
+
+def test_runtime_identity_ignores_mutable_remote_drive_list():
+    expected = {
+        "sid": "S-1-test",
+        "login_session_id": 1,
+        "interactive_desktop": True,
+        "remote_drive_letters": ["Y:", "Z:"],
+    }
+    actual = {
+        "sid": "S-1-test",
+        "login_session_id": 1,
+        "interactive_desktop": True,
+        "remote_drive_letters": [],
+    }
+
+    assert same_local_resource_identity(expected, actual)
 
 
 def test_login_browser_is_started_before_workbench_ui(monkeypatch, tmp_path):

@@ -537,6 +537,13 @@ def build_folder_review_data(
                 "source_system": str(
                     candidate.get("source_system", "")
                 ).strip(),
+                "source_id": str(
+                    candidate.get("source_id")
+                    or candidate.get("source_system", "")
+                ).strip(),
+                "relative_path": str(
+                    candidate.get("relative_path", "")
+                ).strip(),
                 "folder_name": folder_name,
                 "folder_path": str(candidate.get("absolute_path", "")).strip(),
                 "match_type": (

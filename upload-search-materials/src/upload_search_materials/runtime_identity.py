@@ -235,6 +235,13 @@ def runtime_identity_for_pid(pid: int) -> dict[str, Any] | None:
 def same_local_resource_identity(
     expected: Mapping[str, Any], actual: Mapping[str, Any]
 ) -> bool:
+    """Compare the desktop security context, not its mutable mounts.
+
+    ``remote_drive_letters`` is diagnostic-only. Network mounts can change
+    while the same user session remains active, and saved image sources may
+    not be used by the task currently being configured.
+    """
+
     base_matches = bool(
         expected.get("sid")
         and expected.get("sid") == actual.get("sid")
@@ -247,17 +254,6 @@ def same_local_resource_identity(
         expected.get("interactive_desktop")
     ) != bool(actual.get("interactive_desktop")):
         return False
-    if "remote_drive_letters" in expected:
-        expected_drives = {
-            str(value).upper()
-            for value in expected.get("remote_drive_letters", [])
-        }
-        actual_drives = {
-            str(value).upper()
-            for value in actual.get("remote_drive_letters", [])
-        }
-        if expected_drives != actual_drives:
-            return False
     return True
 
 

@@ -322,13 +322,6 @@ def test_folder_prepare_refresh_and_retry_never_wake_codex(
             },
         },
     )
-    launched = []
-
-    def fake_launch(current_store, current_session, job):
-        launched.append(job["attempt_id"])
-        return {**job, "pid": 1234}
-
-    monkeypatch.setattr(web_module, "launch_gallery_worker", fake_launch)
     with _live_server(app) as base_url, sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 900, "height": 800})
@@ -382,6 +375,6 @@ def test_folder_prepare_refresh_and_retry_never_wake_codex(
             (stage_path / "gallery-job.json").read_text(encoding="utf-8")
         )
         assert retried["attempt_id"] != first_attempt
-        assert len(launched) == 2
+        assert retried["status"] == "queued"
         assert not (stage_path / "handoff.json").exists()
         browser.close()

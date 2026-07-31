@@ -30,7 +30,7 @@ def _inside(path: Path, root: Path) -> bool:
 def validate_desktop_launch(
     *,
     runs_root: Path,
-    session_id: str,
+    session_id: str | None,
     port_start: int,
     port_end: int,
     config: Path | None,
@@ -45,7 +45,9 @@ def validate_desktop_launch(
     resolved_runs = Path(runs_root).resolve()
     if not _inside(resolved_runs, repository_root):
         raise DesktopLauncherError("runs_root_outside_project")
-    if not SESSION_PATTERN.fullmatch(str(session_id)):
+    if session_id is not None and not SESSION_PATTERN.fullmatch(
+        str(session_id)
+    ):
         raise DesktopLauncherError("session_id_invalid")
     if not (
         1024 <= int(port_start) <= int(port_end) <= 65535
@@ -63,7 +65,7 @@ def validate_desktop_launch(
     return {
         "project_root": fixed_project,
         "runs_root": resolved_runs,
-        "session_id": str(session_id),
+        "session_id": str(session_id) if session_id is not None else None,
         "port_start": int(port_start),
         "port_end": int(port_end),
         "config": resolved_config,

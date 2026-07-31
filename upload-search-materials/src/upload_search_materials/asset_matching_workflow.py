@@ -82,8 +82,16 @@ def canonical_folder_decisions(
         {
             "product_id": str(item.get("product_id", "")),
             "folder_id": str(item.get("folder_id", "")),
-            "folder_path": str(item.get("folder_path", "")),
+            "folder_path": (
+                ""
+                if str(item.get("relative_path", "")).strip()
+                else str(item.get("folder_path", ""))
+            ),
             "source_system": str(item.get("source_system", "")),
+            "source_id": str(
+                item.get("source_id") or item.get("source_system", "")
+            ),
+            "relative_path": str(item.get("relative_path", "")),
             "decision": (
                 "rejected"
                 if str(item.get("decision", "")) == "rejected"
@@ -101,6 +109,8 @@ def canonical_folder_decisions(
             item["product_id"],
             item["folder_id"],
             item["source_system"],
+            item["source_id"],
+            item["relative_path"],
             item["folder_path"],
         ),
     )

@@ -1,10 +1,7 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$RunsRoot,
     [string]$Session = "",
-    [int]$PortStart = 8765,
-    [int]$PortEnd = 8795,
-    [string]$Config = ""
+    [string]$Config = "",
+    [int]$IdleTimeout = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,10 +15,9 @@ if (-not [System.IO.File]::Exists($Python)) {
 
 $Arguments = @(
     "-m", "upload_search_materials.cli",
-    "desktop-workbench",
-    "--runs-root", $RunsRoot,
-    "--port-start", [string]$PortStart,
-    "--port-end", [string]$PortEnd
+    "material-executor",
+    "--watch",
+    "--idle-timeout", [string]$IdleTimeout
 )
 if ($Session) {
     $Arguments += @("--session", $Session)

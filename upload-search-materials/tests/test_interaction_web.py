@@ -506,6 +506,8 @@ def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(clien
     ):
         assert root in html
     assert 'data-component="ImageSourceConfig"' in html
+    assert "上次保存的 3 个（仅预填）" in html
+    assert "提交时才检测页面中的最终路径" in html
     assert "添加图片源" in html
     assert "检测路径" in html
     assert "保存为本机配置" in html
@@ -675,6 +677,34 @@ def test_stage_submission_requires_previous_stage_completion(tmp_path):
 
     assert response.status_code == 422
     assert "setup" in response.json["field_errors"]["stage"]
+
+
+def test_setup_submit_checks_the_sources_currently_shown_on_the_page(
+    client, session_id, tmp_path
+):
+    missing = tmp_path / "new-source-that-does-not-exist"
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={
+            "values": {
+                "store": "test",
+                "store_confirmed": True,
+                "products_csv": str(tmp_path),
+                "rules_csv": str(tmp_path),
+                "image_source_labels": ["本次新增图片源"],
+                "image_roots": [str(missing)],
+                "folder_index_root": str(tmp_path / ".index"),
+                "asset_manifest": "",
+                "historical_basic_xlsx": "",
+                "historical_promotion_csv": "",
+                "user_notes": "",
+            }
+        },
+    )
+
+    assert response.status_code == 422
+    assert "image_roots" in response.json["field_errors"]
+    assert "本次新增图片源" in response.json["field_errors"]["image_roots"]
 
 
 def test_unclaimed_submission_can_be_withdrawn_but_processing_cannot(
@@ -1596,11 +1626,6 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
         },
     )
 
-    monkeypatch.setattr(
-        web_module,
-        "launch_gallery_worker",
-        lambda store, current_session, job: {**job, "pid": 1234},
-    )
     submitted = client.post(
         f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
         json={
@@ -1625,11 +1650,12 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
     stage_path = tmp_path / session_id / "03-asset-matching"
     assert not (stage_path / "handoff.json").exists()
     assert (stage_path / "gallery-job.json").is_file()
+    assert submitted.json["gallery_job"]["status"] == "queued"
     state = store.load_session(session_id)
     assert state["stages"]["asset_matching"]["status"] == "draft"
 
 
-def test_asset_matching_folder_counts_are_loaded_without_opening_images(
+def test_asset_matching_folder_counts_wait_for_material_executor(
     client, session_id, tmp_path
 ):
     folder = tmp_path / "folder-count"
@@ -1670,9 +1696,9 @@ def test_asset_matching_folder_counts_are_loaded_without_opening_images(
     assert response.json["folder_counts"] == [
         {
             "folder_id": "F1",
-            "image_count_status": "ready",
-            "raw_recursive_image_count": 1,
-            "image_count_reason_code": "",
+            "image_count_status": "unknown",
+            "raw_recursive_image_count": None,
+            "image_count_reason_code": "MATERIAL_EXECUTOR_REQUIRED",
         }
     ]
 
