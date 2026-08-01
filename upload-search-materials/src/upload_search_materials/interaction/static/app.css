@@ -967,6 +967,24 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
   min-width: 190px;
 }
 
+.copy-version-help {
+  max-width: 250px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.copy-finish-hint {
+  flex: 1 1 240px;
+  color: #8a5a13;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.copy-finish-hint[data-status="ready"] {
+  color: #17613a;
+}
+
 .copy-slot-list {
   display: grid;
   gap: 1.25rem;

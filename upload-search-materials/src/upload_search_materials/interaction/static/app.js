@@ -1312,7 +1312,12 @@
     if (UiState.jsonSemanticallyEqual(currentValue, values)) return false;
     const value = JSON.stringify(values, null, 2);
     control.value = value;
-    if (notify) control.dispatchEvent(new Event("input", { bubbles: true }));
+    if (notify) {
+      control.dispatchEvent(new CustomEvent(
+        "input",
+        { bubbles: true, detail: { source: "explicit-user-edit" } },
+      ));
+    }
     return true;
   }
 
@@ -3348,17 +3353,31 @@
       processPanel.appendChild(preview);
     };
 
-    const renderCopyEditor = (processed) => {
+    const renderCopyEditor = (processed, selectedRequestId = "") => {
       const copyContent = subpages.copy;
       const assignments = [...stateByProduct.values()].flat();
+      const savedCopyItems = readJsonListControl("copy_edits")
+        .filter((item) => item?.slot_id);
+      const savedRequestIds = [...new Set(
+        savedCopyItems
+          .map((item) => String(item?.request_id || ""))
+          .filter(Boolean),
+      )];
+      const restoredRequestId = selectedRequestId
+        || (savedRequestIds.length === 1 ? savedRequestIds[0] : "");
+      const hasMeaningfulCopyDrafts = (drafts) => drafts.some((item) => (
+        String(item?.title || "").trim()
+        || String(item?.description || "").trim()
+        || item?.confirmed === true
+      ));
       const savedCopy = new Map(
-        readJsonListControl("copy_edits")
-          .filter((item) => item?.slot_id)
-          .map((item) => [String(item.slot_id), item]),
+        savedCopyItems.map((item) => [String(item.slot_id), item]),
       );
       const form = element("div", "copy-slot-list");
       const copyState = [];
       let finishButton = null;
+      let finishHint = null;
+      let copyVersionCount = 0;
       const copyActions = element("div", "copy-toolbar");
       const copyStatus = element(
         "span",
@@ -3368,25 +3387,53 @@
       const copyButton = element(
         "button",
         "primary-button",
-        "千牛 AI 生成标题与描述",
+        hasMeaningfulCopyDrafts(savedCopyItems)
+          ? "重新生成新版本"
+          : "生成标题与描述",
       );
       copyButton.type = "button";
       const copyVersions = document.createElement("select");
       copyVersions.setAttribute("aria-label", "AI 文案版本");
       const copyToolbarActions = element("div", "copy-toolbar-actions");
-      copyToolbarActions.append(copyButton, copyVersions);
+      copyToolbarActions.append(
+        copyButton,
+        copyVersions,
+        element(
+          "small",
+          "copy-version-help",
+          "重新生成会创建独立新版本，不覆盖历史版本，也不会发布。",
+        ),
+      );
       copyActions.append(copyStatus, copyToolbarActions);
       const updateCopyActions = () => {
-        const hasCompleteDrafts = copyState.length > 0
-          && copyState.every((draft) => draft.title && draft.description);
+        const incompleteCount = copyState.filter(
+          (draft) => !draft.title || !draft.description,
+        ).length;
+        const unconfirmedCount = copyState.filter(
+          (draft) => draft.title && draft.description && !draft.confirmed,
+        ).length;
+        const hasCompleteDrafts = copyState.length > 0 && incompleteCount === 0;
         copyButton.className = hasCompleteDrafts
           ? "button-secondary"
           : "primary-button";
         if (finishButton) {
           finishButton.hidden = !hasCompleteDrafts;
-          finishButton.disabled = copyState.some(
-            (draft) => !draft.title || !draft.description || !draft.confirmed,
-          );
+          finishButton.disabled = incompleteCount > 0 || unconfirmedCount > 0;
+          finishButton.title = incompleteCount
+            ? `还有 ${incompleteCount} 个坑位缺少标题或描述`
+            : unconfirmedCount
+              ? `还需人工确认 ${unconfirmedCount} 个坑位`
+              : "全部坑位已核对，可以进入 dry-run";
+        }
+        if (finishHint) {
+          finishHint.textContent = incompleteCount
+            ? `还有 ${incompleteCount} 个坑位缺少标题或描述。`
+            : unconfirmedCount
+              ? `还需勾选确认 ${unconfirmedCount} 个坑位。`
+              : "全部坑位已核对，可以进入 dry-run。";
+          finishHint.dataset.status = incompleteCount || unconfirmedCount
+            ? "waiting"
+            : "ready";
         }
       };
       assignments.forEach((assignment, assignmentIndex) => {
@@ -3403,6 +3450,7 @@
           source: String(existing.source || "manual"),
           evidence: Array.isArray(existing.evidence) ? existing.evidence : [],
           risks: Array.isArray(existing.risks) ? existing.risks : [],
+          request_id: String(existing.request_id || ""),
           output_sha256: Array.isArray(existing.output_sha256)
             ? existing.output_sha256
             : (processed.slots || [])
@@ -3581,10 +3629,11 @@
       const finish = element(
         "button",
         "primary-button",
-        "完成第五阶段并进入 dry-run",
+        "完成当前阶段并进入 dry-run",
       );
       finish.type = "button";
       finishButton = finish;
+      finishHint = element("small", "copy-finish-hint");
       updateCopyActions();
       finish.addEventListener("click", () => persistStage("submit"));
       const backToProcess = element(
@@ -3598,7 +3647,7 @@
         { userRequested: true },
       ));
       const finalActions = element("div", "slot-page-actions");
-      finalActions.append(backToProcess, finish);
+      finalActions.append(finishHint, backToProcess, finish);
       const technical = document.createElement("details");
       technical.className = "slot-technical-details";
       technical.append(
@@ -3633,10 +3682,11 @@
         }));
         writeJsonListControl("copy_edits", merged, { notify: true });
         copyStatus.textContent = "千牛文案已载入；请核对依据、风险并逐坑确认。";
-        renderCopyEditor(processed);
+        renderCopyEditor(processed, requestId);
       };
       const requestCopy = async (regenerate = false) => {
         copyButton.disabled = true;
+        copyButton.textContent = `正在生成版本 ${copyVersionCount + 1}…`;
         copyStatus.textContent = "正在打开千牛商品坑位并生成文案，请稍候…";
         try {
           const copyRequest = await fetchJson(
@@ -3670,14 +3720,21 @@
           copyStatus.textContent = error.userMessage || error.message;
         } finally {
           copyButton.disabled = false;
+          copyButton.textContent = copyVersionCount
+            ? "重新生成新版本"
+            : "生成标题与描述";
         }
       };
       copyButton.addEventListener("click", () => requestCopy(true));
       fetchJson(apiPath("/stages/slots_copy/agent-requests"))
-        .then((payload) => {
+        .then(async (payload) => {
           const versions = (payload.requests || []).filter(
             (item) => item.kind === "copy_draft" && item.status === "completed",
           );
+          copyVersionCount = versions.length;
+          copyButton.textContent = copyVersionCount
+            ? "重新生成新版本"
+            : "生成标题与描述";
           copyVersions.replaceChildren();
           if (!versions.length) {
             const option = document.createElement("option");
@@ -3692,6 +3749,35 @@
             option.textContent = `版本 ${versions.length - index} · ${item.request_id}`;
             copyVersions.appendChild(option);
           });
+          const selectedVersionExists = versions.some(
+            (item) => item.request_id === restoredRequestId,
+          );
+          if (selectedVersionExists) {
+            copyVersions.value = restoredRequestId;
+            return;
+          }
+          const currentDrafts = readJsonListControl("copy_edits")
+            .filter((item) => item?.slot_id);
+          if (!copyVersions.isConnected) return;
+          if (
+            hasMeaningfulCopyDrafts(savedCopyItems)
+            || hasMeaningfulCopyDrafts(currentDrafts)
+          ) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "当前草稿 · 未绑定 AI 版本";
+            option.selected = true;
+            copyVersions.prepend(option);
+            return;
+          }
+          const latestRequestId = versions[0].request_id;
+          const detail = await fetchJson(
+            apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(latestRequestId)}`),
+          );
+          const drafts = detail.response?.result?.copy_drafts || [];
+          if (drafts.length && copyVersions.isConnected) {
+            applyCopyDrafts(drafts, latestRequestId);
+          }
         })
         .catch(() => {});
       copyVersions.addEventListener("change", async () => {

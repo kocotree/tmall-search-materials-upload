@@ -3916,6 +3916,7 @@ def _current_result(
         "asset_matching",
         "image_review",
         "slots_copy",
+        "dry_run",
     }:
         return None
     context = store.read_optional_stage_document(session_id, stage_id, "review-context")

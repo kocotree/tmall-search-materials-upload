@@ -853,7 +853,10 @@ def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_control
         "AI 标题与描述",
         "确认坑位并进入图片裁剪",
         "完成图片处理并进入文案生成",
-        "完成第五阶段并进入 dry-run",
+        "完成当前阶段并进入 dry-run",
+        "重新生成新版本",
+        "重新生成会创建独立新版本，不覆盖历史版本，也不会发布。",
+        "还需勾选确认",
     ):
         assert text in javascript
     assert '? ["process", "copy"]' in javascript
@@ -861,6 +864,22 @@ def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_control
     assert 'detail: { source: "explicit-user-edit" }' in javascript
     assert (
         'event.detail?.source !== "explicit-user-edit"' in javascript
+    )
+
+
+def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert 'const renderCopyEditor = (processed, selectedRequestId = "")' in javascript
+    assert "copyVersions.value = restoredRequestId" in javascript
+    assert 'request_id: String(existing.request_id || "")' in javascript
+    assert "当前草稿 · 未绑定 AI 版本" in javascript
+    assert "hasMeaningfulCopyDrafts(savedCopyItems)" in javascript
+    assert "applyCopyDrafts(drafts, latestRequestId)" in javascript
+    assert (
+        'new CustomEvent(\n        "input",\n'
+        '        { bubbles: true, detail: { source: "explicit-user-edit" } },'
+        in javascript
     )
 
 
@@ -1395,6 +1414,36 @@ def test_stage_read_and_status_expose_schema_and_state(client, session_id):
     assert status.json["status"] == "draft"
     assert status.json["collection_status"]["status"] == "draft"
     assert status.json["collection_status"]["history"] == []
+
+
+def test_dry_run_stage_exposes_agent_prepared_review_context(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    store.write_review_context(
+        session_id,
+        "dry_run",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "dry_run",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "dry-run ready",
+            "blocking_reasons": [],
+            "evidence": ["dry-run-tasks.json"],
+            "next_action": "review",
+            "data": {"task_count": 10},
+        },
+    )
+
+    response = client.get(
+        f"/api/sessions/{session_id}/stages/dry_run"
+    )
+
+    assert response.status_code == 200
+    assert response.json["result"]["summary"] == "dry-run ready"
+    assert response.json["result"]["data"]["task_count"] == 10
 
 
 def test_stage_read_exposes_only_current_handoff_submission_time(
