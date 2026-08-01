@@ -3363,9 +3363,13 @@
       const copyStatus = element(
         "span",
         "copy-toolbar-status",
-        "AI 文案绑定当前最终图片和顺序；生成后仍需逐坑人工确认。",
+        "千牛会按商品坑位生成文案；生成后仍需逐坑人工确认。",
       );
-      const copyButton = element("button", "primary-button", "AI 生成标题与描述");
+      const copyButton = element(
+        "button",
+        "primary-button",
+        "千牛 AI 生成标题与描述",
+      );
       copyButton.type = "button";
       const copyVersions = document.createElement("select");
       copyVersions.setAttribute("aria-label", "AI 文案版本");
@@ -3567,11 +3571,11 @@
       copyWorkspace.appendChild(form);
       const copyHeading = element("div", "slot-page-heading");
       copyHeading.append(
-        element("strong", "", "AI 标题与描述"),
+        element("strong", "", "千牛 AI 标题与描述"),
         element(
           "span",
           "",
-          "文案只依据最终图片和可信商品信息生成；每个坑位都需要人工确认。",
+          "系统校验并本地上传当前坑位第 1 张最终图片，唤起千牛文案；只读取草稿、不填充、不发布，每个坑位都需要人工核对并确认。",
         ),
       );
       const finish = element(
@@ -3624,28 +3628,32 @@
           evidence: draft.evidence || [],
           risks: draft.risks || [],
           confirmed: false,
-          source: "agent_assisted",
+          source: String(draft.source || "qianniu_builtin_ai"),
           request_id: requestId,
         }));
         writeJsonListControl("copy_edits", merged, { notify: true });
-        copyStatus.textContent = "AI 文案已载入；请核对依据、风险并逐坑确认。";
+        copyStatus.textContent = "千牛文案已载入；请核对依据、风险并逐坑确认。";
         renderCopyEditor(processed);
       };
       const requestCopy = async (regenerate = false) => {
         copyButton.disabled = true;
+        copyStatus.textContent = "正在打开千牛商品坑位并生成文案，请稍候…";
         try {
           const copyRequest = await fetchJson(
             apiPath("/stages/slots_copy/copy-request"),
             {
               method: "POST",
-              body: JSON.stringify({ regenerate }),
+              body: JSON.stringify({
+                regenerate,
+                provider: "qianniu_builtin_ai",
+              }),
             },
           );
           if (copyRequest.status !== "completed") {
             copyStatus.textContent = {
-              pending_agent: "文案请求等待当前 Codex 任务领取。",
-              processing: "Codex 正在按最终坑位图片生成标题和描述。",
-              failed: "AI 文案失败，可保留人工填写并重试。",
+              pending_agent: "千牛文案请求正在排队。",
+              processing: "千牛正在按商品坑位生成标题和描述。",
+              failed: "千牛文案生成失败，可保留人工填写并重试。",
             }[copyRequest.status] || `文案请求：${copyRequest.status}`;
             return;
           }
@@ -3654,7 +3662,7 @@
           );
           const drafts = detail.response?.result?.copy_drafts || [];
           if (!drafts.length) {
-            copyStatus.textContent = "AI 响应没有可用文案，请重试或人工填写。";
+            copyStatus.textContent = "千牛没有返回可用文案，请重试或人工填写。";
             return;
           }
           applyCopyDrafts(drafts, copyRequest.request_id);
@@ -3673,7 +3681,7 @@
           copyVersions.replaceChildren();
           if (!versions.length) {
             const option = document.createElement("option");
-            option.textContent = "暂无 AI 文案版本";
+            option.textContent = "暂无千牛文案版本";
             copyVersions.appendChild(option);
             copyVersions.disabled = true;
             return;

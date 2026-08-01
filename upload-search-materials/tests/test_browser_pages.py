@@ -1268,6 +1268,108 @@ def test_successful_publish_records_remote_id(tmp_path):
     assert page.input_files == [("#file-input", [item.assets[0].source_path])]
 
 
+def test_qianniu_publish_workflow_uses_migrated_page_flow(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.browser.upload_page as upload_module
+    from upload_search_materials.browser.qianniu_upload import (
+        QianniuPublishObservation,
+    )
+
+    page = configured_upload_page()
+    item = approved_item(tmp_path)
+    calls = []
+
+    def fake_prepare(page_arg, item_arg, *, material_center_url):
+        calls.append(("prepare", item_arg.task_id, material_center_url))
+
+    def fake_publish(
+        page_arg,
+        item_arg,
+        *,
+        material_center_url,
+        before_publish,
+    ):
+        calls.append(("button-ready", item_arg.task_id))
+        before_publish()
+        calls.append(("clicked", item_arg.task_id))
+        return QianniuPublishObservation(
+            "submitted",
+            "",
+            remote_material_id="RM-QIANNIU-1",
+            evidence="exact-slot-verified",
+        )
+
+    monkeypatch.setattr(
+        upload_module, "prepare_qianniu_upload", fake_prepare
+    )
+    monkeypatch.setattr(
+        upload_module, "publish_qianniu_once", fake_publish
+    )
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        approval_manifest(item),
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+        before_publish=lambda: calls.append(("checkpoint", "MAT-1")),
+        workflow="qianniu_recommend",
+        material_center_url="https://example.invalid/material-center",
+    )
+
+    assert outcome.status == "submitted"
+    assert outcome.remote_material_id == "RM-QIANNIU-1"
+    assert calls == [
+        (
+            "prepare",
+            "MAT-1",
+            "https://example.invalid/material-center",
+        ),
+        ("button-ready", "MAT-1"),
+        ("checkpoint", "MAT-1"),
+        ("clicked", "MAT-1"),
+    ]
+
+
+def test_qianniu_prepare_failure_stops_before_checkpoint(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.browser.upload_page as upload_module
+    from upload_search_materials.browser.qianniu_upload import (
+        QianniuUploadError,
+    )
+
+    page = configured_upload_page()
+    item = approved_item(tmp_path)
+    checkpoints = []
+
+    def fail_prepare(*args, **kwargs):
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS"
+        )
+
+    monkeypatch.setattr(
+        upload_module, "prepare_qianniu_upload", fail_prepare
+    )
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        approval_manifest(item),
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+        before_publish=lambda: checkpoints.append("called"),
+        workflow="qianniu_recommend",
+    )
+
+    assert outcome.status == "blocked"
+    assert outcome.reason == "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS"
+    assert checkpoints == []
+
+
 def test_remote_match_resolves_uncertain(tmp_path):
     page = configured_upload_page()
     page.visible.add("#remote-table")
@@ -1292,4 +1394,46 @@ def test_remote_match_resolves_uncertain(tmp_path):
 
     assert outcome.status == "under_review"
     assert outcome.remote_material_id == "RM-1"
+
+
+def test_qianniu_resume_uses_exact_slot_verifier(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.browser.verifier as verifier_module
+    from upload_search_materials.browser.qianniu_upload import (
+        QianniuPublishObservation,
+    )
+
+    page = configured_upload_page()
+    item = approved_item(tmp_path)
+    calls = []
+
+    def fake_verify(page_arg, item_arg, *, material_center_url):
+        calls.append((item_arg.task_id, material_center_url))
+        return QianniuPublishObservation(
+            "under_review",
+            "",
+            remote_material_id="RM-QIANNIU-2",
+            evidence="product-and-slot-match",
+        )
+
+    monkeypatch.setattr(
+        verifier_module, "verify_qianniu_remote_item", fake_verify
+    )
+
+    outcome = verify_remote_item(
+        page,
+        item,
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        submitted_at="2026-07-17T11:00:00+08:00",
+        workflow="qianniu_recommend",
+        material_center_url="https://example.invalid/material-center",
+    )
+
+    assert outcome.status == "under_review"
+    assert outcome.remote_material_id == "RM-QIANNIU-2"
+    assert calls == [
+        ("MAT-1", "https://example.invalid/material-center")
+    ]
     assert outcome.retry_allowed is False

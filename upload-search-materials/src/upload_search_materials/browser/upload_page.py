@@ -15,6 +15,12 @@ from .session import (
     assert_store_identity,
     detect_human_check,
 )
+from .qianniu_upload import (
+    DEFAULT_MATERIAL_CENTER_URL,
+    QianniuUploadError,
+    prepare_qianniu_upload,
+    publish_qianniu_once,
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,8 @@ def upload_approved_item(
     expected_store: str,
     now: str,
     before_publish: Callable[[], None] | None = None,
+    workflow: str = "legacy_selectors",
+    material_center_url: str = DEFAULT_MATERIAL_CENTER_URL,
 ) -> UploadOutcome:
     approval = verify_manifest(
         manifest,
@@ -79,6 +87,53 @@ def upload_approved_item(
         return UploadOutcome("blocked", approval.reason, retry_allowed=False)
     if item.status != MaterialStatus.APPROVED:
         return UploadOutcome("blocked", "TASK_NOT_APPROVED_STATE", retry_allowed=False)
+    if workflow == "qianniu_recommend":
+        try:
+            assert_store_identity(
+                page, selectors["store_name"], expected_store
+            )
+            detect_human_check(page, selectors["human_check"])
+            prepare_qianniu_upload(
+                page,
+                item,
+                material_center_url=material_center_url,
+            )
+        except (
+            StoreIdentityError,
+            HumanCheckRequired,
+            QianniuUploadError,
+        ) as error:
+            return UploadOutcome(
+                "blocked",
+                (
+                    error.reason_code
+                    if isinstance(error, QianniuUploadError)
+                    else str(error)
+                ),
+                retry_allowed=False,
+                evidence=str(error),
+            )
+        try:
+            observation = publish_qianniu_once(
+                page,
+                item,
+                material_center_url=material_center_url,
+                before_publish=before_publish,
+            )
+        except QianniuUploadError as error:
+            return UploadOutcome(
+                "blocked",
+                error.reason_code,
+                retry_allowed=False,
+                evidence=str(error),
+            )
+        return UploadOutcome(
+            observation.status,
+            observation.reason_code,
+            retry_allowed=False,
+            remote_material_id=observation.remote_material_id,
+            evidence=observation.evidence,
+        )
     try:
         assert_store_identity(page, selectors["store_name"], expected_store)
         detect_human_check(page, selectors["human_check"])

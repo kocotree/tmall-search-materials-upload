@@ -42,7 +42,8 @@ tmall-materials ui-stop --runs-root <runs-root> --session <session-id>
 Agent 在处理任何 handoff 前，必须先读取该阶段当前 revision 的持久化
 decision-mode；不存在时使用 Skill 的阶段默认值。第五阶段新任务的坑位编排只允许
 `deterministic` 与 `manual` 两个入口；历史规则/AI 草稿只读展示，不得重新生成、
-自动采用或覆盖。`agent_assisted` 只用于最终图片确定后的标题和描述。
+自动采用或覆盖。`agent_assisted` 只用于最终图片确定后的标题和描述；新任务默认
+调用千牛商品坑位内置的“AI生成文案”，不由 Codex 自行编写商品文案。
 模式选择决定 Agent 是等待用户、运行确定性规则，还是领取受控 AI 请求。
 
 素材选择提交后，同步运行确定性编排器并生成唯一未确认
@@ -63,7 +64,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 4. 每坑比例必须是全部成员共同可行的 3:4 或 1:1，并依次按原生比例数量、推荐分辨率通过数、画面保留率、较少压缩和最终 3:4 同分优先进行确定性评分。策略 ID、版本和 SHA-256 与输入 revision 一起写入草稿；相同输入必须产生相同结果。
 5. 新任务不显示或提交独立 `image_review` 阶段；内部 stage ID 和旧 `04-image-review/` 文件仅用于历史恢复。新任务也不得创建 `slot_plan` / `slot_plan_with_analysis` Agent request。
 6. 第五阶段只使用两个递进子页面：`图片裁剪和压缩 → AI生成标题和描述`。第一页顶部先显示自动坑位摘要、依据、未使用候选和人工编辑器；计划未按精确 revision 确认前隐藏裁剪区。人工可增删坑位、增删/调序图片及修改比例，一张图片只能属于一个坑位。确认后才在同页展开可视化 3:4/1:1 裁剪和压缩，输出只写任务目录并由服务端复核实际文件。
-7. 坑位输出达到 `outputs_ready` 后才允许创建独立 `copy_draft` 请求。请求绑定计划 revision、最终输出 SHA-256 和图片顺序；响应逐坑给出标题、描述、依据和风险。文案只能使用可信商品字段，必须逐坑人工确认；图片、比例、顺序、裁剪结果或输出 SHA 改变时，对应文案过期。
+7. 坑位输出达到 `outputs_ready` 后才允许创建独立 `copy_draft` 请求。新任务默认按商品逐坑进入千牛“发图文”表单，验证商品已锁定后，使用该坑位顺序第一的最终输出图片唤起千牛内置“AI生成文案”：对任务目录中的本地最终图片复核 SHA-256 后，直接通过千牛网页的文件输入控件执行“本地上传”；为避免千牛截断长文件名和历史重名，上传事务使用包含源 SHA 前缀和随机后缀的短唯一素材名，图片字节不得改变，并按该唯一名称精确选中。不得先搜索或复用云端素材库中的同名图片，也不得使用与当前坑位无关的任意已有图片。读取标题和正文后立即退出未确认表单。进入商品列表时不得固定只查顶层页面或盲目选择 iframe；必须在限定时间内轮询顶层与全部 frame，并且仅采用“唯一商品名称/ID搜索框 + 已加载商品表格”同时成立的页面作用域。顶部帮助搜索框（例如“如何设置电子发票”）不得作为商品搜索框。该过程不得点击“填充文案”、表单最终“确认”或任何发布按钮；种子图片上传不等于批准或正式发布，正式上传仍受批准清单和生产确认约束。请求仍绑定计划 revision、最终输出 SHA-256 和图片顺序，响应逐坑记录标题、描述、绑定商品、触发图片、依据和风险。千牛文案必须逐坑人工核对、编辑和确认；图片、比例、顺序、裁剪结果或输出 SHA 改变时，对应文案过期。千牛页面不可用时保留可重试失败状态，允许人工填写，不得自动改用 Codex 生成商品事实。
 
 详细字段、判定规则和恢复方式见 [asset-requirements.md](references/asset-requirements.md)、[data-schema.md](references/data-schema.md) 与 [operations-guide.md](references/operations-guide.md)。
 
@@ -195,7 +196,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 4. 默认运行 `tmall-materials supplement` 扫描“搜推高价值”的全部分页，每页增量写入 CSV 和 checkpoint；只对目标容量不明确、解析失败或状态异常的商品，再带 `--scan-mode exact --candidates supplement-candidates.csv` 按精确商品 ID 补采。`--scan-mode recommended` 仅为旧证据和恢复命令保留。
 5. 带 `--backend-status`、已人工确认的素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。
 6. 用户选择精确 task ID 后运行 `tmall-materials approve`，生成不可变 `approval-manifest.json`。
-7. 运行 `tmall-materials publish`。发布前重新核对店铺、商品、坑位和批准内容哈希；发布后回查远端状态。
+7. 运行 `tmall-materials publish`。正式图片上传必须使用项目内 `browser/qianniu_upload.py` 中从 PlaywrightAuto 迁移的千牛搜推流程：精确搜索商品 ID、定位批准的 1-based 坑位、进入“发图文”跨域表单、把批准的最终图片上传到素材库、按完整文件名唯一选中、核对选择数量、返回表单并填写已批准标题和正文。发布按钮唯一可见后才写入 pre-publish checkpoint，并且只允许点击一次明确的“提交发布/发布”；不得点击通用“确认/确定”。若出现二次确认、点击超时或无法在原商品原坑位读到唯一 `CopyId_value`，必须进入 `publish_uncertain` 并暂停批次。发布前仍须重新核对店铺、商品、空坑位和批准内容哈希；发布后按精确商品与坑位回查远端素材 ID。PlaywrightAuto 目录只作为迁移来源，生产运行不得依赖该外部目录。
 8. 上传中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
 运行 `uv run tmall-materials --help` 查看参数。所有命令从本 skill 目录执行；首次使用优先运行 `scripts/bootstrap.cmd`。启动器支持官方源及显式选择的 HTTPS 镜像、项目内缓存、已有 Python 3.11/3.12 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。

@@ -22,6 +22,10 @@ from ..browser.session import (
     inspect_cdp_endpoint,
     open_cdp_page,
 )
+from ..browser.qianniu_copy import (
+    QianniuCopyError,
+    generate_qianniu_copy_drafts,
+)
 from ..collection_readiness import (
     build_collection_readiness,
     create_selector_candidate,
@@ -37,7 +41,10 @@ from ..agent_handoff import (
     AgentRequestError,
     ai_default_slot_planning_enabled,
     cancel_agent_request,
+    claim_agent_request,
+    complete_agent_request,
     create_agent_request,
+    fail_agent_request,
     find_equivalent_agent_request,
     read_agent_request,
     supersede_agent_request,
@@ -3300,6 +3307,13 @@ def create_app(
     )
     def create_slot_copy_request(session_id: str):
         payload = _json_object()
+        copy_provider = str(
+            payload.get("provider", "codex_agent")
+        ).strip()
+        if copy_provider not in {"codex_agent", "qianniu_builtin_ai"}:
+            return _validation_error(
+                {"copy_request": "unsupported copy provider"}
+            )
         state = store.load_session(session_id)
         current = read_current_slot_plan(store, session_id)
         processed_path = (
@@ -3319,6 +3333,9 @@ def create_app(
             processed_path, "processed-outputs"
         )
         outputs_identity = final_outputs_sha256(processed)
+        context_fingerprint = hashlib.sha256(
+            f"{outputs_identity}|{copy_provider}".encode("utf-8")
+        ).hexdigest()
         existing = None
         if payload.get("regenerate") is not True:
             existing = find_equivalent_agent_request(
@@ -3328,7 +3345,7 @@ def create_app(
                 context_revision=int(
                     state["stages"]["slots_copy"]["revision"]
                 ),
-                context_fingerprint=outputs_identity,
+                context_fingerprint=context_fingerprint,
             )
         if existing is not None:
             return jsonify(existing)
@@ -3358,6 +3375,9 @@ def create_app(
                             "output_sha256": str(
                                 output.get("output_sha256", "")
                             ),
+                            "output_path": str(
+                                output.get("output_path", "")
+                            ),
                             "order": int(output.get("order", 0)),
                         }
                         for output in slot.get("outputs", [])
@@ -3379,13 +3399,80 @@ def create_app(
                 request_context={
                     "slot_plan_revision": int(current["plan_revision"]),
                     "final_outputs_sha256": final_outputs_sha256(processed),
-                    "context_fingerprint": outputs_identity,
+                    "context_fingerprint": context_fingerprint,
+                    "copy_provider": copy_provider,
                     "slots": slots,
                     "prohibited_terms": [],
                 },
             )
         except (AgentRequestError, TypeError, ValueError) as error:
             return _validation_error({"copy_request": str(error)})
+        if copy_provider == "qianniu_builtin_ai":
+            provider_actor = "qianniu-builtin-ai"
+            try:
+                claim_agent_request(
+                    store,
+                    session_id,
+                    created["request_id"],
+                    actor=provider_actor,
+                )
+                with open_cdp_page(
+                    runtime.cdp_url,
+                    runtime.material_center_url,
+                ) as page:
+                    drafts = generate_qianniu_copy_drafts(
+                        page,
+                        slots,
+                        material_center_url=runtime.material_center_url,
+                    )
+                complete_agent_request(
+                    store,
+                    session_id,
+                    created["request_id"],
+                    {
+                        "request_id": created["request_id"],
+                        "kind": "copy_draft",
+                        "provider_id": "qianniu-builtin-ai",
+                        "response_model": "qianniu-builtin-copy",
+                        "result": {"copy_drafts": drafts},
+                    },
+                    actor=provider_actor,
+                )
+                created = read_agent_request(
+                    store, session_id, created["request_id"]
+                )
+            except (
+                AgentRequestError,
+                CdpUnavailable,
+                InteractionConflict,
+                QianniuCopyError,
+                TypeError,
+                ValueError,
+            ) as error:
+                app.logger.warning(
+                    "Qianniu copy request failed for session %s: %s",
+                    session_id,
+                    error,
+                )
+                reason_code = (
+                    error.reason_code
+                    if isinstance(error, QianniuCopyError)
+                    else (
+                        "CDP_UNAVAILABLE"
+                        if isinstance(error, CdpUnavailable)
+                        else "QIANNIU_COPY_REQUEST_FAILED"
+                    )
+                )
+                fail_agent_request(
+                    store,
+                    session_id,
+                    created["request_id"],
+                    actor=provider_actor,
+                    reason_code=reason_code,
+                )
+                return _validation_error(
+                    {"copy_request": str(error)}
+                )
         save_current_slot_plan(
             store,
             session_id,
@@ -3482,7 +3569,10 @@ def create_app(
                             or description
                             != originals[slot_id].get("description")
                         )
-                        else "agent_assisted"
+                        else str(
+                            originals[slot_id].get("source")
+                            or "agent_assisted"
+                        )
                     ),
                 }
             )

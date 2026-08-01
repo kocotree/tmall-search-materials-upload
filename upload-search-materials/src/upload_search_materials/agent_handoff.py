@@ -491,7 +491,11 @@ def wait_for_agent_request(
 
 
 def claim_agent_request(
-    store: SessionStore, session_id: str, request_id: str
+    store: SessionStore,
+    session_id: str,
+    request_id: str,
+    *,
+    actor: str = "codex-agent",
 ) -> dict[str, Any]:
     request = read_agent_request(store, session_id, request_id)
     if request["status"] == "processing":
@@ -503,8 +507,30 @@ def claim_agent_request(
         session_id,
         request,
         "processing",
-        actor="codex-agent",
+        actor=actor,
         allowed_from={"pending_agent"},
+    )
+
+
+def fail_agent_request(
+    store: SessionStore,
+    session_id: str,
+    request_id: str,
+    *,
+    actor: str,
+    reason_code: str,
+) -> dict[str, Any]:
+    request = read_agent_request(store, session_id, request_id)
+    if request["status"] == "failed":
+        return request
+    return _transition_agent_request(
+        store,
+        session_id,
+        request,
+        "failed",
+        actor=actor,
+        reason_code=reason_code,
+        allowed_from={"pending_agent", "processing"},
     )
 
 
@@ -620,7 +646,9 @@ def _validate_response(
         return {
             "schema_version": REQUEST_SCHEMA_VERSION,
             "workflow_schema_version": REQUEST_WORKFLOW_SCHEMA_VERSION,
-            "provider_id": PROVIDER_ID,
+            "provider_id": str(
+                response.get("provider_id") or PROVIDER_ID
+            ),
             "request_id": request["request_id"],
             "session_id": request["session_id"],
             "kind": request["kind"],
@@ -988,6 +1016,8 @@ def complete_agent_request(
     session_id: str,
     request_id: str,
     response: Mapping[str, Any],
+    *,
+    actor: str = "codex-agent",
 ) -> dict[str, Any]:
     request = read_agent_request(store, session_id, request_id)
     if request["status"] != "processing":
@@ -1011,7 +1041,7 @@ def complete_agent_request(
             session_id,
             request,
             "failed",
-            actor="codex-agent",
+            actor=actor,
             reason_code=str(error),
             allowed_from={"processing"},
         )
@@ -1037,7 +1067,7 @@ def complete_agent_request(
         session_id,
         request,
         "completed",
-        actor="codex-agent",
+        actor=actor,
         allowed_from={"processing"},
     )
     return validated

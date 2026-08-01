@@ -52,7 +52,11 @@ from .assets import (
     load_media_policy,
     validate_asset_group,
 )
-from .browser.config import SelectorConfigError, load_selectors
+from .browser.config import (
+    SelectorConfigError,
+    load_selector_profile,
+    load_selectors,
+)
 from .browser.export_page import export_reports
 from .browser.material_page import (
     SelectorInvalidError,
@@ -489,14 +493,24 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
         print("发布被阻断：选择器配置不存在", file=sys.stderr)
         return 2
     try:
-        selectors = load_selectors(
+        selector_profile = load_selector_profile(
             Path(args.selectors),
-            purpose="publish",
+            # The PlaywrightAuto-derived uploader operates on the same
+            # verified search-recommendation page as high-value collection.
+            purpose="high_value_collection",
             production=page is None and page_factory is None,
         )
+        selectors = selector_profile.selectors
     except SelectorConfigError as error:
         print(f"发布被阻断：{error}", file=sys.stderr)
         return 2
+    material_center_url = (
+        selector_profile.material_center_url
+        or (
+            "https://myseller.taobao.com/home.htm/"
+            "material-center/material-management"
+        )
+    )
     run = read_json(run_dir / "run.json")
     manifest = read_json(manifest_path)
     manifest_entries = manifest.get("entries")
@@ -577,6 +591,8 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                         selectors,
                         expected_store=args.store,
                         submitted_at=existing["updated_at"],
+                        workflow="qianniu_recommend",
+                        material_center_url=material_center_url,
                     )
                     persisted_status = "failed" if outcome.status == "not_found" else outcome.status
                     if existing["status"] == "under_review" and persisted_status == "submitted":
@@ -637,6 +653,8 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                         expected_store=args.store,
                         now=_now_iso(),
                         before_publish=persist_pre_publish_checkpoint,
+                        workflow="qianniu_recommend",
+                        material_center_url=material_center_url,
                     )
                     checkpoint = state.item_record(item.task_id)
                     _persist_item_transition(

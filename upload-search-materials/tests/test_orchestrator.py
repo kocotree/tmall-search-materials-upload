@@ -1226,6 +1226,8 @@ def test_publish_uncertain_pauses_remaining_batch_items(tmp_path, monkeypatch):
 
     def fake_upload(page, item, manifest, selectors, **kwargs):
         calls.append(item.task_id)
+        assert kwargs["workflow"] == "qianniu_recommend"
+        assert "material-center" in kwargs["material_center_url"]
         kwargs["before_publish"]()
         return UploadOutcome("publish_uncertain", "PUBLISH_UNCERTAIN", evidence="timeout")
 

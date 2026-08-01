@@ -3,6 +3,10 @@ from datetime import datetime, timedelta
 from ..models import MaterialItem
 from .session import assert_store_identity, detect_human_check
 from .upload_page import UploadOutcome, _prepare_exact_product
+from .qianniu_upload import (
+    DEFAULT_MATERIAL_CENTER_URL,
+    verify_qianniu_remote_item,
+)
 
 
 def _status_name(value: str) -> str:
@@ -22,9 +26,24 @@ def verify_remote_item(
     *,
     expected_store: str,
     submitted_at: str,
+    workflow: str = "legacy_selectors",
+    material_center_url: str = DEFAULT_MATERIAL_CENTER_URL,
 ) -> UploadOutcome:
     assert_store_identity(page, selectors["store_name"], expected_store)
     detect_human_check(page, selectors["human_check"])
+    if workflow == "qianniu_recommend":
+        observation = verify_qianniu_remote_item(
+            page,
+            item,
+            material_center_url=material_center_url,
+        )
+        return UploadOutcome(
+            observation.status,
+            observation.reason_code,
+            retry_allowed=False,
+            remote_material_id=observation.remote_material_id,
+            evidence=observation.evidence,
+        )
     _prepare_exact_product(page, item, selectors)
     table = page.locator(selectors["remote_material_table"])
     if not table.is_visible():
