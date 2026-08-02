@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import mimetypes
 from pathlib import Path
 import re
+import uuid
 from typing import Callable, Sequence
 
 from playwright.sync_api import Error as PlaywrightError
@@ -379,12 +380,42 @@ def _fill_first_visible(
     )
 
 
+def _remote_ids_from_row(row) -> tuple[set[str], dict[str, tuple[int, str]]]:
+    remote_ids: set[str] = set()
+    evidence: dict[str, tuple[int, str]] = {}
+    slots = _slot_cells(row)
+    for index in range(slots.count()):
+        slot = slots.nth(index)
+        values = [
+            value.strip()
+            for value in slot.locator(
+                '[class*="CopyId_value"]'
+            ).all_inner_texts()
+            if value.strip()
+        ]
+        if len(values) > 1:
+            raise QianniuUploadError(
+                "QIANNIU_REMOTE_ID_AMBIGUOUS",
+                f"position={index + 1};count={len(values)}",
+            )
+        if values:
+            remote_id = values[0]
+            if remote_id in remote_ids:
+                raise QianniuUploadError(
+                    "QIANNIU_REMOTE_ID_AMBIGUOUS",
+                    f"duplicate={remote_id}",
+                )
+            remote_ids.add(remote_id)
+            evidence[remote_id] = (index + 1, slot.inner_text().strip())
+    return remote_ids, evidence
+
+
 def prepare_qianniu_upload(
     page,
     item: MaterialItem,
     *,
     material_center_url: str = DEFAULT_MATERIAL_CENTER_URL,
-) -> None:
+) -> set[str]:
     """Upload exact approved files and fill copy, stopping before publish."""
 
     if item.material_type != "image_text":
@@ -396,6 +427,7 @@ def prepare_qianniu_upload(
     try:
         _open_recommend_list(page, material_center_url)
         row = _find_product_row(page, str(item.product_id))
+        before_remote_ids, _ = _remote_ids_from_row(row)
         frame = _open_slot_publish_form(
             page,
             str(item.product_id),
@@ -416,7 +448,19 @@ def prepare_qianniu_upload(
             attempts=40,
             delay_ms=300,
         )
-        _set_local_files(page, selector_frame, paths)
+        upload_names = []
+        for asset, path in zip(item.assets, paths, strict=True):
+            extension = Path(path).suffix.lower() or ".jpg"
+            upload_names.append(
+                f"publish-{asset.sha256[:12]}-{uuid.uuid4().hex[:8]}"
+                f"{extension}"
+            )
+        _set_local_files(
+            page,
+            selector_frame,
+            paths,
+            upload_names=upload_names,
+        )
         _wait_for_upload_completion(
             page, selector_frame, len(paths)
         )
@@ -426,7 +470,7 @@ def prepare_qianniu_upload(
             attempts=20,
             delay_ms=300,
         )
-        _select_uploaded_cards(page, selector_frame, paths)
+        _select_uploaded_cards(page, selector_frame, upload_names)
         frame = _wait_for_frame(
             page,
             PUBLISH_FRAME_FRAGMENT,
@@ -453,10 +497,12 @@ def prepare_qianniu_upload(
                 'textarea[maxlength="1000"]',
                 'textarea[placeholder*="10-1000个中文字"]',
                 '[contenteditable="true"]',
+                'textarea[data-cangjie-dockey]',
             ),
             item.description,
             field_name="description",
         )
+        return before_remote_ids
     except QianniuUploadError:
         raise
     except Exception as error:
@@ -467,6 +513,21 @@ def prepare_qianniu_upload(
 
 
 def _publish_button(page, frame):
+    semantic = [
+        candidate
+        for candidate in (
+            frame.locator('button[data-autolog*="publisher_ok_clk"]'),
+            page.locator('button[data-autolog*="publisher_ok_clk"]'),
+        )
+        if candidate.count() == 1 and candidate.first.is_visible()
+    ]
+    if len(semantic) == 1:
+        return semantic[0].first
+    if len(semantic) > 1:
+        raise QianniuUploadError(
+            "QIANNIU_PUBLISH_BUTTON_AMBIGUOUS",
+            f"semantic_count={len(semantic)}",
+        )
     matches = []
     for scope in (frame, page):
         for label in ("提交发布", "发布"):
@@ -549,14 +610,63 @@ def _observe_target_slot(
     )
 
 
+def _observe_new_remote_item(
+    page,
+    item: MaterialItem,
+    *,
+    before_remote_ids: set[str],
+    material_center_url: str,
+) -> QianniuPublishObservation:
+    _open_recommend_list(page, material_center_url)
+    row = _find_product_row(page, str(item.product_id))
+    current_remote_ids, current_evidence = _remote_ids_from_row(row)
+    missing_ids = before_remote_ids - current_remote_ids
+    new_ids = current_remote_ids - before_remote_ids
+    if missing_ids or len(new_ids) != 1:
+        return QianniuPublishObservation(
+            "publish_uncertain",
+            "QIANNIU_REMOTE_ID_DELTA_AMBIGUOUS",
+            evidence=(
+                f"product={item.product_id};"
+                f"before={len(before_remote_ids)};"
+                f"current={len(current_remote_ids)};"
+                f"new={sorted(new_ids)};"
+                f"missing={sorted(missing_ids)}"
+            ),
+        )
+    remote_id = next(iter(new_ids))
+    position, slot_text = current_evidence[remote_id]
+    status = "submitted"
+    if "审核中" in slot_text:
+        status = "under_review"
+    elif any(token in slot_text for token in ("失败", "驳回", "拒绝")):
+        status = "failed"
+    elif any(token in slot_text for token in ("通过", "成功")):
+        status = "success"
+    return QianniuPublishObservation(
+        status,
+        "",
+        remote_material_id=remote_id,
+        evidence=(
+            f"product={item.product_id};requested_slot={item.slot_index};"
+            f"current_position={position};remote_id={remote_id};"
+            "method=remote_id_set_delta"
+        ),
+    )
+
+
 def publish_qianniu_once(
     page,
     item: MaterialItem,
     *,
     material_center_url: str = DEFAULT_MATERIAL_CENTER_URL,
     before_publish: Callable[[], None] | None = None,
+    before_remote_ids: set[str] | None = None,
 ) -> QianniuPublishObservation:
-    """Click one explicit publish button and verify the exact target slot."""
+    """Click once and identify the new item without assuming stable positions."""
+
+    if before_remote_ids is None:
+        raise QianniuUploadError("QIANNIU_REMOTE_BASELINE_MISSING")
 
     frame = _wait_for_frame(
         page,
@@ -587,9 +697,10 @@ def publish_qianniu_once(
         )
     page.wait_for_timeout(4_000)
     try:
-        return _observe_target_slot(
+        return _observe_new_remote_item(
             page,
             item,
+            before_remote_ids=before_remote_ids,
             material_center_url=material_center_url,
         )
     except Exception as error:

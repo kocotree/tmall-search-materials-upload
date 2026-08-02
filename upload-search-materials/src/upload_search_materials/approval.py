@@ -53,7 +53,7 @@ def create_manifest(
     confirmed_by: str,
     confirmed_at: str,
     *,
-    valid_until: str,
+    valid_until: str | None = None,
     run_id: str = "",
     source_sha256: dict[str, str] | None = None,
 ) -> dict:
@@ -69,8 +69,9 @@ def create_manifest(
         "entries": entries,
         "confirmed_by": confirmed_by.strip(),
         "confirmed_at": confirmed_at,
-        "valid_until": valid_until,
     }
+    if valid_until:
+        envelope["valid_until"] = valid_until
     return {**envelope, "manifest_sha256": canonical_hash(envelope)}
 
 
@@ -101,11 +102,13 @@ def verify_manifest(
     try:
         trusted_now = datetime.fromisoformat(now)
         confirmed_at = datetime.fromisoformat(str(manifest["confirmed_at"]))
-        valid_until = datetime.fromisoformat(str(manifest["valid_until"]))
+        valid_until_value = manifest.get("valid_until")
         if trusted_now < confirmed_at:
             return ManifestVerification(False, "APPROVAL_NOT_YET_VALID")
-        if trusted_now > valid_until:
-            return ManifestVerification(False, "APPROVAL_EXPIRED")
+        if valid_until_value:
+            valid_until = datetime.fromisoformat(str(valid_until_value))
+            if trusted_now > valid_until:
+                return ManifestVerification(False, "APPROVAL_EXPIRED")
     except (KeyError, TypeError, ValueError):
         return ManifestVerification(False, "APPROVAL_EXPIRY_INVALID")
     entries_by_id = {entry.get("task_id"): entry for entry in entries}

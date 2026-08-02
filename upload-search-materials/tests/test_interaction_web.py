@@ -145,11 +145,11 @@ def test_root_renders_nine_stage_left_rail(client):
 def test_new_session_hides_legacy_image_review_stage(client, session_id):
     html = client.get(f"/?session_id={session_id}").get_data(as_text=True)
 
-    assert html.count('data-stage-id="') == 8
+    assert html.count('data-stage-id="') == 7
     assert 'data-stage-id="image_review"' not in html
     assert 'data-stage-id="slots_copy"' in html
     assert "完整度巡检" in html
-    assert "生产确认" in html
+    assert "生产确认" not in html
     assert re.search(r"/static/app\.js\?v=[0-9a-f]{12}", html)
 
 
@@ -527,7 +527,7 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
     html = html_module.unescape(response.get_data(as_text=True))
 
     assert response.status_code == 200
-    assert "0 个图片源" in html
+    assert "本次尚未配置" in html
     assert "添加图片源" in html
     assert html.count('name="image_roots"') >= 1
 
@@ -1446,6 +1446,62 @@ def test_dry_run_stage_exposes_agent_prepared_review_context(
     assert response.json["result"]["data"]["task_count"] == 10
 
 
+def test_approval_stage_exposes_upload_task_review_context(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    store.write_review_context(
+        session_id,
+        "approval",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "approval",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "upload tasks ready",
+            "blocking_reasons": [],
+            "evidence": ["dry-run-tasks.json"],
+            "next_action": "select exact tasks",
+            "data": {
+                "task_count": 1,
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "status": "ready_for_review",
+                        "product_id": "1001",
+                    }
+                ],
+            },
+        },
+    )
+
+    response = client.get(
+        f"/api/sessions/{session_id}/stages/approval"
+    )
+
+    assert response.status_code == 200
+    assert response.json["result"]["summary"] == "upload tasks ready"
+    assert response.json["result"]["data"]["tasks"][0]["task_id"] == "task-1"
+
+
+def test_approval_autosave_preserves_review_context_in_frontend(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    preservation_block = javascript.split(
+        "const preservesReviewContext = [", 1
+    )[1].split("]", 1)[0]
+    assert '"approval"' in preservation_block
+
+
+def test_current_workflow_hides_legacy_production_confirmation(client, session_id):
+    page = client.get(f"/?session_id={session_id}").get_data(as_text=True)
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert 'data-stage-panel="production_confirmation"' not in page
+    assert "提交并自动上传所选任务" in javascript
+
+
 def test_stage_read_exposes_only_current_handoff_submission_time(
     client, session_id, tmp_path
 ):
@@ -1614,22 +1670,26 @@ def test_asset_matching_review_context_survives_rejected_folder_draft(
     assert current.json["state"]["status"] == "draft"
     assert len(current.json["result"]["data"]["folder_candidates"]) == 2
     assert current.json["input"]["values"]["folder_decisions"] == [
-        {
-            "decision": "rejected",
-            "folder_id": "folder-a",
-            "folder_path": "",
-            "note": "",
-            "product_id": "1",
-            "source_system": "",
-        },
+            {
+                "decision": "rejected",
+                "folder_id": "folder-a",
+                "folder_path": "",
+                "note": "",
+                "product_id": "1",
+                "relative_path": "",
+                "source_id": "",
+                "source_system": "",
+            },
         {
             "decision": "confirmed",
             "folder_id": "folder-b",
-            "folder_path": "",
-            "note": "",
-            "product_id": "1",
-            "source_system": "",
-        },
+                "folder_path": "",
+                "note": "",
+                "product_id": "1",
+                "relative_path": "",
+                "source_id": "",
+                "source_system": "",
+            },
     ]
     stage_path = tmp_path / session_id / "03-asset-matching"
     assert not (stage_path / "result.json").exists()
@@ -2313,7 +2373,44 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert "处理租约已于" in source
 
 
-def test_validation_enforces_paths_lists_dates_and_boolean_confirmation(client, session_id, tmp_path):
+def test_approval_submit_uses_one_click_authorization(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    store.save_input(session_id, "setup", {"store": "测试店铺"})
+    dry_handoff = store.save_input(
+        session_id,
+        "dry_run",
+        {"decision": "confirm", "warning_notes": ""},
+    )
+    store.write_result(
+        session_id,
+        "dry_run",
+        dry_handoff["revision"],
+        dry_handoff["input_sha256"],
+        status="completed",
+        summary="dry-run complete",
+    )
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/approval/submit",
+        json={
+            "values": {
+                "task_ids": ["task-1"],
+                "confirmed_by": "reviewer",
+            }
+        },
+    )
+
+    assert response.status_code == 202
+    handoff = store.read_optional_stage_document(session_id, "approval", "handoff")
+    assert handoff["handoff_kind"] == "publish_authorization"
+    assert handoff["authorization"]["action"] == "approve_and_publish_exact_tasks"
+    assert handoff["authorization"]["final_confirmation"] is True
+    assert "confirmed_at" not in handoff["authorization"]
+    assert "valid_until" not in handoff["authorization"]
+
+
+def test_validation_enforces_approval_task_list(client, session_id, tmp_path):
     path = tmp_path / "readable.txt"
     path.write_text("ok", encoding="utf-8")
     response = client.post(
@@ -2322,15 +2419,14 @@ def test_validation_enforces_paths_lists_dates_and_boolean_confirmation(client, 
             "values": {
                 "task_ids": "not a list",
                 "confirmed_by": "reviewer",
-                "confirmed_at": "not-a-date",
-                "valid_until": "2026-07-21T12:00:00",
-                "acknowledgement": False,
             }
         },
     )
 
     assert response.status_code == 422
-    assert {"task_ids", "confirmed_at", "acknowledgement"} <= response.json["field_errors"].keys()
+    assert "task_ids" in response.json["field_errors"]
+
+
 
 
 def test_setup_validation_requires_store_confirmation(
@@ -2364,7 +2460,8 @@ def test_source_code_never_imports_execution_modules():
     assert "subprocess" not in text
     assert "playwright" not in text.lower()
     assert "BrowserUploader" not in text
-    assert "_publish" not in text
+    assert "def _publish(" not in text
+    assert "import _publish" not in text
 
 
 @pytest.mark.parametrize("artifact_name", ["input.json", "handoff.json", "result.json"])

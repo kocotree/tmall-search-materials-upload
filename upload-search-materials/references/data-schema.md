@@ -198,15 +198,17 @@ JSON 顶层为对象，键使用 `<商品ID>:<坑位号>`，值至少包含 `tit
 
 `product_task` 保存 `task_id`、`run_id`、商品 ID、资格状态、目标坑位数、负责人和原因码。
 
-`material_item` 保存 `task_id`、商品 ID、媒体类型、slot index、媒体清单、标题、描述、内容哈希、状态、尝试次数、远端素材 ID 和原因码。
+`material_item` 保存 `task_id`、商品 ID、媒体类型、slot index、媒体清单、标题、描述、内容哈希、状态、尝试次数、远端素材 ID 和原因码。千牛搜推列表可能在发布后把新素材插入现有素材之前，因此远端证据必须同时保存发布前 ID 集合、发布后集合差异、当前显示位置和 `method=remote_id_set_delta`；不得仅凭批准时的 1-based 坑位位置写入 ID。只有旧集合完整保留且新增集合恰好包含一个 ID 时，任务才能进入 `submitted`、`under_review` 或 `success`。
+
+交互授权转换出的发布批次保存到 `07-approval/publish-runs/r<revision>-<input_sha前缀>/`，其中包含 `run.json`、`product-tasks.json`、`material-items.json`、`run.sqlite3`、`approval-manifest.json` 和 `upload-results.json`。同一 revision 与 input SHA 的重复调用只能幂等恢复；新 revision 必须使用新目录，禁止覆盖旧批次。
 
 坑位 task ID 由 `run_id + product_id + material_type + slot_index` 确定性生成。
 
 ## Approval Manifest
 
-必需字段：schema version、run ID、目标店铺、批次输入 SHA-256、精确 task ID、商品 ID、媒体 SHA-256、标题、描述、动作、批准人、批准时间、有效期和 manifest SHA-256。
+必需字段：schema version、run ID、目标店铺、批次输入 SHA-256、精确 task ID、商品 ID、媒体 SHA-256、标题、描述、动作、批准人、批准时间和 manifest SHA-256。`valid_until` 仅为旧清单兼容字段，新流程不生成。
 
-manifest SHA-256 覆盖除自身之外的完整规范化批准信封，不能只覆盖 entries。发布前使用可信系统时钟检查有效期，重算批次输入文件和每个媒体文件的 SHA-256；批准后的内容变化不得沿用旧批准。
+manifest SHA-256 覆盖除自身之外的完整规范化批准信封，不能只覆盖 entries。发布前重算批次输入文件和每个媒体文件的 SHA-256；批准后的内容变化不得沿用旧批准。旧清单包含 `valid_until` 时仍执行兼容校验。
 
 ## 时间与批次格式
 

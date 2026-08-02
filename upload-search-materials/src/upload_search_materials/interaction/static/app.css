@@ -1249,3 +1249,56 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+.upload-confirmation-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.upload-confirmation-metric {
+  padding: 14px;
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.upload-confirmation-metric strong,
+.upload-confirmation-metric span { display: block; }
+.upload-confirmation-metric strong { font-size: 1.45rem; }
+
+.upload-confirmation-warnings {
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  border: 1px solid #f0c36a;
+  border-radius: 12px;
+  background: #fff8e6;
+}
+
+.upload-confirmation-warnings p { margin: 6px 0 0; }
+.upload-confirmation-actions { display: flex; gap: 10px; margin-bottom: 14px; }
+.upload-task-grid { display: grid; gap: 14px; }
+
+.upload-task-card {
+  padding: 16px;
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: 14px;
+  background: #fff;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.upload-task-card.is-selected {
+  border-color: #2274e0;
+  box-shadow: 0 0 0 3px rgba(34, 116, 224, .12);
+}
+
+.upload-task-choice { display: flex; align-items: center; gap: 10px; }
+.upload-task-meta { color: #64748b; margin: 8px 0; }
+.upload-task-card h4 { margin: 8px 0; }
+.upload-task-description { line-height: 1.65; margin: 0; }
+.upload-task-blocker { color: #b42318; font-weight: 600; }
+.upload-task-warning { color: #9a6700; }
+
+@media (max-width: 760px) {
+  .upload-confirmation-summary { grid-template-columns: repeat(2, 1fr); }
+}

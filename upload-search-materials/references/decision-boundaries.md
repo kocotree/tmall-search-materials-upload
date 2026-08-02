@@ -29,8 +29,8 @@ dry-run、批准或上传。
 | `image_review/suitability_review` | 历史兼容 | 只读恢复旧适用性快照 | 仅旧任务保留原决定 | 新任务显示或提交独立适用性页面 | 迁移到素材选择内的 selected-asset preflight |
 | `slots_copy/slot_plan` | `deterministic`（默认）、`manual`；历史 `agent_assisted` 只读 | 按缺失坑位、选择顺序、来源轮询和比例评分生成唯一初始草稿 | 审核或人工修改坑位、确认计划、可视化裁剪压缩、确认文案 | 创建新坑位 AI 请求、自动确认、自动处理图片、进入 dry-run 或上传 | 自动编排失败保留当前草稿或空状态；用户人工编排，确认合法 3–9 张同一比例坑位后处理 |
 | `dry_run/dry_run_review` | `rules`（默认）、`manual_only` | 生成只读 dry-run 和差异报告 | 审查全部商品与阻断项 | 把 dry-run 当发布授权 | 阻断项回到对应阶段；人工通过后才进入授权 |
-| `approval/exact_authorization` | `manual_only`（默认） | 生成精确不可变批准清单供查看 | 当前批次 task ID、店铺、内容哈希和有效期的显式批准 | 推断批准、沿用内容变化前批准 | 未批准保持等待；批准清单身份完整后继续 |
-| `production_confirmation/production_write` | `manual_only`（默认） | 再校验店铺、登录、批准和远端状态 | 当前对话对 1–3 商品生产写入的显式确认 | AI/规则自动点击发布、跨店铺发布 | 未确认或身份不一致立即停止；明确确认后仅执行批准项 |
+| `approval/exact_authorization` | `manual_only`（默认） | 生成精确不可变批准清单并通过唯一入口执行发布 | 当前批次 task ID、店铺和内容哈希的一次显式批准兼发布授权 | 推断批准、沿用内容变化前批准、要求第二次生产确认 | 未批准保持等待；授权身份完整后运行 `process-publish-authorization` |
+| `production_confirmation/production_write` | 历史只读 | 不执行新任务动作 | 无 | 新任务进入此阶段或再次索要授权 | 返回当前 approval/results；不得发布 |
 | `results/result_recovery` | `rules`（默认）、`manual` | 远端回查、对账、报告和可证明的断点恢复 | 不确定发布、审核失败或是否重提的裁决 | 对不确定发布自动重发 | 保持 `publish_uncertain`；可信远端证据或新人工决定后继续 |
 
 ## 活动 Agent 请求

@@ -142,6 +142,7 @@ from .desktop_launcher import (
     ensure_login_browser,
     launch_desktop_workbench,
 )
+from .dry_run_workflow import prepare_publish_run_from_authorization
 from .final_material_handoff import process_final_material_handoff
 from .gallery_jobs import process_gallery_job, run_material_executor
 from .material_executor_launcher import launch_material_executor
@@ -1387,6 +1388,103 @@ def _process_gallery_job(args) -> int:
     return 0
 
 
+def _process_publish_authorization(args, page, page_factory=None) -> int:
+    store = SessionStore(Path(args.runs_root))
+    try:
+        state = store.load_session(args.session)
+        claim = state.get("processing_claim")
+        if (
+            state.get("current_stage") != "approval"
+            or state["stages"]["approval"]["status"] != "processing"
+            or not isinstance(claim, dict)
+            or claim.get("stage_id") != "approval"
+        ):
+            raise InteractionConflict("PUBLISH_AUTHORIZATION_NOT_CLAIMED")
+        prepared = prepare_publish_run_from_authorization(store, args.session)
+        runtime = load_runtime_config(args.config)
+        selectors = Path(args.selectors) if args.selectors else runtime.selectors_file
+        if selectors is None:
+            raise InteractionConflict("PRODUCTION_SELECTORS_MISSING")
+        cdp_url = args.cdp_url or runtime.cdp_url
+    except (InteractionConflict, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    manifest_path = Path(prepared["run_dir"]) / "approval-manifest.json"
+    if not manifest_path.is_file():
+        approve_args = argparse.Namespace(
+            run_dir=prepared["run_dir"],
+            task_id=prepared["task_ids"],
+            confirmed_by=prepared["confirmed_by"],
+            confirmed_at=_now_iso(),
+            valid_until=None,
+        )
+        approval_code = _approve(approve_args)
+        if approval_code:
+            return approval_code
+    publish_args = argparse.Namespace(
+        run_dir=prepared["run_dir"],
+        store=prepared["store"],
+        selectors=str(selectors),
+        cdp_url=cdp_url,
+    )
+    publish_code = _publish(
+        publish_args,
+        page,
+        page_factory,
+        resume=bool(prepared.get("existing")),
+    )
+
+    state_store = StateStore(Path(prepared["run_dir"]) / "run.sqlite3")
+    try:
+        records = [
+            state_store.item_record(task_id)
+            for task_id in prepared["task_ids"]
+        ]
+    finally:
+        state_store.close()
+    completed = publish_code == 0 and all(
+        record is not None
+        and record["status"] in {"submitted", "under_review", "success"}
+        and record.get("remote_material_id")
+        for record in records
+    )
+    results_path = Path(prepared["run_dir"]) / "upload-results.json"
+    store.write_result(
+        args.session,
+        "approval",
+        int(claim["revision"]),
+        str(claim["input_sha256"]),
+        status="completed" if completed else "blocked",
+        summary=(
+            f"已提交 {len(records)} 个搜推素材任务。"
+            if completed
+            else "上传未全部完成，已保留逐任务状态并停止自动重试。"
+        ),
+        blocking_reasons=[] if completed else ["PUBLISH_BATCH_INCOMPLETE"],
+        evidence=[str(manifest_path), str(results_path)],
+        next_action=(
+            "在千牛查看审核状态。"
+            if completed
+            else "查看上传结果中的稳定原因码；不确定任务先远端回查。"
+        ),
+        data={
+            "store": prepared["store"],
+            "task_count": len(records),
+            "submitted_count": sum(
+                1
+                for record in records
+                if record is not None
+                and record["status"] in {"submitted", "under_review", "success"}
+            ),
+            "tasks": records,
+        },
+        claim_id=str(claim.get("claim_id", "")) or None,
+        attempt_id=str(claim.get("attempt_id", "")) or None,
+    )
+    return 0 if completed else (publish_code or 1)
+
+
 def _run_material_executor(args) -> int:
     try:
         runtime = load_runtime_config(args.config)
@@ -1900,7 +1998,17 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--task-id", action="append", required=True)
     approve.add_argument("--confirmed-by", required=True)
     approve.add_argument("--confirmed-at", required=True)
-    approve.add_argument("--valid-until", required=True)
+    approve.add_argument("--valid-until")
+
+    process_authorization = subparsers.add_parser(
+        "process-publish-authorization",
+        help="Approve, publish, and persist one claimed page authorization",
+    )
+    process_authorization.add_argument("--runs-root", required=True)
+    process_authorization.add_argument("--session", required=True)
+    process_authorization.add_argument("--config", metavar="JSON")
+    process_authorization.add_argument("--selectors", metavar="YAML")
+    process_authorization.add_argument("--cdp-url")
 
     publish = subparsers.add_parser("publish", help="Publish an immutable approved manifest")
     publish.add_argument("--run-dir", required=True)
@@ -2329,6 +2437,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _run(args)
     if args.command == "approve":
         return _approve(args)
+    if args.command == "process-publish-authorization":
+        return _process_publish_authorization(args, page, page_factory)
     if args.command in {"publish", "resume"}:
         return _publish(
             args,

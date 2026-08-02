@@ -93,7 +93,7 @@ def upload_approved_item(
                 page, selectors["store_name"], expected_store
             )
             detect_human_check(page, selectors["human_check"])
-            prepare_qianniu_upload(
+            before_remote_ids = prepare_qianniu_upload(
                 page,
                 item,
                 material_center_url=material_center_url,
@@ -119,6 +119,7 @@ def upload_approved_item(
                 item,
                 material_center_url=material_center_url,
                 before_publish=before_publish,
+                before_remote_ids=before_remote_ids,
             )
         except QianniuUploadError as error:
             return UploadOutcome(

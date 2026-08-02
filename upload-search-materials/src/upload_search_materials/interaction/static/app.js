@@ -658,7 +658,13 @@
     const assetStep = currentStageId === "asset_matching"
       ? inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
       : "";
-    submitButton.textContent = (
+    submitButton.textContent = currentStageId === "slots_copy"
+      && !["ready_for_agent", "processing", "completed"].includes(status)
+      ? "确认文案并自动预检"
+      : currentStageId === "approval"
+        && !["ready_for_agent", "processing", "completed"].includes(status)
+        ? "提交并自动上传所选任务"
+      : (
       currentStageId === "asset_matching"
       && assetStep === "image_selection"
       && !["ready_for_agent", "processing", "completed"].includes(status)
@@ -4267,6 +4273,122 @@
     })();
   }
 
+  function writeApprovalTaskIds(taskIds) {
+    const control = activeForm()?.querySelector('[name="task_ids"]');
+    if (!control) return;
+    const value = [...taskIds].join("\n");
+    if (control.value === value) return;
+    control.value = value;
+    control.dispatchEvent(new CustomEvent(
+      "input",
+      { bubbles: true, detail: { source: "explicit-user-edit" } },
+    ));
+  }
+
+  function renderUploadTaskConfirmation(view) {
+    const module = document.querySelector('[data-component="ApprovalChecklist"]');
+    const content = module?.querySelector("[data-result-content]");
+    const taskField = activeForm()?.querySelector('[data-field="task_ids"]');
+    if (taskField) taskField.hidden = true;
+    if (!content || view.mode === "empty") return;
+
+    const documentData = view.result?.data || {};
+    const tasks = Array.isArray(documentData.tasks) ? documentData.tasks : [];
+    const warnings = Array.isArray(documentData.warnings) ? documentData.warnings : [];
+    const control = activeForm()?.querySelector('[name="task_ids"]');
+    const selected = new Set(
+      String(control?.value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+    );
+    content.replaceChildren();
+
+    const summary = element("div", "upload-confirmation-summary");
+    [
+      ["商品", documentData.product_count || 0],
+      ["可审任务", tasks.filter((task) => task.status === "ready_for_review").length],
+      ["图片", documentData.media_count || 0],
+      ["警告", warnings.length],
+    ].forEach(([label, value]) => {
+      const item = element("div", "upload-confirmation-metric");
+      item.append(element("strong", "", String(value)), element("span", "", label));
+      summary.appendChild(item);
+    });
+    content.appendChild(summary);
+
+    if (warnings.length) {
+      const warningPanel = element("div", "upload-confirmation-warnings");
+      warningPanel.appendChild(element("strong", "", "上传前检查提醒"));
+      warnings.forEach((warning) => {
+        warningPanel.appendChild(element("p", "", warning.message || warning.code || "待复查"));
+      });
+      content.appendChild(warningPanel);
+    }
+
+    const actions = element("div", "upload-confirmation-actions");
+    const selectAll = element("button", "secondary-button", "选择全部可授权任务");
+    selectAll.type = "button";
+    const clearAll = element("button", "secondary-button", "清空选择");
+    clearAll.type = "button";
+    actions.append(selectAll, clearAll);
+    content.appendChild(actions);
+
+    const grid = element("div", "upload-task-grid");
+    const checkboxes = [];
+    tasks.forEach((task) => {
+      const ready = task.status === "ready_for_review";
+      const card = element("article", "upload-task-card");
+      if (selected.has(task.task_id)) card.classList.add("is-selected");
+      const choice = element("label", "upload-task-choice");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selected.has(task.task_id);
+      checkbox.disabled = !ready;
+      checkbox.dataset.taskId = task.task_id;
+      checkboxes.push(checkbox);
+      choice.append(
+        checkbox,
+        element("strong", "", `商品 ${task.product_id} · 坑位 ${task.remote_slot_position ?? "待确认"}`),
+      );
+      const meta = element(
+        "p",
+        "upload-task-meta",
+        `${task.media?.length || 0} 张图片 · ${task.target_ratio || "原比例"}`,
+      );
+      const title = element("h4", "", task.title || "标题待补充");
+      const description = element("p", "upload-task-description", task.description || "描述待补充");
+      card.append(choice, meta, title, description);
+      (task.blocking_reasons || []).forEach((reason) => {
+        card.appendChild(element("p", "upload-task-blocker", reason));
+      });
+      (task.warnings || []).forEach((warning) => {
+        card.appendChild(element("p", "upload-task-warning", warning));
+      });
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selected.add(task.task_id);
+        else selected.delete(task.task_id);
+        card.classList.toggle("is-selected", checkbox.checked);
+        writeApprovalTaskIds(selected);
+      });
+      grid.appendChild(card);
+    });
+    content.appendChild(grid);
+    selectAll.addEventListener("click", () => {
+      checkboxes.filter((checkbox) => !checkbox.disabled).forEach((checkbox) => {
+        checkbox.checked = true;
+        selected.add(checkbox.dataset.taskId);
+        checkbox.closest(".upload-task-card")?.classList.add("is-selected");
+      });
+      writeApprovalTaskIds(selected);
+    });
+    clearAll.addEventListener("click", () => {
+      checkboxes.forEach((checkbox) => {
+        checkbox.checked = false;
+        selected.delete(checkbox.dataset.taskId);
+        checkbox.closest(".upload-task-card")?.classList.remove("is-selected");
+      });
+      writeApprovalTaskIds(selected);
+    });
+  }
+
   function renderStageResult(schemaComponent) {
     const view = UiState.resultView(uiState);
     (resultRenderers[schemaComponent] || []).forEach((rendererName) => {
@@ -4313,6 +4435,7 @@
     if (schemaComponent === "image_review") renderImageReview(view);
     if (schemaComponent === "slots_copy_editor") renderSlotBoard(view);
     if (schemaComponent === "inspection_matrix") renderInspectionMatrix(view);
+    if (schemaComponent === "approval_table") renderUploadTaskConfirmation(view);
   }
 
   async function loadFolderImageCounts() {
@@ -4654,8 +4777,14 @@
         renderSubmission();
         renderStageResult(stages.get(requestedStageId).component);
         actionMessage.textContent = payload.status === "completed"
-          ? "图片预检与坑位草稿已生成，可直接进入下一阶段检查。"
-          : "交接已持久化，正在等待 Agent 接收。";
+          ? requestedStageId === "slots_copy"
+            ? payload.next_stage === "approval"
+              ? "自动 dry-run 已通过，正在进入上传任务确认。"
+              : "自动 dry-run 发现阻塞项，正在进入处理页面。"
+            : "当前阶段已完成，可直接进入下一阶段检查。"
+          : requestedStageId === "approval"
+            ? "发布授权已提交；Codex 接收后将自动上传所选任务。"
+            : "交接已持久化，正在等待 Agent 接收。";
         if (payload.status !== "completed") {
           await loadRecoveryInstruction(requestedStageId);
         } else if (payload.next_stage && stages.has(payload.next_stage)) {
@@ -4669,6 +4798,8 @@
           "asset_matching",
           "image_review",
           "slots_copy",
+          "dry_run",
+          "approval",
         ]
           .includes(requestedStageId);
         uiState = UiState.receiveStage(uiState, {

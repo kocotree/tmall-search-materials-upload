@@ -98,6 +98,13 @@
 | `HUMAN_CHECK` | 验证码、扫码、短信或风控 | 暂停整批，等待用户处理 |
 | `UPLOAD_REJECTED` | 页面拒绝文件或字段 | 记录原始提示，转人工审核 |
 | `PUBLISH_UNCERTAIN` | 点击发布后没有可信结果 | 禁止重发，先远端回查 |
+| `QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS` | 本地上传后短唯一名称没有恰好命中一张素材卡 | 停在发布前；检查素材选择器，不点击发布 |
+| `QIANNIU_CONTENT_FIELD_MISSING` | 标题或正文控件不可识别，包括 Cangjie 代理 textarea 变化 | 停在发布前；更新现有表单定位并回归测试 |
+| `QIANNIU_PUBLISH_BUTTON_AMBIGUOUS` | 发布专用语义或明确发布按钮不是唯一可见 | 停在发布前；禁止降级点击通用确认按钮 |
+| `QIANNIU_REMOTE_BASELINE_MISSING` | 发布前没有保存同商品远端 ID 集合 | 禁止点击发布 |
+| `QIANNIU_REMOTE_ID_DELTA_AMBIGUOUS` | 发布后旧 ID 消失，或新增 ID 不是恰好一个 | 标记 `publish_uncertain`，禁止按坑位位置猜测或重发 |
+| `PUBLISH_RUN_PARTIAL_STATE` | 交互任务到发布任务的持久化文件只存在一部分 | 禁止覆盖；保留现场并人工恢复 |
+| `PUBLISH_RUN_IDENTITY_MISMATCH` | 已有发布批次与当前 session/store/task IDs 不一致 | 禁止复用或覆盖 |
 | `REMOTE_EVIDENCE_MISMATCH` | 远端记录与批准指纹/坑位/时间不一致 | 保持不确定并转人工 |
 | `MODERATION_FAILED` | 平台审核失败 | 记录平台原因，转人工处理 |
 | `STATE_MISSING` | `run.sqlite3`、任务状态行或状态证据缺失/损坏 | 禁止自动上传，先做可信远端核验 |

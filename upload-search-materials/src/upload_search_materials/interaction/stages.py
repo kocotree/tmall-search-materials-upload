@@ -255,8 +255,8 @@ STAGES: tuple[StageDefinition, ...] = (
     ),
     StageDefinition(
         id="dry_run",
-        title="全量 dry-run 审查",
-        description="确认 dry-run 结果或返回修改，并说明非阻塞警告的处理。",
+        title="阻塞项处理",
+        description="自动 dry-run 仅在发现阻塞项时停留于此；处理后重新提交第四阶段。",
         component="dry_run_review",
         previous_stage="slots_copy",
         fields=(
@@ -266,17 +266,14 @@ STAGES: tuple[StageDefinition, ...] = (
     ),
     StageDefinition(
         id="approval",
-        title="精确任务授权",
-        description="选择精确任务 ID，并记录批准人、时间、有效期和确认。",
+        title="上传任务确认",
+        description="查看自动预检结果并选择任务；提交即授权系统自动上传所选任务。",
         component="approval_table",
         interaction_policy="frontend_preferred",
         previous_stage="dry_run",
         fields=(
-            _field("task_ids", "精确任务 ID", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
-            _field("confirmed_by", "批准人", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
-            _field("confirmed_at", "批准时间", "datetime", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
-            _field("valid_until", "有效期", "datetime", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
-            _field("acknowledgement", "确认授权", "checkbox", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("task_ids", "待授权上传任务", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
+            _field("confirmed_by", "授权人", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
         ),
     ),
     StageDefinition(
@@ -286,6 +283,7 @@ STAGES: tuple[StageDefinition, ...] = (
         component="production_confirmation",
         interaction_policy="frontend_preferred",
         previous_stage="approval",
+        visible=False,
         fields=(
             _field("store", "目标店铺", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
             _field("product_ids", "商品 ID", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
@@ -302,7 +300,7 @@ STAGES: tuple[StageDefinition, ...] = (
         title="结果与恢复",
         description="展示结果；仅在结果报告需要用户处理的异常时启用恢复输入。",
         component="result_timeline",
-        previous_stage="production_confirmation",
+        previous_stage="approval",
         read_only=True,
         fields=(
             _field(

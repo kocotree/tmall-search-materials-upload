@@ -35,10 +35,9 @@ def safety_context(
             session_id, "dry_run"
         ) / "result.json"
         return {
-            "action": "approve_exact_tasks",
+            "action": "approve_and_publish_exact_tasks",
             "store": store_name,
             "task_ids": list(values.get("task_ids", [])),
-            "valid_until": values.get("valid_until"),
             "dry_run_input_sha256": dry_run.get("input_sha256"),
             "dry_run_result_sha256": hashlib.sha256(
                 dry_run_path.read_bytes()

@@ -158,6 +158,26 @@ def test_future_dated_approval_is_rejected():
     assert result.reason == "APPROVAL_NOT_YET_VALID"
 
 
+def test_manifest_without_expiry_is_valid_for_current_simplified_flow():
+    item = sample_material_item()
+    manifest = create_manifest(
+        "KK Tree",
+        [item],
+        "operator",
+        "2026-07-17T10:00:00+08:00",
+    )
+
+    result = verify_manifest(
+        manifest,
+        [item],
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+    )
+
+    assert result.valid is True
+    assert "valid_until" not in manifest
+
+
 def test_review_html_escapes_copy_and_shows_task_id(tmp_path):
     item = sample_material_item(title="<script>alert(1)</script>")
     output = tmp_path / "review.html"

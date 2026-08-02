@@ -61,6 +61,7 @@ from ..asset_matching_workflow import (
     infer_workflow_step,
 )
 from ..deterministic_slot_planning import build_deterministic_slot_plan
+from ..dry_run_workflow import advance_slots_copy_after_submit
 from ..image_compliance import default_image_policy
 from ..gallery_jobs import (
     create_or_reuse_gallery_job,
@@ -1940,6 +1941,18 @@ def create_app(
                     ),
                 },
             )
+        approval_authorization = None
+        if stage_id == "approval":
+            approval_authorization = safety_context(
+                store, session_id, stage_id, values
+            )
+            approval_authorization.update(
+                {
+                    "action": "approve_and_publish_exact_tasks",
+                    "confirmed_by": values.get("confirmed_by"),
+                    "final_confirmation": True,
+                }
+            )
         handoff = store.save_input(
             session_id,
             stage_id,
@@ -1987,7 +2000,14 @@ def create_app(
                 }
                 if stage_id == "asset_matching"
                 and selected_asset_bundle is not None
-                else None
+                else (
+                    {
+                        "handoff_kind": "publish_authorization",
+                        "authorization": approval_authorization,
+                    }
+                    if approval_authorization is not None
+                    else None
+                )
             ),
         )
         _supersede_slot_requests_after_revision_change(
@@ -2090,6 +2110,24 @@ def create_app(
                     "sha256": package_sha256,
                 },
                 next_stage=None,
+            ), 202
+        if stage_id == "slots_copy":
+            advanced = advance_slots_copy_after_submit(store, session_id)
+            document = advanced["document"]
+            return jsonify(
+                revision=handoff["revision"],
+                input_sha256=handoff["input_sha256"],
+                created_at=handoff["created_at"],
+                status="completed",
+                next_stage=advanced["next_stage"],
+                dry_run_status=advanced["status"],
+                dry_run={
+                    "product_count": document["product_count"],
+                    "task_count": document["task_count"],
+                    "media_count": document["media_count"],
+                    "blocking_reasons": document["blocking_reasons"],
+                    "warnings": document["warnings"],
+                },
             ), 202
         return jsonify(
             revision=handoff["revision"],
@@ -3636,6 +3674,11 @@ def _normalize_stage_values(
         # keeps an already-open page usable without retaining it in handoffs.
         normalized.pop("month", None)
         return normalized
+    if stage_id == "approval":
+        # Older cached pages included a second confirmation checkbox. The
+        # clearly labelled submit action is now the sole publish authority.
+        normalized.pop("acknowledgement", None)
+        return normalized
     if stage_id != "asset_matching":
         return normalized
     normalized.pop("aliases", None)
@@ -3917,6 +3960,7 @@ def _current_result(
         "image_review",
         "slots_copy",
         "dry_run",
+        "approval",
     }:
         return None
     context = store.read_optional_stage_document(session_id, stage_id, "review-context")
@@ -4139,6 +4183,7 @@ def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | Non
         "datetime",
         "date",
         "auto_path",
+        "hidden",
     }:
         if not isinstance(value, str) or (field.required and not value.strip()):
             return "must be a non-empty string" if field.required else "must be a string"
@@ -4148,7 +4193,11 @@ def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | Non
             return "must be an ISO month"
         if field.component == "date" and not _is_iso_date(value):
             return "must be an ISO date"
-        if field.component == "datetime" and not _is_iso_datetime(value):
+        is_datetime_field = field.component == "datetime" or (
+            field.component == "hidden"
+            and field.name in {"confirmed_at", "valid_until"}
+        )
+        if is_datetime_field and not _is_iso_datetime(value):
             return "must be an ISO datetime"
         return None
 

@@ -377,17 +377,13 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 ## 9. 精确批准、发布与恢复
 
-```powershell
-uv run tmall-materials approve --run-dir "<最终审核批次目录>" --task-id "<task-id-1>" --confirmed-by "<批准人>" --confirmed-at "<ISO时间>" --valid-until "<ISO时间>"
-uv run tmall-materials publish --run-dir "<最终审核批次目录>" --store "<店铺名>" --selectors "<生产selectors.yaml>" --cdp-url "http://127.0.0.1:9222"
-```
-
-`approve` 生成并持久化 `approval-manifest.json` 及 approved 状态；发布命令只接受该目录中的不可变清单。发布结果不确定时立即暂停，执行：
+页面授权被 `resume-session` 领取后，从 Skill 目录运行唯一生产入口：
 
 ```powershell
-uv run tmall-materials resume --run-dir "<最终审核批次目录>" --store "<店铺名>" --selectors "<生产selectors.yaml>" --cdp-url "http://127.0.0.1:9222"
-uv run tmall-materials report --run-dir "<最终审核批次目录>"
+.\.venv\Scripts\python.exe -m upload_search_materials.cli process-publish-authorization --runs-root "<runs-root>" --session "<session-id>"
 ```
+
+该命令从本机配置解析生产 selectors 与 CDP URL，顺序完成交互任务桥接、不可变批准清单、正式发布和阶段结果写回。已有 `run.json`、`run.sqlite3` 与批准清单时进入幂等 resume，不重建任务或重置已尝试状态。禁止从仓库根目录的其他虚拟环境运行，禁止把上述动作拆成临时 Python/PowerShell 写文件命令。发布不确定时命令保存逐任务状态并停止；先按 `upload-results.json` 与远端证据处理，不得直接重发。
 
 生产前还必须满足 [production-acceptance.md](production-acceptance.md)。示例选择器和示例媒体策略不能直接用于生产。
 
@@ -424,7 +420,7 @@ Agent 按以下顺序处理每一阶段：
 10. 写入与同一组四个值绑定的 `result.json`。
 11. 停止，或明确进入下一阶段。
 
-`wait-handoff` 使用最长 30 秒的心跳租约，以 10–15 秒片段续租同一 `wait_id`；setup 默认总预算为 2 分钟。页面分别显示在线心跳与总等待剩余。命令只返回已验证的当前 handoff，并领取该阶段为 `processing`；正常预算超时、错误、阶段变化或成功认领都会清理自己拥有的 wait，异常退出才依赖自然过期。当前九阶段流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。页面阶段 07/08 只保存输入并生成 handoff；它们不直接运行 `approve` 或 `publish`。这两个命令必须由 Agent 分开调用，且 1–3 个商品的生产测试需在当前对话再次获得用户显式授权。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
+`wait-handoff` 使用最长 30 秒的心跳租约，以 10–15 秒片段续租同一 `wait_id`；setup 默认总预算为 2 分钟。页面分别显示在线心跳与总等待剩余。命令只返回已验证的当前 handoff，并领取该阶段为 `processing`；正常预算超时、错误、阶段变化或成功认领都会清理自己拥有的 wait，异常退出才依赖自然过期。当前流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。“上传任务确认”页只保存输入并生成 `publish_authorization` handoff，不在页面服务进程中写千牛；Agent 领取后只调用 `process-publish-authorization`。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
 若页面没有 Agent 心跳，或原 Codex 任务已结束，请用户把页面显示的恢复指令完整粘贴到新建或当前 Codex 任务。页面不会在后台继续执行 Agent，也无法唤醒已结束的任务。
 

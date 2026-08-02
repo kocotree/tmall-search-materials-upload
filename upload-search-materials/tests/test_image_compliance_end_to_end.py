@@ -168,6 +168,11 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
         },
     )
     assert slot_submit.status_code == 202
+    assert slot_submit.json["status"] == "completed"
+    assert slot_submit.json["next_stage"] == "dry_run"
+    assert slot_submit.json["dry_run_status"] == "blocked"
+    assert slot_submit.json["dry_run"]["task_count"] == 2
+    assert store.load_session(session.session_id)["current_stage"] == "dry_run"
     slot_input = store.read_optional_stage_document(
         session.session_id, "slots_copy", "input"
     )

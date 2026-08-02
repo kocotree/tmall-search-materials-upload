@@ -1282,6 +1282,7 @@ def test_qianniu_publish_workflow_uses_migrated_page_flow(
 
     def fake_prepare(page_arg, item_arg, *, material_center_url):
         calls.append(("prepare", item_arg.task_id, material_center_url))
+        return {"OLD-1", "OLD-2"}
 
     def fake_publish(
         page_arg,
@@ -1289,7 +1290,9 @@ def test_qianniu_publish_workflow_uses_migrated_page_flow(
         *,
         material_center_url,
         before_publish,
+        before_remote_ids,
     ):
+        assert before_remote_ids == {"OLD-1", "OLD-2"}
         calls.append(("button-ready", item_arg.task_id))
         before_publish()
         calls.append(("clicked", item_arg.task_id))
@@ -1368,6 +1371,69 @@ def test_qianniu_prepare_failure_stops_before_checkpoint(
     assert outcome.status == "blocked"
     assert outcome.reason == "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS"
     assert checkpoints == []
+
+
+def test_qianniu_remote_id_uses_set_delta_not_requested_position(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    item = approved_item(tmp_path)
+    item.slot_index = 5
+    monkeypatch.setattr(module, "_open_recommend_list", lambda *args: None)
+    monkeypatch.setattr(module, "_find_product_row", lambda *args: object())
+    monkeypatch.setattr(
+        module,
+        "_remote_ids_from_row",
+        lambda row: (
+            {"OLD-1", "OLD-2", "NEW-1"},
+            {
+                "OLD-1": (4, "old"),
+                "OLD-2": (5, "old"),
+                "NEW-1": (1, "审核中"),
+            },
+        ),
+    )
+
+    observation = module._observe_new_remote_item(
+        object(),
+        item,
+        before_remote_ids={"OLD-1", "OLD-2"},
+        material_center_url="https://example.invalid/material-center",
+    )
+
+    assert observation.status == "under_review"
+    assert observation.remote_material_id == "NEW-1"
+    assert "requested_slot=5" in observation.evidence
+    assert "current_position=1" in observation.evidence
+
+
+def test_qianniu_remote_id_delta_fails_closed_when_baseline_changes(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    item = approved_item(tmp_path)
+    monkeypatch.setattr(module, "_open_recommend_list", lambda *args: None)
+    monkeypatch.setattr(module, "_find_product_row", lambda *args: object())
+    monkeypatch.setattr(
+        module,
+        "_remote_ids_from_row",
+        lambda row: (
+            {"OLD-2", "NEW-1"},
+            {"OLD-2": (2, "old"), "NEW-1": (1, "new")},
+        ),
+    )
+
+    observation = module._observe_new_remote_item(
+        object(),
+        item,
+        before_remote_ids={"OLD-1", "OLD-2"},
+        material_center_url="https://example.invalid/material-center",
+    )
+
+    assert observation.status == "publish_uncertain"
+    assert observation.reason_code == "QIANNIU_REMOTE_ID_DELTA_AMBIGUOUS"
 
 
 def test_remote_match_resolves_uncertain(tmp_path):

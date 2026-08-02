@@ -112,8 +112,8 @@
           </section>
           {% elif stage.id == "approval" %}
           <section class="result-module" data-component="ApprovalChecklist">
-            <div class="module-heading"><div><p class="eyebrow">APPROVAL</p><h3>精确任务授权</h3></div><span>ready_for_review</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>仅在 dry-run 返回可审任务后显示授权清单。</p></div></div>
+            <div class="module-heading"><div><p class="eyebrow">UPLOAD CONFIRMATION</p><h3>上传任务确认</h3></div><span>任务明细 / 警告 / 一次提交</span></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>第四阶段提交后会自动预检；选择任务并提交后即授权自动上传。</p></div></div>
           </section>
           {% elif stage.id == "production_confirmation" %}
           <section class="result-module" data-component="ProductionConfirmation">
@@ -302,7 +302,7 @@
             </div>
             <div class="field-grid">
               {% for field in stage.fields %}
-              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'auto_path_list', 'multi_select'] %} field-wide{% endif %}{% if (stage.id == 'completeness' and field.name == 'selected_product_ids') or (stage.id == 'image_review' and field.name == 'decisions') or (stage.id == 'slots_copy' and field.name == 'slot_assignments') %} interaction-data-field{% endif %}" data-field="{{ field.name }}">
+              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'auto_path_list', 'multi_select'] %} field-wide{% endif %}{% if (stage.id == 'completeness' and field.name == 'selected_product_ids') or (stage.id == 'image_review' and field.name == 'decisions') or (stage.id == 'slots_copy' and field.name == 'slot_assignments') or (stage.id == 'approval' and field.name == 'task_ids') %} interaction-data-field{% endif %}" data-field="{{ field.name }}"{% if field.component == 'hidden' or (stage.id == 'approval' and field.name == 'task_ids') %} hidden{% endif %}>
                 {% if field.component in ["path_list", "auto_path_list"] and field.name == "image_roots" %}
                 <fieldset class="path-list" data-field-group="image_roots">
                   <legend>
