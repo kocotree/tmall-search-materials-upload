@@ -20,15 +20,16 @@ def process_final_material_handoff(
     *,
     claimant_id: str = "codex-agent",
 ) -> dict[str, Any]:
+    stage_path = store._stage_path(session_id, "asset_matching")
     handoff = store.wait_for_handoff(
         session_id,
         "asset_matching",
         timeout_seconds=0.5,
         claimant_id=claimant_id,
+        reclaim_expired=True,
     )
     if handoff.get("handoff_kind") != "final_material_selection":
         raise InteractionConflict("FINAL_MATERIAL_HANDOFF_REQUIRED")
-    stage_path = store._stage_path(session_id, "asset_matching")
     input_path = stage_path / "input.json"
     if hashlib.sha256(input_path.read_bytes()).hexdigest() != handoff.get(
         "input_sha256"

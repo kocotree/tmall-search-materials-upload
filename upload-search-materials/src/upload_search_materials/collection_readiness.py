@@ -309,7 +309,7 @@ def _dom_validation_next_action(evidence: Mapping[str, Any]) -> str:
         and int(high_value.get("count") or 0) == 0
     ):
         return (
-            "点击“验证当前页面”；系统会自动切换到"
+            "由处理器自动重新验证；系统会自动切换到"
             "“搜推素材 → 搜推高价值”并复位到第 1 页"
         )
     pagination = evidence.get("pagination_state", {})
@@ -323,10 +323,10 @@ def _dom_validation_next_action(evidence: Mapping[str, Any]) -> str:
             or ""
         ).strip()
         return (
-            "点击“验证当前页面”重新确认第 1 页"
+            "由处理器自动重新确认第 1 页"
             + (f"（{detail}）" if detail else "")
         )
-    return "点击“验证当前页面”重新检查当前素材中心页面"
+    return "由处理器自动重新检查当前素材中心页面"
 
 
 def create_selector_candidate(
@@ -357,7 +357,7 @@ def create_selector_candidate(
         "production": False,
         "path": str(target),
         "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-        "next_action": "在已登录的素材中心验证当前页面",
+        "next_action": "由处理器在已登录的素材中心自动验证当前页面",
         "created_at": iso_timestamp(),
     }
 

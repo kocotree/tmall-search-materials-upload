@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from .stages import STAGES, get_stage
+from ..agent_diagnostics import (
+    resolve_agent_diagnostic,
+    write_agent_diagnostic,
+)
 from ..decision_modes import get_decision_boundary
 from ..time_utils import iso_timestamp
 from ..persistence import atomic_write_json, read_json
@@ -643,6 +647,31 @@ class SessionStore:
                 if not isinstance(data, dict):
                     raise InteractionConflict("result data must be an object")
                 result["data"] = data
+            if status in {"blocked", "needs_user_input"} and blocking_reasons:
+                diagnostic = write_agent_diagnostic(
+                    self._session_path(session_id),
+                    session_id=session_id,
+                    stage_id=stage_id,
+                    revision=revision,
+                    input_sha256=input_sha256,
+                    reason_codes=blocking_reasons,
+                    phase=f"{stage_id}_result",
+                    message=summary,
+                    evidence=evidence,
+                )
+                result["agent_diagnostic"] = {
+                    "status": diagnostic["status"],
+                    "owner": diagnostic["owner"],
+                    "user_action_required": diagnostic[
+                        "user_action_required"
+                    ],
+                }
+            elif status == "completed":
+                resolve_agent_diagnostic(
+                    self._session_path(session_id),
+                    stage_id=stage_id,
+                    revision=revision,
+                )
             self._write_json_atomic(stage_path / "result.json", result)
             review_context_path = stage_path / "review-context.json"
             if stage_id in {"completeness", "asset_matching"} and status in {
@@ -822,8 +851,6 @@ class SessionStore:
                                 isinstance(wait, dict)
                                 and wait.get("session_id") == session_id
                                 and wait.get("stage_id") == stage_id
-                                and wait.get("expected_revision")
-                                == int(handoff["revision"])
                             ):
                                 state["agent_wait"] = None
                             self._write_session_state(session_id, state)
@@ -1391,6 +1418,45 @@ class SessionStore:
                 "request. Continue with the deterministic draft or user manual "
                 "edits; only final copywriting may create an Agent request."
             )
+        if (
+            state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
+            and stage_id == "completeness"
+        ):
+            return (
+                ui_first
+                +
+                "Continue upload-search-materials without creating a new session. "
+                f"Use session_id='{session_id}', stage_id='completeness', "
+                f"revision={revision}, runs_root='{self._runs_root}'. "
+                "Run exactly one specialized entry: "
+                f"tmall-materials process-product-selection --runs-root "
+                f"'{self._runs_root}' --session '{session_id}'. "
+                "Do not run wait-handoff or resume-session first; the specialized "
+                "entry validates and claims the exact handoff itself."
+            )
+        if (
+            state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
+            and stage_id == "asset_matching"
+        ):
+            handoff = self.read_optional_stage_document(
+                session_id, stage_id, "handoff"
+            )
+            if (
+                isinstance(handoff, dict)
+                and handoff.get("handoff_kind") == "final_material_selection"
+            ):
+                return (
+                    ui_first
+                    +
+                    "Continue upload-search-materials without creating a new session. "
+                    f"Use session_id='{session_id}', stage_id='asset_matching', "
+                    f"revision={revision}, runs_root='{self._runs_root}'. "
+                    "Run exactly one specialized entry: "
+                    f"tmall-materials process-final-material-handoff --runs-root "
+                    f"'{self._runs_root}' --session '{session_id}'. "
+                    "Do not run wait-handoff or resume-session first; the specialized "
+                    "entry validates and claims the exact handoff itself."
+                )
         return (
             ui_first
             +

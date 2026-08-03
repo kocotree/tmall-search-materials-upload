@@ -23,6 +23,7 @@ from .browser.session import (
     open_cdp_page,
     validate_collection_page,
 )
+from .agent_diagnostics import write_agent_diagnostic
 from .interaction.session import (
     InteractionConflict,
     SessionStore,
@@ -869,6 +870,11 @@ def process_setup_collection(
         return {"status": "blocked", "result": result}
     except (LoginInteractionRequired, HumanCheckRequired) as error:
         evidence = artifact_root / "login-required.json"
+        reason_code = (
+            "HUMAN_CHECK"
+            if isinstance(error, HumanCheckRequired)
+            else "LOGIN_INTERACTION_REQUIRED"
+        )
         _write_json(
             evidence,
             {
@@ -878,11 +884,7 @@ def process_setup_collection(
                 "revision": handoff["revision"],
                 "input_sha256": handoff["input_sha256"],
                 "status": "processing",
-                "reason_code": (
-                    "HUMAN_CHECK"
-                    if isinstance(error, HumanCheckRequired)
-                    else "LOGIN_INTERACTION_REQUIRED"
-                ),
+                "reason_code": reason_code,
                 "detail": str(error),
                 "cdp_url": cdp_url or runtime.cdp_url,
                 "material_center_url": (
@@ -892,14 +894,22 @@ def process_setup_collection(
                 "recorded_at": _now_iso(),
             },
         )
+        diagnostic = write_agent_diagnostic(
+            session_path,
+            session_id=session_id,
+            stage_id="setup",
+            revision=int(handoff["revision"]),
+            input_sha256=str(handoff["input_sha256"]),
+            reason_codes=[reason_code],
+            phase="collection_login_check",
+            message=str(error),
+            evidence=[evidence],
+        )
         return {
             "status": "processing",
-            "reason_code": (
-                "HUMAN_CHECK"
-                if isinstance(error, HumanCheckRequired)
-                else "LOGIN_INTERACTION_REQUIRED"
-            ),
+            "reason_code": reason_code,
             "evidence": str(evidence),
+            "agent_diagnostic": diagnostic,
             "processing_claim": store.processing_claim(
                 session_id, "setup"
             ),

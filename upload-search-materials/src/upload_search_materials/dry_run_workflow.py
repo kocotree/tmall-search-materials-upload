@@ -12,6 +12,7 @@ from .io_tables import sha256_file
 from .models import AssetRecord, MaterialItem, MaterialStatus
 from .reporting import write_json
 from .state_store import StateStore
+from .slot_workflow import final_outputs_sha256
 
 
 REMOTE_SLOT_RECHECK_REQUIRED = "REMOTE_SLOT_RECHECK_REQUIRED"
@@ -227,6 +228,8 @@ def _copy_remote_positions(
     store: SessionStore,
     session_id: str,
     copies: dict[str, dict[str, Any]],
+    *,
+    outputs_identity: str,
 ) -> dict[str, int]:
     stage_path = store._stage_path(session_id, "slots_copy")
     request_ids = {
@@ -234,8 +237,25 @@ def _copy_remote_positions(
         for item in copies.values()
         if str(item.get("request_id", "")).strip()
     }
+    request_root = stage_path / "agent-requests"
+    if request_root.is_dir():
+        for path in sorted(request_root.iterdir()):
+            if not path.is_dir():
+                continue
+            try:
+                request = store._read_json(path / "request.json", "copy-request")
+            except InteractionConflict:
+                continue
+            context = request.get("request_context", {})
+            if (
+                request.get("kind") == "copy_draft"
+                and request.get("status") == "completed"
+                and isinstance(context, dict)
+                and context.get("final_outputs_sha256") == outputs_identity
+            ):
+                request_ids.add(path.name)
     positions: dict[str, int] = {}
-    for request_id in request_ids:
+    for request_id in sorted(request_ids):
         try:
             response = store._read_json(
                 stage_path
@@ -250,8 +270,15 @@ def _copy_remote_positions(
             if not isinstance(draft, dict):
                 continue
             slot_id = str(draft.get("slot_id", ""))
+            copy = copies.get(slot_id)
             position = draft.get("remote_slot_position")
-            if slot_id and isinstance(position, int) and position > 0:
+            if (
+                copy is not None
+                and str(draft.get("product_id", ""))
+                == str(copy.get("product_id", ""))
+                and isinstance(position, int)
+                and position > 0
+            ):
                 positions[slot_id] = position
     return positions
 
@@ -299,7 +326,12 @@ def build_dry_run_document(
         for item in processed.get("slots", [])
         if isinstance(item, dict) and item.get("slot_id")
     }
-    positions = _copy_remote_positions(store, session_id, copies)
+    positions = _copy_remote_positions(
+        store,
+        session_id,
+        copies,
+        outputs_identity=final_outputs_sha256(processed),
+    )
     blocking_reasons: list[str] = []
     warnings: list[dict[str, str]] = []
     tasks: list[dict[str, Any]] = []

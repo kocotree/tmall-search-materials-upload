@@ -18,6 +18,7 @@ from .image_compliance import (
     inspect_image_source,
     maximum_inscribed_crop,
     normalize_image_policy,
+    probe_crop_output_size,
     provider_contract_payload,
     snapshot_image_policy,
     validate_normalized_crop,
@@ -99,12 +100,53 @@ def build_image_review_data(
             policy=image_policy,
             compression_available=compression_available,
         )
+        expected_source_sha256 = str(
+            selection.get("sha256") or candidate.get("sha256") or ""
+        )
+        if (
+            expected_source_sha256
+            and source_sha256
+            and source_sha256 != expected_source_sha256
+        ):
+            preflight["selectable"] = False
+            preflight["status"] = "blocked"
+            preflight["reason_codes"] = list(
+                dict.fromkeys(
+                    [*preflight["reason_codes"], "SOURCE_SHA_CHANGED"]
+                )
+            )
         crop_options = {}
+        crop_size_probes: dict[str, dict[str, Any]] = {}
         if preflight["selectable"]:
-            crop_options = {
-                ratio: maximum_inscribed_crop(int(width), int(height), ratio)
-                for ratio in image_policy["allowed_aspect_ratios"]
-            }
+            for ratio in image_policy["allowed_aspect_ratios"]:
+                crop = maximum_inscribed_crop(int(width), int(height), ratio)
+                probe = probe_crop_output_size(
+                    source_path,
+                    target_ratio=ratio,
+                    normalized_box=crop["normalized"],
+                    policy=image_policy,
+                )
+                crop_size_probes[ratio] = probe
+                if probe["meets_size_range"]:
+                    crop_options[ratio] = crop
+            if not crop_options:
+                preflight["selectable"] = False
+                preflight["status"] = "blocked"
+                preflight["reason_codes"] = list(
+                    dict.fromkeys(
+                        [
+                            *preflight["reason_codes"],
+                            (
+                                "OUTPUT_SIZE_BELOW_MINIMUM"
+                                if all(
+                                    not item.get("meets_minimum", False)
+                                    for item in crop_size_probes.values()
+                                )
+                                else "IMAGE_SIZE_EXCEEDED"
+                            ),
+                        ]
+                    )
+                )
         duplicate = bool(source_sha256 and source_sha256 in seen_sha256)
         if duplicate:
             duplicate_count += 1
@@ -134,6 +176,7 @@ def build_image_review_data(
                 "selection_order": int(selection.get("selection_order") or 0),
                 "source_path": str(source_path),
                 "source_sha256": source_sha256,
+                "expected_source_sha256": expected_source_sha256,
                 "source_inspection": inspection,
                 "target_assessments": preflight["resolution_checks"],
                 "width": width,
@@ -143,12 +186,14 @@ def build_image_review_data(
                 "status": "blocked" if not preflight["selectable"] else "pending",
                 "reason_codes": preflight["reason_codes"],
                 "crop_options": crop_options,
+                "crop_size_probes": crop_size_probes,
                 "ratio_options": {
                     ratio: {
                         "ratio": ratio,
                         "crop_box": crop_options.get(ratio),
                         "assessment": preflight["resolution_checks"].get(ratio, {}),
                         "feasible": ratio in crop_options,
+                        "output_size_probe": crop_size_probes.get(ratio, {}),
                         "requires_compression": bool(preflight["size_exceeded"]),
                     }
                     for ratio in image_policy["allowed_aspect_ratios"]

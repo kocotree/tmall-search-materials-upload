@@ -286,6 +286,8 @@ class FakePromotionLocator:
         return None
 
     def inner_text(self):
+        if self.selector == "#recommended":
+            return f"搜推高价值 {self.page.high_value_total}"
         if self.selector == "#current":
             return str(self.page.page_index + 1)
         if self.selector == "#first":
@@ -302,6 +304,9 @@ class FakePromotionPage:
     def __init__(self, pages, *, page_index=0):
         self.pages = pages
         self.page_index = page_index
+        self.high_value_total = sum(len(values) for values in pages)
+        self.filtered_product_id = ""
+        self.reload_count = 0
         self.recommended_checked = False
         self.clicked = []
         self.waited = []
@@ -309,8 +314,43 @@ class FakePromotionPage:
     def locator(self, selector):
         return FakePromotionLocator(self, selector)
 
+    def reload(self, **_kwargs):
+        self.reload_count += 1
+        self.filtered_product_id = ""
+
     def wait_for_timeout(self, milliseconds):
         self.waited.append(milliseconds)
+
+
+def test_collection_skips_redundant_promotion_click_on_recommend_route():
+    page = FakePromotionPage(
+        [["商品一 商品ID 123 发布坑位到 9 篇，当前发布 0 篇"]]
+    )
+    page.url = (
+        "https://myseller.taobao.com/home.htm/material-center/"
+        "material-management?tab=recommend"
+    )
+    page.recommended_checked = True
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_next_page": "#next",
+            "promotion_first_page": "#first",
+            "promotion_current_page": "#current",
+            "promotion_terminal_page": "#terminal",
+        },
+        collected_at="2026-08-03T00:00:00+00:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=0,
+    )
+
+    assert len(rows) == 1
+    assert "#promotion" not in page.clicked
 
 
 class DelayedPromotionLocator(FakePromotionLocator):
@@ -704,6 +744,66 @@ def test_high_value_scan_normalizes_reused_tab_to_first_page(initial_page):
     assert events[0]["current_page"] == 1
     assert events[-1]["event_type"] == "terminal"
     assert events[-1]["current_page"] == 3
+
+
+def test_high_value_scan_refreshes_stale_product_filter_and_checks_total():
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到9篇，当前发布0篇"],
+            ["商品二 商品ID 200 发布坑位到9篇，当前发布1篇"],
+        ]
+    )
+    page.filtered_product_id = "100"
+    events = []
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-08-03T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+        on_pagination_event=events.append,
+    )
+
+    assert page.reload_count == 1
+    assert page.filtered_product_id == ""
+    assert len(rows) == 2
+    origin = next(event for event in events if event["event_type"] == "origin")
+    assert origin["expected_product_count"] == 2
+
+
+def test_high_value_scan_fails_when_collected_count_differs_from_label():
+    page = FakePromotionPage(
+        [["商品一 商品ID 100 发布坑位到9篇，当前发布0篇"]]
+    )
+    page.high_value_total = 2
+
+    with pytest.raises(PaginationStateError, match="HIGH_VALUE_TOTAL_MISMATCH"):
+        scan_recommended_material_status(
+            page,
+            {
+                "promotion_tab": "#promotion",
+                "high_value_filter": "#recommended",
+                "promotion_rows": ".promotion-row",
+                "promotion_current_page": "#current",
+                "promotion_first_page": "#first",
+                "promotion_terminal_page": "#terminal",
+                "promotion_next_page": "#next",
+            },
+            collected_at="2026-08-03T10:00:00+08:00",
+            filter_selector_key="high_value_filter",
+            settle_delay_ms=0,
+            action_wait_ms=500,
+        )
 
 
 def test_high_value_scan_fails_when_first_page_reset_does_not_move():

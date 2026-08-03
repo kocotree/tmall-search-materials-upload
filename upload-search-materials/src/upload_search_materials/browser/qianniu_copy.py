@@ -623,7 +623,17 @@ def generate_qianniu_copy_drafts(
                     "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
                     "文案请求缺少 slot_id 或 product_id",
                 )
-            occurrence = occurrence_by_product.get(product_id, 0)
+            occurrence = int(
+                raw_slot.get(
+                    "remote_slot_occurrence",
+                    occurrence_by_product.get(product_id, 0),
+                )
+            )
+            if occurrence < 0:
+                raise QianniuCopyError(
+                    "QIANNIU_SLOT_OCCURRENCE_INVALID",
+                    f"商品 {product_id} 的空坑位序号不可为负数",
+                )
             row = _find_product_row(page, product_id)
             empty_positions = _empty_slot_positions(row)
             requested_position = raw_slot.get("remote_slot_position")

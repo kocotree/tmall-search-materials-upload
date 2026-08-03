@@ -73,6 +73,8 @@
 | `COMPRESSION_UNAVAILABLE` | 当前任务没有可用压缩提供方 | 禁止采用超限图片并恢复压缩配置 |
 | `COMPRESSION_TARGET_UNREACHABLE` | 最低质量和最小尺寸内仍无法压缩达标 | 更换素材 |
 | `OUTPUT_SIZE_BELOW_MINIMUM` | 处理后文件小于 200KiB | 更换素材，不制造无意义体积 |
+| `CROP_PREFLIGHT_REQUIRED` | 尚未执行当前裁剪参数的预校验 | 保持完成按钮禁用，运行本地裁剪预校验 |
+| `CROP_PREFLIGHT_STALE` | 图片、顺序、比例、裁剪框或压缩参数已变化 | 使旧预校验失效并重新校验当前参数 |
 | `OUTPUT_IDENTITY_MISMATCH` | 第五阶段坑位输出文件已变化 | 使对应坑位输出和文案过期，重新处理和确认 |
 | `SLOT_PLAN_REQUIRED` | 未确认坑位比例就请求正式图片处理 | 返回第五阶段先确认坑位计划 |
 | `AGENT_IMAGE_BUDGET_EXCEEDED` | Codex 请求图片数超过配置 | 缩小候选范围或继续规则/人工方案 |
@@ -118,14 +120,14 @@
 | `SELECTOR_PURPOSE_NOT_DECLARED` | profile 不支持当前操作用途 | 补充并验证对应 purpose |
 | `SELECTOR_PLACEHOLDER_REJECTED` | profile 仍包含占位选择器 | 基于当前 DOM 修复本机 profile |
 | `CDP_UNAVAILABLE` | 用户控制的 CDP Chrome 未连接 | 启动专用 profile，并打开官方素材中心 |
-| `LOGIN_INTERACTION_REQUIRED` | 当前页面还不能验证登录店铺 | 用户在 CDP Chrome 完成登录后恢复同一 session |
-| `HUMAN_CHECK` | 出现扫码、短信、验证码或风控 | 停止自动化，等待用户处理 |
+| `LOGIN_INTERACTION_REQUIRED` | 当前页面还不能验证登录店铺 | 写入统一 Agent 诊断，Codex 打开或置前 CDP Chrome；用户登录后自动重试同一 session |
+| `HUMAN_CHECK` | 出现扫码、短信、验证码或风控 | 保留业务状态并写入统一 Agent 诊断；Codex 只引导用户完成无法代办的原生操作 |
 | `STORE_IDENTITY_MISMATCH` | 当前店铺与阶段一目标不一致 | 阻断整批，不写采集行 |
 | `PROCESSING_CLAIM_ACTIVE` | 同一阶段存在未过期处理租约 | 等待当前 Agent 或租约到期 |
 | `PROCESSING_CLAIM_STALE` | 旧 Agent/旧 claim 尝试回写 | 拒绝旧写入，使用当前 claim 恢复 |
 | `SETUP_INPUT_HASH_MISMATCH` | handoff 与当前 input 不一致 | 停止并重新提交正确 revision |
 | `ENVIRONMENT_NOT_PREPARED` | 项目 `.venv` 或 `uv.lock` 不完整 | 单独运行 `scripts/bootstrap.cmd`；恢复采集不得隐式同步 |
-| `SELECTOR_DOM_NOT_VALIDATED` | profile 未通过当前素材中心 DOM 验证 | 在阶段一点击“验证当前页面” |
+| `SELECTOR_DOM_NOT_VALIDATED` | profile 未通过当前素材中心 DOM 验证 | Codex 读取 Agent 诊断，修复并验证本机 profile 后重跑同一处理入口 |
 | `SELECTOR_FIELD_INVALID:<field>` | 当前 DOM 中某个必需字段验证失败 | 保留非生产候选并按字段修复 |
 | `MATERIAL_PAGE_REQUIRED` | CDP 页面不是官方素材中心 | 用户在 CDP Chrome 打开官方页面 |
 | `COLLECTION_WORKER_OWNERSHIP_INDETERMINATE` | PID 存在但 token/进程身份无法证明 | 不结束、不抢占，等待租约过期 |
@@ -167,6 +169,8 @@
 # Handoff recovery reason codes
 
 - `HANDOFF_SEGMENT_TIMEOUT`: 30 秒等待片段正常结束；可在阶段总预算内继续等待。
+- `SPECIALIZED_PROCESSOR_REQUIRED`: 当前阶段由专用处理器拥有领取权；通用
+  `resume-session`、`wait-handoff` 或页面恢复不得创建租约，按返回的唯一处理入口继续。
 - `HANDOFF_STAGE_CHANGED` / `HANDOFF_SESSION_CHANGED`: 等待身份已变化，重新读取精确
   session 当前阶段。
 - `AGENT_WAIT_STALE` / `AGENT_WAIT_IDENTITY_MISMATCH`: 不得续租旧等待者，重新注册。

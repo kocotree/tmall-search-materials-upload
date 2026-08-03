@@ -6,7 +6,8 @@
 `selected-asset-preflight.json` 并同步创建确定性 `current-slot-plan.json`。
 成功后不领取 `image_review` 或坑位 Agent request；直接打开 `slots_copy` 检查
 自动分组并按需人工调整。确认精确 plan revision 后第一页才展开裁剪和压缩；
-实际输出复核通过后，第二页才允许创建 `copy_draft` 文案请求。
+独立“裁剪预校验”复核实际输出通过后才启用完成按钮；完成图片处理时自动创建
+`copy_draft` 文案请求，不再要求首次点击生成按钮。
 
 `prepare-image-review`、`prepare-slot-board` 和坑位类 Agent request 命令仅供
 历史任务恢复，不用于新任务。
@@ -161,6 +162,11 @@ uv run tmall-materials index-folders `
 
 该入口内部完成精确 handoff 校验与领取、候选快照、文件夹审查数据生成、结果写入和阶段推进。日常流程不得再手工串联 `snapshot-folder-candidates`、`prepare-folder-review` 或直接写 `result.json`。任务目录不保存 `folder-index.sqlite3`。共享索引缺失或损坏时，入口在 `02-completeness/product-selection-diagnostic.json` 写入失败阶段、稳定原因码、异常、输入身份、相关文件状态、traceback 和恢复命令；Codex 修复共享索引后重跑同一入口。共享索引过期时执行 `index-folders --refresh`，而不是新建任务级索引。
 
+`resume-session`、`wait-handoff` 和页面“恢复过期处理”不得先领取 completeness
+handoff；它们只返回 `SPECIALIZED_PROCESSOR_REQUIRED` 和上述唯一入口。该入口自己
+负责首次领取、过期租约回收以及 blocked 后恢复，避免同一交接被通用恢复流程和专用
+处理器重复领取。
+
 候选只按文件夹自身名称匹配，父目录命中不会让 `KV`、`合成`、`1` 等普通子目录重复成为候选。包含完整 SKU 的组合名称（例如 `KQ23002-商品名`）可视为货号命中；同货号异名、名称候选和主副链接关系仍需用户确认。确认文件夹归属后，才按需枚举其中图片、读取尺寸并计算 SHA-256。
 
 ### 3.1 生成文件夹归属审查
@@ -274,11 +280,21 @@ uv run tmall-materials prepare-gallery `
 
 ## 4. 阶段一提交后的受管采集
 
-优先在阶段一页面的“采集运行环境”卡片完成独立 readiness 检查。没有生产 profile
-时点击“创建本机候选”，系统只生成 `production=false` 的 Git 忽略文件；在 CDP
-Chrome 登录、打开官方素材中心并填入目标店铺后点击“验证当前页面”。全部必需字段、
-页面和店铺通过后才提升为生产 profile。配置保存到 Git 忽略的
-`upload-search-materials/config/local-paths.json`，不能使用仓库示例。
+工作台启动时自动启动或恢复 CDP Chrome，并在显示阶段一业务配置前检查登录状态。
+未登录时自动打开官方素材中心，业务页只显示简洁等待状态；用户在千牛原生窗口完成
+扫码、短信、验证码或登录后自动继续，不再点击“验证当前页面”“创建本机候选”或
+“重新检测”。配置提交后，处理器自动复核生产 profile、当前 DOM、店铺、素材中心和
+图片源。技术异常写入 `agent-diagnostics/current.json`，Codex 使用下面的统一入口读取：
+
+```powershell
+.\.venv\Scripts\python.exe -m upload_search_materials.cli diagnose-session `
+  --runs-root "<精确 runs_root>" `
+  --session "<精确 session_id>"
+```
+
+诊断中包含原因、证据、责任边界和同一幂等处理器的重试命令。用户只处理扫码、验证码、
+账号切换或业务配置；不得要求用户修复选择器、执行命令或重新填写已保存的业务数据。
+本机配置仍保存到 Git 忽略的 `upload-search-materials/config/local-paths.json`，不能使用仓库示例。
 
 提交阶段一后执行：
 
@@ -304,6 +320,11 @@ Chrome 登录、打开官方素材中心并填入目标店铺后点击“验证�
 `writing_checkpoint`、`building_completeness` 和终态。首个 checkpoint 前只显示 phase
 与 heartbeat，不显示“0 行完成”。日志位于当前 attempt 目录。重复执行同一绑定时复用
 活 Worker 或完成结果，不启动第二个 Worker。
+
+新采集复用已有 CDP 素材中心标签页时，先刷新页面并等待列表稳定，清除上一轮商品
+ID 筛选。选择“搜推高价值”后读取选择框中的总数（例如“搜推高价值 262”），将其
+写入分页起点证据；不带 `--max-pages` 的完整采集结束时，唯一商品数必须与该总数
+一致，否则以 `HIGH_VALUE_TOTAL_MISMATCH` 保留 attempt，不发布 current 结果。
 
 新采集即使复用已有 CDP 标签页，也必须读取可见当前页；若不是第 1 页，使用经过
 当前 DOM 验证的第一页控件返回并等待页码和有序商品 ID 稳定后才能写首个
@@ -449,7 +470,7 @@ uv run tmall-materials prepare-slot-board `
   --session <session_id>
 ```
 
-第五阶段分为三个递进子页面。第一页上方按商品分页展示第四阶段候选，下方展示唯一当前坑位草稿；默认由 Codex 在一次请求中完成图片分析、主题聚类与坑位编排，规则和完全人工仅作兜底。点击“确认坑位并进入图片裁剪”只锁定每坑 3–9 张、有序图片和唯一比例，不生成派生图。第二页按坑位显示原图尺寸、原始大小、目标比例、裁剪方式和压缩确认；点击“完成图片处理并进入文案生成”才在任务目录生成派生图并复核实际文件。第三页以最终有序图片为依据生成标题和描述，逐坑人工确认后只能进入 dry-run，不会触发阶段 07/08 或真实上传。
+第五阶段分为三个递进子页面。第一页上方按商品分页展示第四阶段候选，下方展示唯一当前坑位草稿；默认由确定性规则生成坑位草稿，人工负责审核和调整。点击“确认坑位并进入图片裁剪”只锁定每坑 3–9 张、有序图片和唯一比例，不生成派生图。第二页按坑位显示原图尺寸、原始大小、目标比例、裁剪方式和压缩确认；用户先点击“裁剪预校验”，本地确定性处理器只对当前坑位图片生成并复核实际输出。未通过、未执行或之后修改任何图片/顺序/比例/裁剪/压缩参数时，“完成图片处理并进入文案生成”保持禁用。完成按钮只锁定已经通过的输出并自动创建 `copy_draft` 请求。第三页轮询 Codex 处理进度并逐坑回填千牛标题和描述，逐坑人工确认后只能进入 dry-run，不会触发阶段 07/08 或真实上传。
 
 可选的 Codex 建议必须由用户点击“提交给 Agent 生成建议”创建。页面不会自动唤醒 Codex；复制页面恢复提示词到当前 Codex 任务，或由 Agent 执行：
 
@@ -507,7 +528,10 @@ mode 和现有草稿。AI 超时、取消、无效或过期时不清空草稿，
 - 坑位确认前不生成派生图片。处理页使用 `3:4 / 1:1` 比例按钮与可拖动、可缩放、
   锁定比例的可视化裁剪框；页面不要求用户输入归一化坐标。单图裁剪变化只使该图
   输出与所属坑位文案失效，其他坑位文案保持有效。
-- 图片输出完成后单独领取 `copy_draft` 请求；文案确认之前不得提交第五阶段。
+- 图片完成按钮自动创建 `copy_draft` 请求。Codex 从 Skill 目录运行
+  `tmall-materials process-copy-request --runs-root <runs-root> --session <session-id> --request <request-id>`；
+  该入口逐坑复用 `browser/qianniu_copy.py` 并写入 `progress.json`，不得在 UI 服务中同步运行
+  Playwright，也不得另写一套浏览器脚本。文案确认之前不得提交第五阶段。
 # 有界等待与“已提交”恢复
 
 在精确 session 的人工阶段使用 15 秒等待片段：

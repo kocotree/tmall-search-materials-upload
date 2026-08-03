@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from upload_search_materials.desktop_launcher import (
     DesktopLauncherError,
     ensure_login_browser,
+    inspect_login_browser,
     validate_desktop_launch,
 )
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
@@ -187,3 +189,63 @@ def test_login_browser_is_started_before_workbench_ui(monkeypatch, tmp_path):
     assert result["connected"] is True
     assert result["page_count"] == 1
     assert calls[0]["material_center_url"] == runtime.material_center_url
+
+
+def test_login_gate_detects_authenticated_store_without_target_store(
+    monkeypatch, tmp_path
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def nth(self, index):
+            return Locator([self.values[index]])
+
+        def is_visible(self):
+            return bool(self.values and self.values[0][0])
+
+        def inner_text(self):
+            return self.values[0][1]
+
+    class Page:
+        url = "https://example.test/material-center"
+
+        def bring_to_front(self):
+            return None
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, selector):
+            if "captcha" in selector:
+                return Locator([])
+            return Locator([(True, "测试店铺")])
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["ready"] is True
+    assert result["login_state"] == "authenticated"
+    assert result["observed_store"] == "测试店铺"

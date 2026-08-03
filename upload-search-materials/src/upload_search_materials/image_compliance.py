@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import math
 from pathlib import Path
@@ -41,6 +42,7 @@ UNUSABLE_REASON_CODES = {
     "SOURCE_UNREADABLE",
     "SOURCE_METADATA_MISSING",
     "IMAGE_SIZE_BELOW_MINIMUM",
+    "IMAGE_SIZE_EXCEEDED",
     "OUTPUT_DIMENSIONS_BELOW_MINIMUM",
     "COMPRESSION_UNAVAILABLE",
 }
@@ -48,11 +50,12 @@ REASON_MESSAGES = {
     "SOURCE_UNREADABLE": "原图无法读取，请检查文件是否存在、可访问且未损坏",
     "SOURCE_METADATA_MISSING": "原图预检信息不完整，需要重新检查",
     "IMAGE_SIZE_BELOW_MINIMUM": "原图小于 200KB，不可用于本次发布",
-    "IMAGE_SIZE_EXCEEDED": "原图超过 20MB，需要生成合规压缩输出",
+    "IMAGE_SIZE_EXCEEDED": "原图或预裁剪结果超过 20MB，不可用于本次发布",
     "OUTPUT_DIMENSIONS_BELOW_MINIMUM": "无法裁出宽高均不少于 720px 的合规图片",
     "COMPRESSION_UNAVAILABLE": "当前任务未启用图片压缩，超限图片不可采用",
     "COMPRESSION_TARGET_UNREACHABLE": "在允许质量和最小尺寸内无法压缩到目标大小",
     "OUTPUT_SIZE_BELOW_MINIMUM": "处理后文件小于允许的最小文件大小",
+    "SOURCE_SHA_CHANGED": "图片在选择后发生了变化，需要重新确认",
     "OUTPUT_IDENTITY_MISMATCH": "处理后文件已变化，需要返回第四阶段重新确认",
     "OUTPUT_PATH_OUTSIDE_TASK": "处理后文件不在当前任务目录内",
 }
@@ -169,7 +172,7 @@ class NullImageCompressionProvider:
 def default_image_policy() -> dict[str, Any]:
     return {
         "version": 2,
-        "formats": ["jpg", "jpeg", "png", "webp"],
+        "formats": ["jpg", "jpeg", "bmp", "gif", "heic", "png", "webp"],
         "allowed_aspect_ratios": ["3:4", "1:1"],
         "aspect_ratio_tolerance": 0.02,
         "recommended_dimensions": {
@@ -865,6 +868,78 @@ class PillowImageCompressionProvider:
                 progressive=bool(self.policy["output"]["progressive"]),
             )
         return None
+
+
+def probe_crop_output_size(
+    source_path: Path,
+    *,
+    target_ratio: str,
+    normalized_box: Mapping[str, Any],
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Render a same-format crop in memory and check the upload size range."""
+
+    image_policy = normalize_image_policy(policy or default_image_policy())
+    minimum = round(float(image_policy["min_size_kb"]) * KIB)
+    maximum = round(float(image_policy["max_size_mb"]) * MIB)
+    output_policy = image_policy["output"]
+    with Image.open(Path(source_path).resolve()) as opened:
+        source_format = str(opened.format or "").upper()
+        image = ImageOps.exif_transpose(opened)
+        validated = validate_normalized_crop(
+            normalized_box,
+            target_ratio=target_ratio,
+            width=image.width,
+            height=image.height,
+        )
+        pixel = validated["pixel"]
+        cropped = image.crop(
+            (
+                pixel["x"],
+                pixel["y"],
+                pixel["x"] + pixel["width"],
+                pixel["y"] + pixel["height"],
+            )
+        )
+        if cropped.mode in {"RGBA", "LA"} or (
+            cropped.mode == "P" and "transparency" in cropped.info
+        ):
+            rgba = cropped.convert("RGBA")
+            canvas = Image.new(
+                "RGBA", rgba.size, output_policy["background_color"]
+            )
+            canvas.alpha_composite(rgba)
+            cropped = canvas.convert("RGB")
+        else:
+            cropped = cropped.convert("RGB")
+        buffer = BytesIO()
+        save_options: dict[str, Any] = {}
+        if source_format == "JPEG":
+            save_options = {
+                "quality": int(output_policy["quality_max"]),
+                "optimize": bool(output_policy["optimize"]),
+                "progressive": bool(output_policy["progressive"]),
+            }
+        elif source_format == "PNG":
+            save_options = {"optimize": bool(output_policy["optimize"])}
+        elif source_format == "WEBP":
+            save_options = {"quality": int(output_policy["quality_max"])}
+        elif source_format == "GIF":
+            save_options = {"optimize": bool(output_policy["optimize"])}
+        elif source_format not in {"BMP", "HEIC", "HEIF"}:
+            raise ValueError("IMAGE_FORMAT_UNSUPPORTED")
+        cropped.save(buffer, format=source_format, **save_options)
+    size_bytes = buffer.tell()
+    return {
+        "output_size_bytes": size_bytes,
+        "minimum_size_bytes": minimum,
+        "maximum_size_bytes": maximum,
+        "meets_minimum": size_bytes >= minimum,
+        "meets_maximum": size_bytes <= maximum,
+        "meets_size_range": minimum <= size_bytes <= maximum,
+        "probe_quality": int(output_policy["quality_max"]),
+        "probe_format": source_format,
+    }
 
 
 def generate_crop_derivative(

@@ -136,6 +136,28 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
             "asset_ids": ["asset-3", "asset-4", "asset-5"],
         },
     ]
+    current_endpoint = (
+        f"/api/sessions/{session.session_id}/stages/slots_copy/current-slot-plan"
+    )
+    saved_plan = client.post(
+        current_endpoint,
+        json={"plan_revision": 0, "slot_assignments": slot_assignments},
+    )
+    assert saved_plan.status_code == 200, saved_plan.json
+    confirmed_plan = client.post(
+        f"{current_endpoint}/confirm",
+        json={
+            "plan_revision": saved_plan.json["current_slot_plan"][
+                "plan_revision"
+            ]
+        },
+    )
+    assert confirmed_plan.status_code == 200, confirmed_plan.json
+    crop_preflight = client.post(
+        f"/api/sessions/{session.session_id}/stages/slots_copy/crop-preflight",
+        json={"slot_assignments": slot_assignments},
+    )
+    assert crop_preflight.status_code == 200, crop_preflight.json
     process_response = client.post(
         f"/api/sessions/{session.session_id}/stages/slots_copy/process-plan",
         json={"slot_assignments": slot_assignments},

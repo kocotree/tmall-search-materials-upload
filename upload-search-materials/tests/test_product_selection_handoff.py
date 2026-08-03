@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from upload_search_materials.cli import build_parser
+from upload_search_materials.cli import build_parser, main
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.product_selection_handoff import (
     ProductSelectionProcessingError,
@@ -214,3 +214,81 @@ def test_cli_exposes_single_product_selection_entry():
     )
     assert args.command == "process-product-selection"
     assert args.claimant_id == "codex-agent"
+
+
+def test_resume_session_does_not_claim_completeness_before_processor(
+    tmp_path, capsys
+):
+    store, session_id, handoff = _submitted_selection(tmp_path)
+    index_root = tmp_path / "shared-folder-index"
+    _write_shared_index(index_root)
+
+    code = main(
+        [
+            "resume-session",
+            "--runs-root",
+            str(store.runs_root),
+            "--session",
+            session_id,
+            "--ack",
+            "已提交",
+        ]
+    )
+    resumed = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert resumed["status"] == "ready"
+    assert resumed["claim_deferred"] is True
+    assert resumed["processor"] == "process-product-selection"
+    assert resumed["next_command"][1] == "process-product-selection"
+    state = store.load_session(session_id)
+    assert state["stages"]["completeness"]["status"] == "ready_for_agent"
+    assert state["processing_claim"] is None
+
+    result = process_product_selection_handoff(
+        store,
+        session_id,
+        folder_index_root=index_root,
+        claimant_id="codex-agent",
+    )
+
+    assert result["status"] == "completed"
+    assert result["completeness_revision"] == handoff["revision"]
+    assert store.load_session(session_id)["current_stage"] == "asset_matching"
+
+
+def test_completeness_recovery_instruction_names_only_specialized_entry(
+    tmp_path,
+):
+    store, session_id, _handoff = _submitted_selection(tmp_path)
+
+    instruction = store.recovery_instruction(session_id, "completeness")
+
+    assert "process-product-selection" in instruction
+    assert "Do not run wait-handoff or resume-session first" in instruction
+
+
+def test_wait_handoff_refuses_to_claim_completeness(tmp_path, capsys):
+    store, session_id, _handoff = _submitted_selection(tmp_path)
+
+    code = main(
+        [
+            "wait-handoff",
+            "--runs-root",
+            str(store.runs_root),
+            "--session",
+            session_id,
+            "--stage",
+            "completeness",
+            "--timeout",
+            "0.1",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().err)
+
+    assert code == 2
+    assert payload["reason_code"] == "SPECIALIZED_PROCESSOR_REQUIRED"
+    assert payload["next_command"][1] == "process-product-selection"
+    state = store.load_session(session_id)
+    assert state["stages"]["completeness"]["status"] == "ready_for_agent"
+    assert state["processing_claim"] is None

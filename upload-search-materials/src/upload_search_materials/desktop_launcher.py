@@ -6,7 +6,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .browser.session import CdpUnavailable, ensure_cdp_browser
+from .browser.config import SelectorConfigError, load_selector_profile
+from .browser.session import (
+    CdpUnavailable,
+    ensure_cdp_browser,
+    open_cdp_page,
+)
+from .collection_readiness import DEFAULT_CANDIDATE_SELECTORS
 from .interaction.service import start_service
 from .runtime_config import load_runtime_config
 from .runtime_config import RuntimeConfig
@@ -98,6 +104,90 @@ def ensure_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
             "endpoint": runtime.cdp_url,
         }
     return login_browser
+
+
+def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
+    """Ensure the visible browser exists and return a safe login gate state.
+
+    This check deliberately does not need the target store, which is a business
+    value entered later.  It only proves that the material-center page exposes
+    a visible authenticated store identity and no human challenge.
+    """
+
+    browser = ensure_login_browser(runtime)
+    if not browser.get("connected"):
+        return {
+            **browser,
+            "ready": False,
+            "login_state": "browser_unavailable",
+        }
+    selectors = dict(DEFAULT_CANDIDATE_SELECTORS)
+    if runtime.selectors_file is not None:
+        try:
+            profile = load_selector_profile(
+                runtime.selectors_file,
+                purpose="high_value_collection",
+                production=False,
+            )
+        except SelectorConfigError:
+            profile = None
+        if profile is not None:
+            selectors.update(profile.selectors)
+    try:
+        with open_cdp_page(
+            runtime.cdp_url,
+            runtime.material_center_url,
+        ) as page:
+            page.bring_to_front()
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+            challenge = page.locator(selectors["human_check"])
+            challenge_visible = any(
+                challenge.nth(index).is_visible()
+                for index in range(min(challenge.count(), 10))
+            )
+            if challenge_visible:
+                return {
+                    **browser,
+                    "ready": False,
+                    "login_state": "human_check",
+                    "reason_code": "HUMAN_CHECK",
+                }
+            store = page.locator(selectors["store_name"])
+            observed_store = ""
+            for index in range(min(store.count(), 20)):
+                candidate = store.nth(index)
+                if not candidate.is_visible():
+                    continue
+                observed_store = str(candidate.inner_text()).strip()
+                if observed_store:
+                    break
+            if observed_store:
+                return {
+                    **browser,
+                    "ready": True,
+                    "login_state": "authenticated",
+                    "observed_store": observed_store,
+                    "observed_url": str(page.url),
+                    "reason_code": "READY",
+                }
+            return {
+                **browser,
+                "ready": False,
+                "login_state": "interaction_required",
+                "observed_url": str(page.url),
+                "reason_code": "LOGIN_INTERACTION_REQUIRED",
+            }
+    except Exception as error:
+        return {
+            **browser,
+            "ready": False,
+            "login_state": "browser_unavailable",
+            "reason_code": str(error).split(":", 1)[0],
+            "message": str(error),
+        }
 
 
 def launch_desktop_workbench(**kwargs: Any) -> dict[str, Any]:

@@ -168,9 +168,21 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
         checkboxes = page.locator(".asset-card input[type=checkbox]")
         checkboxes.nth(0).check()
         summary = page.locator(".asset-selection-summary")
+        page.wait_for_function(
+            "document.querySelector('.asset-selection-summary')?.textContent.includes('还差 2 张')"
+        )
         assert "还差 2 张" in summary.inner_text()
         for index in range(1, 9):
             checkboxes.nth(index).check()
+            expected = index + 1
+            page.wait_for_function(
+                "([count]) => document.querySelector('.asset-selection-summary')"
+                "?.textContent.includes(`已选 ${count} 张`)",
+                arg=[expected],
+            )
+        page.wait_for_function(
+            "document.querySelector('.asset-selection-summary')?.textContent.includes('3+3+3')"
+        )
         assert "预计创建 3 个完整坑位（3+3+3）" in summary.inner_text()
         assert (
             page.evaluate(

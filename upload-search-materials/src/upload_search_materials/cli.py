@@ -69,6 +69,10 @@ from .browser.session import (
 from .browser.upload_page import upload_approved_item
 from .browser.verifier import verify_remote_item
 from .copywriting import generate_and_validate_copy
+from .copy_draft_workflow import (
+    CopyDraftProcessingError,
+    process_copy_draft_request,
+)
 from .confirmed_assets import (
     build_confirmed_folder_gallery,
     extract_folder_decisions,
@@ -143,6 +147,7 @@ from .desktop_launcher import (
     launch_desktop_workbench,
 )
 from .dry_run_workflow import prepare_publish_run_from_authorization
+from .agent_diagnostics import read_agent_diagnostic, write_exception_diagnostic
 from .final_material_handoff import process_final_material_handoff
 from .product_selection_handoff import (
     ProductSelectionProcessingError,
@@ -1123,8 +1128,69 @@ def _port_owner_pid(port: int) -> int | None:
     return None
 
 
+def _specialized_processor_payload(
+    stage_id: str,
+    *,
+    runs_root: str | Path,
+    session_id: str,
+    claimant_id: str,
+) -> dict[str, Any] | None:
+    processor = ""
+    if stage_id == "completeness":
+        processor = "process-product-selection"
+    elif stage_id == "asset_matching":
+        store = SessionStore(Path(runs_root))
+        handoff = store.read_optional_stage_document(
+            session_id, stage_id, "handoff"
+        )
+        if (
+            isinstance(handoff, dict)
+            and handoff.get("handoff_kind") == "final_material_selection"
+        ):
+            processor = "process-final-material-handoff"
+    if not processor:
+        return None
+    return {
+        "claim_deferred": True,
+        "processor": processor,
+        "next_command": [
+            "tmall-materials",
+            processor,
+            "--runs-root",
+            str(Path(runs_root)),
+            "--session",
+            session_id,
+            "--claimant-id",
+            claimant_id,
+        ],
+        "next_action": (
+            f"Run the specialized {processor} processor directly; "
+            "generic recovery must not claim this handoff."
+        ),
+    }
+
+
 def _wait_handoff(args) -> int:
     store = SessionStore(Path(args.runs_root))
+    specialized = _specialized_processor_payload(
+        args.stage,
+        runs_root=args.runs_root,
+        session_id=args.session,
+        claimant_id=args.claimant,
+    )
+    if specialized is not None:
+        print(
+            json.dumps(
+                {
+                    "status": "specialized_processor_required",
+                    "reason_code": "SPECIALIZED_PROCESSOR_REQUIRED",
+                    **specialized,
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     state = store.load_session(args.session)
     stage_state = state["stages"][args.stage]
     expected_revision = int(stage_state["revision"]) + (
@@ -1378,15 +1444,38 @@ def _process_confirmed_gallery(args) -> int:
 
 
 def _process_gallery_job(args) -> int:
+    store = SessionStore(Path(args.runs_root))
     try:
         result = process_gallery_job(
-            SessionStore(Path(args.runs_root)),
+            store,
             args.session,
             args.job,
             args.attempt,
         )
     except (OSError, RuntimeError, SchemaError, ValueError) as error:
-        print(str(error), file=sys.stderr)
+        diagnostic = write_exception_diagnostic(
+            store,
+            args.session,
+            "asset_matching",
+            processor="process-gallery-job",
+            phase="prepare_gallery",
+            error=error,
+        )
+        print(
+            json.dumps(
+                {
+                    "reason_code": diagnostic["reason_code"],
+                    "message": str(error),
+                    "diagnostic_path": str(
+                        store._session_path(args.session)
+                        / "agent-diagnostics"
+                        / "current.json"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps(result, ensure_ascii=False))
     return 0
@@ -1411,7 +1500,29 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
             raise InteractionConflict("PRODUCTION_SELECTORS_MISSING")
         cdp_url = args.cdp_url or runtime.cdp_url
     except (InteractionConflict, OSError, ValueError) as error:
-        print(str(error), file=sys.stderr)
+        diagnostic = write_exception_diagnostic(
+            store,
+            args.session,
+            "approval",
+            processor="process-publish-authorization",
+            phase="prepare_publish",
+            error=error,
+        )
+        print(
+            json.dumps(
+                {
+                    "reason_code": diagnostic["reason_code"],
+                    "message": str(error),
+                    "diagnostic_path": str(
+                        store._session_path(args.session)
+                        / "agent-diagnostics"
+                        / "current.json"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
         return 2
 
     manifest_path = Path(prepared["run_dir"]) / "approval-manifest.json"
@@ -1512,14 +1623,38 @@ def _run_material_executor(args) -> int:
 
 
 def _process_final_material_handoff(args) -> int:
+    store = SessionStore(Path(args.runs_root))
     try:
         result = process_final_material_handoff(
-            SessionStore(Path(args.runs_root)),
+            store,
             args.session,
             claimant_id=args.claimant,
         )
     except (OSError, RuntimeError, SchemaError, ValueError) as error:
-        print(str(error), file=sys.stderr)
+        diagnostic = write_exception_diagnostic(
+            store,
+            args.session,
+            "asset_matching",
+            processor="process-final-material-handoff",
+            phase="validate_and_plan",
+            error=error,
+            handoff_kind="final_material_selection",
+        )
+        print(
+            json.dumps(
+                {
+                    "reason_code": diagnostic["reason_code"],
+                    "message": str(error),
+                    "diagnostic_path": str(
+                        store._session_path(args.session)
+                        / "agent-diagnostics"
+                        / "current.json"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps(result, ensure_ascii=False))
     return 0
@@ -1562,6 +1697,21 @@ def _resume_session(args) -> int:
                 "status": authoritative["status"],
                 "collection_status": authoritative,
             }
+    if (
+        resolved["stage_id"] in {"completeness", "asset_matching"}
+        and resolved["status"]
+        in {"ready", "recoverable", "needs_user_input", "blocked"}
+    ):
+        specialized = _specialized_processor_payload(
+            resolved["stage_id"],
+            runs_root=args.runs_root,
+            session_id=args.session,
+            claimant_id=args.claimant,
+        )
+        if specialized is not None:
+            resolved = {**resolved, **specialized}
+            print(json.dumps(resolved, ensure_ascii=False))
+            return 0
     if resolved["status"] in {
         "ready",
         "recoverable",
@@ -2116,6 +2266,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--claimant-id", default="codex-agent"
     )
 
+    process_copy_request = subparsers.add_parser(
+        "process-copy-request",
+        help=(
+            "Claim one durable copy request and run the maintained Qianniu "
+            "Playwright copy workflow"
+        ),
+    )
+    process_copy_request.add_argument(
+        "--runs-root", required=True, metavar="DIR"
+    )
+    process_copy_request.add_argument("--session", required=True)
+    process_copy_request.add_argument("--request", required=True)
+    process_copy_request.add_argument("--config", metavar="JSON")
+    process_copy_request.add_argument("--actor", default="codex-agent")
+
+    diagnose_session = subparsers.add_parser(
+        "diagnose-session",
+        help="Read the single current Agent-only workflow diagnostic",
+    )
+    diagnose_session.add_argument(
+        "--runs-root", required=True, metavar="DIR"
+    )
+    diagnose_session.add_argument("--session", required=True)
+
     collection_worker = subparsers.add_parser(
         "collection-worker",
         help=argparse.SUPPRESS,
@@ -2564,6 +2738,67 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     {
                         "ok": False,
                         "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
+    if args.command == "process-copy-request":
+        try:
+            runtime = load_runtime_config(args.config)
+            result = process_copy_draft_request(
+                SessionStore(Path(args.runs_root)),
+                args.session,
+                args.request,
+                runtime=runtime,
+                page=page,
+                page_factory=page_factory,
+                actor=args.actor,
+            )
+        except CopyDraftProcessingError as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": error.reason_code,
+                        "message": str(error),
+                        "diagnostic_path": str(error.diagnostic_path),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        except (InteractionConflict, OSError, TypeError, ValueError) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, "response": result}, ensure_ascii=False))
+        return 0
+    if args.command == "diagnose-session":
+        try:
+            result = read_agent_diagnostic(
+                Path(args.runs_root), args.session
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": "AGENT_DIAGNOSTIC_INVALID",
                         "message": str(error),
                     },
                     ensure_ascii=False,

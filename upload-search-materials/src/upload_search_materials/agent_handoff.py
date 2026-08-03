@@ -383,7 +383,7 @@ def create_agent_request(
             }],
         }
         request["recovery_prompt"] = recovery_prompt(
-            store, session_id, request_id
+            store, session_id, request_id, kind=kind
         )
         _atomic_json(temporary_root / "request.json", request)
         temporary_root.replace(root)
@@ -510,6 +510,38 @@ def claim_agent_request(
         actor=actor,
         allowed_from={"pending_agent"},
     )
+
+
+def retry_agent_request(
+    store: SessionStore,
+    session_id: str,
+    request_id: str,
+    *,
+    actor: str = "codex-agent",
+) -> dict[str, Any]:
+    """Explicitly requeue one failed request for its idempotent processor."""
+
+    request = read_agent_request(store, session_id, request_id)
+    if request["status"] == "pending_agent":
+        return request
+    if request["status"] != "failed":
+        raise InteractionConflict("Agent request is not retryable")
+    retried = _transition_agent_request(
+        store,
+        session_id,
+        request,
+        "pending_agent",
+        actor=actor,
+        reason_code="AGENT_REQUEST_RETRY",
+        allowed_from={"failed"},
+    )
+    retried["claimed_at"] = None
+    retried["completed_at"] = None
+    _atomic_json(
+        _request_path(store, session_id, request_id) / "request.json",
+        retried,
+    )
+    return retried
 
 
 def fail_agent_request(
@@ -1018,6 +1050,7 @@ def complete_agent_request(
     response: Mapping[str, Any],
     *,
     actor: str = "codex-agent",
+    allow_context_revision_drift: bool = False,
 ) -> dict[str, Any]:
     request = read_agent_request(store, session_id, request_id)
     if request["status"] != "processing":
@@ -1025,7 +1058,10 @@ def complete_agent_request(
     current_revision = int(
         store.load_session(session_id)["stages"]["slots_copy"]["revision"]
     )
-    if current_revision != int(request.get("context_revision", -1)):
+    if (
+        current_revision != int(request.get("context_revision", -1))
+        and not allow_context_revision_drift
+    ):
         supersede_agent_request(
             store,
             session_id,
@@ -1074,9 +1110,20 @@ def complete_agent_request(
 
 
 def recovery_prompt(
-    store: SessionStore, session_id: str, request_id: str
+    store: SessionStore,
+    session_id: str,
+    request_id: str,
+    *,
+    kind: str = "",
 ) -> str:
     request_path = _request_path(store, session_id, request_id) / "request.json"
+    if kind == "copy_draft":
+        return (
+            "继续当前 upload-search-materials 任务，不要创建新 session。"
+            f"读取文案请求：{request_path}；"
+            "调用唯一 process-copy-request 入口，复用项目现有千牛文案 "
+            "Playwright 流程，逐坑保存并回填结果。不要自行生成商品文案。"
+        )
     return (
         "继续当前 upload-search-materials 任务，不要创建新 session。"
         f"读取 Agent 请求：{request_path}；"

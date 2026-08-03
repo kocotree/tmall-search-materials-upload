@@ -6,8 +6,8 @@
 - canonical Skill：`upload-search-materials/SKILL.md`。
 - Agent metadata：`upload-search-materials/agents/openai.yaml`。
 - 历史日常入口 `tmall-materials interact` 是前台 Flask 服务：输出 URL 后持续占用调用终端，不负责后台生命周期、就绪轮询或打开浏览器。
-- 阶段一页面必须逐项显示 `collection_readiness.checks`，并把配置 UI、CDP Chrome、用户原生登录动作、阻断配置和 collector 故障分开。草稿始终可保存；正式提交只在全部检查 ready 时开放。
-- “创建本机候选”只生成 Git 忽略的 `production=false` profile；“验证当前页面”读取 CDP Chrome 当前 DOM、店铺和页面身份，全部通过后才提升生产配置。示例 profile 永远不能直接提升。
+- 阶段一页面只显示店铺、图片源等业务配置。工作台自动启动或恢复 CDP Chrome；登录尚未完成时用独立等待页遮住业务表单，用户在千牛原生窗口登录成功后自动继续。不得显示 `collection_readiness.checks`、CDP、DOM、SHA、选择器路径或“验证当前页面”等技术操作。
+- setup handoff 提交后由处理器自动检查生产 profile、当前 DOM、店铺、素材中心和路径。失败统一写入 Agent-only `agent-diagnostics/current.json`；Codex 通过 `diagnose-session` 获取原因、证据和幂等重试入口。“创建本机候选”仍只生成 Git 忽略的 `production=false` profile，示例 profile 永远不能直接提升。
 - setup 处理中显示 `collection_status` 的当前 attempt/worker；phase、heartbeat、页数、持久化行数、checkpoint 和日志优先于旧 `result.json`。旧结果在 history 中显示时间与 reason code，并明确为 superseded。
 - 恢复按钮仅在租约已过期或拥有关系和进程死亡均已证明时可用。归属不确定时显示等待租约，页面不得提供强制结束 PID。
 - 项目原先没有 `.codex/skills/upload-search-materials/`，fresh repository context 因而可能无法发现 canonical Skill，并可能直接询问店铺名或 NAS 路径。
@@ -44,8 +44,8 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 | 任务配置：店铺、图片源、高级路径 | `setup_form`、原生目录选择器 | `frontend_preferred` | UI 启动失败、不可达或无可用浏览器 |
 | 搜推高价值商品选择、搜索、筛选、排除 | `inspection_matrix` | `frontend_required` | 不允许业务值降级 |
 | 文件夹采用/排除、换批、图片采用、预检、重复提示 | `asset_match_gallery` | `frontend_required` | 不允许业务值降级 |
-| 坑位、顺序、比例、裁剪、压缩 | `slots_copy_editor` 第一子页 | `frontend_required` | 不允许业务值降级 |
-| AI 文案状态、标题、描述、风险和逐坑确认 | `slots_copy_editor` 第二子页 | `frontend_required` | schema gap 可记录，不得旁路发布 |
+| 坑位、顺序、比例、裁剪、压缩、独立裁剪预校验 | `slots_copy_editor` 第一子页 | `frontend_required` | 不允许业务值降级；预校验未通过时完成按钮必须禁用 |
+| AI 文案任务进度、逐坑回填、标题、描述、风险和逐坑确认 | `slots_copy_editor` 第二子页 | `frontend_required` | 页面只创建/轮询 Agent 请求，不得同步运行 Playwright；schema gap 可记录，不得旁路发布 |
 | dry-run 审查 | `dry_run_review` | `frontend_required` | 不允许业务值降级 |
 | 精确批准 | `approval_table` | `frontend_preferred` | 页面不可用时仍须绑定不可变清单与哈希 |
 | 生产确认 | `production_confirmation` | `frontend_preferred` | 页面不可用时仍须精确确认店铺、任务、坑位和 manifest 哈希 |

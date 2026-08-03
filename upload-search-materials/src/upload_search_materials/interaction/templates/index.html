@@ -129,7 +129,17 @@
           </section>
           {% endif %}
 
-          <form class="schema-form" data-stage-form="{{ stage.id }}" novalidate{% if stage.id == "results" %} data-results-recovery hidden{% endif %}>
+          {% if stage.id == "setup" %}
+          <section class="setup-login-gate" data-setup-login-gate aria-live="polite">
+            <div class="setup-login-gate-spinner" aria-hidden="true"></div>
+            <div>
+              <p class="eyebrow">QIANNIU</p>
+              <h3 data-setup-login-title>正在准备千牛</h3>
+              <p data-setup-login-message>系统会自动检查登录状态；如果需要登录，请在自动打开的千牛窗口中完成操作。</p>
+            </div>
+          </section>
+          {% endif %}
+          <form class="schema-form" data-stage-form="{{ stage.id }}" novalidate{% if stage.id == "results" %} data-results-recovery hidden{% elif stage.id == "setup" %} hidden{% endif %}>
             {% if stage.id == "setup" %}
             <div class="form-heading">
               <div><p class="eyebrow">TASK SETUP</p><h3>业务配置</h3></div>
@@ -179,7 +189,7 @@
                   <span>搜推素材</span><strong>全量自动采集</strong>
                   <p>选择“商品分类 → 搜推高价值”，遍历全部分页并写入当前任务目录。</p>
                 </article>
-                <article class="setup-status-card setup-status-card-wide collection-runtime-config" data-component="CollectionRuntimeConfig" data-ready="pending">
+                <article class="setup-status-card setup-status-card-wide collection-runtime-config" data-component="CollectionRuntimeConfig" data-ready="pending" hidden aria-hidden="true">
                   <span>采集运行环境</span><strong data-collection-runtime-summary>正在检测</strong>
                   <p>当前配置页只负责工作流交互；另一个 CDP Chrome 窗口负责用户登录和只读采集。</p>
                   <label>
@@ -234,7 +244,7 @@
                   </div>
                   <div class="image-source-actions">
                     <button class="secondary-button" type="button" data-add-image-source>添加图片源</button>
-                    <button class="secondary-button" type="button" data-check-image-sources>检测路径</button>
+                    <button class="secondary-button" type="button" data-check-image-sources hidden aria-hidden="true">检测路径</button>
                     <button class="primary-button" type="button" data-save-image-sources>保存为本机配置</button>
                   </div>
                   <p class="image-source-feedback" data-image-source-feedback aria-live="polite"></p>

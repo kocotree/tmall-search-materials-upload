@@ -6,6 +6,7 @@ import pytest
 
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.interaction.web import create_app
+from upload_search_materials.cli import main
 from upload_search_materials.final_material_handoff import (
     process_final_material_handoff,
 )
@@ -32,7 +33,7 @@ def session_id(client):
 
 
 def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
-    client, session_id, tmp_path
+    client, session_id, tmp_path, capsys
 ):
     sources = tmp_path / "sources"
     sources.mkdir()
@@ -86,6 +87,21 @@ def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
         },
     )
 
+    for candidate in candidates:
+        checked = client.post(
+            f"/api/sessions/{session_id}/stages/asset_matching/assets/"
+            f"{candidate['asset_id']}/selection-preflight",
+            json={},
+        )
+        assert checked.status_code == 200
+        assert checked.json["status"] == "passed"
+        assert checked.json["feasible_ratios"] == ["3:4", "1:1"]
+    cached = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/selection-preflights"
+    )
+    assert cached.status_code == 200
+    assert len(cached.json["entries"]) == 9
+
     final_payload = {
         "request_id": "final-material-submit-1",
         "values": {
@@ -128,6 +144,46 @@ def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
     assert retried.status_code == 202
     assert retried.json["revision"] == submitted.json["revision"]
     assert retried.json["input_sha256"] == submitted.json["input_sha256"]
+    recovery_instruction = store.recovery_instruction(
+        session_id, "asset_matching"
+    )
+    assert "process-final-material-handoff" in recovery_instruction
+    assert "Do not run wait-handoff or resume-session first" in recovery_instruction
+
+    wait_code = main(
+        [
+            "wait-handoff",
+            "--runs-root",
+            str(tmp_path),
+            "--session",
+            session_id,
+            "--stage",
+            "asset_matching",
+            "--timeout",
+            "0.1",
+        ]
+    )
+    wait_payload = json.loads(capsys.readouterr().err)
+    assert wait_code == 2
+    assert wait_payload["processor"] == "process-final-material-handoff"
+    assert store.load_session(session_id)["processing_claim"] is None
+
+    resume_code = main(
+        [
+            "resume-session",
+            "--runs-root",
+            str(tmp_path),
+            "--session",
+            session_id,
+            "--ack",
+            "已提交",
+        ]
+    )
+    resumed = json.loads(capsys.readouterr().out)
+    assert resume_code == 0
+    assert resumed["claim_deferred"] is True
+    assert resumed["processor"] == "process-final-material-handoff"
+    assert store.load_session(session_id)["processing_claim"] is None
 
     processed = process_final_material_handoff(store, session_id)
 
@@ -338,3 +394,87 @@ def test_three_images_create_one_complete_slot(client, session_id, tmp_path):
         ).read_text(encoding="utf-8")
     )
     assert [len(item["asset_ids"]) for item in plan["slot_assignments"]] == [3]
+
+
+def test_selected_asset_failure_returns_card_level_feedback(
+    client, session_id, tmp_path
+):
+    sources = tmp_path / "feedback"
+    sources.mkdir()
+    candidates = []
+    for index in range(4):
+        source = sources / f"{index}.jpg"
+        if index == 0:
+            Image.new("RGB", (1440, 1920), "white").save(
+                source, quality=95
+            )
+            source.write_bytes(source.read_bytes() + (b"\0" * 300_000))
+        else:
+            Image.effect_noise((1440, 1920), 100).convert("RGB").save(
+                source, quality=94
+            )
+        candidates.append(
+            {
+                "asset_id": f"A{index}",
+                "product_id": "P1",
+                "product_title": "测试商品",
+                "source_path": str(source),
+                "source_system": "folder",
+                "match_type": "exact_product_name",
+                "validation_status": "valid",
+                "preflight": {"selectable": True, "status": "direct"},
+                "source_inspection": {
+                    "size_bytes": source.stat().st_size,
+                    "width": 1440,
+                    "height": 1920,
+                },
+            }
+        )
+    first = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={"values": {"image_roots": [str(sources)], "source_types": ["image"]}},
+    )
+    SessionStore(tmp_path).write_result(
+        session_id,
+        "asset_matching",
+        first.json["revision"],
+        first.json["input_sha256"],
+        status="needs_user_input",
+        summary="请选择素材",
+        data={
+            "requirements": [{"product_id": "P1", "missing_materials": 1}],
+            "asset_candidates": candidates,
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(sources)],
+                "source_types": ["image"],
+                "asset_decisions": [
+                    {"asset_id": item["asset_id"], "decision": "selected"}
+                    for item in candidates
+                ],
+            }
+        },
+    )
+
+    assert response.status_code == 422
+    assert "1 张已选素材需要处理" in response.json["field_errors"]["asset_decisions"]
+    assert "还差" not in response.json["field_errors"]["asset_decisions"]
+    feedback = response.json["asset_validation"]
+    assert feedback["blocking_count"] == 1
+    blocked = next(
+        item for item in feedback["items"] if item["severity"] == "blocked"
+    )
+    assert blocked == {
+        "asset_id": "A0",
+        "product_id": "P1",
+        "severity": "blocked",
+        "issue_type": "output_size",
+        "message": "3:4、1:1 裁剪后均小于 200 KiB，请更换图片",
+        "feasible_ratios": [],
+    }
+    assert "source_path" not in blocked

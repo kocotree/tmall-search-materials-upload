@@ -305,10 +305,28 @@ def open_cdp_page(cdp_url: str, material_center_url: str | None = None):
         if not browser.contexts:
             raise RuntimeError("CDP 浏览器没有可用上下文")
         context = browser.contexts[0]
-        page = context.pages[-1] if context.pages else context.new_page()
-        if material_center_url and (
-            not str(page.url).strip()
-            or str(page.url).startswith(("about:", "chrome:", "edge:"))
-        ):
+        pages = list(context.pages)
+        page = None
+        if material_center_url:
+            page = next(
+                (
+                    candidate
+                    for candidate in reversed(pages)
+                    if "material-center" in str(candidate.url)
+                    or "material-management" in str(candidate.url)
+                ),
+                None,
+            )
+        page = page or (pages[-1] if pages else context.new_page())
+        current_url = str(page.url).strip()
+        login_page = any(
+            marker in current_url.casefold()
+            for marker in ("login", "passport", "oauth", "authorize")
+        )
+        material_page = (
+            "material-center" in current_url
+            or "material-management" in current_url
+        )
+        if material_center_url and not material_page and not login_page:
             page.goto(material_center_url)
         yield page

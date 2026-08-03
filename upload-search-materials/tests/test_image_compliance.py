@@ -20,6 +20,7 @@ from upload_search_materials.image_compliance import (
     inspect_image_source,
     maximum_inscribed_crop,
     normalize_image_policy,
+    probe_crop_output_size,
     snapshot_image_policy,
     validate_compression_result,
     validate_crop_suggestion,
@@ -81,7 +82,7 @@ def test_preflight_reports_resolution_ratio_and_size():
     assert result["size_display"] == "20.00MB"
 
 
-def test_preflight_twenty_mib_boundary_and_oversize_remain_selectable():
+def test_preflight_twenty_mib_boundary_and_oversize_is_blocked():
     at_limit = classify_image(
         width=1000,
         height=1000,
@@ -95,8 +96,8 @@ def test_preflight_twenty_mib_boundary_and_oversize_remain_selectable():
         extension=".png",
     )
     assert at_limit["status"] == "direct"
-    assert over_limit["status"] == "needs_compression"
-    assert over_limit["selectable"] is True
+    assert over_limit["status"] == "unusable"
+    assert over_limit["selectable"] is False
     assert "IMAGE_SIZE_EXCEEDED" in over_limit["reason_codes"]
     assert over_limit["resolution_checks"]["1:1"]["status"] == "below_recommended"
 
@@ -233,6 +234,18 @@ def test_generate_crop_derivative_is_task_local_and_source_unchanged(tmp_path):
     )
     assert repeated["output_path"] == result["output_path"]
     assert repeated["output_sha256"] == result["output_sha256"]
+
+
+def test_crop_probe_preserves_png_format(tmp_path):
+    source = tmp_path / "source.png"
+    Image.effect_noise((1600, 1600), 80).convert("RGB").save(source)
+    result = probe_crop_output_size(
+        source,
+        target_ratio="3:4",
+        normalized_box=maximum_inscribed_crop(1600, 1600, "3:4")["normalized"],
+    )
+    assert result["probe_format"] == "PNG"
+    assert result["meets_size_range"] is True
 
 
 def test_generate_crop_rejects_changed_source(tmp_path):

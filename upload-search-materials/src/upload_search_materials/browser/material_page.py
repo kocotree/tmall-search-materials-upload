@@ -35,6 +35,20 @@ PAGINATION_RECOVERY_GUIDANCE = {
         "下一页不可用，但无法证明当前确为末页，采集已安全停止。"
     ),
 }
+PAGINATION_RECOVERY_GUIDANCE.update(
+    {
+        "HIGH_VALUE_REFRESH_FAILED": (
+            "The material-center page could not be refreshed before collection."
+        ),
+        "HIGH_VALUE_TOTAL_UNVERIFIED": (
+            "The total shown by the high-value filter could not be read."
+        ),
+        "HIGH_VALUE_TOTAL_MISMATCH": (
+            "The collected unique-product count does not match the total shown "
+            "by the high-value filter."
+        ),
+    }
+)
 PAGINATION_SELECTOR_FIELDS = (
     "promotion_current_page",
     "promotion_first_page",
@@ -57,6 +71,32 @@ class PaginationState:
 def _pagination_error(code: str, detail: str = "") -> PaginationStateError:
     suffix = f":{detail}" if detail else ""
     return PaginationStateError(f"{code}{suffix}")
+
+
+def _refresh_high_value_collection_page(page, *, action_wait_ms: int) -> None:
+    """Clear stale SPA search state before a full high-value scan."""
+
+    try:
+        page.reload(wait_until="domcontentloaded")
+    except (AttributeError, PlaywrightError) as error:
+        raise _pagination_error("HIGH_VALUE_REFRESH_FAILED") from error
+    if action_wait_ms:
+        page.wait_for_timeout(action_wait_ms)
+
+
+def _high_value_total(category_filter) -> int:
+    """Read the total embedded in labels such as ``搜推高价值 262``."""
+
+    try:
+        text = str(category_filter.inner_text() or "").strip()
+    except (AttributeError, PlaywrightError) as error:
+        raise _pagination_error("HIGH_VALUE_TOTAL_UNVERIFIED") from error
+    numbers = re.findall(r"\d[\d,]*", text)
+    if not numbers:
+        raise _pagination_error(
+            "HIGH_VALUE_TOTAL_UNVERIFIED", f"label={text!r}"
+        )
+    return int(numbers[-1].replace(",", ""))
 
 
 def _single_locator(page, selectors: Mapping[str, str], field: str):
@@ -445,6 +485,27 @@ def _click_with_popup_retries(
     raise SelectorInvalidError(f"{field_name}:popup_blocked") from last_error
 
 
+def _promotion_tab_is_already_open(page, selectors: dict[str, str]) -> bool:
+    """Avoid a redundant tab click after refresh restored the target route."""
+
+    tab = page.locator(selectors["promotion_tab"])
+    try:
+        selected = tab.get_attribute("aria-selected") == "true"
+        class_names = set((tab.get_attribute("class") or "").split())
+        route_selected = "tab=recommend" in str(getattr(page, "url", ""))
+        has_rows = any(
+            str(value).strip()
+            for value in page.locator(selectors["promotion_rows"]).all_inner_texts()
+        )
+    except (AttributeError, PlaywrightError):
+        return False
+    return has_rows and (
+        selected
+        or route_selected
+        or bool(class_names.intersection({"active", "selected", "checked"}))
+    )
+
+
 def _parse_promotion_row(
     text: str,
     *,
@@ -534,17 +595,27 @@ def scan_recommended_material_status(
     if missing:
         raise SelectorInvalidError(",".join(missing))
 
+    expected_high_value_total: int | None = None
+    if filter_selector_key == "high_value_filter":
+        _refresh_high_value_collection_page(
+            page,
+            action_wait_ms=action_wait_ms,
+        )
+
+    _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
+
     if on_phase is not None:
         on_phase("opening_promotion", None)
-    _click_with_popup_retries(
-        page,
-        page.locator(selectors["promotion_tab"]),
-        selectors,
-        field_name="promotion_tab",
-        delay_ms=settle_delay_ms,
-    )
-    if action_wait_ms:
-        page.wait_for_timeout(action_wait_ms)
+    if not _promotion_tab_is_already_open(page, selectors):
+        _click_with_popup_retries(
+            page,
+            page.locator(selectors["promotion_tab"]),
+            selectors,
+            field_name="promotion_tab",
+            delay_ms=settle_delay_ms,
+        )
+        if action_wait_ms:
+            page.wait_for_timeout(action_wait_ms)
     if not [
         value
         for value in page.locator(
@@ -573,6 +644,8 @@ def scan_recommended_material_status(
         class_name = category_filter.get_attribute("class") or ""
     if checked != "true" and "checked" not in class_name.split():
         raise SelectorInvalidError(filter_selector_key)
+    if filter_selector_key == "high_value_filter":
+        expected_high_value_total = _high_value_total(category_filter)
 
     pagination_state: PaginationState | None = None
     if filter_selector_key == "high_value_filter":
@@ -599,6 +672,15 @@ def scan_recommended_material_status(
                     "event_type": "origin",
                     "reason_code": "PAGINATION_ORIGIN_VERIFIED",
                     **pagination_state.as_dict(),
+                    **(
+                        {
+                            "expected_product_count": (
+                                expected_high_value_total
+                            )
+                        }
+                        if expected_high_value_total is not None
+                        else {}
+                    ),
                 }
             )
 
@@ -771,7 +853,31 @@ def scan_recommended_material_status(
                         **pagination_state.as_dict(),
                     }
                 )
-    return list(output_by_product.values())
+    output = list(output_by_product.values())
+    if (
+        expected_high_value_total is not None
+        and max_pages is None
+        and len(output) != expected_high_value_total
+    ):
+        error = _pagination_error(
+            "HIGH_VALUE_TOTAL_MISMATCH",
+            (
+                f"expected={expected_high_value_total}:"
+                f"collected={len(output)}"
+            ),
+        )
+        if on_pagination_event is not None:
+            on_pagination_event(
+                {
+                    "event_type": "failure",
+                    "reason_code": "HIGH_VALUE_TOTAL_MISMATCH",
+                    "detail": str(error),
+                    "expected_product_count": expected_high_value_total,
+                    "collected_product_count": len(output),
+                }
+            )
+        raise error
+    return output
 
 
 def prepare_high_value_validation_page(
@@ -796,6 +902,7 @@ def prepare_high_value_validation_page(
     if missing:
         raise SelectorInvalidError(",".join(missing))
     selected = dict(selectors)
+    _settle_safe_popups(page, selected, delay_ms=settle_delay_ms)
     category_filter = page.locator(selected["high_value_filter"])
     filter_count = category_filter.count()
     checked = (
@@ -811,19 +918,16 @@ def prepare_high_value_validation_page(
     if filter_count != 1 or (
         checked != "true" and "checked" not in class_name.split()
     ):
-        promotion_tab = page.locator(selected["promotion_tab"])
-        try:
-            promotion_tab.click(timeout=3000)
-        except PlaywrightError:
+        if not _promotion_tab_is_already_open(page, selected):
             _click_with_popup_retries(
                 page,
-                promotion_tab,
+                page.locator(selected["promotion_tab"]),
                 selected,
                 field_name="promotion_tab",
                 delay_ms=settle_delay_ms,
             )
-        if action_wait_ms:
-            page.wait_for_timeout(action_wait_ms)
+            if action_wait_ms:
+                page.wait_for_timeout(action_wait_ms)
         category_filter = page.locator(selected["high_value_filter"])
         filter_count = category_filter.count()
     if filter_count != 1:

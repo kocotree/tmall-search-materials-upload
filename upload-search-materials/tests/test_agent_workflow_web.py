@@ -8,6 +8,10 @@ from upload_search_materials.agent_handoff import (
     complete_agent_request,
     read_agent_request,
 )
+from upload_search_materials.copy_draft_workflow import (
+    _with_remote_slot_occurrences,
+    process_copy_draft_request,
+)
 from upload_search_materials.image_compliance import default_image_policy
 from upload_search_materials.interaction.session import (
     LEGACY_AI_COMPATIBILITY_PROFILE,
@@ -545,6 +549,21 @@ def test_three_step_confirm_and_processing_are_separate_and_idempotent(
     process_endpoint = (
         f"/api/sessions/{session_id}/stages/slots_copy/process-plan"
     )
+    preflight_endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/crop-preflight"
+    )
+    required_preflight = client.post(
+        process_endpoint,
+        json={"crop_parameters": {}},
+    )
+    assert required_preflight.status_code == 422
+    assert "裁剪预校验" in str(required_preflight.json)
+    preflight = client.post(
+        preflight_endpoint,
+        json={"crop_parameters": {}},
+    )
+    assert preflight.status_code == 200, preflight.json
+    assert preflight.json["workflow_state"] == "crop_preflight_passed"
     first_process = client.post(
         process_endpoint,
         json={"crop_parameters": {}},
@@ -608,6 +627,13 @@ def test_single_crop_change_invalidates_only_its_slot_copy(tmp_path):
     process_endpoint = (
         f"/api/sessions/{session_id}/stages/slots_copy/process-plan"
     )
+    preflight_endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/crop-preflight"
+    )
+    first_preflight = client.post(
+        preflight_endpoint, json={"crop_parameters": {}}
+    )
+    assert first_preflight.status_code == 200, first_preflight.json
     first = client.post(process_endpoint, json={"crop_parameters": {}})
     assert first.status_code == 200, first.json
 
@@ -622,17 +648,20 @@ def test_single_crop_change_invalidates_only_its_slot_copy(tmp_path):
             ],
         },
     )
-    changed = client.post(
-        process_endpoint,
-        json={
-            "crop_parameters": {
-                "slot-a:asset-0": {
-                    "normalized_box": [0.05, 0.05, 0.95, 0.95],
-                    "confirm_compression": True,
-                }
+    changed_payload = {
+        "crop_parameters": {
+            "slot-a:asset-0": {
+                "normalized_box": [0.05, 0.05, 0.95, 0.95],
+                "confirm_compression": True,
             }
-        },
+        }
+    }
+    changed_preflight = client.post(
+        preflight_endpoint,
+        json=changed_payload,
     )
+    assert changed_preflight.status_code == 200, changed_preflight.json
+    changed = client.post(process_endpoint, json=changed_payload)
     assert changed.status_code == 200, changed.json
     copy_state = SessionStore._read_json(
         stage_path / "confirmed-copy-drafts.json",
@@ -654,6 +683,277 @@ def test_copy_request_is_blocked_until_final_outputs_are_ready(tmp_path):
 
     assert response.status_code == 422
     assert "final image outputs are not ready" in str(response.json)
+
+
+def test_copy_progress_autosave_does_not_supersede_open_request(tmp_path):
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    current_endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"
+    )
+    current = client.post(
+        current_endpoint,
+        json={
+            "plan_revision": 0,
+            "slot_assignments": [{
+                "slot_id": "slot-a",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            }],
+        },
+    ).json["current_slot_plan"]
+    assert client.post(
+        f"{current_endpoint}/confirm",
+        json={"plan_revision": current["plan_revision"]},
+    ).status_code == 200
+    initial_values = {
+        "slot_assignments": current["slot_assignments"],
+        "copy_edits": [],
+    }
+    initial_draft = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/draft",
+        json={"revision": 0, "values": initial_values},
+    )
+    assert initial_draft.status_code == 200, initial_draft.json
+    assert client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/crop-preflight",
+        json={"crop_parameters": {}},
+    ).status_code == 200
+    completed = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/process-plan",
+        json={"crop_parameters": {}},
+    )
+    request_id = completed.json["copy_request_id"]
+    stage_input = store.read_optional_stage_document(
+        session_id, "slots_copy", "input"
+    )
+    values = dict(stage_input.get("values", {}))
+    values["copy_edits"] = [{
+        "slot_id": "slot-a",
+        "product_id": "P1",
+        "title": "partial",
+        "description": "partial draft",
+        "confirmed": False,
+    }]
+
+    saved = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/draft",
+        json={
+            "revision": stage_input["revision"],
+            "values": values,
+        },
+    )
+
+    assert saved.status_code == 200, saved.json
+    assert read_agent_request(
+        store, session_id, request_id
+    )["status"] == "pending_agent"
+
+
+def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    current_endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"
+    )
+    current = client.post(
+        current_endpoint,
+        json={
+            "plan_revision": 0,
+            "slot_assignments": [
+                {
+                    "slot_id": "slot-a",
+                    "product_id": "P1",
+                    "target_ratio": "3:4",
+                    "asset_ids": ["asset-0", "asset-1", "asset-2"],
+                }
+            ],
+        },
+    ).json["current_slot_plan"]
+    confirmed = client.post(
+        f"{current_endpoint}/confirm",
+        json={"plan_revision": current["plan_revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.json
+    preflight = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/crop-preflight",
+        json={"crop_parameters": {}},
+    )
+    assert preflight.status_code == 200, preflight.json
+    completed = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/process-plan",
+        json={"crop_parameters": {}},
+    )
+    assert completed.status_code == 200, completed.json
+    request_id = completed.json["copy_request_id"]
+    request_document = read_agent_request(store, session_id, request_id)
+    assert request_document["kind"] == "copy_draft"
+    assert request_document["status"] == "pending_agent"
+    assert "process-copy-request" in request_document["recovery_prompt"]
+
+    calls = []
+
+    def fake_generate(page, slots, *, material_center_url):
+        calls.append(
+            (
+                page,
+                slots[0]["slot_id"],
+                material_center_url,
+                slots[0]["remote_slot_occurrence"],
+            )
+        )
+        slot = slots[0]
+        return [
+            {
+                "slot_id": slot["slot_id"],
+                "product_id": slot["product_id"],
+                "title": "KK树儿童防晒帽",
+                "description": "轻盈舒适，适合儿童日常户外防晒使用。",
+                "evidence": ["千牛商品坑位内置 AI 生成"],
+                "risks": [],
+                "source": "qianniu_builtin_ai",
+            }
+        ]
+
+    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    page = object()
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=page,
+    )
+    assert response["result"]["copy_drafts"]
+    assert calls and all(call[0] is page for call in calls)
+    assert [call[3] for call in calls] == [0]
+    assert read_agent_request(store, session_id, request_id)["status"] == "completed"
+    detail = client.get(
+        f"/api/sessions/{session_id}/stages/slots_copy/agent-requests/{request_id}"
+    ).json
+    assert detail["progress"]["status"] == "completed"
+    assert detail["progress"]["completed_count"] == detail["progress"]["total_count"]
+
+
+def test_copy_slots_keep_distinct_remote_occurrences_across_checkpoint_calls():
+    prepared = _with_remote_slot_occurrences(
+        [
+            {"slot_id": "p1-a", "product_id": "p1"},
+            {"slot_id": "p2-a", "product_id": "p2"},
+            {"slot_id": "p1-b", "product_id": "p1"},
+            {
+                "slot_id": "p1-fixed",
+                "product_id": "p1",
+                "remote_slot_position": 9,
+            },
+            {"slot_id": "p1-c", "product_id": "p1"},
+        ]
+    )
+
+    assert [item.get("remote_slot_occurrence") for item in prepared] == [
+        0,
+        0,
+        1,
+        None,
+        3,
+    ]
+
+
+def test_copy_request_completion_allows_frontend_progress_autosave(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    current_endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"
+    )
+    current = client.post(
+        current_endpoint,
+        json={
+            "plan_revision": 0,
+            "slot_assignments": [{
+                "slot_id": "slot-a",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            }],
+        },
+    ).json["current_slot_plan"]
+    confirmed = client.post(
+        f"{current_endpoint}/confirm",
+        json={"plan_revision": current["plan_revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.json
+    preflight = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/crop-preflight",
+        json={"crop_parameters": {}},
+    )
+    assert preflight.status_code == 200, preflight.json
+    processed = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/process-plan",
+        json={"crop_parameters": {}},
+    )
+    assert processed.status_code == 200, processed.json
+    request_id = processed.json["copy_request_id"]
+    request_revision = read_agent_request(
+        store, session_id, request_id
+    )["context_revision"]
+    autosaved = False
+
+    def fake_generate(page, slots, *, material_center_url):
+        nonlocal autosaved
+        if not autosaved:
+            state = store.load_session(session_id)
+            store.save_draft(
+                session_id,
+                "slots_copy",
+                {},
+                "",
+                expected_revision=int(
+                    state["stages"]["slots_copy"]["revision"]
+                ),
+                request_id="copy-progress-autosave",
+            )
+            autosaved = True
+        slot = slots[0]
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "KK树儿童防晒帽",
+            "description": "轻盈舒适，适合儿童日常户外防晒使用。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+            "remote_slot_position": 1,
+        }]
+
+    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert response["result"]["copy_drafts"]
+    assert (
+        store.load_session(session_id)["stages"]["slots_copy"]["revision"]
+        > request_revision
+    )
+    assert read_agent_request(store, session_id, request_id)["status"] == "completed"
 
 
 def test_agent_web_thumbnail_failure_is_structured_and_atomic(tmp_path):

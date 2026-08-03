@@ -16,16 +16,14 @@ import yaml
 
 from ..browser.config import SelectorConfigError, load_selector_profile
 from ..browser.material_page import prepare_high_value_validation_page
+from ..agent_diagnostics import write_exception_diagnostic
 from ..browser.session import (
     CdpUnavailable,
     ensure_cdp_browser,
     inspect_cdp_endpoint,
     open_cdp_page,
 )
-from ..browser.qianniu_copy import (
-    QianniuCopyError,
-    generate_qianniu_copy_drafts,
-)
+from ..copy_draft_workflow import create_copy_draft_request
 from ..collection_readiness import (
     build_collection_readiness,
     create_selector_candidate,
@@ -41,10 +39,7 @@ from ..agent_handoff import (
     AgentRequestError,
     ai_default_slot_planning_enabled,
     cancel_agent_request,
-    claim_agent_request,
-    complete_agent_request,
     create_agent_request,
-    fail_agent_request,
     find_equivalent_agent_request,
     read_agent_request,
     supersede_agent_request,
@@ -62,6 +57,7 @@ from ..asset_matching_workflow import (
 )
 from ..deterministic_slot_planning import build_deterministic_slot_plan
 from ..dry_run_workflow import advance_slots_copy_after_submit
+from ..desktop_launcher import inspect_login_browser
 from ..image_compliance import default_image_policy
 from ..gallery_jobs import (
     create_or_reuse_gallery_job,
@@ -82,11 +78,11 @@ from ..slot_planning import (
     materialize_confirmed_slot_plan,
     slot_plan_sha256,
     slot_context_is_stale,
+    validate_final_output,
     validate_slot_assignments,
 )
 from ..slot_workflow import (
     ai_assignments,
-    final_outputs_sha256,
     mark_manual_override,
     read_current_slot_plan,
     response_sha256,
@@ -250,6 +246,213 @@ def create_app(
     def require_desktop_identity() -> None:
         if isinstance(expected_runtime_identity, dict):
             require_local_resource_identity(expected_runtime_identity)
+
+    def selection_preflight_policy() -> tuple[dict[str, Any], str]:
+        policy = default_image_policy()
+        policy_sha256 = hashlib.sha256(
+            json.dumps(
+                policy,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return policy, policy_sha256
+
+    def selection_preflight_cache_path(session_id: str) -> Path:
+        return (
+            store._stage_path(session_id, "asset_matching")
+            / "selection-preflight-cache.json"
+        )
+
+    def read_selection_preflight_cache(session_id: str) -> dict[str, Any]:
+        path = selection_preflight_cache_path(session_id)
+        if not path.is_file():
+            return {"schema_version": 1, "algorithm_version": 1, "entries": {}}
+        document = store._read_json(path, "selection-preflight-cache")
+        if not isinstance(document.get("entries"), dict):
+            document["entries"] = {}
+        return document
+
+    def selection_preflight_identity(
+        candidate: dict[str, Any], policy_sha256: str
+    ) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "algorithm_version": 1,
+                    "asset_id": str(candidate.get("asset_id", "")),
+                    "product_id": str(candidate.get("product_id", "")),
+                    "source_sha256": str(candidate.get("sha256", "")),
+                    "policy_sha256": policy_sha256,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def current_asset_gallery(
+        session_id: str, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        context = _current_result(store, session_id, "asset_matching", state)
+        data = context.get("data") if isinstance(context, dict) else None
+        if not isinstance(data, dict) or not isinstance(
+            data.get("asset_candidates"), list
+        ):
+            raise InteractionConflict("current asset gallery is unavailable")
+        return data
+
+    def build_single_selection_preflight(
+        session_id: str,
+        state: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        policy, policy_sha256 = selection_preflight_policy()
+        identity = selection_preflight_identity(candidate, policy_sha256)
+        cache = read_selection_preflight_cache(session_id)
+        cached = cache["entries"].get(str(candidate.get("asset_id", "")))
+        if (
+            isinstance(cached, dict)
+            and cached.get("identity_sha256") == identity
+            and isinstance(cached.get("preflight"), dict)
+        ):
+            return cached
+        require_desktop_identity()
+        decision = {
+            "product_id": str(candidate.get("product_id", "")),
+            "asset_id": str(candidate.get("asset_id", "")),
+            "sha256": str(candidate.get("sha256", "")),
+            "decision": "selected",
+            "selection_order": 1,
+        }
+        preflight = build_image_review_data(
+            [candidate],
+            [decision],
+            policy=policy,
+            policy_sha256=policy_sha256,
+            asset_matching_revision=int(
+                state["stages"]["asset_matching"]["revision"]
+            ),
+            inspection_cache_path=(
+                store._stage_path(session_id, "asset_matching")
+                / "source-inspection-cache.json"
+            ),
+        )
+        feedback = _selected_asset_validation_feedback(preflight)
+        item = feedback.get("items", [{}])[0]
+        entry = {
+            "schema_version": 1,
+            "algorithm_version": 1,
+            "asset_id": str(candidate.get("asset_id", "")),
+            "product_id": str(candidate.get("product_id", "")),
+            "source_sha256": str(candidate.get("sha256", "")),
+            "policy_sha256": policy_sha256,
+            "identity_sha256": identity,
+            "status": (
+                "blocked"
+                if item.get("severity") == "blocked"
+                else "warning"
+                if item.get("severity") == "warning"
+                else "passed"
+            ),
+            "feasible_ratios": list(item.get("feasible_ratios", [])),
+            "message": str(item.get("message", "检查通过")),
+            "preflight": preflight,
+            "checked_at": datetime.now().astimezone().isoformat(),
+        }
+        with store._session_lock(session_id):
+            cache = read_selection_preflight_cache(session_id)
+            cache["entries"][entry["asset_id"]] = entry
+            cache["updated_at"] = entry["checked_at"]
+            store._write_json_atomic(
+                selection_preflight_cache_path(session_id), cache
+            )
+        return entry
+
+    def combine_cached_selection_preflights(
+        session_id: str,
+        candidates: list[dict[str, Any]],
+        decisions: list[dict[str, Any]],
+        *,
+        policy: dict[str, Any],
+        policy_sha256: str,
+        asset_matching_revision: int,
+    ) -> dict[str, Any] | None:
+        by_id = {
+            str(item.get("asset_id", "")): item
+            for item in candidates
+            if isinstance(item, dict) and item.get("asset_id")
+        }
+        cache = read_selection_preflight_cache(session_id)
+        records: list[dict[str, Any]] = []
+        seen_sha256: set[str] = set()
+        duplicate_count = 0
+        for decision in sorted(
+            decisions,
+            key=lambda item: (
+                str(item.get("product_id", "")),
+                int(item.get("selection_order") or 0),
+                str(item.get("asset_id", "")),
+            ),
+        ):
+            candidate = by_id.get(str(decision.get("asset_id", "")))
+            if candidate is None:
+                return None
+            entry = cache["entries"].get(str(candidate.get("asset_id", "")))
+            identity = selection_preflight_identity(candidate, policy_sha256)
+            if (
+                not isinstance(entry, dict)
+                or entry.get("identity_sha256") != identity
+                or not isinstance(entry.get("preflight"), dict)
+                or not entry["preflight"].get("assets")
+            ):
+                return None
+            asset = json.loads(json.dumps(entry["preflight"]["assets"][0]))
+            asset["selection_order"] = int(decision.get("selection_order") or 0)
+            source_sha256 = str(asset.get("source_sha256", ""))
+            duplicate = bool(source_sha256 and source_sha256 in seen_sha256)
+            if duplicate:
+                duplicate_count += 1
+                asset["duplicate"] = True
+                asset["status"] = "blocked"
+                asset["reason_codes"] = list(
+                    dict.fromkeys([*asset.get("reason_codes", []), "DUPLICATE_ASSET"])
+                )
+            if source_sha256:
+                seen_sha256.add(source_sha256)
+            records.append(asset)
+        return {
+            "schema_version": 3,
+            "record_type": "suitability_record",
+            "asset_matching_revision": asset_matching_revision,
+            "policy": policy,
+            "policy_sha256": policy_sha256,
+            "selected_count": len(records),
+            "reviewable_count": sum(item.get("status") != "blocked" for item in records),
+            "blocked_count": sum(item.get("status") == "blocked" for item in records),
+            "duplicate_count": duplicate_count,
+            "assets": records,
+            "suitability_records": records,
+            "capabilities": {
+                "manual_crop": True,
+                "ai_crop": False,
+                "image_compression": True,
+                "compression_provider": "pillow",
+                "compression_provider_version": "1",
+            },
+        }
+
+    def public_selection_preflight(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "asset_id": str(entry.get("asset_id", "")),
+            "product_id": str(entry.get("product_id", "")),
+            "identity_sha256": str(entry.get("identity_sha256", "")),
+            "status": str(entry.get("status", "pending")),
+            "feasible_ratios": list(entry.get("feasible_ratios", [])),
+            "message": str(entry.get("message", "")),
+            "checked_at": entry.get("checked_at"),
+        }
     static_root = Path(app.static_folder or "")
     static_asset_version = hashlib.sha256(
         b"".join(
@@ -879,6 +1082,63 @@ def create_app(
             session=_project_upload_results_session(store, session_id, state)
         )
 
+    @app.errorhandler(Exception)
+    def unexpected_workflow_error(error: Exception):
+        """Keep technical failures out of the business UI and route them to Codex."""
+
+        view_args = request.view_args or {}
+        session_id = str(view_args.get("session_id", "")).strip()
+        diagnostic = None
+        if session_id:
+            try:
+                state = store.load_session(session_id)
+                stage_id = str(
+                    view_args.get("stage_id") or state.get("current_stage") or "setup"
+                )
+                diagnostic = write_exception_diagnostic(
+                    store,
+                    session_id,
+                    stage_id,
+                    processor=f"interaction-{request.endpoint or 'request'}",
+                    phase=f"http_{request.method.casefold()}",
+                    error=error,
+                )
+            except Exception:
+                diagnostic = None
+        return _error(
+            "workflow processing failed",
+            500,
+            message="系统暂时未能完成当前操作，Codex 已收到诊断信息。",
+            diagnostic_status=(
+                "open" if isinstance(diagnostic, dict) else "unavailable"
+            ),
+        )
+
+    @app.get("/api/runtime/login-status")
+    def get_runtime_login_status():
+        """Automatic login gate; the business UI never exposes diagnostics."""
+
+        require_desktop_identity()
+        state = inspect_login_browser(runtime)
+        ready = state.get("ready") is True
+        login_state = str(state.get("login_state", "preparing"))
+        if ready:
+            public_message = "千牛已准备完成"
+        elif login_state in {"interaction_required", "human_check"}:
+            public_message = "请在已打开的千牛窗口完成登录"
+        else:
+            public_message = "正在准备千牛登录窗口"
+        return jsonify(
+            ready=ready,
+            status="ready" if ready else "waiting_for_login",
+            message=public_message,
+            login_state=login_state,
+            reason_code=str(state.get("reason_code", "")),
+            observed_store=(
+                str(state.get("observed_store", "")) if ready else ""
+            ),
+        )
+
     @app.get("/api/sessions/<session_id>/stages/<stage_id>")
     def get_stage_route(session_id: str, stage_id: str):
         if stage_id == "asset_matching":
@@ -1105,6 +1365,82 @@ def create_app(
             executor_launch=executor_launch,
         ), 202
 
+    @app.get(
+        "/api/sessions/<session_id>/stages/asset_matching/selection-preflights"
+    )
+    def get_asset_selection_preflights(session_id: str):
+        state = store.load_session(session_id)
+        data = current_asset_gallery(session_id, state)
+        _, policy_sha256 = selection_preflight_policy()
+        candidates = {
+            str(item.get("asset_id", "")): item
+            for item in data.get("asset_candidates", [])
+            if isinstance(item, dict) and item.get("asset_id")
+        }
+        entries = []
+        for asset_id, entry in read_selection_preflight_cache(session_id)[
+            "entries"
+        ].items():
+            candidate = candidates.get(str(asset_id))
+            if not isinstance(entry, dict) or candidate is None:
+                continue
+            if entry.get("identity_sha256") != selection_preflight_identity(
+                candidate, policy_sha256
+            ):
+                continue
+            entries.append(public_selection_preflight(entry))
+        return jsonify(entries=entries)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/asset_matching/assets/"
+        "<asset_id>/selection-preflight"
+    )
+    def preflight_asset_selection(session_id: str, asset_id: str):
+        state = store.load_session(session_id)
+        if state["stages"]["asset_matching"]["status"] not in {
+            "draft",
+            "needs_user_input",
+            "blocked",
+        }:
+            raise InteractionConflict(
+                "asset matching does not accept selection preflight"
+            )
+        data = current_asset_gallery(session_id, state)
+        candidate = next(
+            (
+                dict(item)
+                for item in data.get("asset_candidates", [])
+                if isinstance(item, dict)
+                and str(item.get("asset_id", "")) == str(asset_id)
+            ),
+            None,
+        )
+        if candidate is None:
+            raise InteractionConflict("selected asset is not in current gallery")
+        if not (
+            candidate.get("validation_status") == "valid"
+            and isinstance(candidate.get("preflight"), dict)
+            and candidate["preflight"].get("selectable") is True
+        ):
+            return _error(
+                "asset is not selectable",
+                422,
+                reason_code="ASSET_NOT_SELECTABLE",
+                message="这张图片未通过原图硬性检查，不能采用。",
+            )
+        try:
+            entry = build_single_selection_preflight(
+                session_id, state, candidate
+            )
+        except (OSError, ValueError, LocalResourceIdentityMismatch):
+            return _error(
+                "selection preflight failed",
+                422,
+                reason_code="ASSET_SELECTION_PREFLIGHT_FAILED",
+                message="这张图片暂时无法完成裁剪预检，请稍后重试或更换图片。",
+            )
+        return jsonify(**public_selection_preflight(entry))
+
     @app.post(
         "/api/sessions/<session_id>/stages/<stage_id>/recover-processing"
     )
@@ -1114,6 +1450,34 @@ def create_app(
             payload.get("claimant_id", "codex-agent")
         ).strip() or "codex-agent"
         current = store.processing_claim(session_id, stage_id)
+        handoff = store.read_optional_stage_document(
+            session_id, stage_id, "handoff"
+        )
+        specialized_processor = (
+            "process-product-selection"
+            if stage_id == "completeness"
+            else (
+                "process-final-material-handoff"
+                if stage_id == "asset_matching"
+                and isinstance(handoff, dict)
+                and handoff.get("handoff_kind") == "final_material_selection"
+                else ""
+            )
+        )
+        if specialized_processor:
+            resolved = store.resolve_recovery_state(session_id, stage_id)
+            return jsonify(
+                status="specialized_processor_required",
+                reason_code="SPECIALIZED_PROCESSOR_REQUIRED",
+                claim_deferred=True,
+                processor=specialized_processor,
+                recovery=resolved,
+                processing_claim=current,
+                next_action=(
+                    f"Agent must run {specialized_processor} directly; "
+                    "the page does not claim this handoff."
+                ),
+            )
         if current and not current.get("expired"):
             if stage_id != "setup":
                 raise InteractionConflict("PROCESSING_CLAIM_ACTIVE")
@@ -1397,6 +1761,19 @@ def create_app(
         expected_revision = payload.get("revision")
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
             return _validation_error({"revision": "must be an integer"})
+        previous_input = store.read_optional_stage_document(
+            session_id, stage_id, "input"
+        )
+        previous_values = (
+            previous_input.get("values", {})
+            if isinstance(previous_input, dict)
+            else {}
+        )
+        slot_plan_changed = (
+            stage_id != "slots_copy"
+            or previous_values.get("slot_assignments")
+            != values.get("slot_assignments")
+        )
         document = store.save_draft(
             session_id,
             stage_id,
@@ -1405,9 +1782,13 @@ def create_app(
             expected_revision=expected_revision,
             request_id=_persistence_request_id(payload),
         )
-        _supersede_slot_requests_after_revision_change(
-            store, session_id, stage_id
-        )
+        # Copy drafts are incrementally hydrated from a running copy request.
+        # Autosaving those fields must not invalidate the request that produced
+        # them; only a change to the slot/image plan makes its output stale.
+        if slot_plan_changed:
+            _supersede_slot_requests_after_revision_change(
+                store, session_id, stage_id
+            )
         if stage_id == "asset_matching":
             invalidate_gallery_if_scope_expands(
                 store,
@@ -1557,36 +1938,6 @@ def create_app(
                     "候选文件夹后才能加载图片："
                     + "、".join(products_without_folder)
                 )
-        if not field_errors and stage_id == "setup" and enforce_stage_order:
-            readiness_path = (
-                store._session_path(session_id)
-                / "collected"
-                / "promotion"
-                / "collection-readiness-evidence.json"
-            )
-            dom_evidence: dict[str, Any] = {}
-            if readiness_path.is_file():
-                try:
-                    dom_evidence = json.loads(
-                        readiness_path.read_text(encoding="utf-8")
-                    )
-                except (OSError, ValueError, json.JSONDecodeError):
-                    dom_evidence = {}
-            readiness = build_collection_readiness(
-                runtime,
-                dom_evidence=dom_evidence,
-                expected_store=str(values.get("store", "")),
-            )
-            if not readiness["ready"]:
-                blocked = [
-                    item
-                    for item in readiness["checks"]
-                    if not item["ready"]
-                ]
-                field_errors["collection_readiness"] = "；".join(
-                    f"{item['reason_code']}：{item['message']}"
-                    for item in blocked
-                )
         if not field_errors and stage_id == "image_review":
             review_context = _current_result(
                 store, session_id, "image_review", state
@@ -1609,6 +1960,7 @@ def create_app(
                 except (TypeError, ValueError) as error:
                     field_errors["decisions"] = str(error)
         selected_asset_bundle = None
+        asset_validation_feedback = None
         if (
             not field_errors
             and stage_id == "asset_matching"
@@ -1638,30 +1990,38 @@ def create_app(
                 and isinstance(current_data, dict)
                 and isinstance(current_data.get("asset_candidates"), list)
             ):
-                policy = default_image_policy()
-                policy_sha256 = hashlib.sha256(
-                    json.dumps(
-                        policy,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
+                policy, policy_sha256 = selection_preflight_policy()
                 prospective_revision = int(
                     state["stages"]["asset_matching"]["revision"]
                 ) + 1
-                preflight = build_image_review_data(
+                preflight = combine_cached_selection_preflights(
+                    session_id,
                     current_data.get("asset_candidates", []),
                     values.get("asset_decisions", []),
                     policy=policy,
                     policy_sha256=policy_sha256,
                     asset_matching_revision=prospective_revision,
-                    inspection_cache_path=(
-                        store._stage_path(session_id, "asset_matching")
-                        / "source-inspection-cache.json"
-                    ),
+                )
+                if preflight is None:
+                    # Backward-compatible safety fallback for API clients and
+                    # historical drafts. The normal UI fills the per-image
+                    # cache while the user selects each image.
+                    preflight = build_image_review_data(
+                        current_data.get("asset_candidates", []),
+                        values.get("asset_decisions", []),
+                        policy=policy,
+                        policy_sha256=policy_sha256,
+                        asset_matching_revision=prospective_revision,
+                        inspection_cache_path=(
+                            store._stage_path(session_id, "asset_matching")
+                            / "source-inspection-cache.json"
+                        ),
+                    )
+                asset_validation_feedback = (
+                    _selected_asset_validation_feedback(preflight)
                 )
                 usable_by_product: dict[str, int] = {}
+                ratios_by_product: dict[str, dict[str, int]] = {}
                 required_products = {
                     str(item.get("product_id", ""))
                     for item in current_data.get("requirements", [])
@@ -1678,11 +2038,30 @@ def create_app(
                         usable_by_product[product_id] = (
                             usable_by_product.get(product_id, 0) + 1
                         )
+                        ratio_counts = ratios_by_product.setdefault(
+                            product_id, {"3:4": 0, "1:1": 0}
+                        )
+                        for ratio in ("3:4", "1:1"):
+                            option = item.get("ratio_options", {}).get(ratio, {})
+                            if isinstance(option, dict) and option.get("feasible") is True:
+                                ratio_counts[ratio] += 1
                 shortages = {
                     product_id: 3 - usable_by_product.get(product_id, 0)
                     for product_id in required_products
                     if usable_by_product.get(product_id, 0) < 3
                 }
+                ratio_shortages = {
+                    product_id
+                    for product_id in required_products
+                    if max(
+                        ratios_by_product.get(
+                            product_id, {"3:4": 0, "1:1": 0}
+                        ).values()
+                    ) < 3
+                }
+                blocking_count = int(
+                    asset_validation_feedback.get("blocking_count", 0)
+                )
                 if not required_products:
                     field_errors["asset_decisions"] = (
                         "当前画廊没有有效的商品边界，请重新加载图片"
@@ -1690,6 +2069,20 @@ def create_app(
                 elif not values.get("asset_decisions"):
                     field_errors["asset_decisions"] = (
                         f"{PRODUCT_IMAGE_SHORTAGE}：每个商品至少采用 3 张图片"
+                    )
+                elif blocking_count:
+                    shortage_detail = "；".join(
+                        f"{product_id} 还差 {count} 张"
+                        for product_id, count in sorted(shortages.items())
+                    )
+                    field_errors["asset_decisions"] = (
+                        f"有 {blocking_count} 张已选素材需要处理，"
+                        "请查看红色卡片并取消或更换图片"
+                        + (
+                            f"；处理后仍需补充：{shortage_detail}"
+                            if shortage_detail
+                            else ""
+                        )
                     )
                 elif shortages:
                     detail = "；".join(
@@ -1699,6 +2092,11 @@ def create_app(
                     field_errors["asset_decisions"] = (
                         f"{PRODUCT_IMAGE_SHORTAGE}：完整坑位至少需要 3 张"
                         f"可用且不重复的图片：{detail}"
+                    )
+                elif ratio_shortages:
+                    field_errors["asset_decisions"] = (
+                        "每个商品至少需要 3 张共同支持同一比例的图片："
+                        + "、".join(sorted(ratio_shortages))
                     )
                 else:
                     missing_slots = {
@@ -1743,7 +2141,14 @@ def create_app(
                 except (TypeError, ValueError) as error:
                     field_errors["slot_assignments"] = str(error)
         if field_errors:
-            return _validation_error(field_errors)
+            return _validation_error(
+                field_errors,
+                **(
+                    {"asset_validation": asset_validation_feedback}
+                    if asset_validation_feedback is not None
+                    else {}
+                ),
+            )
 
         expected_revision = payload.get("revision")
         if "revision" in payload and (
@@ -2040,6 +2445,7 @@ def create_app(
             )
             stale_names = (
                 "current-slot-plan.json",
+                "crop-preflight.json",
                 "processed-outputs.json",
                 "slot-plan.snapshot.json",
                 "confirmed-copy-drafts.json",
@@ -2487,11 +2893,17 @@ def create_app(
         response.headers["Cache-Control"] = "private, max-age=300"
         return response
 
-    @app.post(
-        "/api/sessions/<session_id>/stages/slots_copy/process-plan"
-    )
-    def process_confirmed_slot_plan(session_id: str):
-        payload = _json_object()
+    def _slot_processing_request(
+        session_id: str, payload: dict[str, Any]
+    ) -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any] | None,
+        list[dict[str, Any]],
+        dict[str, Any],
+        Path,
+        str,
+    ]:
         state = store.load_session(session_id)
         if state["stages"]["slots_copy"]["status"] not in {
             "draft",
@@ -2502,9 +2914,7 @@ def create_app(
         context = _current_result(store, session_id, "slots_copy", state)
         data = context.get("data") if isinstance(context, dict) else None
         if not isinstance(data, dict):
-            return _validation_error(
-                {"slot_assignments": "prepare the current slot board first"}
-            )
+            raise ValueError("prepare the current slot board first")
         current_plan = read_current_slot_plan(store, session_id)
         submitted_assignments = payload.get("slot_assignments")
         if current_plan is not None:
@@ -2519,44 +2929,74 @@ def create_app(
                     "copy_review",
                 }
             ):
-                return _validation_error(
-                    {
-                        "current_slot_plan": (
-                            "confirm the current slot plan before processing"
-                        )
-                    }
+                raise ValueError(
+                    "confirm the current slot plan before processing"
                 )
             submitted_assignments = current_plan["slot_assignments"]
+        assignments = validate_slot_assignments(submitted_assignments, data)
+        stage_path = store._stage_path(session_id, "slots_copy")
+        crop_parameters = (
+            payload.get("crop_parameters")
+            if isinstance(payload.get("crop_parameters"), dict)
+            else {}
+        )
+        requested_processing_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "plan_sha256": slot_plan_sha256(assignments),
+                    "crop_parameters": crop_parameters,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return (
+            state,
+            data,
+            current_plan,
+            assignments,
+            crop_parameters,
+            stage_path,
+            requested_processing_sha256,
+        )
+
+    @app.get(
+        "/api/sessions/<session_id>/stages/slots_copy/crop-preflight"
+    )
+    def get_slot_crop_preflight(session_id: str):
+        store.load_session(session_id)
+        path = (
+            store._stage_path(session_id, "slots_copy")
+            / "crop-preflight.json"
+        )
+        if not path.is_file():
+            return jsonify(workflow_state="not_checked", slots=[])
+        return jsonify(SessionStore._read_json(path, "crop-preflight"))
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/slots_copy/crop-preflight"
+    )
+    def preflight_confirmed_slot_plan(session_id: str):
+        payload = _json_object()
         try:
-            assignments = validate_slot_assignments(
-                submitted_assignments, data
-            )
-            stage_path = store._stage_path(session_id, "slots_copy")
-            crop_parameters = (
-                payload.get("crop_parameters")
-                if isinstance(payload.get("crop_parameters"), dict)
-                else {}
-            )
-            requested_processing_sha256 = hashlib.sha256(
-                json.dumps(
-                    {
-                        "plan_sha256": slot_plan_sha256(assignments),
-                        "crop_parameters": crop_parameters,
-                    },
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()
-            processed_path = stage_path / "processed-outputs.json"
-            existing_processed = None
-            if processed_path.is_file():
-                existing_processed = SessionStore._read_json(
-                    processed_path, "processed-outputs"
+            (
+                _state,
+                data,
+                current_plan,
+                assignments,
+                crop_parameters,
+                stage_path,
+                requested_processing_sha256,
+            ) = _slot_processing_request(session_id, payload)
+            preflight_path = stage_path / "crop-preflight.json"
+            if preflight_path.is_file():
+                existing = SessionStore._read_json(
+                    preflight_path, "crop-preflight"
                 )
                 if (
-                    existing_processed.get("processing_sha256")
+                    existing.get("processing_sha256")
                     == requested_processing_sha256
                 ):
-                    return jsonify(existing_processed)
+                    return jsonify(existing)
             processed = materialize_confirmed_slot_plan(
                 assignments,
                 data,
@@ -2565,9 +3005,140 @@ def create_app(
             )
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             return _validation_error({"slot_assignments": str(error)})
-        store._write_json_atomic(
-            processed_path, processed
-        )
+        preflight = {
+            **processed,
+            "workflow_state": "crop_preflight_passed",
+            "crop_parameters": crop_parameters,
+            "checked_count": sum(
+                len(slot.get("outputs", []))
+                for slot in processed.get("slots", [])
+                if isinstance(slot, dict)
+            ),
+            "minimum_size_bytes": 204800,
+            "checked_at": datetime.now().astimezone().isoformat(),
+        }
+        if current_plan is not None:
+            updated = save_current_slot_plan(
+                store,
+                session_id,
+                data,
+                current_plan["slot_assignments"],
+                decision_source=str(current_plan["decision_source"]),
+                context_revision=int(current_plan["context_revision"]),
+                expected_plan_revision=int(current_plan["plan_revision"]),
+                workflow_state="processing",
+                confirmed=True,
+                request_id=current_plan.get("agent_request_id"),
+                response_sha256=current_plan.get("agent_response_sha256"),
+                fallback_reason=current_plan.get("fallback_reason"),
+                actor="system",
+            )
+            preflight["plan_revision"] = int(updated["plan_revision"])
+        store._write_json_atomic(preflight_path, preflight)
+        return jsonify(preflight)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/slots_copy/process-plan"
+    )
+    def process_confirmed_slot_plan(session_id: str):
+        payload = _json_object()
+        try:
+            (
+                _state,
+                data,
+                current_plan,
+                assignments,
+                crop_parameters,
+                stage_path,
+                requested_processing_sha256,
+            ) = _slot_processing_request(session_id, payload)
+            preflight_path = stage_path / "crop-preflight.json"
+            if not preflight_path.is_file():
+                return _error(
+                    "validation failed",
+                    422,
+                    {"crop_preflight": "请先点击“裁剪预校验”"},
+                    reason_code="CROP_PREFLIGHT_REQUIRED",
+                )
+            preflight = SessionStore._read_json(
+                preflight_path, "crop-preflight"
+            )
+            if (
+                preflight.get("workflow_state")
+                != "crop_preflight_passed"
+                or preflight.get("processing_sha256")
+                != requested_processing_sha256
+            ):
+                return _error(
+                    "validation failed",
+                    422,
+                    {"crop_preflight": "裁剪参数已变化，请重新执行预校验"},
+                    reason_code="CROP_PREFLIGHT_STALE",
+                )
+            root = (stage_path / "derived").resolve()
+            verified_slots: list[dict[str, Any]] = []
+            for slot in preflight.get("slots", []):
+                if not isinstance(slot, dict):
+                    continue
+                verified_outputs = []
+                for output in slot.get("outputs", []):
+                    if not isinstance(output, dict):
+                        continue
+                    verified = validate_final_output(
+                        output, policy=data.get("policy", default_image_policy())
+                    )
+                    if not Path(verified["output_path"]).resolve().is_relative_to(root):
+                        raise ValueError("OUTPUT_PATH_OUTSIDE_TASK")
+                    verified_outputs.append(verified)
+                verified_slots.append({**slot, "outputs": verified_outputs})
+            processed = {
+                **preflight,
+                "workflow_state": "outputs_ready",
+                "crop_parameters": crop_parameters,
+                "slots": verified_slots,
+                "finalized_at": datetime.now().astimezone().isoformat(),
+            }
+            processed_path = stage_path / "processed-outputs.json"
+            existing_processed = (
+                SessionStore._read_json(processed_path, "processed-outputs")
+                if processed_path.is_file()
+                else None
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            return _validation_error({"slot_assignments": str(error)})
+
+        if (
+            isinstance(existing_processed, dict)
+            and existing_processed.get("processing_sha256")
+            == requested_processing_sha256
+            and existing_processed.get("workflow_state") == "outputs_ready"
+        ):
+            try:
+                copy_request = create_copy_draft_request(
+                    store,
+                    session_id,
+                    copy_provider="qianniu_builtin_ai",
+                    regenerate=False,
+                    board_data=data,
+                )
+            except (
+                AgentRequestError,
+                InteractionConflict,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
+                return _validation_error({"copy_request": str(error)})
+            return jsonify(
+                {
+                    **existing_processed,
+                    "copy_request_id": copy_request["request_id"],
+                    "copy_request_status": copy_request["status"],
+                    "copy_request": copy_request,
+                }
+            )
+
+        store._write_json_atomic(processed_path, processed)
         invalidated_copy_slots: set[str] = set()
         if isinstance(existing_processed, dict):
             previous_outputs = {
@@ -2640,7 +3211,20 @@ def create_app(
                 fallback_reason=current_plan.get("fallback_reason"),
                 actor="system",
             )
-        return jsonify(processed)
+        try:
+            copy_request = create_copy_draft_request(
+                store,
+                session_id,
+                copy_provider="qianniu_builtin_ai",
+                regenerate=False,
+                board_data=data,
+            )
+            processed["copy_request_id"] = copy_request["request_id"]
+            processed["copy_request_status"] = copy_request["status"]
+            store._write_json_atomic(processed_path, processed)
+        except (AgentRequestError, InteractionConflict, OSError, TypeError, ValueError) as error:
+            return _validation_error({"copy_request": str(error)})
+        return jsonify({**processed, "copy_request": copy_request})
 
     @app.get(
         "/api/sessions/<session_id>/stages/slots_copy/processed-outputs"
@@ -2925,6 +3509,23 @@ def create_app(
                 response = SessionStore._read_json(response_path, "response")
             except InteractionConflict:
                 response = {"status": "invalid", "reason_code": "AGENT_RESPONSE_INVALID"}
+        progress_path = (
+            store._stage_path(session_id, "slots_copy")
+            / "agent-requests"
+            / request_id
+            / "progress.json"
+        )
+        progress = None
+        if progress_path.is_file():
+            try:
+                progress = SessionStore._read_json(
+                    progress_path, "copy-progress"
+                )
+            except InteractionConflict:
+                progress = {
+                    "status": "invalid",
+                    "reason_code": "COPY_PROGRESS_INVALID",
+                }
         if (
             state.get("workflow_profile") != "deterministic-manual-v1"
             and value.get("kind") == "slot_plan_with_analysis"
@@ -2979,7 +3580,7 @@ def create_app(
                             response_sha256=response_sha256(response_path),
                             actor="system",
                         )
-        return jsonify(request=value, response=response)
+        return jsonify(request=value, response=response, progress=progress)
 
     @app.get(
         "/api/sessions/<session_id>/stages/slots_copy/current-slot-plan"
@@ -3114,6 +3715,7 @@ def create_app(
         stale_paths = [
             stage_path / name
             for name in (
+                "crop-preflight.json",
                 "processed-outputs.json",
                 "slot-plan.snapshot.json",
                 "confirmed-copy-drafts.json",
@@ -3362,186 +3964,29 @@ def create_app(
     def create_slot_copy_request(session_id: str):
         payload = _json_object()
         copy_provider = str(
-            payload.get("provider", "codex_agent")
+            payload.get("provider", "qianniu_builtin_ai")
         ).strip()
-        if copy_provider not in {"codex_agent", "qianniu_builtin_ai"}:
-            return _validation_error(
-                {"copy_request": "unsupported copy provider"}
-            )
-        state = store.load_session(session_id)
-        current = read_current_slot_plan(store, session_id)
-        processed_path = (
-            store._stage_path(session_id, "slots_copy")
-            / "processed-outputs.json"
-        )
-        if (
-            current is None
-            or current.get("workflow_state")
-            not in {"outputs_ready", "copy_generating", "copy_review"}
-            or not processed_path.is_file()
-        ):
-            return _validation_error(
-                {"copy_request": "final image outputs are not ready"}
-            )
-        processed = SessionStore._read_json(
-            processed_path, "processed-outputs"
-        )
-        outputs_identity = final_outputs_sha256(processed)
-        context_fingerprint = hashlib.sha256(
-            f"{outputs_identity}|{copy_provider}".encode("utf-8")
-        ).hexdigest()
-        existing = None
-        if payload.get("regenerate") is not True:
-            existing = find_equivalent_agent_request(
-                store,
-                session_id,
-                kind="copy_draft",
-                context_revision=int(
-                    state["stages"]["slots_copy"]["revision"]
-                ),
-                context_fingerprint=context_fingerprint,
-            )
-        if existing is not None:
-            return jsonify(existing)
-        context = _current_result(store, session_id, "slots_copy", state)
-        board_data = (
-            context.get("data") if isinstance(context, dict) else {}
-        )
-        product_titles = {
-            str(item.get("product_id", "")): str(
-                item.get("product_title", "")
-            )
-            for item in board_data.get("products", [])
-            if isinstance(item, dict)
-        }
-        slots = []
-        for slot in processed.get("slots", []):
-            product_id = str(slot.get("product_id", ""))
-            slots.append(
-                {
-                    "slot_id": str(slot.get("slot_id", "")),
-                    "product_id": product_id,
-                    "target_ratio": str(slot.get("target_ratio", "")),
-                    "theme": str(slot.get("theme", "")),
-                    "ordered_outputs": [
-                        {
-                            "asset_id": str(output.get("asset_id", "")),
-                            "output_sha256": str(
-                                output.get("output_sha256", "")
-                            ),
-                            "output_path": str(
-                                output.get("output_path", "")
-                            ),
-                            "order": int(output.get("order", 0)),
-                        }
-                        for output in slot.get("outputs", [])
-                    ],
-                    "trusted_source_fields": {
-                        "商品标题": product_titles.get(product_id, "")
-                    },
-                }
-            )
         try:
-            created = create_agent_request(
+            state = store.load_session(session_id)
+            context = _current_result(store, session_id, "slots_copy", state)
+            board_data = (
+                context.get("data") if isinstance(context, dict) else {}
+            )
+            created = create_copy_draft_request(
                 store,
                 session_id,
-                kind="copy_draft",
-                candidates=[],
-                context_revision=int(
-                    state["stages"]["slots_copy"]["revision"]
-                ),
-                request_context={
-                    "slot_plan_revision": int(current["plan_revision"]),
-                    "final_outputs_sha256": final_outputs_sha256(processed),
-                    "context_fingerprint": context_fingerprint,
-                    "copy_provider": copy_provider,
-                    "slots": slots,
-                    "prohibited_terms": [],
-                },
+                copy_provider=copy_provider,
+                regenerate=payload.get("regenerate") is True,
+                board_data=board_data,
             )
-        except (AgentRequestError, TypeError, ValueError) as error:
+        except (
+            AgentRequestError,
+            InteractionConflict,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as error:
             return _validation_error({"copy_request": str(error)})
-        if copy_provider == "qianniu_builtin_ai":
-            provider_actor = "qianniu-builtin-ai"
-            try:
-                claim_agent_request(
-                    store,
-                    session_id,
-                    created["request_id"],
-                    actor=provider_actor,
-                )
-                with open_cdp_page(
-                    runtime.cdp_url,
-                    runtime.material_center_url,
-                ) as page:
-                    drafts = generate_qianniu_copy_drafts(
-                        page,
-                        slots,
-                        material_center_url=runtime.material_center_url,
-                    )
-                complete_agent_request(
-                    store,
-                    session_id,
-                    created["request_id"],
-                    {
-                        "request_id": created["request_id"],
-                        "kind": "copy_draft",
-                        "provider_id": "qianniu-builtin-ai",
-                        "response_model": "qianniu-builtin-copy",
-                        "result": {"copy_drafts": drafts},
-                    },
-                    actor=provider_actor,
-                )
-                created = read_agent_request(
-                    store, session_id, created["request_id"]
-                )
-            except (
-                AgentRequestError,
-                CdpUnavailable,
-                InteractionConflict,
-                QianniuCopyError,
-                TypeError,
-                ValueError,
-            ) as error:
-                app.logger.warning(
-                    "Qianniu copy request failed for session %s: %s",
-                    session_id,
-                    error,
-                )
-                reason_code = (
-                    error.reason_code
-                    if isinstance(error, QianniuCopyError)
-                    else (
-                        "CDP_UNAVAILABLE"
-                        if isinstance(error, CdpUnavailable)
-                        else "QIANNIU_COPY_REQUEST_FAILED"
-                    )
-                )
-                fail_agent_request(
-                    store,
-                    session_id,
-                    created["request_id"],
-                    actor=provider_actor,
-                    reason_code=reason_code,
-                )
-                return _validation_error(
-                    {"copy_request": str(error)}
-                )
-        save_current_slot_plan(
-            store,
-            session_id,
-            board_data,
-            current["slot_assignments"],
-            decision_source=str(current["decision_source"]),
-            context_revision=int(current["context_revision"]),
-            expected_plan_revision=int(current["plan_revision"]),
-            workflow_state="copy_generating",
-            confirmed=True,
-            request_id=current.get("agent_request_id"),
-            response_sha256=current.get("agent_response_sha256"),
-            fallback_reason=current.get("fallback_reason"),
-            actor="system",
-        )
         return jsonify(created), 201
 
     @app.post(
@@ -4539,6 +4984,7 @@ def _archive_slot_output_metadata(
     targets = [
         stage_path / name
         for name in (
+            "crop-preflight.json",
             "processed-outputs.json",
             "slot-plan.snapshot.json",
             "confirmed-copy-drafts.json",
@@ -4590,8 +5036,89 @@ def _supersede_slot_requests_after_revision_change(
             continue
 
 
-def _validation_error(field_errors: dict[str, str]):
-    return _error("validation failed", 422, field_errors)
+def _selected_asset_validation_feedback(
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a path-free, business-facing summary for selected asset cards."""
+
+    items: list[dict[str, Any]] = []
+    for asset in preflight.get("assets", []):
+        if not isinstance(asset, dict):
+            continue
+        reason_codes = set(asset.get("reason_codes", []))
+        ratio_options = asset.get("ratio_options", {})
+        feasible_ratios = [
+            ratio
+            for ratio in ("3:4", "1:1")
+            if isinstance(ratio_options.get(ratio), dict)
+            and ratio_options[ratio].get("feasible") is True
+        ]
+        blocked = asset.get("status") == "blocked" or asset.get("duplicate") is True
+        if asset.get("duplicate") is True or "DUPLICATE_ASSET" in reason_codes:
+            issue_type = "duplicate"
+            message = "与另一张已选图片重复，请取消其中一张"
+        elif "SOURCE_SHA_CHANGED" in reason_codes:
+            issue_type = "source_changed"
+            message = "这张图片在选择后发生了变化，请重新确认"
+        elif reason_codes.intersection(
+            {
+                "SOURCE_UNREADABLE",
+                "ASSET_UNREADABLE",
+                "ASSET_NOT_FOUND",
+                "ZERO_BYTE_ASSET",
+                "SOURCE_METADATA_MISSING",
+            }
+        ):
+            issue_type = "source_unreadable"
+            message = "这张图片暂时无法读取，请更换图片或稍后重试"
+        elif "OUTPUT_SIZE_BELOW_MINIMUM" in reason_codes:
+            issue_type = "output_size"
+            message = "3:4、1:1 裁剪后均小于 200 KiB，请更换图片"
+        elif "IMAGE_SIZE_EXCEEDED" in reason_codes:
+            issue_type = "output_size"
+            message = "原图或预裁剪结果超过 20 MiB，请更换图片"
+        elif "OUTPUT_DIMENSIONS_BELOW_MINIMUM" in reason_codes:
+            issue_type = "output_dimensions"
+            message = "无法裁出宽高均不少于 720px 的合规图片，请更换图片"
+        elif "SELECTED_ASSET_NOT_IN_CURRENT_RESULT" in reason_codes:
+            issue_type = "not_current"
+            message = "这张图片已不在当前候选中，请取消后重新选择"
+        elif blocked:
+            issue_type = "blocked"
+            message = "这张图片未通过最终检查，请更换图片"
+        elif len(feasible_ratios) == 1:
+            issue_type = "ratio_limited"
+            message = f"仅支持 {feasible_ratios[0]}，后续只会用于该比例坑位"
+        else:
+            issue_type = "ok"
+            message = "检查通过"
+        severity = "blocked" if blocked else (
+            "warning" if len(feasible_ratios) == 1 else "ok"
+        )
+        items.append(
+            {
+                "asset_id": str(asset.get("asset_id", "")),
+                "product_id": str(asset.get("product_id", "")),
+                "severity": severity,
+                "issue_type": issue_type,
+                "message": message,
+                "feasible_ratios": feasible_ratios,
+            }
+        )
+    return {
+        "selected_count": int(preflight.get("selected_count", 0)),
+        "blocking_count": sum(
+            item["severity"] == "blocked" for item in items
+        ),
+        "warning_count": sum(
+            item["severity"] == "warning" for item in items
+        ),
+        "items": items,
+    }
+
+
+def _validation_error(field_errors: dict[str, str], **details: Any):
+    return _error("validation failed", 422, field_errors, **details)
 
 
 def _error(
@@ -4605,4 +5132,3 @@ def _error(
         field_errors=field_errors or {},
         **details,
     ), status_code
-    final_outputs_sha256,

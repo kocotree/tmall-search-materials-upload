@@ -167,16 +167,42 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert "视频" in html and "本轮延期" in html
     assert 'name="month"' not in html
     assert "目标月份" not in html
-    assert "打开或恢复登录窗口" in html
+    assert 'data-setup-login-gate' in html
     assert "不要求用户手工转换为 UNC" in html
     assert 'name="products_csv"' in html and 'type="hidden"' in html
     assert 'name="rules_csv"' in html
     assert html.count('name="image_roots"') >= 3
     for removed in ("basic_xlsx", "search_xlsx", "asset_root", "runs_root"):
         assert f'name="{removed}"' not in html
-    assert 'data-component="CollectionRuntimeConfig"' in html
-    assert 'data-save-selector-profile' in html
-    assert "CDP Chrome" in html
+    assert re.search(
+        r'data-component="CollectionRuntimeConfig"[^>]+hidden', html
+    )
+    assert re.search(r'data-check-image-sources[^>]+hidden', html)
+
+
+def test_setup_login_gate_uses_automatic_safe_status(client, monkeypatch):
+    monkeypatch.setattr(
+        web_module,
+        "inspect_login_browser",
+        lambda _runtime: {
+            "ready": True,
+            "login_state": "authenticated",
+            "reason_code": "READY",
+            "observed_store": "测试店铺",
+        },
+    )
+
+    response = client.get("/api/runtime/login-status")
+
+    assert response.status_code == 200
+    assert response.json == {
+        "ready": True,
+        "status": "ready",
+        "message": "千牛已准备完成",
+        "login_state": "authenticated",
+        "reason_code": "READY",
+        "observed_store": "测试店铺",
+    }
 
 
 def test_setup_login_browser_route_reuses_or_opens_visible_browser(
@@ -443,7 +469,7 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
     assert validated.json["collection_readiness"]["ready"] is True
 
 
-def test_production_setup_submission_is_blocked_by_readiness(tmp_path):
+def test_setup_submission_hands_technical_readiness_to_agent(tmp_path):
     workspace = tmp_path / "workspace"
     (workspace / "docs").mkdir(parents=True)
     (workspace / "upload-search-materials").mkdir()
@@ -487,11 +513,14 @@ def test_production_setup_submission_is_blocked_by_readiness(tmp_path):
         },
     )
 
-    assert response.status_code == 422
-    assert "collection_readiness" in response.json["field_errors"]
-    assert "ENVIRONMENT_NOT_PREPARED" in response.json["field_errors"][
-        "collection_readiness"
-    ]
+    assert response.status_code == 202
+    assert response.json["status"] == "ready_for_agent"
+    handoff_path = (
+        SessionStore(runtime.runs_root)._stage_path(session_id, "setup")
+        / "handoff.json"
+    )
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    assert handoff["stage_id"] == "setup"
 
 
 def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(client):
@@ -875,7 +904,11 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     assert 'request_id: String(existing.request_id || "")' in javascript
     assert "当前草稿 · 未绑定 AI 版本" in javascript
     assert "hasMeaningfulCopyDrafts(savedCopyItems)" in javascript
-    assert "applyCopyDrafts(drafts, latestRequestId)" in javascript
+    assert "pollCopyRequest(latestRequestId)" in javascript
+    assert '"裁剪预校验"' in javascript
+    assert 'apiPath("/stages/slots_copy/crop-preflight")' in javascript
+    assert 'copyButton.textContent = "重新生成新版本"' in javascript
+    assert '"生成标题与描述"' not in javascript
     assert re.search(
         r'new CustomEvent\(\s*"input",\s*'
         r'\{ bubbles: true, detail: \{ source: "explicit-user-edit" \} \},',
@@ -923,6 +956,8 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
         client.get(path).get_data(as_text=True)
         for path in ("/static/ui-state.js", "/static/app.js")
     )
+
+    assert "initialCompletenessReview" in javascript
 
     assert "编辑中" in javascript
     assert "已提交，等待 Agent" in javascript
@@ -1053,6 +1088,7 @@ def test_results_stage_projects_approval_uploads_by_product(
         "approval",
         {},
     )
+
     store.write_result(
         session_id,
         "approval",
@@ -2377,6 +2413,52 @@ def test_stage_status_exposes_authoritative_claim_and_expired_recovery(
     assert recovered.json["processing_claim"]["expired"] is False
 
 
+def test_completeness_page_recovery_does_not_replace_specialized_claim(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    setup = store.save_input(session_id, "setup", {"store": "shop"})
+    store.write_result(
+        session_id,
+        "setup",
+        setup["revision"],
+        setup["input_sha256"],
+        status="completed",
+        summary="setup complete",
+    )
+    store.save_input(
+        session_id,
+        "completeness",
+        {"selected_product_ids": ["1"]},
+    )
+    store.wait_for_handoff(
+        session_id,
+        "completeness",
+        timeout_seconds=0.1,
+        claimant_id="first-agent",
+        lease_seconds=60,
+    )
+    state = store.load_session(session_id)
+    original_claim_id = state["processing_claim"]["claim_id"]
+    state["processing_claim"]["lease_expires_at"] = (
+        "2000-01-01T00:00:00+00:00"
+    )
+    store._write_session_state(session_id, state)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/recover-processing",
+        json={"claimant_id": "replacement-agent"},
+    )
+
+    assert response.status_code == 200
+    assert response.json["reason_code"] == "SPECIALIZED_PROCESSOR_REQUIRED"
+    assert response.json["claim_deferred"] is True
+    assert response.json["processor"] == "process-product-selection"
+    current = store.load_session(session_id)
+    assert current["processing_claim"]["claim_id"] == original_claim_id
+    assert current["processing_claim"]["claimant_id"] == "first-agent"
+
+
 def test_frontend_shows_processing_lease_and_expired_recovery_action():
     source = (
         Path(__file__).parents[1]
@@ -2391,6 +2473,8 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert "processing_claim" in source
     assert "/recover-processing" in source
     assert "处理租约已于" in source
+    assert 'currentStageId === "completeness"' in source
+    assert "无需在页面恢复租约" in source
 
 
 def test_approval_submit_uses_one_click_authorization(

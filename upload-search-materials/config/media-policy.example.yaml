@@ -1,6 +1,6 @@
 image:
   version: 2
-  formats: [jpg, jpeg, png, webp]
+  formats: [jpg, jpeg, bmp, gif, heic, png, webp]
   allowed_aspect_ratios: ["3:4", "1:1"]
   aspect_ratio_tolerance: 0.02
   recommended_dimensions:

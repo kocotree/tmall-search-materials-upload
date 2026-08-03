@@ -86,6 +86,57 @@ def test_review_keeps_unreadable_asset_as_auditable_blocked_row(tmp_path):
     assert "SOURCE_UNREADABLE" in data["assets"][0]["reason_codes"]
 
 
+def test_review_blocks_crop_that_cannot_reach_two_hundred_kib(tmp_path):
+    source = tmp_path / "flat.jpg"
+    Image.new("RGB", (1440, 1920), "white").save(source, quality=95)
+    source.write_bytes(source.read_bytes() + (b"\0" * 300_000))
+
+    data = build_image_review_data(
+        [_candidate(source)],
+        [{"asset_id": "asset-a", "decision": "selected"}],
+        policy=default_image_policy(),
+        policy_sha256="policy",
+        asset_matching_revision=2,
+    )
+
+    asset = data["assets"][0]
+    assert asset["status"] == "blocked"
+    assert asset["crop_options"] == {}
+    assert "OUTPUT_SIZE_BELOW_MINIMUM" in asset["reason_codes"]
+    assert all(
+        probe["output_size_bytes"] < 204_800
+        and probe["minimum_size_bytes"] == 204_800
+        for probe in asset["crop_size_probes"].values()
+    )
+
+
+def test_review_blocks_source_that_changed_after_selection(tmp_path):
+    source = tmp_path / "changed.jpg"
+    Image.effect_noise((1440, 1920), 100).convert("RGB").save(
+        source, quality=94
+    )
+    candidate = _candidate(source)
+    candidate["sha256"] = "0" * 64
+
+    data = build_image_review_data(
+        [candidate],
+        [{
+            "asset_id": "asset-a",
+            "decision": "selected",
+            "sha256": "0" * 64,
+        }],
+        policy=default_image_policy(),
+        policy_sha256="policy",
+        asset_matching_revision=2,
+    )
+
+    asset = data["assets"][0]
+    assert asset["status"] == "blocked"
+    assert asset["crop_options"] == {}
+    assert "SOURCE_SHA_CHANGED" in asset["reason_codes"]
+
+
+
 def test_normalize_decisions_requires_every_reviewable_asset(tmp_path):
     source = tmp_path / "source.jpg"
     Image.new("RGB", (1000, 1500), "blue").save(source)
@@ -228,7 +279,7 @@ def test_prepare_session_snapshots_policy_and_binds_current_revision(tmp_path):
     assert migrated_slots["data"]["two_page_workflow"] is True
 
 
-def test_oversize_source_is_reviewable_for_manual_crop(tmp_path):
+def test_oversize_source_is_blocked_before_manual_crop(tmp_path):
     source = tmp_path / "source.jpg"
     Image.new("RGB", (1440, 1920), "white").save(source)
     data = build_image_review_data(
@@ -239,5 +290,6 @@ def test_oversize_source_is_reviewable_for_manual_crop(tmp_path):
         asset_matching_revision=1,
     )
     assert data["assets"][0]["preflight"]["size_bytes"] > 0
-    assert data["assets"][0]["preflight"]["status"] == "needs_compression"
-    assert data["assets"][0]["preflight"]["selectable"] is True
+    assert data["assets"][0]["preflight"]["status"] == "unusable"
+    assert data["assets"][0]["preflight"]["selectable"] is False
+    assert "IMAGE_SIZE_EXCEEDED" in data["assets"][0]["reason_codes"]

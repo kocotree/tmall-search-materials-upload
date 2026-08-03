@@ -28,6 +28,8 @@
   const collectionRuntimeConfig = document.querySelector(
     '[data-component="CollectionRuntimeConfig"]',
   );
+  const setupLoginGate = document.querySelector("[data-setup-login-gate]");
+  const setupForm = document.querySelector('[data-stage-form="setup"]');
   const handoffActions = document.querySelector(".handoff-actions");
   const goCurrentStageButton = document.createElement("button");
   goCurrentStageButton.type = "button";
@@ -67,6 +69,16 @@
   let isHydrating = false;
   let folderCountsLoading = false;
   let folderCountsLoadedFor = "";
+  let setupLoginReady = !setupLoginGate;
+  let setupLoginGateStarted = false;
+  let selectedAssetValidation = null;
+  const selectionPreflights = new Map();
+  const pendingSelectionPreflights = new Map();
+  const selectionPreflightQueue = [];
+  let activeSelectionPreflights = 0;
+  const selectionPreflightConcurrency = 3;
+  let selectionPreflightHydrationKey = "";
+  let selectionPreflightHydrationInFlight = false;
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -106,6 +118,7 @@
       error.reasonCode = payload.reason_code || "";
       error.userMessage = payload.message || "";
       error.allowedActions = payload.allowed_actions || [];
+      error.payload = payload;
       throw error;
     }
     return payload;
@@ -514,7 +527,7 @@
   }
 
   function initializeCollectionRuntime() {
-    if (!collectionRuntimeConfig) return;
+    if (!collectionRuntimeConfig || collectionRuntimeConfig.hidden) return;
     collectionRuntimeConfig.querySelector(
       "[data-open-login-browser]",
     ).addEventListener("click", openCollectionLoginBrowser);
@@ -531,6 +544,44 @@
       "[data-refresh-collection-runtime]",
     ).addEventListener("click", refreshCollectionRuntime);
     refreshCollectionRuntime();
+  }
+
+  async function initializeSetupLoginGate() {
+    if (!setupLoginGate || !setupForm || setupLoginGateStarted) return;
+    setupLoginGateStarted = true;
+    const title = setupLoginGate.querySelector("[data-setup-login-title]");
+    const message = setupLoginGate.querySelector("[data-setup-login-message]");
+    const poll = async () => {
+      try {
+        const payload = await fetchJson("/api/runtime/login-status");
+        if (payload.ready) {
+          const storeInput = setupForm.querySelector('[name="store"]');
+          if (storeInput && !storeInput.value.trim() && payload.observed_store) {
+            storeInput.value = payload.observed_store;
+          }
+          setupLoginGate.hidden = true;
+          setupForm.hidden = false;
+          setupLoginReady = true;
+          renderStatus();
+          return;
+        }
+        setupLoginReady = false;
+        setupForm.hidden = true;
+        setupLoginGate.hidden = false;
+        title.textContent = "等待千牛登录";
+        message.textContent = payload.message
+          || "请在自动打开的千牛窗口完成登录，成功后这里会自动继续。";
+      } catch (error) {
+        setupLoginReady = false;
+        setupForm.hidden = true;
+        setupLoginGate.hidden = false;
+        title.textContent = "正在恢复千牛环境";
+        message.textContent = "系统正在自动处理，请稍候。";
+      }
+      renderStatus();
+      window.setTimeout(poll, 1500);
+    };
+    await poll();
   }
 
   async function ensureSession() {
@@ -658,6 +709,9 @@
     const assetStep = currentStageId === "asset_matching"
       ? inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
       : "";
+    const initialCompletenessReview = currentStageId === "completeness"
+      && !uiState.submission
+      && status === "needs_user_input";
     submitButton.textContent = currentStageId === "slots_copy"
       && !["ready_for_agent", "processing", "completed"].includes(status)
       ? "确认文案并自动预检"
@@ -671,6 +725,7 @@
     )
       ? "确认选图并提交给 Codex"
       : ["needs_user_input", "blocked"].includes(status)
+        && !initialCompletenessReview
       ? "补充后重新提交"
       : status === "ready_for_agent"
         ? "已提交，等待 Agent"
@@ -686,7 +741,15 @@
     ) {
       submitButton.disabled = true;
     }
+    if (currentStageId === "asset_matching" && pendingSelectionPreflights.size) {
+      submitButton.disabled = true;
+      submitButton.textContent = "正在检测所选图片…";
+    }
     saveButton.disabled = lockedByServer;
+    if (currentStageId === "setup" && !setupLoginReady) {
+      saveButton.disabled = true;
+      submitButton.disabled = true;
+    }
     goCurrentStageButton.hidden = !(
       lockedByServer
       && stages.has(sessionCurrentStageId)
@@ -779,11 +842,18 @@
       : null;
     const processing = uiState.serverStatus === "processing";
     const recoverable = currentCollectionStatus?.status === "recoverable";
+    const specializedRecovery = ["completeness", "asset_matching"].includes(
+      currentStageId,
+    );
     recoverProcessingButton.hidden = !(
-      processing && (currentProcessingClaim?.expired || recoverable)
+      !specializedRecovery
+      && processing
+      && (currentProcessingClaim?.expired || recoverable)
     );
     recoverProcessingButton.disabled = !(
-      processing && (currentProcessingClaim?.expired || recoverable)
+      !specializedRecovery
+      && processing
+      && (currentProcessingClaim?.expired || recoverable)
     );
     if (!processing) return;
     if (
@@ -842,6 +912,11 @@
       return;
     }
     if (currentProcessingClaim.expired) {
+      if (specializedRecovery) {
+        actionMessage.textContent =
+          "商品选择已经保留，Agent 将通过唯一处理入口继续，无需在页面恢复租约。";
+        return;
+      }
       actionMessage.textContent =
         `Agent ${currentProcessingClaim.claimant_id || "未知"} 的处理租约已于 ` +
         `${formatClaimTime(currentProcessingClaim.lease_expires_at)} 过期；` +
@@ -989,6 +1064,19 @@
     summary.className = "result-data";
     const heading = document.createElement("strong");
     const result = view.result;
+    const diagnostic = result.agent_diagnostic;
+    if (diagnostic?.status === "open") {
+      heading.textContent = diagnostic.user_action_required
+        ? "需要你在已打开的窗口完成操作"
+        : "系统正在处理异常";
+      const safeMessage = document.createElement("p");
+      safeMessage.textContent = diagnostic.user_action_required
+        ? "请按照 Codex 的提示完成必要操作；当前业务数据已经保留。"
+        : "异常详情已自动交给 Codex，当前业务数据已经保留，无需重新配置。";
+      summary.append(heading, safeMessage);
+      content.appendChild(summary);
+      return;
+    }
     heading.textContent = result.summary || "Agent 已返回结果";
     summary.appendChild(heading);
     if (Array.isArray(result.evidence) && result.evidence.length) {
@@ -1443,6 +1531,83 @@
       .filter((item) => item?.decision === "selected" && item.asset_id);
   }
 
+  function selectionPreflightFor(assetId) {
+    return selectionPreflights.get(String(assetId || "")) || null;
+  }
+
+  async function hydrateSelectionPreflights() {
+    const key = `${sessionId}:${revision}`;
+    if (
+      !sessionId
+      || selectionPreflightHydrationKey === key
+      || selectionPreflightHydrationInFlight
+    ) return;
+    selectionPreflightHydrationInFlight = true;
+    try {
+      const payload = await fetchJson(apiPath(
+        "/stages/asset_matching/selection-preflights",
+      ));
+      selectionPreflights.clear();
+      (payload.entries || []).forEach((entry) => {
+        if (entry?.asset_id) {
+          selectionPreflights.set(String(entry.asset_id), entry);
+        }
+      });
+      selectionPreflightHydrationKey = key;
+      if (currentStageId === "asset_matching") {
+        renderStageResult(stages.get(currentStageId).component);
+      }
+    } catch (_error) {
+      selectionPreflightHydrationKey = key;
+    } finally {
+      selectionPreflightHydrationInFlight = false;
+    }
+  }
+
+  function drainSelectionPreflightQueue() {
+    while (
+      activeSelectionPreflights < selectionPreflightConcurrency
+      && selectionPreflightQueue.length
+    ) {
+      const job = selectionPreflightQueue.shift();
+      activeSelectionPreflights += 1;
+      fetchJson(apiPath(
+        `/stages/asset_matching/assets/${encodeURIComponent(job.assetId)}/selection-preflight`,
+      ), { method: "POST", body: "{}" })
+        .then((entry) => {
+          selectionPreflights.set(job.assetId, entry);
+          job.resolve(entry);
+        })
+        .catch(job.reject)
+        .finally(() => {
+          activeSelectionPreflights -= 1;
+          pendingSelectionPreflights.delete(job.assetId);
+          if (!pendingSelectionPreflights.size && currentStageId === "asset_matching") {
+            renderStatus();
+          }
+          drainSelectionPreflightQueue();
+        });
+    }
+  }
+
+  async function runSelectionPreflight(candidate) {
+    const assetId = String(candidate.asset_id || "");
+    if (!assetId) throw new Error("候选图片缺少稳定标识");
+    const existing = selectionPreflightFor(assetId);
+    if (existing?.status && existing.status !== "pending") return existing;
+    if (pendingSelectionPreflights.has(assetId)) {
+      return pendingSelectionPreflights.get(assetId);
+    }
+    const promise = new Promise((resolve, reject) => {
+      selectionPreflightQueue.push({ assetId, resolve, reject });
+    });
+    pendingSelectionPreflights.set(assetId, promise);
+    submitButton.disabled = true;
+    submitButton.textContent = "正在检测所选图片…";
+    drainSelectionPreflightQueue();
+    return promise;
+  }
+
   function candidateIsSelectable(candidate) {
     const confirmedMatch = ["matched_unlicensed", "confirmed"]
       .includes(candidate.match_status);
@@ -1467,38 +1632,72 @@
 
   function resolutionSummary(candidate) {
     const checks = candidate.resolution_checks || candidate.preflight?.resolution_checks || {};
-    return ["3:4", "1:1"]
-      .filter((ratio) => checks[ratio])
-      .map((ratio) => {
-        const check = checks[ratio];
-        const minimum = check.minimum_status === "meets_minimum"
-          ? "满足最小尺寸"
-          : "低于最小尺寸";
-        const status = check.status === "meets_or_exceeds" ? "达到推荐" : "低于推荐";
-        return `${ratio} 最大裁剪 ${check.max_crop_width}×${check.max_crop_height} · ${minimum} · ${status}`;
-      })
-      .join("；");
+    const matching = candidate.preflight?.matching_ratios || [];
+    if (!matching.length) {
+      const feasible = ["3:4", "1:1"].filter(
+        (ratio) => checks[ratio]?.minimum_status === "meets_minimum",
+      );
+      return feasible.length
+        ? `需要裁剪；可尝试 ${feasible.join("、")}`
+        : "无法裁出宽高均不少于 720px 的图片";
+    }
+    const belowRecommended = matching.filter(
+      (ratio) => checks[ratio]?.status !== "meets_or_exceeds",
+    );
+    return belowRecommended.length
+      ? `原图已满足 ${matching.join("、")}；${belowRecommended.join("、")} 未达到推荐分辨率`
+      : `原图已满足 ${matching.join("、")}，并达到推荐分辨率`;
   }
 
   function persistSelectedCandidates(productId, selected) {
     const otherProducts = selectedAssetDecisions()
       .filter((item) => String(item.product_id) !== String(productId));
-    const selectedRows = selected.map((candidate, index) => ({
-      product_id: String(productId),
-      asset_id: String(candidate.asset_id),
-      sha256: String(candidate.sha256),
-      folder_id: String(candidate.folder_id || candidate.resolved_folder_id || ""),
-      folder_path: String(candidate.folder_path || candidate.candidate_directory || ""),
-      source_system: String(candidate.source_system || ""),
-      source_path: String(candidate.source_path || ""),
-      decision: "selected",
-      selection_order: index + 1,
-    }));
-    writeJsonListControl(
+    const selectedRows = selected.map((candidate, index) => {
+      const selectionPreflight = selectionPreflightFor(candidate.asset_id);
+      return {
+        product_id: String(productId),
+        asset_id: String(candidate.asset_id),
+        sha256: String(candidate.sha256),
+        folder_id: String(candidate.folder_id || candidate.resolved_folder_id || ""),
+        folder_path: String(candidate.folder_path || candidate.candidate_directory || ""),
+        source_system: String(candidate.source_system || ""),
+        source_path: String(candidate.source_path || ""),
+        decision: "selected",
+        selection_order: index + 1,
+        selection_preflight_identity: String(
+          selectionPreflight?.identity_sha256 || "",
+        ),
+        feasible_ratios: [...(selectionPreflight?.feasible_ratios || [])],
+      };
+    });
+    const nextDecisions = [...otherProducts, ...selectedRows];
+    const changed = writeJsonListControl(
       "asset_decisions",
-      [...otherProducts, ...selectedRows],
+      nextDecisions,
       { notify: true },
     );
+    if (changed && selectedAssetValidation) {
+      const selectedIds = new Set(
+        nextDecisions.map((item) => String(item.asset_id || "")),
+      );
+      const retainedItems = (selectedAssetValidation.items || []).filter(
+        (item) => selectedIds.has(String(item.asset_id || ""))
+          && item.issue_type !== "duplicate",
+      );
+      selectedAssetValidation = retainedItems.length
+        ? {
+          ...selectedAssetValidation,
+          selected_count: nextDecisions.length,
+          blocking_count: retainedItems.filter(
+            (item) => item.severity === "blocked",
+          ).length,
+          warning_count: retainedItems.filter(
+            (item) => item.severity === "warning",
+          ).length,
+          items: retainedItems,
+        }
+        : null;
+    }
   }
 
   function persistLicense(assetId, confirmed) {
@@ -1869,6 +2068,7 @@
 
   function renderAssetMatchGallery(view) {
     if (view.mode === "empty") return;
+    void hydrateSelectionPreflights();
     const data = view.result?.data;
     const folderCandidates = Array.isArray(data?.folder_candidates)
       ? data.folder_candidates.filter(
@@ -1912,7 +2112,7 @@
         element(
           "p",
           "",
-          "选择本次采用的图片；采用即确认该图片可用于本次发布。系统会在提交时完成增量预检，并按每坑 3–9 张自动生成坑位草稿。",
+          "选择本次采用的图片；每次勾选都会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，再按每坑 3–9 张提交生成坑位草稿。",
         ),
       );
       resultSummary.replaceChildren(heading, action);
@@ -2035,10 +2235,16 @@
       }
       if (coverageNotice.textContent) product.appendChild(coverageNotice);
       const selectedSection = element("section", "selected-assets");
+      const selectedToolbar = element("div", "selected-assets-toolbar");
       const selectedHeading = element("strong", "", "已选素材");
+      const issueFilter = element("button", "button-secondary", "只看需处理素材");
+      issueFilter.type = "button";
+      issueFilter.hidden = true;
+      issueFilter.setAttribute("aria-pressed", "false");
+      selectedToolbar.append(selectedHeading, issueFilter);
       const duplicateWarning = element("p", "asset-warning");
       const selectedGrid = element("div", "selected-asset-grid");
-      selectedSection.append(selectedHeading, duplicateWarning, selectedGrid);
+      selectedSection.append(selectedToolbar, duplicateWarning, selectedGrid);
       product.appendChild(selectedSection);
       const paging = element("div", "asset-paging");
       const previousPage = element("button", "button-secondary", "上一批");
@@ -2135,9 +2341,15 @@
 
         displayedCandidates.forEach((candidate) => {
           const assetId = String(candidate.asset_id || "");
+          const selectionCheck = selectionPreflightFor(assetId);
+          const checking = pendingSelectionPreflights.has(assetId);
           const selectable = candidateIsSelectable(candidate)
-            && !hashesUsedElsewhere.has(String(candidate.sha256 || ""));
+            && !hashesUsedElsewhere.has(String(candidate.sha256 || ""))
+            && selectionCheck?.status !== "blocked";
           const card = element("article", "asset-card");
+          card.dataset.selectionPreflightStatus = checking
+            ? "checking"
+            : selectionCheck?.status || "unchecked";
           if (selectedIds.has(assetId)) card.classList.add("is-selected");
           const image = document.createElement("img");
           image.loading = "lazy";
@@ -2151,6 +2363,7 @@
             : "尺寸不可读";
           const inspection = candidate.source_inspection || {};
           const sizeText = inspection.size_display || candidate.size_display || candidate.preflight?.size_display || "读取失败";
+          const formatText = inspection.format || candidate.format || "未知";
           const ratioText = inspection.ratio_display || candidate.preflight?.original_ratio || "读取失败";
           const maxSizeText = candidate.max_size_display || candidate.preflight?.max_size_display || "未知";
           const minSizeText = candidate.preflight?.min_size_display || "200KB";
@@ -2161,9 +2374,13 @@
             status,
             element("span", "", `原图尺寸 ${dimensions} · 原图比例 ${ratioText}`),
             element("span", "", resolutionSummary(candidate) || "推荐分辨率待检测"),
-            element("span", "", `原图文件 ${sizeText} · 允许范围 ${minSizeText}–${maxSizeText}`),
+            element("span", "", `原图格式 ${formatText} · 文件 ${sizeText} · 允许范围 ${minSizeText}–${maxSizeText}`),
             element("span", "", `处理建议：${preflightLabel(candidate)}`),
-            element("span", "asset-warning", (candidate.preflight?.reason_messages || []).join("；")),
+            element(
+              "span",
+              candidateIsSelectable(candidate) ? "asset-warning" : "asset-hard-error",
+              (candidate.preflight?.reason_messages || []).join("；"),
+            ),
             element("small", "", candidate.source_path || ""),
           );
           const controls = element("div", "asset-card-controls");
@@ -2171,9 +2388,30 @@
           const select = document.createElement("input");
           select.type = "checkbox";
           select.checked = selectedIds.has(assetId);
-          select.disabled = !selectable;
+          select.disabled = !selectable || checking;
           selectLabel.append(select, document.createTextNode("采用"));
           controls.append(selectLabel);
+          if (checking) {
+            controls.appendChild(element("span", "asset-warning", "正在检查 1:1、3:4 预裁剪…"));
+          } else if (selectionCheck?.status === "passed") {
+            controls.appendChild(element(
+              "span",
+              "asset-selection-check is-passed",
+              `预裁剪通过：${selectionCheck.feasible_ratios.join("、")}`,
+            ));
+          } else if (selectionCheck?.status === "warning") {
+            controls.appendChild(element(
+              "span",
+              "asset-warning",
+              selectionCheck.message,
+            ));
+          } else if (selectionCheck?.status === "blocked") {
+            controls.appendChild(element(
+              "span",
+              "asset-selection-check is-blocked",
+              selectionCheck.message,
+            ));
+          }
           if (candidate.match_status === "needs_manual_confirmation") {
             controls.appendChild(element("span", "asset-warning", "名称候选来自已采用文件夹"));
           } else if (!candidate.preflight || !candidate.source_inspection) {
@@ -2203,10 +2441,42 @@
           card.append(image, meta, controls);
           grid.appendChild(card);
 
-          select.addEventListener("change", () => {
+          select.addEventListener("change", async () => {
             if (select.checked) {
-              selectedIds.add(assetId);
-              persistLicense(assetId, true);
+              select.disabled = true;
+              select.indeterminate = true;
+              card.dataset.selectionPreflightStatus = "checking";
+              actionMessage.textContent = "正在检查所选图片的 1:1、3:4 预裁剪…";
+              try {
+                const result = await runSelectionPreflight(candidate);
+                select.indeterminate = false;
+                if (result.status === "blocked") {
+                  select.checked = false;
+                  selectedIds.delete(assetId);
+                  persistLicense(assetId, false);
+                  actionMessage.textContent = result.message;
+                } else {
+                  selectedIds.add(assetId);
+                  persistLicense(assetId, true);
+                  actionMessage.textContent = result.status === "warning"
+                    ? result.message
+                    : "图片预裁剪检查通过。";
+                }
+              } catch (error) {
+                select.indeterminate = false;
+                select.checked = false;
+                selectedIds.delete(assetId);
+                persistLicense(assetId, false);
+                actionMessage.textContent = error.userMessage || error.message;
+              }
+              persistSelectedCandidates(
+                productId,
+                productCandidates.filter(
+                  (item) => selectedIds.has(String(item.asset_id)),
+                ),
+              );
+              draw();
+              return;
             } else {
               selectedIds.delete(assetId);
               persistLicense(assetId, false);
@@ -2235,7 +2505,25 @@
           const selectedCandidates = productCandidates.filter(
             (candidate) => latestIds.has(String(candidate.asset_id)),
           );
-          selectedHeading.textContent = `已选素材 · ${selectedCandidates.length} 张`;
+          const validationItems = Array.isArray(selectedAssetValidation?.items)
+            ? selectedAssetValidation.items.filter(
+              (item) => String(item.product_id || "") === productId,
+            )
+            : [];
+          const validationByAsset = new Map(
+            validationItems.map((item) => [String(item.asset_id || ""), item]),
+          );
+          const issueCount = validationItems.filter(
+            (item) => ["blocked", "warning"].includes(item.severity),
+          ).length;
+          selectedHeading.textContent = issueCount
+            ? `已选素材 · ${selectedCandidates.length} 张 · 需处理 ${issueCount} 张`
+            : `已选素材 · ${selectedCandidates.length} 张`;
+          issueFilter.hidden = issueCount === 0;
+          if (issueCount === 0) {
+            issueFilter.setAttribute("aria-pressed", "false");
+            issueFilter.textContent = "只看需处理素材";
+          }
           selectedGrid.replaceChildren();
           const fingerprintCounts = new Map();
           latestDecisions.forEach((item) => {
@@ -2253,8 +2541,24 @@
           duplicateWarning.textContent = duplicateCount
             ? `发现 ${duplicateCount} 张完全重复图片，请取消重复项。`
             : "";
-          selectedCandidates.forEach((candidate) => {
+          selectedCandidates
+            .filter((candidate) => (
+              issueFilter.getAttribute("aria-pressed") !== "true"
+              || ["blocked", "warning"].includes(
+                validationByAsset.get(String(candidate.asset_id))?.severity,
+              )
+            ))
+            .forEach((candidate) => {
             const item = element("article", "selected-asset-card");
+            const validation = validationByAsset.get(String(candidate.asset_id));
+            const livePreflight = selectionPreflightFor(candidate.asset_id);
+            if (validation && validation.severity !== "ok") {
+              item.dataset.validationSeverity = validation.severity;
+            } else if (livePreflight?.status === "blocked") {
+              item.dataset.validationSeverity = "blocked";
+            } else if (livePreflight?.status === "warning") {
+              item.dataset.validationSeverity = "warning";
+            }
             const image = document.createElement("img");
             image.loading = "lazy";
             image.alt = `${requirement.product_title || productId} 已选图片`;
@@ -2275,11 +2579,31 @@
               );
               draw();
             });
-            item.append(
-              image,
-              element("small", "", candidate.source_system || "未知来源"),
-              remove,
-            );
+            item.append(image, element("small", "", candidate.source_system || "未知来源"));
+            if (validation && validation.severity !== "ok") {
+              const validationMessage = element(
+                "p",
+                "selected-asset-validation",
+                validation.message,
+              );
+              validationMessage.setAttribute("role", "alert");
+              item.appendChild(validationMessage);
+            } else if (livePreflight?.status === "blocked") {
+              const validationMessage = element(
+                "p",
+                "selected-asset-validation",
+                livePreflight.message,
+              );
+              validationMessage.setAttribute("role", "alert");
+              item.appendChild(validationMessage);
+            } else if (livePreflight?.status === "warning") {
+              item.appendChild(element(
+                "p",
+                "selected-asset-validation",
+                livePreflight.message,
+              ));
+            }
+            item.appendChild(remove);
             selectedGrid.appendChild(item);
           });
         }
@@ -2302,6 +2626,12 @@
       });
       preflightFilter.addEventListener("change", () => {
         pageIndex = 0;
+        draw();
+      });
+      issueFilter.addEventListener("click", () => {
+        const active = issueFilter.getAttribute("aria-pressed") === "true";
+        issueFilter.setAttribute("aria-pressed", String(!active));
+        issueFilter.textContent = active ? "只看需处理素材" : "查看全部已选素材";
         draw();
       });
       draw();
@@ -2565,6 +2895,7 @@
         const stop = () => {
           window.removeEventListener("pointermove", move);
           window.removeEventListener("pointerup", stop);
+          invalidateCropPreflight();
         };
         window.addEventListener("pointermove", move);
         window.addEventListener("pointerup", stop, { once: true });
@@ -3016,12 +3347,20 @@
       "",
       "请检查裁剪框、原图大小和压缩参数。",
     );
+    const cropPreflightButton = element(
+      "button",
+      "button-secondary",
+      "裁剪预校验",
+    );
+    cropPreflightButton.type = "button";
     const processPlanButton = element(
       "button",
       "primary-button",
       "完成图片处理并进入文案生成",
     );
     processPlanButton.type = "button";
+    processPlanButton.disabled = true;
+    let cropPreflight = null;
     const backToCompose = element(
       "button",
       "button-secondary",
@@ -3034,7 +3373,11 @@
     ));
     const processActions = element("div", "slot-page-actions");
     if (!twoPageWorkflow) processActions.appendChild(backToCompose);
-    processActions.append(processStatus, processPlanButton);
+    processActions.append(
+      processStatus,
+      cropPreflightButton,
+      processPlanButton,
+    );
     processPanel.append(processHeading, processWorkspace, processActions);
     subpages.process.appendChild(processPanel);
     const normalizedCropBox = (output) => {
@@ -3065,6 +3408,11 @@
           String(output.asset_id) === String(assetId)
           && String(output.target_ratio) === String(targetRatio),
       );
+    const invalidateCropPreflight = () => {
+      cropPreflight = null;
+      processPlanButton.disabled = true;
+      processStatus.textContent = "裁剪参数已变化，请重新执行裁剪预校验。";
+    };
     const createSlotCropEditor = (output, assignment, cropState) => {
       const width = Number(output.width || output.source_width || 0);
       const height = Number(output.height || output.source_height || 0);
@@ -3239,17 +3587,20 @@
           const y = Math.min(1 - boxHeight, Math.max(0, box[1] + dy));
           cropState.normalized_box = [x, y, x + boxWidth, y + boxHeight];
         }
+        invalidateCropPreflight();
         update();
       });
       image.addEventListener("load", update);
       restore.addEventListener("click", () => {
         cropState.use_original = false;
         cropState.normalized_box = normalizedCropBox(output);
+        invalidateCropPreflight();
         update();
       });
       original.addEventListener("click", () => {
         cropState.use_original = true;
         cropState.normalized_box = null;
+        invalidateCropPreflight();
         update();
       });
       update();
@@ -3285,6 +3636,7 @@
           );
           button.addEventListener("click", () => {
             if (value === assignment.target_ratio) return;
+            invalidateCropPreflight();
             assignment.target_ratio = value;
             assignment.plan_source = "manual_override";
             Object.keys(cropParameters)
@@ -3349,6 +3701,7 @@
             cropParameters[cropKey].confirm_compression === true;
           compression.disabled = !output.requires_compression;
           compression.addEventListener("change", () => {
+            invalidateCropPreflight();
             cropParameters[cropKey].confirm_compression = compression.checked;
             renderProcessingPage();
           });
@@ -3411,9 +3764,13 @@
       if (needsCompression) {
         blockedReason ||= "请先确认所有需要压缩的图片。";
       }
-      processPlanButton.disabled = Boolean(blockedReason);
-      processStatus.textContent =
-        blockedReason || "参数已就绪；执行后会生成任务目录内的派生图片并校验结果。";
+      cropPreflightButton.disabled = Boolean(blockedReason);
+      processPlanButton.disabled = Boolean(blockedReason)
+        || cropPreflight?.workflow_state !== "crop_preflight_passed";
+      processStatus.textContent = blockedReason
+        || (cropPreflight?.workflow_state === "crop_preflight_passed"
+          ? `裁剪预校验已通过：${cropPreflight.checked_count || 0} 张图片均不少于 204,800 字节。`
+          : "请先执行裁剪预校验；通过后才能进入文案生成。");
     };
     const renderProcessedPreview = (processed) => {
       processPanel.querySelector(".processed-preview-grid")?.remove();
@@ -3476,11 +3833,10 @@
       const copyButton = element(
         "button",
         "primary-button",
-        hasMeaningfulCopyDrafts(savedCopyItems)
-          ? "重新生成新版本"
-          : "生成标题与描述",
+        "重新生成新版本",
       );
       copyButton.type = "button";
+      copyButton.hidden = true;
       const copyVersions = document.createElement("select");
       copyVersions.setAttribute("aria-label", "AI 文案版本");
       const copyToolbarActions = element("div", "copy-toolbar-actions");
@@ -3756,27 +4112,96 @@
       );
       writeJsonListControl("copy_edits", copyState);
       const applyCopyDrafts = (drafts, requestId) => {
-        const merged = drafts.map((draft) => ({
-          slot_id: draft.slot_id,
-          product_id: assignments.find(
-            (item) => item.slot_id === draft.slot_id,
-          )?.product_id || "",
-          title: draft.title || "",
-          description: draft.description || "",
-          evidence: draft.evidence || [],
-          risks: draft.risks || [],
-          confirmed: false,
-          source: String(draft.source || "qianniu_builtin_ai"),
-          request_id: requestId,
-        }));
+        const draftsBySlot = new Map(
+          drafts.map((draft) => [String(draft.slot_id), draft]),
+        );
+        const existingBySlot = new Map(
+          readJsonListControl("copy_edits")
+            .filter((item) => item?.slot_id)
+            .map((item) => [String(item.slot_id), item]),
+        );
+        const merged = assignments.map((assignment) => {
+          const slotId = String(assignment.slot_id);
+          const draft = draftsBySlot.get(slotId);
+          const existing = existingBySlot.get(slotId) || {};
+          if (!draft) return existing.slot_id
+            ? existing
+            : {
+              slot_id: slotId,
+              product_id: assignment.product_id,
+              title: "",
+              description: "",
+              evidence: [],
+              risks: [],
+              confirmed: false,
+              source: "pending_qianniu_builtin_ai",
+              request_id: requestId,
+            };
+          return {
+            slot_id: slotId,
+            product_id: assignment.product_id,
+            title: draft.title || "",
+            description: draft.description || "",
+            evidence: draft.evidence || [],
+            risks: draft.risks || [],
+            confirmed: false,
+            source: String(draft.source || "qianniu_builtin_ai"),
+            request_id: requestId,
+          };
+        });
         writeJsonListControl("copy_edits", merged, { notify: true });
-        copyStatus.textContent = "千牛文案已载入；请核对依据、风险并逐坑确认。";
+        copyStatus.textContent = drafts.length === assignments.length
+          ? "千牛文案已载入；请核对依据、风险并逐坑确认。"
+          : `Codex 已回填 ${drafts.length}/${assignments.length} 个坑位，正在继续处理。`;
         renderCopyEditor(processed, requestId);
+      };
+      const pollCopyRequest = async (requestId) => {
+        if (!requestId || !copyVersions.isConnected) return;
+        try {
+          const detail = await fetchJson(
+            apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(requestId)}`),
+          );
+          if (!copyVersions.isConnected) return;
+          const requestState = detail.request?.status || "";
+          const progressDrafts = detail.progress?.copy_drafts || [];
+          const completedDrafts = detail.response?.result?.copy_drafts || [];
+          const drafts = completedDrafts.length
+            ? completedDrafts
+            : progressDrafts;
+          const knownCount = savedCopyItems.filter(
+            (item) => String(item.request_id || "") === requestId
+              && String(item.title || "").trim()
+              && String(item.description || "").trim(),
+          ).length;
+          if (drafts.length > knownCount) {
+            applyCopyDrafts(drafts, requestId);
+            return;
+          }
+          if (requestState === "completed") {
+            copyStatus.textContent = "千牛文案已载入；请核对并逐坑确认。";
+            copyButton.disabled = false;
+            return;
+          }
+          if (requestState === "failed") {
+            copyStatus.textContent = `文案生成遇到问题，已保留 ${progressDrafts.length}/${assignments.length} 个坑位并将诊断交给 Codex。`;
+            copyButton.disabled = false;
+            return;
+          }
+          copyButton.disabled = true;
+          copyStatus.textContent = requestState === "processing"
+            ? `Codex 正在复用千牛文案流程：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
+            : "图片已确认，正在等待 Codex 获取千牛文案。";
+          window.setTimeout(() => pollCopyRequest(requestId), 1500);
+        } catch (error) {
+          if (!copyVersions.isConnected) return;
+          copyStatus.textContent = "文案状态暂时无法读取，系统会自动重试。";
+          window.setTimeout(() => pollCopyRequest(requestId), 2500);
+        }
       };
       const requestCopy = async (regenerate = false) => {
         copyButton.disabled = true;
-        copyButton.textContent = `正在生成版本 ${copyVersionCount + 1}…`;
-        copyStatus.textContent = "正在打开千牛商品坑位并生成文案，请稍候…";
+        copyButton.textContent = `正在创建版本 ${copyVersionCount + 1}…`;
+        copyStatus.textContent = "正在创建新的千牛文案任务…";
         try {
           const copyRequest = await fetchJson(
             apiPath("/stages/slots_copy/copy-request"),
@@ -3788,48 +4213,37 @@
               }),
             },
           );
-          if (copyRequest.status !== "completed") {
-            copyStatus.textContent = {
-              pending_agent: "千牛文案请求正在排队。",
-              processing: "千牛正在按商品坑位生成标题和描述。",
-              failed: "千牛文案生成失败，可保留人工填写并重试。",
-            }[copyRequest.status] || `文案请求：${copyRequest.status}`;
-            return;
-          }
-          const detail = await fetchJson(
-            apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(copyRequest.request_id)}`),
-          );
-          const drafts = detail.response?.result?.copy_drafts || [];
-          if (!drafts.length) {
-            copyStatus.textContent = "千牛没有返回可用文案，请重试或人工填写。";
-            return;
-          }
-          applyCopyDrafts(drafts, copyRequest.request_id);
+          copyStatus.textContent = "新版本已提交给 Codex。";
+          pollCopyRequest(copyRequest.request_id);
         } catch (error) {
           copyStatus.textContent = error.userMessage || error.message;
-        } finally {
           copyButton.disabled = false;
-          copyButton.textContent = copyVersionCount
-            ? "重新生成新版本"
-            : "生成标题与描述";
+        } finally {
+          copyButton.textContent = "重新生成新版本";
         }
       };
       copyButton.addEventListener("click", () => requestCopy(true));
       fetchJson(apiPath("/stages/slots_copy/agent-requests"))
         .then(async (payload) => {
-          const versions = (payload.requests || []).filter(
+          const copyRequests = (payload.requests || []).filter(
+            (item) => item.kind === "copy_draft",
+          );
+          const versions = copyRequests.filter(
             (item) => item.kind === "copy_draft" && item.status === "completed",
           );
           copyVersionCount = versions.length;
-          copyButton.textContent = copyVersionCount
-            ? "重新生成新版本"
-            : "生成标题与描述";
+          copyButton.textContent = "重新生成新版本";
+          copyButton.hidden = copyRequests.length === 0;
           copyVersions.replaceChildren();
           if (!versions.length) {
             const option = document.createElement("option");
             option.textContent = "暂无千牛文案版本";
             copyVersions.appendChild(option);
             copyVersions.disabled = true;
+            const active = copyRequests.find(
+              (item) => item.request_id === restoredRequestId,
+            ) || copyRequests[0];
+            if (active) pollCopyRequest(active.request_id);
             return;
           }
           versions.forEach((item, index) => {
@@ -3843,6 +4257,7 @@
           );
           if (selectedVersionExists) {
             copyVersions.value = restoredRequestId;
+            pollCopyRequest(restoredRequestId);
             return;
           }
           const currentDrafts = readJsonListControl("copy_edits")
@@ -3857,16 +4272,15 @@
             option.textContent = "当前草稿 · 未绑定 AI 版本";
             option.selected = true;
             copyVersions.prepend(option);
+            const active = copyRequests.find(
+              (item) => item.request_id === restoredRequestId
+                && ["pending_agent", "processing"].includes(item.status),
+            );
+            if (active) pollCopyRequest(active.request_id);
             return;
           }
           const latestRequestId = versions[0].request_id;
-          const detail = await fetchJson(
-            apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(latestRequestId)}`),
-          );
-          const drafts = detail.response?.result?.copy_drafts || [];
-          if (drafts.length && copyVersions.isConnected) {
-            applyCopyDrafts(drafts, latestRequestId);
-          }
+          pollCopyRequest(latestRequestId);
         })
         .catch(() => {});
       copyVersions.addEventListener("change", async () => {
@@ -3886,6 +4300,7 @@
       confirmPlanButton.disabled = true;
       composeStatus.textContent = "正在保存并锁定坑位图片、顺序和比例…";
       try {
+        if (slotPlanDirty) invalidateCropPreflight();
         if (slotPlanDirty) {
           const updated = await fetchJson(
             apiPath("/stages/slots_copy/current-slot-plan"),
@@ -3929,37 +4344,78 @@
       }
     });
 
+    const ensureConfirmedSlotPlan = async () => {
+      const assignments = [...stateByProduct.values()].flat();
+      if (slotPlanDirty) {
+        const updated = await fetchJson(
+          apiPath("/stages/slots_copy/current-slot-plan"),
+          {
+            method: "POST",
+            body: JSON.stringify({
+              plan_revision: currentPlanRevision,
+              slot_assignments: assignments,
+            }),
+          },
+        );
+        currentPlanRevision = Number(
+          updated.current_slot_plan?.plan_revision || currentPlanRevision,
+        );
+        const confirmed = await fetchJson(
+          apiPath("/stages/slots_copy/current-slot-plan/confirm"),
+          {
+            method: "POST",
+            body: JSON.stringify({ plan_revision: currentPlanRevision }),
+          },
+        );
+        currentPlanRevision = Number(
+          confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
+        );
+        slotPlanDirty = false;
+      }
+      return assignments;
+    };
+
+    cropPreflightButton.addEventListener("click", async () => {
+      cropPreflightButton.disabled = true;
+      processPlanButton.disabled = true;
+      processStatus.textContent = "正在逐张试裁并检查最终文件大小…";
+      try {
+        const assignments = await ensureConfirmedSlotPlan();
+        cropPreflight = await fetchJson(
+          apiPath("/stages/slots_copy/crop-preflight"),
+          {
+            method: "POST",
+            body: JSON.stringify({
+              slot_assignments: assignments,
+              crop_parameters: cropParameters,
+            }),
+          },
+        );
+        currentPlanRevision = Number(
+          cropPreflight.plan_revision || currentPlanRevision,
+        );
+        processStatus.textContent = `裁剪预校验已通过：${cropPreflight.checked_count || 0} 张图片均不少于 204,800 字节。`;
+        processPlanButton.disabled = false;
+      } catch (error) {
+        cropPreflight = null;
+        processStatus.textContent = error.userMessage
+          || Object.values(error.fieldErrors || {})[0]
+          || error.message;
+      } finally {
+        cropPreflightButton.disabled = false;
+      }
+    });
+
     processPlanButton.addEventListener("click", async () => {
       const assignments = [...stateByProduct.values()].flat();
+      if (cropPreflight?.workflow_state !== "crop_preflight_passed") {
+        processStatus.textContent = "请先执行裁剪预校验。";
+        processPlanButton.disabled = true;
+        return;
+      }
       processPlanButton.disabled = true;
-      processStatus.textContent = "正在生成裁剪/压缩输出并复核实际文件…";
+      processStatus.textContent = "正在确认图片输出并创建千牛文案任务…";
       try {
-        if (slotPlanDirty) {
-          const updated = await fetchJson(
-            apiPath("/stages/slots_copy/current-slot-plan"),
-            {
-              method: "POST",
-              body: JSON.stringify({
-                plan_revision: currentPlanRevision,
-                slot_assignments: assignments,
-              }),
-            },
-          );
-          currentPlanRevision = Number(
-            updated.current_slot_plan?.plan_revision || currentPlanRevision,
-          );
-          const confirmed = await fetchJson(
-            apiPath("/stages/slots_copy/current-slot-plan/confirm"),
-            {
-              method: "POST",
-              body: JSON.stringify({ plan_revision: currentPlanRevision }),
-            },
-          );
-          currentPlanRevision = Number(
-            confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
-          );
-          slotPlanDirty = false;
-        }
         const processed = await fetchJson(
           apiPath("/stages/slots_copy/process-plan"),
           {
@@ -3971,9 +4427,12 @@
           },
         );
         processedOutputs = processed;
-        processStatus.textContent = `处理完成：${processed.slots?.length || 0} 个坑位已通过校验；现在确认文案。`;
+        processStatus.textContent = `图片处理完成：${processed.slots?.length || 0} 个坑位；文案任务已交给 Codex。`;
         renderProcessedPreview(processed);
-        renderCopyEditor(processed);
+        renderCopyEditor(
+          processed,
+          processed.copy_request?.request_id || processed.copy_request_id || "",
+        );
         maxUnlockedPage = Math.max(
           maxUnlockedPage,
           pageOrder.indexOf("copy"),
@@ -3984,16 +4443,31 @@
           || Object.values(error.fieldErrors || {})[0]
           || error.message;
       } finally {
-        processPlanButton.disabled = false;
+        processPlanButton.disabled = cropPreflight?.workflow_state
+          !== "crop_preflight_passed";
       }
     });
+    fetchJson(apiPath("/stages/slots_copy/crop-preflight"))
+      .then((preflight) => {
+        if (preflight.workflow_state !== "crop_preflight_passed") return;
+        cropPreflight = preflight;
+        if (preflight.crop_parameters) {
+          Object.keys(cropParameters).forEach((key) => delete cropParameters[key]);
+          Object.assign(cropParameters, preflight.crop_parameters);
+        }
+        currentPlanRevision = Number(
+          preflight.plan_revision || currentPlanRevision,
+        );
+        renderProcessingPage();
+      })
+      .catch(() => {});
     fetchJson(apiPath("/stages/slots_copy/processed-outputs"))
       .then((processed) => {
         if (processed.workflow_state === "outputs_ready" && processed.plan_sha256) {
           processedOutputs = processed;
           processStatus.textContent = "当前坑位计划已有通过校验的输出；可以继续确认文案。";
           renderProcessedPreview(processed);
-          renderCopyEditor(processed);
+          renderCopyEditor(processed, processed.copy_request_id || "");
           processPanel.hidden = false;
           maxUnlockedPage = Math.max(
             maxUnlockedPage,
@@ -4589,6 +5063,7 @@
     try {
       const payload = await fetchJson(apiPath(`/stages/${requestedStageId}`));
       if (requestedStageId !== currentStageId) return;
+      if (requestedStageId === "asset_matching") selectedAssetValidation = null;
       revision = payload.state.revision;
       revisionLabel.textContent = String(revision);
       uiState = UiState.receiveStage(uiState, {
@@ -4787,10 +5262,53 @@
       const decisions = Array.isArray(values.asset_decisions)
         ? values.asset_decisions.filter((item) => item?.decision === "selected")
         : [];
+      if (pendingSelectionPreflights.size) {
+        const message = `还有 ${pendingSelectionPreflights.size} 张图片正在进行预裁剪检查，请等待完成。`;
+        showFieldErrors(form, { asset_decisions: message });
+        actionMessage.textContent = message;
+        persistenceInFlight = false;
+        return;
+      }
+      let unchecked = decisions.filter((item) => {
+        const result = selectionPreflightFor(item.asset_id);
+        return !result || !["passed", "warning"].includes(result.status);
+      });
+      if (unchecked.length) {
+        const allCandidates = Array.isArray(uiState.result?.data?.asset_candidates)
+          ? uiState.result.data.asset_candidates
+          : [];
+        const byAssetId = new Map(
+          allCandidates.map((candidate) => [String(candidate.asset_id || ""), candidate]),
+        );
+        actionMessage.textContent = `正在补检 ${unchecked.length} 张历史已选图片…`;
+        await Promise.all(unchecked.map((item) => {
+          const candidate = byAssetId.get(String(item.asset_id || ""));
+          return candidate ? runSelectionPreflight(candidate) : Promise.resolve(null);
+        }));
+        unchecked = decisions.filter((item) => {
+          const result = selectionPreflightFor(item.asset_id);
+          return !result || !["passed", "warning"].includes(result.status);
+        });
+        if (unchecked.length) {
+          const message = `有 ${unchecked.length} 张已选图片未通过预裁剪，已在“已选素材”中标明，请取消后更换。`;
+          showFieldErrors(form, { asset_decisions: message });
+          actionMessage.textContent = message;
+          persistenceInFlight = false;
+          renderStageResult(stages.get(currentStageId).component);
+          return;
+        }
+      }
       const counts = new Map();
+      const ratioCounts = new Map();
       decisions.forEach((item) => {
         const productId = String(item.product_id || "");
         counts.set(productId, (counts.get(productId) || 0) + 1);
+        const current = ratioCounts.get(productId) || { "3:4": 0, "1:1": 0 };
+        (selectionPreflightFor(item.asset_id)?.feasible_ratios || [])
+          .forEach((ratio) => {
+            if (Object.hasOwn(current, ratio)) current[ratio] += 1;
+          });
+        ratioCounts.set(productId, current);
       });
       const requiredProducts = Array.isArray(uiState.result?.data?.requirements)
         ? uiState.result.data.requirements
@@ -4802,10 +5320,16 @@
         .map((productId) => (
           `${productId} 还差 ${3 - (counts.get(productId) || 0)} 张`
         ));
-      if (!requiredProducts.length || shortages.length) {
+      const incompatibleRatios = requiredProducts.filter((productId) => {
+        const current = ratioCounts.get(productId) || { "3:4": 0, "1:1": 0 };
+        return Math.max(current["3:4"], current["1:1"]) < 3;
+      });
+      if (!requiredProducts.length || shortages.length || incompatibleRatios.length) {
         const message = !decisions.length
           ? "每个商品至少采用 3 张图片；当前草稿可以继续保存。"
-          : `完整坑位至少需要 3 张图片：${shortages.join("；")}`;
+          : shortages.length
+            ? `完整坑位至少需要 3 张图片：${shortages.join("；")}`
+            : `每个商品至少需要 3 张共同支持同一比例的图片：${incompatibleRatios.join("、")}`;
         showFieldErrors(form, { asset_decisions: message });
         actionMessage.textContent = message;
         persistenceInFlight = false;
@@ -4915,6 +5439,18 @@
         stageGeneration,
       )) return;
       showFieldErrors(form, error.fieldErrors || {});
+      if (
+        requestedStageId === "asset_matching"
+        && error.payload?.asset_validation
+      ) {
+        selectedAssetValidation = error.payload.asset_validation;
+        renderStageResult(stages.get(requestedStageId).component);
+        window.requestAnimationFrame(() => {
+          document.querySelector(
+            '.selected-asset-card[data-validation-severity="blocked"]',
+          )?.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
       const pausedSubmission = pendingPersistenceMode === "submit";
       pendingPersistenceMode = null;
       const persistenceConflict = [
@@ -5115,6 +5651,7 @@
     renderStatus();
     renderSubmission();
     renderStageResult(stage.component);
+    if (stageId === "setup") initializeSetupLoginGate();
     window.scrollTo({ top: 0, behavior: "smooth" });
     loadStage();
     if (sessionId) loadRecoveryInstruction(stageId);

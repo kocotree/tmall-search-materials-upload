@@ -10,6 +10,7 @@ from pathlib import Path
 import traceback
 from typing import Any
 
+from .agent_diagnostics import write_exception_diagnostic
 from .folder_index import build_folder_review_data, snapshot_folder_candidates
 from .interaction.session import InteractionConflict, SessionStore
 from .reporting import read_json
@@ -448,6 +449,15 @@ def process_product_selection_handoff(
             "created_at": _now_iso(),
         }
         store._write_json_atomic(diagnostic_path, diagnostic)
+        write_exception_diagnostic(
+            store,
+            session_id,
+            "completeness",
+            processor="process-product-selection",
+            phase=phase,
+            error=error,
+            evidence=[diagnostic_path],
+        )
         if handoff is not None:
             try:
                 current = store.load_session(session_id)
