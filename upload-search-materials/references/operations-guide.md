@@ -151,31 +151,23 @@ uv run tmall-materials index-folders `
 
 检查共享目录中的 `folder-scan-summary.json` 和 `folder-candidates.csv`。目录新增、删除或改名后使用相同参数和输出目录加 `--refresh`；它会重新遍历目录树发现差异，但在同一 SQLite 中增量更新 active/inactive 状态。只调整名称或货号匹配规则时加 `--rematch-only`，后者只读取本地 SQLite，不重新遍历 NAS。不得因为单次任务等待较久就改用任意历史任务索引；只能使用当前本机配置指向且身份校验通过的共享索引。
 
-第二阶段选择商品后，只把对应候选复制到当前任务：
+第二阶段选择商品并正式提交后，Codex 只运行以下唯一入口：
 
 ```powershell
-uv run tmall-materials snapshot-folder-candidates `
-  --candidates "<共享文件夹索引目录>\folder-candidates.csv" `
-  --product-id "<商品ID 1>" `
-  --product-id "<商品ID 2>" `
-  --output "<任务目录>\03-asset-matching\folder-candidates.csv"
+.\.venv\Scripts\tmall-materials.exe process-product-selection `
+  --runs-root "<runs-root>" `
+  --session "<session-id>"
 ```
 
-任务目录不保存 `folder-index.sqlite3`。共享索引缺失时当前任务等待首次建立；共享索引过期时执行 `--refresh`，而不是新建任务级索引。
+该入口内部完成精确 handoff 校验与领取、候选快照、文件夹审查数据生成、结果写入和阶段推进。日常流程不得再手工串联 `snapshot-folder-candidates`、`prepare-folder-review` 或直接写 `result.json`。任务目录不保存 `folder-index.sqlite3`。共享索引缺失或损坏时，入口在 `02-completeness/product-selection-diagnostic.json` 写入失败阶段、稳定原因码、异常、输入身份、相关文件状态、traceback 和恢复命令；Codex 修复共享索引后重跑同一入口。共享索引过期时执行 `index-folders --refresh`，而不是新建任务级索引。
 
 候选只按文件夹自身名称匹配，父目录命中不会让 `KV`、`合成`、`1` 等普通子目录重复成为候选。包含完整 SKU 的组合名称（例如 `KQ23002-商品名`）可视为货号命中；同货号异名、名称候选和主副链接关系仍需用户确认。确认文件夹归属后，才按需枚举其中图片、读取尺寸并计算 SHA-256。
 
 ### 3.1 生成文件夹归属审查
 
-把候选转换成素材匹配页面可读取的数据：
+上述唯一入口同时把候选转换成素材匹配页面可读取的数据；这里不再运行第二条命令。
 
-```powershell
-uv run tmall-materials prepare-folder-review `
-  --candidates "<任务目录>\03-asset-matching\folder-candidates.csv" `
-  --output "<任务目录>\03-asset-matching\folder-review.json"
-```
-
-把 `folder-review.json` 作为素材匹配阶段 `result.json.data` 写入当前精确 `session_id`，并设置 `workflow_step=folder_review`。页面先展示目录元数据，再由独立本机请求异步回填每个文件夹的原始递归素材数；计数期间显示“素材数统计中”，不可访问时显示“素材数未知”，计数过程不打开、解码或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。“确认文件夹并加载图片”必须放在文件夹列表下方、候选图片上方，是独立的本机固定操作；点击后直接调用本地 `prepare-gallery` API 保存二态决定并启动 gallery job，不经过通用阶段提交处理器。这一步不创建 handoff、不等待 Codex，也不需要回复“已提交”。文件夹审查和加载中隐藏页面底部提交按钮；进入选图后才显示原位置的“确认选图并提交给 Codex”。仅加载或刷新页面不得写草稿。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。再次生成审查数据时可传 `--decisions "<folder-decisions.json>"` 保留已有决定；历史 `pending` 按采用读取，新保存结果不再写入 `pending`。
+入口自动把 `folder-review.json` 写入素材匹配阶段的 `review-context.json.data`，并设置 `workflow_step=folder_review`。页面先展示目录元数据，再由独立本机请求异步回填每个文件夹的原始递归素材数；计数期间显示“素材数统计中”，不可访问时显示“素材数未知”，计数过程不打开、解码或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。“确认文件夹并加载图片”必须放在文件夹列表下方、候选图片上方，是独立的本机固定操作；点击后直接调用本地 `prepare-gallery` API 保存二态决定并启动 gallery job，不经过通用阶段提交处理器。这一步不创建 handoff、不等待 Codex，也不需要回复“已提交”。文件夹审查和加载中隐藏页面底部提交按钮；进入选图后才显示原位置的“确认选图并提交给 Codex”。仅加载或刷新页面不得写草稿。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。历史任务需要一次性精确文件夹查询时仍可单独使用 `prepare-folder-review --exact-folder`，但它不得成为新任务的正常阶段推进路径。
 
 只有最终采用的文件夹可进入按需图片枚举，`rejected` 不得读取。候选优先来自商品 ID、完整货号或去除末尾“（主）/（副）”后的基础名称；最长公共连续部分覆盖基础名称至少 50% 且不少于 5 个字符时，可作为默认排除的粗略候选展示。用户仍应核对同货号异名、主副链接和历史目录，并排除错误来源。
 

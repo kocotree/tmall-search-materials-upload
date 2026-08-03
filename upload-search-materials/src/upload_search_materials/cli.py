@@ -144,6 +144,10 @@ from .desktop_launcher import (
 )
 from .dry_run_workflow import prepare_publish_run_from_authorization
 from .final_material_handoff import process_final_material_handoff
+from .product_selection_handoff import (
+    ProductSelectionProcessingError,
+    process_product_selection_handoff,
+)
 from .gallery_jobs import process_gallery_job, run_material_executor
 from .material_executor_launcher import launch_material_executor
 from .tasks import build_material_items, build_product_tasks
@@ -2096,6 +2100,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Debug only: keep collection in the invoking process",
     )
 
+    process_product_selection = subparsers.add_parser(
+        "process-product-selection",
+        help=(
+            "Claim one submitted product selection and prepare the complete "
+            "folder-review stage in one invocation"
+        ),
+    )
+    process_product_selection.add_argument(
+        "--runs-root", required=True, metavar="DIR"
+    )
+    process_product_selection.add_argument("--session", required=True)
+    process_product_selection.add_argument("--config", metavar="JSON")
+    process_product_selection.add_argument(
+        "--claimant-id", default="codex-agent"
+    )
+
     collection_worker = subparsers.add_parser(
         "collection-worker",
         help=argparse.SUPPRESS,
@@ -2508,6 +2528,51 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
             if result.get("status") in {"completed", "processing"}
             else 1
         )
+    if args.command == "process-product-selection":
+        try:
+            runtime = load_runtime_config(args.config)
+            result = process_product_selection_handoff(
+                SessionStore(Path(args.runs_root)),
+                args.session,
+                folder_index_root=runtime.folder_index_root,
+                claimant_id=args.claimant_id,
+                config_path=args.config,
+            )
+        except ProductSelectionProcessingError as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": error.reason_code,
+                        "message": str(error),
+                        "diagnostic_path": str(error.diagnostic_path),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        except (
+            InteractionConflict,
+            InteractionPathError,
+            OSError,
+            SchemaError,
+            ValueError,
+        ) as error:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason_code": str(error).split(":", 1)[0],
+                        "message": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
     if args.command == "collection-worker":
         try:
             result = run_collection_worker(
