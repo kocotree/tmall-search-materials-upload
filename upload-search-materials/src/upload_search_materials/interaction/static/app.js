@@ -79,7 +79,7 @@
     "dry_run_review": ["DryRunSummary"],
     "approval_table": ["ApprovalChecklist"],
     "production_confirmation": ["ProductionConfirmation"],
-    "result_timeline": ["ResultTimeline"],
+    "upload_results": [],
   };
 
   function apiPath(suffix = "") {
@@ -952,7 +952,7 @@
       submitButton.hidden = true;
       saveButton.disabled = true;
       submitButton.disabled = true;
-      actionMessage.textContent = "结果阶段只读；仅当 Agent 明确要求补充时开放恢复输入。";
+      actionMessage.textContent = "结果阶段只展示本次上传状态。";
     } else if (mayRecover) {
       saveButton.hidden = true;
       saveButton.disabled = true;
@@ -1024,6 +1024,89 @@
       summary.appendChild(action);
     }
     content.appendChild(summary);
+  }
+
+  function renderUploadResults(view) {
+    const module = document.querySelector('[data-component="UploadResults"]');
+    const content = module?.querySelector("[data-result-content]");
+    if (!content) return;
+    content.replaceChildren();
+
+    if (view.mode === "empty") {
+      const empty = element("div", "empty-state");
+      empty.dataset.emptyState = "暂无结果";
+      const mark = element("span", "", "◎");
+      mark.setAttribute("aria-hidden", "true");
+      empty.append(
+        mark,
+        element("strong", "", "暂无上传结果"),
+        element("p", "", "完成上传后，这里会显示每个商品是否上传成功。"),
+      );
+      content.appendChild(empty);
+      return;
+    }
+
+    const result = view.result || {};
+    const data = result.data || {};
+    const products = Array.isArray(data.products) ? data.products : [];
+    content.appendChild(element("p", "upload-results-summary", result.summary || "上传结果已生成"));
+    if (!products.length) {
+      content.appendChild(element("p", "upload-results-empty", "没有找到可展示的商品上传记录。"));
+      return;
+    }
+
+    const list = element("div", "upload-results-list");
+    products.forEach((product) => {
+      const card = element("article", "upload-result-card");
+      card.dataset.status = product.status || "failed";
+      const header = element("div", "upload-result-header");
+      const identity = element("div", "upload-result-identity");
+      identity.append(
+        element("strong", "", product.product_name || `商品 ${product.product_id}`),
+        element("span", "", `商品 ID：${product.product_id || "未知"}`),
+      );
+      const outcome = element("div", "upload-result-outcome");
+      const badge = element("strong", "upload-result-badge", product.status_label || "上传失败");
+      badge.dataset.status = product.status || "failed";
+      outcome.append(
+        badge,
+        element("span", "", `${Number(product.success_count || 0)} / ${Number(product.task_count || 0)} 个坑位成功`),
+      );
+      header.append(identity, outcome);
+      card.appendChild(header);
+
+      const materials = Array.isArray(product.materials) ? product.materials : [];
+      if (materials.length) {
+        const materialList = element("div", "upload-material-list");
+        materials.forEach((material) => {
+          const row = element("div", "upload-material-row");
+          row.dataset.status = material.status || "failed";
+          row.append(
+            element(
+              "strong",
+              "upload-material-slot",
+              material.slot_index == null ? "坑位未知" : `坑位 ${material.slot_index}`,
+            ),
+            element(
+              "code",
+              "upload-material-id",
+              material.remote_material_id
+                ? `素材 ID：${material.remote_material_id}`
+                : "素材 ID：未获取",
+            ),
+            element(
+              "span",
+              "upload-material-status",
+              material.status_label || "上传失败",
+            ),
+          );
+          materialList.appendChild(row);
+        });
+        card.appendChild(materialList);
+      }
+      list.appendChild(card);
+    });
+    content.appendChild(list);
   }
 
   function completenessSelectedIds() {
@@ -4394,6 +4477,9 @@
     (resultRenderers[schemaComponent] || []).forEach((rendererName) => {
       renderResult(rendererName, view);
     });
+    if (schemaComponent === "upload_results") {
+      renderUploadResults(view);
+    }
     if (schemaComponent === "asset_match_gallery") {
       const step = inferAssetMatchingStep(
         view.result?.data,

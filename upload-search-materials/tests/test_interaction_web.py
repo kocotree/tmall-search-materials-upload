@@ -787,7 +787,7 @@ def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
         "DryRunSummary",
         "ApprovalChecklist",
         "ProductionConfirmation",
-        "ResultTimeline",
+        "UploadResults",
     }
 
     for component in components:
@@ -876,10 +876,10 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     assert "当前草稿 · 未绑定 AI 版本" in javascript
     assert "hasMeaningfulCopyDrafts(savedCopyItems)" in javascript
     assert "applyCopyDrafts(drafts, latestRequestId)" in javascript
-    assert (
-        'new CustomEvent(\n        "input",\n'
-        '        { bubbles: true, detail: { source: "explicit-user-edit" } },'
-        in javascript
+    assert re.search(
+        r'new CustomEvent\(\s*"input",\s*'
+        r'\{ bubbles: true, detail: \{ source: "explicit-user-edit" \} \},',
+        javascript,
     )
 
 
@@ -968,12 +968,12 @@ def test_javascript_selects_result_renderers_by_schema_component(client):
         assert f'"{component}"' in javascript
 
 
-def test_results_recovery_form_is_hidden_and_disabled_by_default(client):
+def test_results_form_is_hidden_and_has_no_recovery_controls(client):
     html = client.get("/").get_data(as_text=True)
 
     assert re.search(r'<form[^>]+data-results-recovery[^>]+hidden', html)
     for field_name in ("recovery_action", "manual_notes", "allow_retry_after_remote_absence"):
-        assert re.search(rf'<(?:input|select|textarea)[^>]+name="{field_name}"[^>]+disabled', html)
+        assert f'name="{field_name}"' not in html
 
 
 def test_result_modules_keep_persistent_content_containers(client):
@@ -1020,8 +1020,8 @@ def test_results_stage_rejects_ordinary_submission_without_creating_handoff(
     assert not (results_directory / "handoff.json").exists()
 
 
-@pytest.mark.parametrize("status", ["needs_user_input", "blocked"])
-def test_results_stage_accepts_recovery_only_when_session_status_requires_user_action(
+@pytest.mark.parametrize("status", ["draft", "needs_user_input", "blocked"])
+def test_results_stage_never_accepts_submissions(
     client, session_id, tmp_path, status
 ):
     state_path = tmp_path / session_id / "session.json"
@@ -1040,84 +1040,104 @@ def test_results_stage_accepts_recovery_only_when_session_status_requires_user_a
         },
     )
 
-    assert response.status_code == 202
+    assert response.status_code == 409
+    assert response.json["error"] == "read-only stage does not accept submissions"
 
 
-def test_results_recovery_rechecks_status_inside_save_lock(
-    tmp_path, monkeypatch
+def test_results_stage_projects_approval_uploads_by_product(
+    client, session_id, tmp_path
 ):
     store = SessionStore(tmp_path)
-    session = store.create_session()
-    initial_handoff = store.save_input(
-        session.session_id,
-        "results",
-        {"recovery_action": "retry"},
+    handoff = store.save_input(
+        session_id,
+        "approval",
+        {},
     )
     store.write_result(
-        session.session_id,
-        "results",
-        initial_handoff["revision"],
-        initial_handoff["input_sha256"],
-        status="blocked",
-        summary="awaiting recovery decision",
-    )
-
-    route_reached_save = threading.Event()
-    allow_recovery_save = threading.Event()
-    original_save_input = SessionStore.save_input
-
-    def pause_before_save_lock(self, session_id, stage_id, *args, **kwargs):
-        if stage_id == "results":
-            route_reached_save.set()
-            assert allow_recovery_save.wait(2)
-        return original_save_input(self, session_id, stage_id, *args, **kwargs)
-
-    monkeypatch.setattr(SessionStore, "save_input", pause_before_save_lock)
-    responses = []
-
-    def submit_recovery():
-        with create_app(tmp_path, enforce_stage_order=False).test_client() as client:
-            responses.append(
-                client.post(
-                    f"/api/sessions/{session.session_id}/stages/results/submit",
-                    json={
-                        "values": {
-                            "recovery_action": "retry",
-                            "manual_notes": "retry only if still blocked",
-                            "allow_retry_after_remote_absence": True,
-                        }
-                    },
-                )
-            )
-
-    request_thread = threading.Thread(target=submit_recovery)
-    request_thread.start()
-    assert route_reached_save.wait(2)
-
-    store.write_result(
-        session.session_id,
-        "results",
-        initial_handoff["revision"],
-        initial_handoff["input_sha256"],
+        session_id,
+        "approval",
+        handoff["revision"],
+        handoff["input_sha256"],
         status="completed",
-        summary="agent completed while recovery request was waiting",
+        summary="upload finished",
+        data={
+            "store": "测试店铺",
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "status": "submitted",
+                    "remote_material_id": "remote-1",
+                },
+                {
+                    "task_id": "task-2",
+                    "status": "failed",
+                    "remote_material_id": None,
+                },
+            ],
+        },
     )
-    results_path = session.path / "09-results"
-    completed_artifacts = {
-        name: (results_path / name).read_bytes()
-        for name in ("input.json", "handoff.json", "result.json")
-    }
-    completed_state = (session.path / "session.json").read_bytes()
+    store._write_json_atomic(
+        store._session_path(session_id) / "approval-manifest.json",
+        {
+            "entries": [
+                {"task_id": "task-1", "product_id": "1001", "slot_index": 3},
+                {"task_id": "task-2", "product_id": "1002", "slot_index": 4},
+            ]
+        },
+    )
+    inputs = store._session_path(session_id) / "inputs"
+    inputs.mkdir(exist_ok=True)
+    (inputs / "products.csv").write_text(
+        "商品ID,货号（查找引用）,商品名称（查找引用）,产品等级,链接,运营,组别,品类-公司维度划分\n"
+        "1001,SKU-1,商品一,A级,,,,\n"
+        "1002,SKU-2,商品二,A级,,,,\n",
+        encoding="utf-8",
+    )
 
-    allow_recovery_save.set()
-    request_thread.join(2)
-
-    assert not request_thread.is_alive()
-    assert responses[0].status_code == 409
-    assert responses[0].json["error"] == "stage status does not allow input submission"
-    assert (session.path / "session.json").read_bytes() == completed_state
-    for name, expected_bytes in completed_artifacts.items():
-        assert (results_path / name).read_bytes() == expected_bytes
+    result_response = client.get(
+        f"/api/sessions/{session_id}/stages/results"
+    )
+    assert result_response.status_code == 200
+    result = result_response.json["result"]
+    assert result["summary"] == "上传结束：1 个商品成功，1 个商品未全部成功"
+    assert result["data"]["products"] == [
+        {
+            "product_id": "1001",
+            "product_name": "商品一",
+            "status": "success",
+            "status_label": "上传成功",
+            "task_count": 1,
+            "success_count": 1,
+            "failed_count": 0,
+            "materials": [
+                {
+                    "slot_index": 3,
+                    "remote_material_id": "remote-1",
+                    "status": "success",
+                    "status_label": "上传成功",
+                }
+            ],
+        },
+        {
+            "product_id": "1002",
+            "product_name": "商品二",
+            "status": "failed",
+            "status_label": "上传失败",
+            "task_count": 1,
+            "success_count": 0,
+            "failed_count": 1,
+            "materials": [
+                {
+                    "slot_index": 4,
+                    "remote_material_id": "",
+                    "status": "failed",
+                    "status_label": "上传失败",
+                }
+            ],
+        },
+    ]
+    session_response = client.get(f"/api/sessions/{session_id}")
+    assert session_response.json["session"]["current_stage"] == "results"
 
 
 @pytest.mark.parametrize(

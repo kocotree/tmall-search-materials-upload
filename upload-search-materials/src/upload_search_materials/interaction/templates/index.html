@@ -11,7 +11,9 @@
   <div class="app-shell" data-component="AppShell" data-session-id="{{ session_id }}" data-runs-root="{{ runs_root }}">
     <aside class="stage-rail" data-component="StageRail" aria-label="任务阶段">
       <div class="brand-block">
-        <span class="brand-mark" aria-hidden="true">M</span>
+        <span class="brand-mark">
+          <img src="{{ url_for('static', filename='kocotree-logo.png', v=static_asset_version) }}" alt="KK树公司">
+        </span>
         <div>
           <p class="eyebrow">MATERIAL OPS</p>
           <p class="brand-name">素材上新工作台</p>
@@ -121,9 +123,9 @@
             <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>这里仅核对交接内容，不在浏览器执行生产动作。</p></div></div>
           </section>
           {% elif stage.id == "results" %}
-          <section class="result-module" data-component="ResultTimeline">
-            <div class="module-heading"><div><p class="eyebrow">RESULTS</p><h3>结果与恢复时间线</h3></div><span>结果 / 回查 / 异常</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>发布、回查和异常记录只从 Agent 结果读取。</p></div></div>
+          <section class="result-module" data-component="UploadResults">
+            <div class="module-heading"><div><p class="eyebrow">RESULTS</p><h3>上传结果</h3></div><span>商品 / 状态</span></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>暂无上传结果</strong><p>完成上传后，这里会显示每个商品是否上传成功。</p></div></div>
           </section>
           {% endif %}
 

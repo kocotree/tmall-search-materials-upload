@@ -297,34 +297,12 @@ STAGES: tuple[StageDefinition, ...] = (
     ),
     StageDefinition(
         id="results",
-        title="结果与恢复",
-        description="展示结果；仅在结果报告需要用户处理的异常时启用恢复输入。",
-        component="result_timeline",
+        title="结果",
+        description="按商品展示本次上传是否成功。",
+        component="upload_results",
         previous_stage="approval",
         read_only=True,
-        fields=(
-            _field(
-                "recovery_action",
-                "恢复请求",
-                "select",
-                disabled=True,
-                enabled_when="result.exception_requires_user_action",
-            ),
-            _field(
-                "manual_notes",
-                "人工处理说明",
-                "textarea",
-                disabled=True,
-                enabled_when="result.exception_requires_user_action",
-            ),
-            _field(
-                "allow_retry_after_remote_absence",
-                "确认远端不存在后允许重试",
-                "checkbox",
-                disabled=True,
-                enabled_when="result.exception_requires_user_action",
-            ),
-        ),
+        fields=(),
     ),
 )
 

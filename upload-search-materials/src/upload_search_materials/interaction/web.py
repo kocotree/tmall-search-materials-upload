@@ -874,7 +874,10 @@ def create_app(
 
     @app.get("/api/sessions/<session_id>")
     def get_session(session_id: str):
-        return jsonify(session=store.load_session(session_id))
+        state = store.load_session(session_id)
+        return jsonify(
+            session=_project_upload_results_session(store, session_id, state)
+        )
 
     @app.get("/api/sessions/<session_id>/stages/<stage_id>")
     def get_stage_route(session_id: str, stage_id: str):
@@ -886,13 +889,22 @@ def create_app(
                 request_material_executor(session_id, migrated_job)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        result = (
+            _upload_results_result(store, session_id, state)
+            if stage_id == "results"
+            else _current_result(store, session_id, stage_id, state)
+        )
+        stage_state = state["stages"][stage_id]
+        if stage_id == "results" and result is not None:
+            stage_state = {
+                **stage_state,
+                "status": str(result.get("status") or "completed"),
+            }
         response = {
             "stage": asdict(stage),
-            "state": state["stages"][stage_id],
+            "state": stage_state,
             "input": _current_input(store, session_id, stage, state),
-            "result": _current_result(
-                store, session_id, stage_id, state
-            ),
+            "result": result,
             "submission": _current_submission(
                 store, session_id, stage_id, state
             ),
@@ -1368,6 +1380,8 @@ def create_app(
         values = _values(payload)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        if stage.read_only:
+            raise InteractionConflict("read-only stage does not accept submissions")
         values = _normalize_stage_values(
             store, session_id, stage_id, state, values
         )
@@ -1408,6 +1422,8 @@ def create_app(
         values = _values(payload)
         state = store.load_session(session_id)
         stage = get_stage(stage_id)
+        if stage.read_only:
+            raise InteractionConflict("read-only stage does not accept submissions")
         values = _normalize_stage_values(
             store, session_id, stage_id, state, values
         )
@@ -4001,6 +4017,201 @@ def _current_result(
         stale["data"] = stale_data
         return stale
     return context
+
+
+def _upload_results_result(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project the authoritative approval output into a product-level result."""
+
+    approval = _current_result(store, session_id, "approval", state)
+    if not isinstance(approval, dict):
+        return None
+    approval_data = approval.get("data")
+    if not isinstance(approval_data, dict):
+        return None
+    task_results = [
+        item
+        for item in approval_data.get("tasks", [])
+        if isinstance(item, dict) and str(item.get("task_id", "")).strip()
+    ]
+    if not task_results:
+        return None
+
+    session_path = store._session_path(session_id)
+    manifest_entries: list[dict[str, Any]] = []
+    try:
+        manifest = json.loads(
+            (session_path / "approval-manifest.json").read_text(encoding="utf-8")
+        )
+        manifest_entries = [
+            item
+            for item in manifest.get("entries", [])
+            if isinstance(item, dict)
+        ]
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        manifest_entries = []
+    manifest_by_task = {
+        str(item.get("task_id", "")): item for item in manifest_entries
+    }
+
+    product_names: dict[str, str] = {}
+    try:
+        product_names = {
+            str(product.product_id): str(product.title or "").strip()
+            for product in read_product_csv(session_path / "inputs" / "products.csv")
+        }
+    except (FileNotFoundError, OSError, UnicodeError, SchemaError):
+        product_names = {}
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    product_order: list[str] = []
+    for task in task_results:
+        task_id = str(task.get("task_id", "")).strip()
+        product_id = str(
+            manifest_by_task.get(task_id, {}).get("product_id", "")
+        ).strip()
+        if not product_id:
+            evidence = str(task.get("evidence", ""))
+            marker = evidence.partition("product=")[2]
+            product_id = marker.partition(";")[0].strip()
+        if not product_id:
+            product_id = "未知商品"
+        if product_id not in grouped:
+            grouped[product_id] = []
+            product_order.append(product_id)
+        grouped[product_id].append(task)
+
+    success_statuses = {"submitted", "under_review", "success"}
+    products: list[dict[str, Any]] = []
+    for product_id in product_order:
+        tasks = grouped[product_id]
+        materials: list[dict[str, Any]] = []
+        for task in tasks:
+            task_id = str(task.get("task_id", "")).strip()
+            manifest_entry = manifest_by_task.get(task_id, {})
+            remote_status = str(task.get("status", "")).strip()
+            remote_material_id = str(
+                task.get("remote_material_id") or ""
+            ).strip()
+            uploaded = (
+                remote_status in success_statuses
+                and bool(remote_material_id)
+            )
+            if uploaded:
+                material_status, material_status_label = (
+                    "success",
+                    "上传成功",
+                )
+            elif remote_status == "publish_uncertain":
+                material_status, material_status_label = (
+                    "uncertain",
+                    "状态待确认",
+                )
+            else:
+                material_status, material_status_label = (
+                    "failed",
+                    "上传失败",
+                )
+            slot_index = manifest_entry.get("slot_index")
+            materials.append(
+                {
+                    "slot_index": (
+                        int(slot_index)
+                        if isinstance(slot_index, int)
+                        or (
+                            isinstance(slot_index, str)
+                            and slot_index.isdigit()
+                        )
+                        else None
+                    ),
+                    "remote_material_id": remote_material_id,
+                    "status": material_status,
+                    "status_label": material_status_label,
+                }
+            )
+        materials.sort(
+            key=lambda item: (
+                item["slot_index"] is None,
+                item["slot_index"] or 0,
+            )
+        )
+        success_count = sum(
+            item["status"] == "success" for item in materials
+        )
+        task_count = len(tasks)
+        if success_count == task_count:
+            status, status_label = "success", "上传成功"
+        elif success_count:
+            status, status_label = "partial", "部分成功"
+        else:
+            status, status_label = "failed", "上传失败"
+        products.append(
+            {
+                "product_id": product_id,
+                "product_name": product_names.get(product_id, ""),
+                "status": status,
+                "status_label": status_label,
+                "task_count": task_count,
+                "success_count": success_count,
+                "failed_count": task_count - success_count,
+                "materials": materials,
+            }
+        )
+
+    succeeded = sum(item["status"] == "success" for item in products)
+    incomplete = len(products) - succeeded
+    if not incomplete:
+        summary = f"上传完成：{succeeded} 个商品均已成功提交"
+    else:
+        summary = f"上传结束：{succeeded} 个商品成功，{incomplete} 个商品未全部成功"
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "results",
+        "revision": state["stages"]["results"]["revision"],
+        "status": str(approval.get("status") or "completed"),
+        "summary": summary,
+        "blocking_reasons": list(approval.get("blocking_reasons") or []),
+        "evidence": [],
+        "next_action": None,
+        "created_at": approval.get("completed_at") or approval.get("created_at"),
+        "data": {
+            "store": approval_data.get("store"),
+            "product_count": len(products),
+            "success_product_count": succeeded,
+            "incomplete_product_count": incomplete,
+            "task_count": sum(item["task_count"] for item in products),
+            "products": products,
+        },
+    }
+
+
+def _project_upload_results_session(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose completed uploads as the final stage without rewriting history."""
+
+    result = _upload_results_result(store, session_id, state)
+    if result is None:
+        return state
+    projected = {
+        **state,
+        "stages": {
+            **state["stages"],
+            "results": {
+                **state["stages"]["results"],
+                "status": str(result.get("status") or "completed"),
+            },
+        },
+    }
+    if state.get("current_stage") in {"approval", "results"}:
+        projected["current_stage"] = "results"
+    return projected
 
 
 def _completeness_selection_errors(

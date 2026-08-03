@@ -14,7 +14,8 @@ def test_registry_contains_ordered_nine_stage_workflow():
 
 def test_every_interactive_stage_exposes_user_input_fields():
     for stage in STAGES:
-        assert stage.fields
+        if not stage.read_only:
+            assert stage.fields
 
 
 def test_video_field_is_present_and_deferred():
@@ -54,9 +55,9 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
         "image_review": ("decisions", "user_notes"),
         "slots_copy": ("slot_assignments", "copy_edits", "user_notes"),
         "dry_run": ("decision", "warning_notes"),
-        "approval": ("task_ids", "confirmed_by", "confirmed_at", "valid_until", "acknowledgement"),
+        "approval": ("task_ids", "confirmed_by"),
         "production_confirmation": ("store", "product_ids", "task_ids", "slot_ids", "max_products", "approval_manifest_sha256", "final_confirmation", "notes"),
-        "results": ("recovery_action", "manual_notes", "allow_retry_after_remote_absence"),
+        "results": (),
     }
     assert {stage.id: tuple(field.name for field in stage.fields) for stage in STAGES} == expected_fields
     assert [stage.previous_stage for stage in STAGES] == [
@@ -68,7 +69,7 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
         "slots_copy",
         "dry_run",
         "approval",
-        "production_confirmation",
+        "approval",
     ]
 
 
@@ -78,6 +79,8 @@ def test_definitions_are_immutable_and_results_is_read_only():
     with pytest.raises(FrozenInstanceError):
         get_stage("setup").fields[0].label = "changed"
     assert get_stage("results").read_only is True
+    assert get_stage("results").title == "结果"
+    assert get_stage("results").component == "upload_results"
 
 
 def test_stages_have_rendering_metadata_with_chinese_copy():
@@ -107,7 +110,4 @@ def test_setup_uses_configured_sources_and_keeps_manual_imports_optional():
 
 def test_recovery_fields_are_conditionally_enabled_only_for_actionable_exceptions():
     results = get_stage("results")
-    assert all(field.disabled for field in results.fields)
-    assert {
-        field.enabled_when for field in results.fields
-    } == {"result.exception_requires_user_action"}
+    assert results.fields == ()

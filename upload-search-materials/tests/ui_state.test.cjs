@@ -12,7 +12,7 @@ try {
   // Assertions below report the missing production interface as test failures.
 }
 
-test("results recovery remains eligible while local edits are dirty", () => {
+test("results remains read-only even when the upload is blocked", () => {
   assert.equal(typeof UiState.createState, "function");
   let state = UiState.createState("results");
   state = UiState.receiveStage(state, {
@@ -24,8 +24,8 @@ test("results recovery remains eligible while local edits are dirty", () => {
   state = UiState.receiveStatus(state, "blocked", "2026-07-21T08:00:00Z");
 
   assert.deepEqual(UiState.recoveryView(state), {
-    visible: true,
-    submitEnabled: true,
+    visible: false,
+    submitEnabled: false,
   });
   assert.equal(state.serverStatus, "blocked");
   assert.equal(state.dirty, true);

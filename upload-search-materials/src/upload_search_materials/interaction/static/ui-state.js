@@ -55,8 +55,7 @@
   }
 
   function recoveryView(state) {
-    const eligible = state.stageId === "results" && userActionStatuses.has(state.serverStatus);
-    return { visible: eligible, submitEnabled: eligible };
+    return { visible: false, submitEnabled: false };
   }
 
   function resultView(state) {
