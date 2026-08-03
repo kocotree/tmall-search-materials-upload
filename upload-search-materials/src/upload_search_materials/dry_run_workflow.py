@@ -224,6 +224,148 @@ def _set_current_stage(
         store._write_session_state(session_id, state)
 
 
+def return_blocked_dry_run_to_slots_copy(
+    store: SessionStore,
+    session_id: str,
+) -> dict[str, Any]:
+    """Reopen the confirmed copy page after a blocked dry-run review."""
+
+    transitioned = False
+    with store._session_lock(session_id):
+        state = store.load_session(session_id)
+        dry_state = state["stages"]["dry_run"]
+        copy_state = state["stages"]["slots_copy"]
+        already_returned = (
+            state.get("current_stage") == "slots_copy"
+            and copy_state.get("status") == "needs_user_input"
+        )
+        if state.get("current_stage") != "dry_run" and not already_returned:
+            raise InteractionConflict("DRY_RUN_RETURN_STAGE_CHANGED")
+        if not already_returned and dry_state.get("status") not in {
+            "blocked",
+            "needs_user_input",
+        }:
+            raise InteractionConflict("DRY_RUN_RETURN_STATUS_INVALID")
+        if not already_returned and copy_state.get("status") != "completed":
+            raise InteractionConflict("SLOTS_COPY_RETURN_STATUS_INVALID")
+        if not already_returned:
+            copy_state["status"] = "needs_user_input"
+            state["current_stage"] = "slots_copy"
+            store._write_session_state(session_id, state)
+            transitioned = True
+
+    _archive_completed_slot_result_for_reopen(store, session_id)
+    _restore_slots_copy_review_context(store, session_id)
+    if transitioned:
+        store._append_event(
+            store._session_path(session_id),
+            "dry_run_returned_to_slots_copy",
+            session_id=session_id,
+            dry_run_revision=int(dry_state["revision"]),
+            slots_copy_revision=int(copy_state["revision"]),
+        )
+    return {
+        "status": "needs_user_input",
+        "next_stage": "slots_copy",
+        "revision": int(copy_state["revision"]),
+    }
+
+
+def _archive_completed_slot_result_for_reopen(
+    store: SessionStore,
+    session_id: str,
+) -> bool:
+    """Hide the completed result from hydration while preserving its audit copy."""
+
+    stage_path = store._stage_path(session_id, "slots_copy")
+    result_path = stage_path / "result.json"
+    if not result_path.is_file():
+        return False
+    result = store._read_json(result_path, "result")
+    revision = int(result.get("revision", 0))
+    archive_path = (
+        stage_path
+        / "reopened-after-dry-run"
+        / f"r{revision:04d}-{sha256_file(result_path)[:12]}"
+        / "result.json"
+    )
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if archive_path.is_file():
+        raise InteractionConflict("SLOTS_COPY_REOPEN_ARCHIVE_CONFLICT")
+    result_path.replace(archive_path)
+    store._append_event(
+        store._session_path(session_id),
+        "slots_copy_result_archived_for_reopen",
+        session_id=session_id,
+        revision=revision,
+        archive_path=str(archive_path),
+    )
+    return True
+
+
+def _restore_slots_copy_review_context(
+    store: SessionStore,
+    session_id: str,
+) -> bool:
+    """Rebuild the board payload without changing the confirmed slot plan."""
+
+    from .deterministic_slot_planning import build_deterministic_slot_plan
+    from .slot_planning import build_rule_slot_plan
+
+    asset_path = store._stage_path(session_id, "asset_matching")
+    preflight_path = asset_path / "selected-asset-preflight.json"
+    package_path = asset_path / "final-material-package.json"
+    if not preflight_path.is_file() or not package_path.is_file():
+        return False
+    preflight_document = store._read_json(
+        preflight_path, "selected-asset-preflight"
+    )
+    package = store._read_json(package_path, "final-material-package")
+    preflight = preflight_document.get("data")
+    if not isinstance(preflight, dict):
+        return False
+    planning_decisions = [
+        {
+            "asset_id": str(item.get("asset_id", "")),
+            "decision": (
+                "excluded"
+                if item.get("status") == "blocked"
+                or item.get("duplicate") is True
+                else "selected"
+            ),
+            "candidate_ratios": list(item.get("crop_options", {}).keys()),
+        }
+        for item in preflight.get("assets", [])
+        if isinstance(item, dict)
+    ]
+    board_data = build_rule_slot_plan(
+        preflight,
+        planning_decisions,
+        image_review_revision=0,
+    )
+    board_data["deterministic_plan"] = build_deterministic_slot_plan(
+        board_data,
+        missing_slots_by_product=package.get("missing_slots_by_product", {}),
+    )
+    state = store.load_session(session_id)
+    revision = int(state["stages"]["slots_copy"]["revision"])
+    context = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "slots_copy",
+        "revision": revision,
+        "status": "needs_user_input",
+        "summary": "已恢复当前坑位、图片输出和文案草稿，可继续编辑后重新预检。",
+        "blocking_reasons": [],
+        "evidence": [str(package_path)],
+        "next_action": "检查或修改文案后，重新确认并自动预检。",
+        "created_at": _now_iso(),
+        "data": board_data,
+    }
+    store.write_review_context(session_id, "slots_copy", context)
+    return True
+
+
 def _copy_remote_positions(
     store: SessionStore,
     session_id: str,
@@ -256,17 +398,62 @@ def _copy_remote_positions(
                 request_ids.add(path.name)
     positions: dict[str, int] = {}
     for request_id in sorted(request_ids):
+        request_path = request_root / request_id
         try:
             response = store._read_json(
-                stage_path
-                / "agent-requests"
-                / request_id
-                / "response.json",
+                request_path / "response.json",
                 "copy-response",
             )
         except InteractionConflict:
-            continue
-        for draft in response.get("result", {}).get("copy_drafts", []):
+            response = None
+
+        drafts = (
+            response.get("result", {}).get("copy_drafts", [])
+            if isinstance(response, dict)
+            else []
+        )
+        if not drafts:
+            # The copy processor writes every Qianniu result to progress.json
+            # before it finalizes response.json.  If a downstream autosave
+            # superseded the request after the last slot was generated, the
+            # response is absent even though the exact remote positions are
+            # already durable.  Recover only a complete, identity-matched
+            # progress set; partial progress must remain blocking.
+            try:
+                request = store._read_json(
+                    request_path / "request.json", "copy-request"
+                )
+                progress = store._read_json(
+                    request_path / "progress.json", "copy-progress"
+                )
+            except InteractionConflict:
+                continue
+            request_context = request.get("request_context", {})
+            expected_slots = {
+                str(item.get("slot_id", ""))
+                for item in request_context.get("slots", [])
+                if isinstance(item, dict) and str(item.get("slot_id", ""))
+            }
+            progress_drafts = progress.get("copy_drafts", [])
+            progress_slots = {
+                str(item.get("slot_id", ""))
+                for item in progress_drafts
+                if isinstance(item, dict) and str(item.get("slot_id", ""))
+            }
+            total_count = int(progress.get("total_count", 0))
+            completed_count = int(progress.get("completed_count", 0))
+            if (
+                request_context.get("final_outputs_sha256") != outputs_identity
+                or not expected_slots
+                or progress_slots != expected_slots
+                or len(progress_drafts) != len(progress_slots)
+                or completed_count != total_count
+                or total_count != len(expected_slots)
+            ):
+                continue
+            drafts = progress_drafts
+
+        for draft in drafts:
             if not isinstance(draft, dict):
                 continue
             slot_id = str(draft.get("slot_id", ""))

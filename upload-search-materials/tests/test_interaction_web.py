@@ -1176,6 +1176,45 @@ def test_results_stage_projects_approval_uploads_by_product(
     assert session_response.json["session"]["current_stage"] == "results"
 
 
+def test_approval_review_tasks_do_not_project_as_upload_failures(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    with store._session_lock(session_id):
+        state = store.load_session(session_id)
+        state["current_stage"] = "approval"
+        state["stages"]["approval"]["status"] = "needs_user_input"
+        store._write_session_state(session_id, state)
+    store.write_review_context(
+        session_id,
+        "approval",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "approval",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "review upload tasks",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "select exact tasks",
+            "data": {
+                "tasks": [
+                    {"task_id": "task-1", "status": "ready_for_review"}
+                ]
+            },
+        },
+    )
+
+    session_response = client.get(f"/api/sessions/{session_id}")
+    result_response = client.get(
+        f"/api/sessions/{session_id}/stages/results"
+    )
+
+    assert session_response.json["session"]["current_stage"] == "approval"
+    assert result_response.json["result"] is None
+
+
 @pytest.mark.parametrize(
     ("data", "content_type", "status"),
     [(b"{}", None, 415), (b"{", "application/json", 400)],

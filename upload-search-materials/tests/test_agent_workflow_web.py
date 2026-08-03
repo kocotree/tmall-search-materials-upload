@@ -707,7 +707,14 @@ def test_copy_progress_autosave_does_not_supersede_open_request(tmp_path):
         json={"plan_revision": current["plan_revision"]},
     ).status_code == 200
     initial_values = {
-        "slot_assignments": current["slot_assignments"],
+        # Model the real UI sequence: the stage input can still contain an
+        # older pre-confirmation draft even though current-slot-plan already
+        # holds the authoritative processed assignment.
+        "slot_assignments": [{
+            **current["slot_assignments"][0],
+            "asset_ids": ["asset-2", "asset-1", "asset-0"],
+            "ordered_asset_ids": ["asset-2", "asset-1", "asset-0"],
+        }],
         "copy_edits": [],
     }
     initial_draft = client.post(
@@ -728,6 +735,7 @@ def test_copy_progress_autosave_does_not_supersede_open_request(tmp_path):
         session_id, "slots_copy", "input"
     )
     values = dict(stage_input.get("values", {}))
+    values["slot_assignments"] = current["slot_assignments"]
     values["copy_edits"] = [{
         "slot_id": "slot-a",
         "product_id": "P1",

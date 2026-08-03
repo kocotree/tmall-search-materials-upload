@@ -345,18 +345,26 @@ def process_copy_draft_request(
                 else candidate_reason
             )
         )
+        latest_request = read_agent_request(store, session_id, request_id)
+        request_superseded = latest_request.get("status") == "superseded"
+        if request_superseded:
+            reason_code = str(
+                latest_request.get("reason_code")
+                or "AGENT_REQUEST_SUPERSEDED"
+            )
         write_progress(
-            "failed",
+            "superseded" if request_superseded else "failed",
             current_slot_id=current_slot_id,
             reason_code=reason_code,
         )
-        fail_agent_request(
-            store,
-            session_id,
-            request_id,
-            actor=actor,
-            reason_code=reason_code,
-        )
+        if not request_superseded:
+            fail_agent_request(
+                store,
+                session_id,
+                request_id,
+                actor=actor,
+                reason_code=reason_code,
+            )
         write_exception_diagnostic(
             store,
             session_id,

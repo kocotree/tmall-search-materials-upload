@@ -734,7 +734,10 @@
           : "提交给 Agent";
     const lockedByServer = !uiState.dirty
       && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
-    submitButton.disabled = lockedByServer;
+    const approvalHasSelectedTasks = currentStageId !== "approval" || String(
+      activeForm()?.querySelector('[name="task_ids"]')?.value || "",
+    ).split(/\r?\n/).some((taskId) => taskId.trim());
+    submitButton.disabled = lockedByServer || !approvalHasSelectedTasks;
     if (
       currentStageId === "asset_matching"
       && ["queued", "running"].includes(currentGalleryJob?.status)
@@ -774,6 +777,9 @@
     retryGalleryButton.disabled = retryGalleryButton.hidden;
     setFormLocked(uiState.serverStatus);
     updateResultsRecovery(UiState.recoveryView(uiState));
+    if (currentStageId !== "slots_copy") {
+      handoffActions?.classList.remove("is-stage-managed");
+    }
     if (currentStageId === "asset_matching") {
       submitButton.hidden = assetStep !== "image_selection";
     }

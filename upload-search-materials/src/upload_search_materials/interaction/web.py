@@ -1769,11 +1769,23 @@ def create_app(
             if isinstance(previous_input, dict)
             else {}
         )
-        slot_plan_changed = (
-            stage_id != "slots_copy"
-            or previous_values.get("slot_assignments")
-            != values.get("slot_assignments")
-        )
+        if stage_id == "slots_copy":
+            # Copy drafts are hydrated into the stage input while the request
+            # is running.  The input may still contain the pre-confirmation
+            # slot draft, so comparing only with previous_values can falsely
+            # supersede the request on its first progress autosave.  The
+            # confirmed current plan is authoritative once it exists.
+            current_plan = read_current_slot_plan(store, session_id)
+            authoritative_assignments = (
+                current_plan.get("slot_assignments")
+                if isinstance(current_plan, dict)
+                else previous_values.get("slot_assignments")
+            )
+            slot_plan_changed = (
+                authoritative_assignments != values.get("slot_assignments")
+            )
+        else:
+            slot_plan_changed = True
         document = store.save_draft(
             session_id,
             stage_id,
@@ -4471,8 +4483,17 @@ def _upload_results_result(
 ) -> dict[str, Any] | None:
     """Project the authoritative approval output into a product-level result."""
 
-    approval = _current_result(store, session_id, "approval", state)
+    approval_state = state["stages"]["approval"]
+    if approval_state.get("status") != "completed":
+        return None
+    approval = store.read_optional_stage_document(
+        session_id, "approval", "result"
+    )
     if not isinstance(approval, dict):
+        return None
+    if int(approval.get("revision", -1)) != int(
+        approval_state.get("revision", -2)
+    ):
         return None
     approval_data = approval.get("data")
     if not isinstance(approval_data, dict):
