@@ -15,10 +15,9 @@ from .path_diagnostics import diagnose_image_sources
 
 PRODUCTS_PATTERN = "天猫商品信息表*产品数据表*数据总表.csv"
 RULES_PATTERN = "天猫商品信息表*每月推品规则*Grid View.csv"
-LOCAL_CONFIG_RELATIVE = Path("upload-search-materials/config/local-paths.json")
-LOCAL_SELECTORS_RELATIVE = Path(
-    "upload-search-materials/config/selectors.local.yaml"
-)
+LOCAL_CONFIG_RELATIVE = Path("config/local-paths.json")
+LOCAL_SELECTORS_RELATIVE = Path("config/selectors.local.yaml")
+PACKAGE_DOCS_RELATIVE = Path("src/upload_search_materials/docs")
 DEFAULT_CDP_PROFILE_RELATIVE = Path(".local-cache/cdp-profile")
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DEFAULT_MATERIAL_CENTER_URL = (
@@ -279,9 +278,11 @@ def _find_workspace_root(configured: str | None, *, start: Path | None) -> Path:
             if resolved in seen:
                 continue
             seen.add(resolved)
-            if (resolved / "docs").is_dir() and (
-                resolved / "upload-search-materials"
-            ).is_dir():
+            if (
+                (resolved / "SKILL.md").is_file()
+                and (resolved / "pyproject.toml").is_file()
+                and (resolved / "src" / "upload_search_materials").is_dir()
+            ):
                 return resolved
     return (start or Path.cwd()).resolve()
 
@@ -322,7 +323,7 @@ def _resolve_table(value: object, workspace_root: Path, pattern: str) -> Discove
     if value:
         path = _resolve_configured_path(value, workspace_root)
         return DiscoveredPath(path, "configured" if path.is_file() else "missing")
-    docs = workspace_root / "docs"
+    docs = workspace_root / PACKAGE_DOCS_RELATIVE
     candidates = tuple(sorted(docs.glob(pattern))) if docs.is_dir() else ()
     if len(candidates) == 1:
         return DiscoveredPath(candidates[0].resolve(), "discovered", candidates)

@@ -39,9 +39,9 @@ def _frontmatter(text: str, path: Path) -> dict:
 
 def validate(repository_root: Path) -> list[str]:
     errors: list[str] = []
-    canonical = repository_root / "upload-search-materials" / "SKILL.md"
+    canonical = repository_root / "SKILL.md"
     entry = repository_root / ".codex" / "skills" / "upload-search-materials" / "SKILL.md"
-    metadata = repository_root / "upload-search-materials" / "agents" / "openai.yaml"
+    metadata = repository_root / "agents" / "openai.yaml"
     entry_metadata = entry.parent / "agents" / "openai.yaml"
     for path in (canonical, entry, metadata, entry_metadata):
         if not path.is_file():
@@ -90,7 +90,7 @@ def main() -> int:
     parser.add_argument(
         "--repository-root",
         type=Path,
-        default=Path(__file__).resolve().parents[2],
+        default=Path(__file__).resolve().parents[1],
     )
     args = parser.parse_args()
     errors = validate(args.repository_root.resolve())

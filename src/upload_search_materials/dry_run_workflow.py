@@ -10,7 +10,7 @@ from typing import Any
 from .interaction.session import InteractionConflict, SessionStore
 from .io_tables import sha256_file
 from .models import AssetRecord, MaterialItem, MaterialStatus
-from .reporting import write_json
+from .reporting import read_json, write_json
 from .state_store import StateStore
 from .slot_workflow import final_outputs_sha256
 
@@ -91,10 +91,13 @@ def prepare_publish_run_from_authorization(
         if existing_count != len(artifact_paths):
             raise InteractionConflict("PUBLISH_RUN_PARTIAL_STATE")
         run = store._read_json(publish_path / "run.json", "publish-run")
-        persisted_items = store._read_json(
-            publish_path / "material-items.json",
-            "publish-items",
-        )
+        persisted_items = read_json(publish_path / "material-items.json")
+        if not isinstance(persisted_items, list) or not all(
+            isinstance(item, dict) for item in persisted_items
+        ):
+            raise InteractionConflict(
+                "publish-items.json must contain a list of objects"
+            )
         if (
             run.get("run_id") != f"SESSION-{session_id}-APPROVAL-{revision}"
             or str(run.get("store", "")).strip()

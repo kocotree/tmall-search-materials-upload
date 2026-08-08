@@ -364,9 +364,7 @@ def launch_collection_worker(
     with log_file.open("ab", buffering=0) as log_stream:
         process = popen(
             argv,
-            cwd=str(
-                runtime.workspace_root / "upload-search-materials"
-            ),
+            cwd=str(runtime.workspace_root),
             stdin=subprocess.DEVNULL,
             stdout=log_stream,
             stderr=log_stream,

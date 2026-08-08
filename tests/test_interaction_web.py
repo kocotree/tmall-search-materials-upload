@@ -21,15 +21,16 @@ from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 @pytest.fixture
 def client(tmp_path):
-    workspace = Path(__file__).parents[2]
+    workspace = Path(__file__).parents[1]
+    docs = workspace / "src" / "upload_search_materials" / "docs"
     runtime = RuntimeConfig(
         workspace_root=workspace,
         products=DiscoveredPath(
-            workspace / "docs" / "天猫商品信息表_产品数据表_数据总表.csv",
+            docs / "天猫商品信息表_产品数据表_数据总表.csv",
             "discovered",
         ),
         rules=DiscoveredPath(
-            workspace / "docs" / "天猫商品信息表_每月推品规则（合并）_Grid View.csv",
+            docs / "天猫商品信息表_每月推品规则（合并）_Grid View.csv",
             "discovered",
         ),
         image_sources=(
@@ -295,12 +296,9 @@ def test_collection_runtime_panel_validates_and_saves_local_profile(
     assert status.json["selector_profile"]["configured"] is True
     assert status.json["cdp"]["connected"] is True
     config = json.loads(
-        (
-            tmp_path
-            / "upload-search-materials"
-            / "config"
-            / "local-paths.json"
-        ).read_text(encoding="utf-8")
+        (tmp_path / "config" / "local-paths.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert config["selectors_file"] == str(selectors)
 
@@ -360,11 +358,21 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
     tmp_path, monkeypatch
 ):
     workspace = tmp_path / "workspace"
-    project = workspace / "upload-search-materials"
+    project = workspace
     scripts = project / ".venv" / "Scripts"
     scripts.mkdir(parents=True)
-    (workspace / "docs").mkdir()
+    (workspace / "src" / "upload_search_materials" / "docs").mkdir(
+        parents=True
+    )
     (project / "config").mkdir()
+    (workspace / "SKILL.md").write_text(
+        "---\nname: test\ndescription: test\n---\n",
+        encoding="utf-8",
+    )
+    (workspace / "pyproject.toml").write_text(
+        "[project]\nname='test'\n",
+        encoding="utf-8",
+    )
     (scripts / "python.exe").write_bytes(b"prepared")
     (scripts / "tmall-materials.exe").write_bytes(b"prepared")
     (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
@@ -563,7 +571,7 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
 
 def test_runtime_image_source_api_saves_checks_and_reloads_multiple_roots(tmp_path):
     workspace = tmp_path / "workspace"
-    (workspace / "upload-search-materials" / "config").mkdir(parents=True)
+    (workspace / "config").mkdir(parents=True)
     available = workspace / "available"
     available.mkdir()
     runtime = RuntimeConfig(
@@ -589,7 +597,7 @@ def test_runtime_image_source_api_saves_checks_and_reloads_multiple_roots(tmp_pa
     ]
     assert saved.status_code == 200 and saved.json["saved"] is True
     assert len(loaded.json["image_sources"]) == 2
-    config = workspace / "upload-search-materials" / "config" / "local-paths.json"
+    config = workspace / "config" / "local-paths.json"
     assert config.is_file()
 
 

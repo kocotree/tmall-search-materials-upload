@@ -80,10 +80,10 @@
 ### 恢复命令
 
 ```powershell
-.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli ui-status --runs-root "<runs-root>" --session "<session-id>"
-.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli ui-restart --runs-root "<runs-root>" --session "<session-id>"
-.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli process-setup --runs-root "<runs-root>" --session "<session-id>"
-.\upload-search-materials\.venv\Scripts\python.exe -m upload_search_materials.cli collection-status --runs-root "<runs-root>" --session "<session-id>"
+.\.venv\Scripts\python.exe -m upload_search_materials.cli ui-status --runs-root "<runs-root>" --session "<session-id>"
+.\.venv\Scripts\python.exe -m upload_search_materials.cli ui-restart --runs-root "<runs-root>" --session "<session-id>"
+.\.venv\Scripts\python.exe -m upload_search_materials.cli process-setup --runs-root "<runs-root>" --session "<session-id>"
+.\.venv\Scripts\python.exe -m upload_search_materials.cli collection-status --runs-root "<runs-root>" --session "<session-id>"
 ```
 
 只有受管 collector 产生 `SELECTOR_INVALID` 等可复现错误后，才允许用 Playwright
@@ -109,8 +109,8 @@
 
 ```powershell
 uv run --directory .\upload-search-materials --locked pytest -q --basetemp ..\test_evidence\frontend-first\pytest-temp
-node --test .\upload-search-materials\tests\ui_state.test.cjs
-uv run --project .\upload-search-materials --locked python .\upload-search-materials\scripts\validate_skill_entry.py --repository-root .
+node --test .\tests\ui_state.test.cjs
+uv run --locked python .\scripts\validate_skill_entry.py --repository-root .
 $env:PYTHONUTF8='1'; uv run --project .\upload-search-materials --locked python "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .\upload-search-materials
 openspec validate make-skill-interactions-frontend-first --strict
 ```
@@ -218,7 +218,7 @@ test_evidence/
 
 ```powershell
 uv --version
-Get-Content .\upload-search-materials\.python-version
+Get-Content .\.python-version
 uv sync --project .\upload-search-materials --extra test
 uv lock --project .\upload-search-materials --check
 uv run --project .\upload-search-materials --locked tmall-materials --help
@@ -249,7 +249,7 @@ uv run --project .\upload-search-materials --locked python -X utf8 $quickValidat
 ```powershell
 New-Item -ItemType Directory -Force test_evidence\02-interaction | Out-Null
 uv run --directory .\upload-search-materials --locked python -m pytest -q tests\test_interaction_stages.py tests\test_interaction_session.py tests\test_interaction_web.py tests\test_interaction_ui_state.py --basetemp ..\test_evidence\02-interaction\pytest-temp -o cache_dir=..\test_evidence\02-interaction\pytest-cache 2>&1 | Tee-Object test_evidence\02-interaction\pytest-focused.txt
-node --test .\upload-search-materials\tests\ui_state.test.cjs 2>&1 | Tee-Object test_evidence\02-interaction\node-ui-state.txt
+node --test .\tests\ui_state.test.cjs 2>&1 | Tee-Object test_evidence\02-interaction\node-ui-state.txt
 uv run --project .\upload-search-materials --locked tmall-materials --help | Select-String "interact|wait-handoff"
 uv run --project .\upload-search-materials --locked tmall-materials interact --help
 uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --help

@@ -196,10 +196,30 @@ def ensure_cdp_browser(
 
 def assert_store_identity(page, selector: str, expected_store: str) -> str:
     locator = page.locator(selector)
-    actual = locator.inner_text().strip() if locator.count() else ""
-    if actual != expected_store.strip():
-        raise StoreIdentityError(f"目标店铺={expected_store.strip()}; 当前店铺={actual or '<missing>'}")
-    return actual
+    expected = expected_store.strip()
+    observed: list[str] = []
+    visible: list[str] = []
+    for index in range(locator.count()):
+        candidate = locator.nth(index) if locator.count() > 1 else locator
+        text = candidate.inner_text().strip()
+        if not text:
+            continue
+        observed.append(text)
+        try:
+            if candidate.is_visible():
+                visible.append(text)
+        except Exception:
+            # Some lightweight page adapters do not expose visibility.  Their
+            # text is still usable for the same exact-match check.
+            visible.append(text)
+
+    candidates = visible or observed
+    if expected in candidates:
+        return expected
+    actual = " | ".join(dict.fromkeys(candidates))
+    raise StoreIdentityError(
+        f"目标店铺={expected}; 当前店铺={actual or '<missing>'}"
+    )
 
 
 def detect_human_check(page, selector: str) -> None:

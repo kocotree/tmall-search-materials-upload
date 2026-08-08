@@ -10,10 +10,9 @@ runs/
 .pytest-task-*/
 .pytest-tmp-*/
 .pytest-cache-*/
-upload-search-materials/.pytest-*/
-upload-search-materials/.browser-test-runs/
-upload-search-materials/.environment-fingerprint.json
-upload-search-materials/v/
+.browser-test-runs/
+.environment-fingerprint.json
+v/
 build/
 .tmall-browser-profile/
 __pycache__/
@@ -22,6 +21,6 @@ __pycache__/
 *.log
 feishu-auth-*.png
 .local-cache/
-upload-search-materials/config/local-paths.json
-upload-search-materials/config/selectors.local.yaml
-upload-search-materials/config/selectors.local.yml
+config/local-paths.json
+config/selectors.local.yaml
+config/selectors.local.yml

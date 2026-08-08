@@ -84,6 +84,39 @@ def _refresh_high_value_collection_page(page, *, action_wait_ms: int) -> None:
         page.wait_for_timeout(action_wait_ms)
 
 
+def _wait_for_nonempty_promotion_rows(
+    page,
+    selector: str,
+    *,
+    timeout_ms: int,
+    poll_ms: int = 250,
+) -> list[str]:
+    """Wait for the SPA table to hydrate after refresh or tab selection."""
+
+    elapsed_ms = 0
+    last_error: Exception | None = None
+    while True:
+        try:
+            rows = [
+                str(value).strip()
+                for value in page.locator(selector).all_inner_texts()
+                if str(value).strip()
+            ]
+        except (AttributeError, PlaywrightError) as error:
+            rows = []
+            last_error = error
+        if rows:
+            return rows
+        if elapsed_ms >= timeout_ms:
+            break
+        delay_ms = min(poll_ms, timeout_ms - elapsed_ms)
+        if delay_ms <= 0:
+            break
+        page.wait_for_timeout(delay_ms)
+        elapsed_ms += delay_ms
+    raise SelectorInvalidError("promotion_tab:outcome_unchanged") from last_error
+
+
 def _high_value_total(category_filter) -> int:
     """Read the total embedded in labels such as ``搜推高价值 262``."""
 
@@ -616,14 +649,11 @@ def scan_recommended_material_status(
         )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
-    if not [
-        value
-        for value in page.locator(
-            selectors["promotion_rows"]
-        ).all_inner_texts()
-        if str(value).strip()
-    ]:
-        raise SelectorInvalidError("promotion_tab:outcome_unchanged")
+    _wait_for_nonempty_promotion_rows(
+        page,
+        selectors["promotion_rows"],
+        timeout_ms=max(action_wait_ms, 15_000) if action_wait_ms else 0,
+    )
 
     if on_phase is not None:
         on_phase("selecting_high_value", None)

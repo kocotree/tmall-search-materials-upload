@@ -6,7 +6,7 @@ from pathlib import Path
 from scripts.validate_skill_entry import validate
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_project_skill_entry_is_discoverable_and_consistent():
@@ -18,10 +18,10 @@ def test_missing_canonical_skill_returns_stable_validation_error(tmp_path):
         REPOSITORY_ROOT / ".codex",
         tmp_path / ".codex",
     )
-    (tmp_path / "upload-search-materials" / "agents").mkdir(parents=True)
+    (tmp_path / "agents").mkdir(parents=True)
     shutil.copy2(
-        REPOSITORY_ROOT / "upload-search-materials" / "agents" / "openai.yaml",
-        tmp_path / "upload-search-materials" / "agents" / "openai.yaml",
+        REPOSITORY_ROOT / "agents" / "openai.yaml",
+        tmp_path / "agents" / "openai.yaml",
     )
     errors = validate(tmp_path)
     assert any("missing artifact" in error and "SKILL.md" in error for error in errors)
@@ -32,17 +32,17 @@ def test_stale_entry_sha_is_rejected(tmp_path):
         REPOSITORY_ROOT / ".codex",
         tmp_path / ".codex",
     )
-    target_skill = tmp_path / "upload-search-materials"
+    target_skill = tmp_path
     (target_skill / "agents").mkdir(parents=True)
     shutil.copy2(
-        REPOSITORY_ROOT / "upload-search-materials" / "SKILL.md",
+        REPOSITORY_ROOT / "SKILL.md",
         target_skill / "SKILL.md",
     )
     shutil.copy2(
-        REPOSITORY_ROOT / "upload-search-materials" / "agents" / "openai.yaml",
+        REPOSITORY_ROOT / "agents" / "openai.yaml",
         target_skill / "agents" / "openai.yaml",
     )
-    canonical = tmp_path / "upload-search-materials" / "SKILL.md"
+    canonical = tmp_path / "SKILL.md"
     canonical.write_text(
         canonical.read_text(encoding="utf-8") + "\nchanged\n",
         encoding="utf-8",

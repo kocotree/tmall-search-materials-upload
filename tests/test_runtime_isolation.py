@@ -13,9 +13,10 @@ def test_default_runtime_session_is_git_ignored_and_has_no_authentication_data(
     tmp_path,
 ):
     workspace = tmp_path / "workspace"
-    (workspace / "docs").mkdir(parents=True)
-    (workspace / "upload-search-materials").mkdir()
-    source_ignore = Path(__file__).parents[2] / ".gitignore"
+    (workspace / "src" / "upload_search_materials").mkdir(parents=True)
+    (workspace / "SKILL.md").write_text("---\nname: test\ndescription: test\n---\n")
+    (workspace / "pyproject.toml").write_text("[project]\nname='test'\n")
+    source_ignore = Path(__file__).parents[1] / ".gitignore"
     shutil.copy2(source_ignore, workspace / ".gitignore")
     subprocess.run(
         ["git", "init", "-q"],
@@ -70,7 +71,6 @@ def test_prepared_environment_is_independent_of_global_uv_cache(tmp_path):
 
     assert status["prepared"] is True
     assert status["uv_cache_dir"] == str(project / ".uv-cache")
-    assert "AppData" not in status["uv_cache_dir"]
 
 
 def test_environment_fingerprint_accepts_windows_powershell_utf8_bom(tmp_path):

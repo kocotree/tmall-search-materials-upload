@@ -17,19 +17,21 @@ RULE_NAME = "天猫商品信息表_每月推品规则（合并）_Grid View.csv"
 
 def make_workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "portable-project"
-    (workspace / "docs").mkdir(parents=True)
-    (workspace / "upload-search-materials" / "config").mkdir(parents=True)
+    (workspace / "src" / "upload_search_materials" / "docs").mkdir(parents=True)
+    (workspace / "config").mkdir(parents=True)
+    (workspace / "SKILL.md").write_text("---\nname: test\ndescription: test\n---\n")
+    (workspace / "pyproject.toml").write_text("[project]\nname='test'\n")
     return workspace
 
 
 def test_discovers_unique_tables_from_workspace_relative_docs(tmp_path):
     workspace = make_workspace(tmp_path)
-    products = workspace / "docs" / PRODUCT_NAME
-    rules = workspace / "docs" / RULE_NAME
+    products = workspace / "src" / "upload_search_materials" / "docs" / PRODUCT_NAME
+    rules = workspace / "src" / "upload_search_materials" / "docs" / RULE_NAME
     products.write_text("product", encoding="utf-8")
     rules.write_text("rules", encoding="utf-8")
 
-    runtime = load_runtime_config(environ={}, start=workspace / "upload-search-materials")
+    runtime = load_runtime_config(environ={}, start=workspace / "src")
 
     assert runtime.workspace_root == workspace.resolve()
     assert runtime.products.path == products.resolve()
@@ -43,7 +45,7 @@ def test_discovers_unique_tables_from_workspace_relative_docs(tmp_path):
 def test_ambiguous_table_match_is_not_selected(tmp_path):
     workspace = make_workspace(tmp_path)
     for suffix in ("A", "B"):
-        (workspace / "docs" / f"天猫商品信息表_{suffix}_产品数据表_数据总表.csv").write_text(
+        (workspace / "src" / "upload_search_materials" / "docs" / f"天猫商品信息表_{suffix}_产品数据表_数据总表.csv").write_text(
             "product", encoding="utf-8"
         )
 
@@ -128,7 +130,7 @@ def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
         ],
     )
 
-    assert updated.config_path == workspace / "upload-search-materials/config/local-paths.json"
+    assert updated.config_path == workspace / "config/local-paths.json"
     saved = json.loads(updated.config_path.read_text(encoding="utf-8"))
     assert [item["label"] for item in saved["image_sources"]] == ["模特图", "买家秀"]
     statuses = inspect_image_sources(updated, saved["image_sources"])

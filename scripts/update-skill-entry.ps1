@@ -3,7 +3,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 $skillRoot = Split-Path -Parent $PSScriptRoot
-$repositoryRoot = Split-Path -Parent $skillRoot
+$repositoryRoot = $skillRoot
 $canonicalPath = Join-Path $skillRoot "SKILL.md"
 $entryPath = Join-Path $repositoryRoot ".codex\skills\upload-search-materials\SKILL.md"
 

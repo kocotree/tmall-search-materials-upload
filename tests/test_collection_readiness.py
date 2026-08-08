@@ -208,9 +208,18 @@ def test_candidate_reports_login_and_wrong_store_as_user_actions(tmp_path):
 
 def test_readiness_keeps_checks_independent_without_nas_access(tmp_path, monkeypatch):
     workspace = tmp_path
-    (workspace / "docs").mkdir()
-    project = workspace / "upload-search-materials"
-    (project / "config").mkdir(parents=True)
+    (workspace / "src" / "upload_search_materials" / "docs").mkdir(
+        parents=True
+    )
+    (workspace / "config").mkdir()
+    (workspace / "SKILL.md").write_text(
+        "---\nname: test\ndescription: test\n---\n",
+        encoding="utf-8",
+    )
+    (workspace / "pyproject.toml").write_text(
+        "[project]\nname='test'\n",
+        encoding="utf-8",
+    )
     runtime = load_runtime_config(environ={}, start=workspace)
     monkeypatch.setattr(
         "upload_search_materials.collection_readiness.inspect_cdp_endpoint",

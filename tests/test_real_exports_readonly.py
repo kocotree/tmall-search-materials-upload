@@ -14,7 +14,9 @@ def _docs_dir() -> Path:
     configured = os.environ.get("TMALL_MATERIAL_DOCS")
     if configured:
         return Path(configured)
-    candidates = [Path(__file__).parents[2] / "docs"]
+    candidates = [
+        Path(__file__).parents[1] / "src" / "upload_search_materials" / "docs"
+    ]
     parents = Path(__file__).parents
     if len(parents) > 4:
         candidates.append(parents[4] / "docs")

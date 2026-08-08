@@ -62,7 +62,7 @@ uv run python -X utf8 $quickValidate .
 
 映射盘可访问且 Windows 能解析其 UNC 目标时，页面只显示“采用 UNC”建议，不会自动替换。跨电脑配置优先使用 UNC；映射盘仍可用于当前受管服务身份能够访问的电脑。路径检测不能创建映射、挂载共享、取得凭据或绕过 NAS 权限。
 
-项目内输入默认无需配置：程序先定位包含 `docs/` 与 `upload-search-materials/` 的项目根目录，再在 `docs/` 中按以下受控模式查找：
+项目内输入默认无需配置：程序先定位包含 `SKILL.md`、`pyproject.toml` 与 `src/upload_search_materials/` 的 Skill 根目录，再在 `src/upload_search_materials/docs/` 中按以下受控模式查找：
 
 - 商品表：`天猫商品信息表*产品数据表*数据总表.csv`
 - 规则表：`天猫商品信息表*每月推品规则*Grid View.csv`
@@ -73,7 +73,7 @@ uv run python -X utf8 $quickValidate .
 
 1. `tmall-materials interact --config <配置.json>` 指定配置文件。
 2. `TMALL_CONFIG_FILE` 指定配置文件；`TMALL_WORKSPACE_ROOT`、`TMALL_PRODUCTS_CSV`、`TMALL_RULES_CSV`、`TMALL_RUNS_ROOT` 可单项覆盖。
-3. 项目内 `upload-search-materials/config/local-paths.json`。
+3. 项目内 `config/local-paths.json`。
 4. 项目结构自动发现；运行目录默认使用 `<项目根目录>/runs/`。
 
 共享文件夹索引路径按 `TMALL_FOLDER_INDEX_ROOT`、本机配置 `folder_index_root`、`<项目根目录>/.local-cache/folder-index/` 解析。它是每台电脑唯一维护的机器级缓存，不放入时间戳任务目录。
@@ -294,7 +294,7 @@ uv run tmall-materials prepare-gallery `
 
 诊断中包含原因、证据、责任边界和同一幂等处理器的重试命令。用户只处理扫码、验证码、
 账号切换或业务配置；不得要求用户修复选择器、执行命令或重新填写已保存的业务数据。
-本机配置仍保存到 Git 忽略的 `upload-search-materials/config/local-paths.json`，不能使用仓库示例。
+本机配置仍保存到 Git 忽略的 `config/local-paths.json`，不能使用仓库示例。
 
 提交阶段一后执行：
 
@@ -405,7 +405,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
 
 ```powershell
-.\upload-search-materials\scripts\start-ui.cmd
+.\scripts\start-ui.cmd
 uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --runs-root .\runs --session 20260721_143025 --stage asset_matching
 ```
 

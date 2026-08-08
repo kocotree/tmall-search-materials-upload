@@ -16,7 +16,7 @@ from .runtime_config import RuntimeConfig
 from .time_utils import iso_timestamp
 
 
-BOOTSTRAP_ACTION = "运行 upload-search-materials\\scripts\\bootstrap.cmd -WithTests"
+BOOTSTRAP_ACTION = "运行 scripts\\bootstrap.cmd -WithTests"
 
 
 class RuntimePreflightError(RuntimeError):
@@ -98,7 +98,7 @@ def preflight_runtime_environment(
 ) -> dict[str, Any]:
     """Check prepared local state without dependency resolution or network I/O."""
 
-    project = runtime.workspace_root / "upload-search-materials"
+    project = runtime.workspace_root
     environment = environment_fingerprint(project)
     if not environment["prepared"]:
         raise RuntimePreflightError(

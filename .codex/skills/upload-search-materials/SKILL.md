@@ -6,7 +6,7 @@ description: Use for starting, configuring, testing, resuming, reviewing, auditi
 
 This is the repository discovery entry. The canonical instructions are:
 
-`../../../upload-search-materials/SKILL.md`
+`../../../SKILL.md`
 
 Before taking any workflow action:
 
@@ -17,4 +17,4 @@ Before taking any workflow action:
 5. Use the managed UI launcher documented by the canonical Skill. Codex chat is only a reason-coded fallback after a real frontend failure.
 
 Generated from canonical SHA-256:
-`792613e6eff00558974ad583ce77a7dffd9d7adecee81569f81b73618323bcff`
+`8dbb3abfced75284667d21d05fd20d617fd8972fe0396064ed5a663971f08bcb`

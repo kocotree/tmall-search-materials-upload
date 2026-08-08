@@ -34,7 +34,7 @@ def prepared_runtime_preflight(monkeypatch):
         lambda runtime, **_kwargs: {
             "ready": True,
             "environment": worker_module.environment_fingerprint(
-                runtime.workspace_root / "upload-search-materials"
+                runtime.workspace_root
             ),
         },
     )
@@ -178,6 +178,7 @@ def test_launcher_returns_promptly_and_reuses_matching_live_worker(
     assert len(calls) == 1
     assert calls[0][1]["stdin"] is not None
     assert calls[0][1]["stdout"] is calls[0][1]["stderr"]
+    assert calls[0][1]["cwd"] == str(runtime.workspace_root)
     assert "ownership_token" not in first["worker"]
 
 

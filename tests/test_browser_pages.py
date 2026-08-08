@@ -196,6 +196,47 @@ def test_wrong_store_stops_batch():
         assert_store_identity(page, "#store", "KK Tree")
 
 
+def test_store_identity_uses_exact_visible_match_among_wrappers():
+    class Candidate:
+        def __init__(self, text, visible=True):
+            self.text = text
+            self.visible = visible
+
+        def inner_text(self):
+            return self.text
+
+        def is_visible(self):
+            return self.visible
+
+    class Candidates:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def nth(self, index):
+            return self.values[index]
+
+    class StorePage:
+        def locator(self, _selector):
+            return Candidates(
+                [
+                    Candidate("kocotree旗舰店 5.0 88VIP"),
+                    Candidate(""),
+                    Candidate("kocotree旗舰店"),
+                    Candidate("›"),
+                ]
+            )
+
+    assert (
+        assert_store_identity(
+            StorePage(), "[class*=shopName]", "kocotree旗舰店"
+        )
+        == "kocotree旗舰店"
+    )
+
+
 def test_human_check_stops_batch():
     page = FakePage()
     page.visible.add("#human-check")
@@ -375,6 +416,34 @@ class DelayedPromotionPage(FakePromotionPage):
         if self.pending_next:
             self.page_index += 1
             self.pending_next = False
+
+
+class SlowHydrationPromotionLocator(FakePromotionLocator):
+    def count(self):
+        if self.selector == ".promotion-row" and not self.page.rows_ready:
+            return 0
+        return super().count()
+
+    def all_inner_texts(self):
+        if self.selector == ".promotion-row" and not self.page.rows_ready:
+            return []
+        return super().all_inner_texts()
+
+
+class SlowHydrationPromotionPage(FakePromotionPage):
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.rows_ready = False
+        self.total_waited_ms = 0
+
+    def locator(self, selector):
+        return SlowHydrationPromotionLocator(self, selector)
+
+    def wait_for_timeout(self, milliseconds):
+        super().wait_for_timeout(milliseconds)
+        self.total_waited_ms += milliseconds
+        if self.total_waited_ms >= 4_000:
+            self.rows_ready = True
 
 
 class FakePopupLocator:
@@ -779,6 +848,32 @@ def test_high_value_scan_refreshes_stale_product_filter_and_checks_total():
     assert len(rows) == 2
     origin = next(event for event in events if event["event_type"] == "origin")
     assert origin["expected_product_count"] == 2
+
+
+def test_high_value_scan_waits_for_slow_spa_table_hydration():
+    page = SlowHydrationPromotionPage(
+        [["商品一 商品ID 100 发布坑位到9篇，当前发布0篇"]]
+    )
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-08-07T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100"]
+    assert page.total_waited_ms >= 4_000
 
 
 def test_high_value_scan_fails_when_collected_count_differs_from_label():

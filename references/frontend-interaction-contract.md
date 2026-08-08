@@ -3,8 +3,8 @@
 ## 现状基线
 
 - 基线分支：`codex/non-ai-slot-planning`。
-- canonical Skill：`upload-search-materials/SKILL.md`。
-- Agent metadata：`upload-search-materials/agents/openai.yaml`。
+- canonical Skill：`SKILL.md`。
+- Agent metadata：`agents/openai.yaml`。
 - 历史日常入口 `tmall-materials interact` 是前台 Flask 服务：输出 URL 后持续占用调用终端，不负责后台生命周期、就绪轮询或打开浏览器。
 - 阶段一页面只显示店铺、图片源等业务配置。工作台自动启动或恢复 CDP Chrome；登录尚未完成时用独立等待页遮住业务表单，用户在千牛原生窗口登录成功后自动继续。不得显示 `collection_readiness.checks`、CDP、DOM、SHA、选择器路径或“验证当前页面”等技术操作。
 - setup handoff 提交后由处理器自动检查生产 profile、当前 DOM、店铺、素材中心和路径。失败统一写入 Agent-only `agent-diagnostics/current.json`；Codex 通过 `diagnose-session` 获取原因、证据和幂等重试入口。“创建本机候选”仍只生成 Git 忽略的 `production=false` profile，示例 profile 永远不能直接提升。

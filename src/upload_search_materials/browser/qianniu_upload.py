@@ -223,7 +223,15 @@ def _wait_for_upload_completion(
     try:
         success.wait_for(state="visible", timeout=60_000)
     except PlaywrightTimeoutError:
-        body = selector_frame.locator("body").inner_text()
+        try:
+            body = selector_frame.locator("body").inner_text()
+        except PlaywrightError as exc:
+            if "frame was detached" in str(exc).lower():
+                return
+            raise QianniuUploadError(
+                "QIANNIU_LOCAL_UPLOAD_RUNTIME_FAILED",
+                str(exc),
+            ) from exc
         if "上传失败" in body:
             raise QianniuUploadError(
                 "QIANNIU_LOCAL_UPLOAD_FAILED",
@@ -233,10 +241,29 @@ def _wait_for_upload_completion(
             "QIANNIU_LOCAL_UPLOAD_TIMEOUT",
             f"expected={expected_count}",
         )
+    except PlaywrightError as exc:
+        # The material selector replaces its iframe after a successful local
+        # upload in some Qianniu revisions.  The caller immediately reacquires
+        # that frame and verifies the exact uploaded filename, so detachment is
+        # a safe transition signal rather than evidence of failure.
+        if "frame was detached" in str(exc).lower():
+            return
+        raise QianniuUploadError(
+            "QIANNIU_LOCAL_UPLOAD_RUNTIME_FAILED",
+            str(exc),
+        ) from exc
 
     done = _visible_exact_text(selector_frame, "完成")
     if done is not None:
-        done.click(force=True)
+        try:
+            done.click(force=True)
+        except PlaywrightError as exc:
+            if "frame was detached" in str(exc).lower():
+                return
+            raise QianniuUploadError(
+                "QIANNIU_LOCAL_UPLOAD_RUNTIME_FAILED",
+                str(exc),
+            ) from exc
         page.wait_for_timeout(1_000)
 
 

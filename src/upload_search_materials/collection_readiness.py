@@ -118,7 +118,7 @@ def _check(
 
 
 def project_environment_status(runtime: RuntimeConfig) -> dict[str, Any]:
-    project = runtime.workspace_root / "upload-search-materials"
+    project = runtime.workspace_root
     executable = project / ".venv" / "Scripts" / "tmall-materials.exe"
     python = project / ".venv" / "Scripts" / "python.exe"
     lock = project / "uv.lock"
