@@ -45,6 +45,27 @@
 路径和窗口错误只阻断当前路径动作，不清空输入、不提交阶段。程序不得自动建立映射、
 挂载共享、保存 NAS 凭据或把资源管理器用户权限误当成受管服务身份权限。
 
+## 共享文件夹索引
+
+| 原因码 | 含义 | 恢复 |
+|---|---|---|
+| `FOLDER_INDEX_BUSY` | 另一个活跃进程持有同一共享索引的单写租约 | 读取既有 `folder-index-progress.json`；不得启动第二个写入者 |
+| `FOLDER_INDEX_BUILDING` | 商品选择已提交，但共享索引仍在生成候选文件 | 等待进度进入完成状态后重跑同一 handoff 处理入口 |
+| `FOLDER_ENUMERATION_TIMEOUT` | 一个 NAS 目录连续 10 秒没有返回任何目录项或元数据进展 | 保留已提交的目录元数据并停止继续调度本轮目录 I/O；检查该相对路径后运行 `--refresh` |
+| `FOLDER_ENUMERATION_ACCESS_DENIED` | 当前桌面身份无权枚举该目录 | 修复共享权限后对同一索引运行 `--refresh`；不得索取或保存凭据 |
+| `FOLDER_ENUMERATION_PATH_UNAVAILABLE` | 扫描期间目录被删除、断开或变为不可用 | 核对挂载和目录变更后运行 `--refresh` |
+| `FOLDER_ENUMERATION_ERROR` | 其他目录枚举错误 | 查看 `folder-scan-summary.json` 中的相对路径和系统错误后运行 `--refresh` |
+| `FOLDER_REFRESH_SCOPE_UNSAFE` | 定向刷新入口是符号链接或重解析点 | 改用同一 root 内的真实稳定相对路径；不得跟随该入口扫描 |
+
+文件夹索引的超时是“无进展超时”，不是整个大目录的总耗时限制；持续返回目录项的
+大型目录可以继续扫描。任一目录枚举错误都会令本轮摘要保持 `complete=false`，不会
+把未扫描的子树当作空目录或完整索引。
+
+索引异常退出时，目录级 frontier、扫描 ID、计数和已完成范围保存在 SQLite 的
+`active_scan` metadata 中；`--resume` 只接受相同 roots 与商品表身份。正常结束或已明确
+返回 partial 后清除检查点。定向刷新路径拒绝绝对路径、盘符、空段、`.` 和 `..`，且
+只在本轮完整完成的来源/前缀范围内更新 inactive 状态。
+
 | `LOCAL_RESOURCE_IDENTITY_MISMATCH` | 服务、picker、索引或 Worker 的 SID/登录会话不一致 | 从固定桌面入口重启工作台后重新检测 |
 | `PERSISTENCE_ACCESS_DENIED` | 本地状态文件不是短暂占用而是只读或 ACL 拒绝 | 保留事务证据，修复工作目录权限后重试原请求 |
 | `REVISION_CONTENT_CONFLICT` | 同一 request ID 或目标 revision 对应不同规范化内容 | 刷新权威状态，保留既有 revision，不自动覆盖 |

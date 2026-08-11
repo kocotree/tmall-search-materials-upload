@@ -35,6 +35,21 @@ def test_asset_matching_defers_image_root_reachability_until_folder_confirmation
     assert "读取图片前检查可访问性" in field.help_text
 
 
+def test_asset_matching_keeps_technical_decisions_out_of_the_visible_form():
+    components = {
+        field.name: field.component
+        for field in get_stage("asset_matching").fields
+    }
+
+    for name in (
+        "source_types",
+        "folder_decisions",
+        "license_decisions",
+        "asset_decisions",
+    ):
+        assert components[name] == "hidden_json_list"
+
+
 def test_each_stage_declares_its_exact_fields_and_dependency():
     expected_fields = {
             "setup": (

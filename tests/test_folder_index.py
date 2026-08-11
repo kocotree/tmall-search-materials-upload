@@ -4,6 +4,9 @@ import csv
 import json
 from pathlib import Path
 import sqlite3
+import threading
+
+import pytest
 
 from upload_search_materials.asset_index import NamedRoot
 from upload_search_materials.asset_matching import PathMatch
@@ -143,6 +146,127 @@ def test_folder_index_never_reads_or_hashes_image_files(tmp_path, monkeypatch):
     connection.close()
 
 
+def test_folder_index_times_out_one_stalled_directory_and_continues(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    (root / "stuck").mkdir(parents=True)
+    (root / "healthy" / "nested").mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    release = threading.Event()
+    original_entries = folder_index_module._directory_entries
+
+    def controlled_entries(directory):
+        if Path(directory).name == "stuck":
+            release.wait()
+            return
+        yield from original_entries(directory)
+
+    monkeypatch.setattr(
+        folder_index_module,
+        "_directory_entries",
+        controlled_entries,
+    )
+    try:
+        summary = build_folder_index(
+            database_path=database,
+            products_sha256="a" * 64,
+            roots=(NamedRoot("model_nas", root),),
+            matcher=FolderMatcher(),
+            checkpoint_size=1000,
+            directory_inactivity_timeout_seconds=0.1,
+        )
+    finally:
+        release.set()
+
+    assert summary["complete"] is False
+    assert summary["completed_sources"] == []
+    assert summary["errors"] == [
+        {
+            "source_system": "model_nas",
+            "relative_path": "stuck",
+            "reason_code": "FOLDER_ENUMERATION_TIMEOUT",
+            "detail": (
+                "directory enumeration produced no progress for 0.1 seconds"
+            ),
+        }
+    ]
+    connection = sqlite3.connect(database)
+    rows = list(
+        connection.execute(
+            "SELECT relative_path FROM folders ORDER BY relative_path"
+        )
+    )
+    connection.close()
+    assert rows == [("healthy",), ("healthy/nested",), ("stuck",)]
+
+
+def test_folder_index_records_access_denied_and_continues(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    (root / "denied").mkdir(parents=True)
+    (root / "healthy" / "nested").mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    original_entries = folder_index_module._directory_entries
+
+    def controlled_entries(directory):
+        if Path(directory).name == "denied":
+            raise PermissionError("denied by test")
+        yield from original_entries(directory)
+
+    monkeypatch.setattr(
+        folder_index_module,
+        "_directory_entries",
+        controlled_entries,
+    )
+
+    summary = build_folder_index(
+        database_path=database,
+        products_sha256="a" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+        directory_inactivity_timeout_seconds=1.0,
+    )
+
+    assert summary["complete"] is False
+    assert summary["errors"] == [
+        {
+            "source_system": "model_nas",
+            "relative_path": "denied",
+            "reason_code": "FOLDER_ENUMERATION_ACCESS_DENIED",
+            "detail": "denied by test",
+        }
+    ]
+    connection = sqlite3.connect(database)
+    relative_paths = {
+        row[0] for row in connection.execute("SELECT relative_path FROM folders")
+    }
+    connection.close()
+    assert "healthy/nested" in relative_paths
+
+
+def test_folder_index_rejects_invalid_directory_timeout_without_side_effects(
+    tmp_path,
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    database = tmp_path / "output" / "folder-index.sqlite3"
+
+    with pytest.raises(
+        ValueError, match="directory inactivity timeout must be positive"
+    ):
+        build_folder_index(
+            database_path=database,
+            products_sha256="a" * 64,
+            roots=(NamedRoot("model_nas", root),),
+            matcher=FolderMatcher(),
+            directory_inactivity_timeout_seconds=0,
+        )
+
+    assert not database.exists()
+
+
 def test_folder_index_does_not_inherit_parent_match_into_generic_children(tmp_path):
     root = tmp_path / "root"
     (root / "KQ25046" / "KV").mkdir(parents=True)
@@ -227,6 +351,250 @@ def test_rematch_uses_stored_folder_names_without_rescanning_root(
     connection = sqlite3.connect(database)
     assert connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 0
     connection.close()
+
+
+def test_rematch_accepts_a_new_product_table_identity_without_rescanning(tmp_path):
+    root = tmp_path / "root"
+    (root / "KQ25046").mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    build_folder_index(
+        database_path=database,
+        products_sha256="a" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+    )
+
+    summary = rematch_folder_index(
+        database_path=database,
+        products_sha256="b" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+    )
+
+    assert summary["complete"] is True
+    connection = sqlite3.connect(database)
+    assert connection.execute(
+        "SELECT value FROM metadata WHERE key='products_sha256'"
+    ).fetchone() == ("b" * 64,)
+    connection.close()
+
+
+def test_rematch_migrates_legacy_combined_identity_with_new_products(tmp_path):
+    root = tmp_path / "root"
+    (root / "KQ25046").mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    build_folder_index(
+        database_path=database,
+        products_sha256="a" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+    )
+    legacy_identity = json.dumps(
+        {
+            "products_sha256": "a" * 64,
+            "roots": [{"source_system": "model_nas", "path": str(root)}],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    connection = sqlite3.connect(database)
+    connection.execute("DELETE FROM metadata WHERE key='filesystem_identity'")
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('identity', ?)",
+        (legacy_identity,),
+    )
+    connection.commit()
+    connection.close()
+
+    summary = rematch_folder_index(
+        database_path=database,
+        products_sha256="b" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+    )
+
+    assert summary["complete"] is True
+    connection = sqlite3.connect(database)
+    assert connection.execute(
+        "SELECT value FROM metadata WHERE key='filesystem_identity'"
+    ).fetchone() is not None
+    connection.close()
+
+
+def test_folder_index_writes_terminal_progress_and_releases_lease(tmp_path):
+    root = tmp_path / "root"
+    (root / "KQ25046").mkdir(parents=True)
+    output = tmp_path / "output"
+
+    build_folder_index(
+        database_path=output / "folder-index.sqlite3",
+        products_sha256="a" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+    )
+
+    progress = json.loads(
+        (output / "folder-index-progress.json").read_text(encoding="utf-8")
+    )
+    assert progress["status"] == "complete"
+    assert progress["phase"] == "finished"
+    assert progress["folders_discovered"] == 1
+    assert progress["heartbeat_epoch_seconds"] >= progress["started_at_epoch_seconds"]
+    assert not (output / ".folder-index.lock").exists()
+
+
+def test_folder_index_rejects_a_live_concurrent_owner(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / ".folder-index.lock").write_text(
+        json.dumps({"pid": __import__("os").getpid(), "operation_id": "other"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="FOLDER_INDEX_BUSY"):
+        build_folder_index(
+            database_path=output / "folder-index.sqlite3",
+            products_sha256="a" * 64,
+            roots=(NamedRoot("model_nas", root),),
+            matcher=FolderMatcher(),
+        )
+
+    assert not (output / "folder-index.sqlite3").exists()
+
+
+def test_folder_index_reclaims_a_stale_process_lease(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / ".folder-index.lock").write_text(
+        json.dumps({"pid": 2_147_483_647, "operation_id": "stale"}),
+        encoding="utf-8",
+    )
+
+    summary = build_folder_index(
+        database_path=output / "folder-index.sqlite3",
+        products_sha256="a" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+    )
+
+    assert summary["complete"] is True
+    assert not (output / ".folder-index.lock").exists()
+
+
+def test_targeted_prefix_refresh_does_not_deactivate_other_subtrees(tmp_path):
+    root = tmp_path / "root"
+    removed = root / "campaign-a" / "old"
+    untouched = root / "campaign-b" / "keep"
+    removed.mkdir(parents=True)
+    untouched.mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    options = {
+        "database_path": database,
+        "products_sha256": "a" * 64,
+        "roots": (NamedRoot("model_nas", root),),
+        "matcher": FolderMatcher(),
+    }
+    build_folder_index(**options)
+    removed.rmdir()
+    (root / "campaign-a" / "new").mkdir()
+
+    summary = build_folder_index(
+        **options,
+        refresh=True,
+        target_prefixes=(("model_nas", "campaign-a"),),
+    )
+
+    assert summary["targeted"] is True
+    connection = sqlite3.connect(database)
+    states = dict(connection.execute("SELECT relative_path, active FROM folders"))
+    connection.close()
+    assert states["campaign-a/old"] == 0
+    assert states["campaign-a/new"] == 1
+    assert states["campaign-b/keep"] == 1
+
+
+@pytest.mark.parametrize("prefix", ("../escape", "/absolute", "C:/drive", "a//b"))
+def test_targeted_refresh_rejects_unsafe_prefix_without_changing_index(
+    tmp_path, prefix
+):
+    root = tmp_path / "root"
+    (root / "safe").mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    options = {
+        "database_path": database,
+        "products_sha256": "a" * 64,
+        "roots": (NamedRoot("model_nas", root),),
+        "matcher": FolderMatcher(),
+    }
+    build_folder_index(**options)
+    before = database.read_bytes()
+
+    with pytest.raises(ValueError, match="定向刷新子路径"):
+        build_folder_index(
+            **options,
+            refresh=True,
+            target_prefixes=(("model_nas", prefix),),
+        )
+
+    assert database.read_bytes() == before
+
+
+def test_folder_index_resume_uses_the_saved_directory_frontier(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    (root / "a" / "nested").mkdir(parents=True)
+    (root / "b" / "final").mkdir(parents=True)
+    database = tmp_path / "output" / "folder-index.sqlite3"
+    original_entries = folder_index_module._directory_entries
+
+    def interrupted_entries(directory):
+        if Path(directory).name == "b":
+            raise KeyboardInterrupt("simulated process interruption")
+        yield from original_entries(directory)
+
+    monkeypatch.setattr(folder_index_module, "_directory_entries", interrupted_entries)
+    with pytest.raises(KeyboardInterrupt):
+        build_folder_index(
+            database_path=database,
+            products_sha256="a" * 64,
+            roots=(NamedRoot("model_nas", root),),
+            matcher=FolderMatcher(),
+            checkpoint_size=1,
+        )
+    monkeypatch.setattr(folder_index_module, "_directory_entries", original_entries)
+
+    connection = sqlite3.connect(database)
+    active = json.loads(
+        connection.execute(
+            "SELECT value FROM metadata WHERE key='active_scan'"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert active["pending_relative_paths"] == ["b"]
+
+    summary = build_folder_index(
+        database_path=database,
+        products_sha256="a" * 64,
+        roots=(NamedRoot("model_nas", root),),
+        matcher=FolderMatcher(),
+        resume=True,
+    )
+
+    assert summary["mode"] == "resume"
+    connection = sqlite3.connect(database)
+    paths = {
+        row[0] for row in connection.execute("SELECT relative_path FROM folders")
+    }
+    assert connection.execute(
+        "SELECT value FROM metadata WHERE key='active_scan'"
+    ).fetchone() is None
+    connection.close()
+    assert paths == {"a", "a/nested", "b", "b/final"}
 
 
 def test_rematch_cli_does_not_require_the_declared_root_to_be_online(tmp_path):

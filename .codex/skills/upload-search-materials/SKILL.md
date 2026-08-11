@@ -17,4 +17,4 @@ Before taking any workflow action:
 5. Use the managed UI launcher documented by the canonical Skill. Codex chat is only a reason-coded fallback after a real frontend failure.
 
 Generated from canonical SHA-256:
-`53df08699e8a3f686b288e78e8ddaba28856251d880efc7a03162a0065992956`
+`f6c7be4a8d0c53f08f65b7bcea259428262bb884784485a932ae7e41b9cff78e`

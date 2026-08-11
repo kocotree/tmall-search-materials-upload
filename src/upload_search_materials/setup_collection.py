@@ -791,9 +791,7 @@ def process_setup_collection(
         def wait_on_main_page(page_number: int, location: str) -> None:
             wait_for_human_check(live_page, page_number, location)
 
-        def run_random_action(
-            page_number: int, product_ids: tuple[str, ...]
-        ) -> dict[str, Any]:
+        def run_random_action(page_number: int) -> dict[str, Any]:
             store.renew_processing_claim(session_id, "setup", claim_id)
             if progress_callback is not None:
                 progress_callback(
@@ -806,11 +804,7 @@ def process_setup_collection(
                 )
             return perform_random_collection_action(
                 live_page,
-                product_ids,
-                material_center_url=(
-                    profile.material_center_url
-                    or runtime.material_center_url
-                ),
+                rows_selector=str(profile.selectors["promotion_rows"]),
                 wait_for_human_check=(
                     lambda target_page, location: wait_for_human_check(
                         target_page, page_number, location

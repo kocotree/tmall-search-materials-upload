@@ -191,27 +191,22 @@ STAGES: tuple[StageDefinition, ...] = (
             _field(
                 "source_types",
                 "来源类型",
-                "multi_select",
-                disabled=True,
-                help_text="固定为图片，由系统自动填写",
+                "hidden_json_list",
             ),
             _field(
                 "folder_decisions",
                 "候选文件夹归属决定",
-                "table",
-                help_text="候选默认采用；排除后立即同步画廊并自动写入",
+                "hidden_json_list",
             ),
             _field(
                 "license_decisions",
                 "授权决定",
-                "table",
-                help_text="首轮扫描可为空；画廊确认后自动写入",
+                "hidden_json_list",
             ),
             _field(
                 "asset_decisions",
                 "素材采用或排除决定",
-                "table",
-                help_text="首轮扫描可为空；选图和换一批后自动写入",
+                "hidden_json_list",
             ),
             _field(
                 "include_video",

@@ -617,10 +617,7 @@ def scan_recommended_material_status(
     on_pagination_event: Callable[[dict[str, Any]], None] | None = None,
     expected_page_hashes: Mapping[int, str] | None = None,
     human_check_waiter: Callable[[int, str], None] | None = None,
-    random_action: Callable[
-        [int, tuple[str, ...]], Mapping[str, Any] | None
-    ]
-    | None = None,
+    random_action: Callable[[int], Mapping[str, Any] | None] | None = None,
     random_interval_picker: Callable[[], int] | None = None,
 ) -> list[dict[str, str]]:
     required = (
@@ -796,16 +793,7 @@ def scan_recommended_material_status(
                 and next_random_action_page is not None
                 and page_number >= next_random_action_page
             ):
-                page_product_ids = tuple(
-                    dict.fromkeys(
-                        match.group(1)
-                        for text in row_texts
-                        if (match := re.search(r"商品ID\s*(\d+)", text))
-                    )
-                )
-                event = dict(
-                    random_action(page_number, page_product_ids) or {}
-                )
+                event = dict(random_action(page_number) or {})
                 events = getattr(page, "_tmall_collection_events", None)
                 if not isinstance(events, list):
                     events = []
@@ -823,6 +811,11 @@ def scan_recommended_material_status(
                     else 1
                 )
                 next_random_action_page = page_number + interval
+                if event.get("page_state_restored") is False:
+                    raise _pagination_error(
+                        "RANDOM_ACTION_PAGE_RESTORE_FAILED",
+                        f"page={page_number}",
+                    )
                 if human_check_waiter is not None:
                     human_check_waiter(page_number, "after_random_action")
         if max_pages is not None and page_number >= max_pages:

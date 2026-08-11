@@ -138,6 +138,12 @@ from .reporting import (
     write_supplement_candidates,
 )
 from .runtime_config import load_runtime_config
+from .team_folder_index import (
+    TeamFolderIndexError,
+    publish_snapshot,
+    snapshot_status,
+    sync_snapshots,
+)
 from .setup_collection import process_setup_collection
 from .collection_worker import (
     collection_status,
@@ -2009,6 +2015,21 @@ def _index_assets(args) -> int:
 
 def _index_folders(args) -> int:
     try:
+        refresh_sources = tuple(args.refresh_source or ())
+        refresh_prefixes = []
+        for raw_scope in args.refresh_prefix or ():
+            source, separator, prefix = raw_scope.partition("=")
+            if not separator or not source.strip() or not prefix.strip():
+                raise ValueError(
+                    "--refresh-prefix 必须使用 SOURCE=RELATIVE_PATH 格式"
+                )
+            refresh_prefixes.append((source.strip(), prefix.strip()))
+        if args.rematch_only and (refresh_sources or refresh_prefixes):
+            raise ValueError("--rematch-only 不能与定向刷新范围同时使用")
+        resume_requested = bool(args.resume)
+        refresh_requested = bool(
+            args.refresh or refresh_sources or refresh_prefixes
+        )
         products_path = Path(args.products)
         if not products_path.is_file():
             raise ValueError(f"商品表不存在: {products_path}")
@@ -2045,9 +2066,13 @@ def _index_folders(args) -> int:
 
         output = Path(args.output).resolve()
         database_path = output / "folder-index.sqlite3"
-        if args.refresh or args.rematch_only:
+        if refresh_requested or resume_requested or args.rematch_only:
             if not database_path.is_file():
-                mode_name = "--refresh" if args.refresh else "--rematch-only"
+                mode_name = (
+                    "--resume"
+                    if resume_requested
+                    else ("--refresh" if refresh_requested else "--rematch-only")
+                )
                 raise ValueError(f"{mode_name} 需要已有 folder-index.sqlite3")
         elif output.exists():
             if not output.is_dir():
@@ -2065,6 +2090,7 @@ def _index_folders(args) -> int:
                 products_sha256=products_sha256,
                 roots=tuple(normalized_roots),
                 matcher=matcher,
+                candidates_path=output / "folder-candidates.csv",
             )
         else:
             summary = build_folder_index(
@@ -2072,16 +2098,80 @@ def _index_folders(args) -> int:
                 products_sha256=products_sha256,
                 roots=tuple(normalized_roots),
                 matcher=matcher,
-                refresh=args.refresh,
+                refresh=refresh_requested,
                 checkpoint_size=args.checkpoint_size,
+                target_sources=refresh_sources,
+                target_prefixes=tuple(refresh_prefixes),
+                resume=resume_requested,
+                candidates_path=output / "folder-candidates.csv",
             )
-        candidate_count = write_folder_candidates(
-            database_path, output / "folder-candidates.csv"
-        )
-        summary["candidate_rows"] = candidate_count
+        if "candidate_rows" not in summary:
+            summary["candidate_rows"] = write_folder_candidates(
+                database_path, output / "folder-candidates.csv"
+            )
         write_json(output / "folder-scan-summary.json", summary)
         return 0 if summary["complete"] else 1
     except (SchemaError, sqlite3.DatabaseError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
+def _team_folder_index(args) -> int:
+    try:
+        runtime = load_runtime_config(args.config)
+        shared_root = (
+            Path(args.shared_root).expanduser()
+            if args.shared_root
+            else runtime.team_folder_index_root
+        )
+        if shared_root is None:
+            raise TeamFolderIndexError(
+                "TEAM_INDEX_SHARED_ROOT_REQUIRED: 请配置 team_folder_index_root"
+            )
+        local_root = (
+            Path(args.local_root).expanduser()
+            if args.local_root
+            else runtime.folder_index_root
+        )
+        source_ids = tuple(args.source_id or ())
+        if args.action == "status":
+            result = snapshot_status(shared_root=shared_root, local_root=local_root)
+        elif args.action == "sync":
+            products_path = Path(args.products) if args.products else runtime.products.path
+            if products_path is None or not products_path.is_file():
+                raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_MISSING")
+            result = sync_snapshots(
+                shared_root=shared_root,
+                local_root=local_root,
+                products_path=products_path,
+                image_sources=runtime.image_sources,
+                source_ids=source_ids,
+            )
+        else:
+            if len(source_ids) != 1:
+                raise TeamFolderIndexError("TEAM_INDEX_PUBLISH_REQUIRES_ONE_SOURCE")
+            source_id = source_ids[0]
+            binding = next(
+                (
+                    item for item in runtime.image_sources
+                    if item.get("source_id") == source_id
+                ),
+                None,
+            )
+            if binding is None:
+                raise TeamFolderIndexError(
+                    f"TEAM_INDEX_LOCAL_BINDING_MISSING: {source_id}"
+                )
+            result = publish_snapshot(
+                database_path=local_root / "folder-index.sqlite3",
+                shared_root=shared_root,
+                source_id=source_id,
+                canonical_source=str(binding.get("canonical_unc", "")),
+                publisher=args.publisher,
+            )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (TeamFolderIndexError, SchemaError, sqlite3.DatabaseError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 2
 
@@ -2597,8 +2687,32 @@ def build_parser() -> argparse.ArgumentParser:
     index_folders.add_argument("--output", required=True, metavar="DIR")
     index_folders.add_argument("--checkpoint-size", type=int, default=1000)
     folder_index_mode = index_folders.add_mutually_exclusive_group()
+    folder_index_mode.add_argument("--resume", action="store_true")
     folder_index_mode.add_argument("--refresh", action="store_true")
     folder_index_mode.add_argument("--rematch-only", action="store_true")
+    index_folders.add_argument(
+        "--refresh-source",
+        action="append",
+        metavar="SOURCE",
+        help="Refresh one complete configured source; may be repeated",
+    )
+    index_folders.add_argument(
+        "--refresh-prefix",
+        action="append",
+        metavar="SOURCE=RELATIVE_PATH",
+        help="Refresh one source-relative subtree; may be repeated",
+    )
+    team_folder_index = subparsers.add_parser(
+        "team-folder-index",
+        help="Inspect, sync, or explicitly publish decentralized folder-index snapshots",
+    )
+    team_folder_index.add_argument("action", choices=("status", "sync", "publish"))
+    team_folder_index.add_argument("--config")
+    team_folder_index.add_argument("--shared-root", metavar="DIR")
+    team_folder_index.add_argument("--local-root", metavar="DIR")
+    team_folder_index.add_argument("--products", metavar="CSV")
+    team_folder_index.add_argument("--source-id", action="append", metavar="SOURCE")
+    team_folder_index.add_argument("--publisher", default="")
     folder_review = subparsers.add_parser(
         "prepare-folder-review",
         help="Build visual folder-ownership review data",
@@ -3108,6 +3222,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _index_assets(args)
     if args.command == "index-folders":
         return _index_folders(args)
+    if args.command == "team-folder-index":
+        return _team_folder_index(args)
     if args.command == "prepare-folder-review":
         return _prepare_folder_review(args)
     if args.command == "snapshot-folder-candidates":

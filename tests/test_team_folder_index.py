@@ -1,0 +1,269 @@
+import csv
+import json
+from pathlib import Path
+import sqlite3
+
+import pytest
+
+from upload_search_materials.team_folder_index import (
+    TeamFolderIndexError,
+    publish_snapshot,
+    snapshot_status,
+    sync_snapshots,
+    validate_snapshot,
+)
+
+
+def make_database(path: Path, rows: list[tuple[str, str, str]]) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE folders (
+          folder_id TEXT PRIMARY KEY,
+          source_system TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          absolute_path TEXT NOT NULL,
+          folder_name TEXT NOT NULL,
+          parent_relative_path TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          last_seen_scan_id TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO metadata VALUES ('last_summary', ?)",
+        (json.dumps({"complete": True}),),
+    )
+    for folder_id, source_id, relative_path in rows:
+        connection.execute(
+            "INSERT INTO folders VALUES (?, ?, ?, ?, ?, ?, 1, 'scan')",
+            (
+                folder_id,
+                source_id,
+                relative_path,
+                f"/machine-specific/{relative_path}",
+                Path(relative_path).name,
+                Path(relative_path).parent.as_posix(),
+            ),
+        )
+    connection.commit()
+    connection.close()
+
+
+def make_products(path: Path) -> None:
+    headers = [
+        "商品ID",
+        "商品名称（查找引用）",
+        "货号（查找引用）",
+        "产品等级",
+        "链接",
+        "运营",
+        "组别",
+        "品类-公司维度划分",
+    ]
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=headers)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "商品ID": "1001",
+                "商品名称（查找引用）": "测试商品",
+                "货号（查找引用）": "SKU1",
+                "产品等级": "A",
+                "链接": "https://example.test/1001",
+                "运营": "测试",
+                "组别": "测试",
+                "品类-公司维度划分": "测试",
+            }
+        )
+
+
+def test_publish_creates_portable_immutable_snapshot(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+
+    first = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+        publisher="machine-a",
+    )
+    second = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+        publisher="machine-b",
+    )
+
+    assert first["snapshot_id"] != second["snapshot_id"]
+    snapshots = shared / "sources" / "source-a" / "snapshots"
+    assert (snapshots / first["snapshot_id"]).is_dir()
+    assert (snapshots / second["snapshot_id"]).is_dir()
+    payload = (snapshots / first["snapshot_id"] / "folders.csv").read_text(
+        encoding="utf-8-sig"
+    )
+    assert "/machine-specific" not in payload
+    assert "absolute_path" not in payload
+    pointer = json.loads(
+        (shared / "sources" / "source-a" / "current.json").read_text()
+    )
+    assert pointer["snapshot_id"] == second["snapshot_id"]
+
+
+def test_status_falls_back_to_newest_valid_immutable_snapshot(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    first = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+    )
+    second = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+    )
+    latest_csv = (
+        shared
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / second["snapshot_id"]
+        / "folders.csv"
+    )
+    latest_csv.write_text("tampered", encoding="utf-8")
+
+    status = snapshot_status(shared_root=shared, local_root=tmp_path / "local")
+
+    assert status["sources"][0]["status"] == "valid"
+    assert status["sources"][0]["snapshot_id"] == first["snapshot_id"]
+
+
+def test_sync_caches_snapshot_and_rehydrates_local_paths(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    local = tmp_path / "local"
+    products = tmp_path / "products.csv"
+    local_media = tmp_path / "mounted-media"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    make_products(products)
+    published = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+    )
+
+    summary = sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        products_path=products,
+        image_sources=(
+            {
+                "source_id": "source-a",
+                "path": str(local_media),
+                "canonical_unc": r"\\nas\media\source-a",
+            },
+        ),
+    )
+
+    assert summary["complete"] is True
+    assert summary["candidate_rows"] == 1
+    assert summary["sources"][0]["origin"] == "shared"
+    with (local / "folder-candidates.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as stream:
+        row = next(csv.DictReader(stream))
+    assert row["product_id"] == "1001"
+    assert row["absolute_path"] == str(local_media / "season" / "SKU1")
+    cached = (
+        local
+        / "team-cache"
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / published["snapshot_id"]
+    )
+    assert validate_snapshot(cached)["snapshot_id"] == published["snapshot_id"]
+
+    before = sorted((shared / "sources" / "source-a" / "snapshots").iterdir())
+    offline_summary = sync_snapshots(
+        shared_root=tmp_path / "unmounted",
+        local_root=local,
+        products_path=products,
+        image_sources=(
+            {
+                "source_id": "source-a",
+                "path": str(local_media),
+                "canonical_unc": r"\\nas\media\source-a",
+            },
+        ),
+    )
+    after = sorted((shared / "sources" / "source-a" / "snapshots").iterdir())
+    assert offline_summary["sources"][0]["origin"] == "local_cache"
+    assert before == after
+
+
+def test_requested_sync_blocks_when_local_binding_is_missing(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    products = tmp_path / "products.csv"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    make_products(products)
+    publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+    )
+
+    summary = sync_snapshots(
+        shared_root=shared,
+        local_root=tmp_path / "local",
+        products_path=products,
+        image_sources=(),
+    )
+
+    assert summary["complete"] is False
+    assert summary["skipped_sources"][0]["reason_code"] == "TEAM_INDEX_LOCAL_BINDING_MISSING"
+    assert summary["candidate_rows"] == 0
+
+
+def test_publish_rejects_missing_canonical_identity(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+
+    with pytest.raises(TeamFolderIndexError, match="CANONICAL_SOURCE_REQUIRED"):
+        publish_snapshot(
+            database_path=database,
+            shared_root=tmp_path / "shared",
+            source_id="source-a",
+            canonical_source="",
+        )
+
+
+def test_publish_rejects_partial_local_refresh(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='last_summary'",
+        (json.dumps({"complete": False, "errors": ["NAS timeout"]}),),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(TeamFolderIndexError, match="LOCAL_SOURCE_INCOMPLETE"):
+        publish_snapshot(
+            database_path=database,
+            shared_root=tmp_path / "shared",
+            source_id="source-a",
+            canonical_source=r"\\nas\media\source-a",
+        )

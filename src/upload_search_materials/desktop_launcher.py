@@ -256,5 +256,6 @@ def launch_desktop_workbench(**kwargs: Any) -> dict[str, Any]:
         port_start=launch["port_start"],
         port_end=launch["port_end"],
         config=str(launch["config"]) if launch["config"] else None,
+        managed_desktop=True,
     )
     return {**result, "login_browser": login_browser}

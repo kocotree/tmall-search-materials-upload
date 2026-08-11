@@ -21,6 +21,7 @@ __pycache__/
 *.log
 feishu-auth-*.png
 .local-cache/
+.codegraph/
 config/local-paths.json
 config/selectors.local.yaml
 config/selectors.local.yml

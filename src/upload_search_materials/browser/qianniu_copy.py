@@ -294,15 +294,22 @@ def _open_slot_publish_form(
     row=None,
 ):
     def resolve_live_slot():
-        scope, _search = _wait_for_product_scope(page)
         last_slot_count = 0
         for _ in range(30):
             try:
-                rows = scope.locator("tbody tr").filter(
-                    has_text=product_id
-                )
-                if rows.count() == 1 and rows.first.is_visible():
-                    slots = _slot_cells(rows.first)
+                live_row = row
+                if live_row is None:
+                    scope, _search = _wait_for_product_scope(page)
+                    rows = scope.locator("tbody tr").filter(
+                        has_text=product_id
+                    )
+                    live_row = (
+                        rows.first
+                        if rows.count() == 1 and rows.first.is_visible()
+                        else None
+                    )
+                if live_row is not None and live_row.is_visible():
+                    slots = _slot_cells(live_row)
                     last_slot_count = slots.count()
                     if 1 <= position <= last_slot_count:
                         slot = slots.nth(position - 1)

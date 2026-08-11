@@ -95,6 +95,24 @@ cd .\upload-search-materials
   -Config ".\config\local-paths.json"
 ```
 
+macOS 使用同一个结构化桌面入口；它把本地 UI 服务提交给当前登录用户的
+`launchd`，因此启动命令返回或 Codex 工具回合结束后服务仍保持可用。job 只监听
+`127.0.0.1`，状态文件保存唯一 label、PID 和 ownership token；`ui-stop` / `ui-restart`
+仍须先通过精确 session 和 ownership 校验：
+
+```bash
+.venv/bin/tmall-materials desktop-workbench \
+  --runs-root "<项目内精确 runs_root>" \
+  --port-start 8765 \
+  --port-end 8795 \
+  --config "config/local-paths.json"
+```
+
+macOS 的托管 job 只继承运行所需的路径、区域设置和代码中显式列出的本机配置变量，
+不按变量名前缀复制宿主环境，也不保存 NAS 凭据、Cookie 或 Token。恢复已有任务时
+增加 `--session "<精确 session_id>"`；不得按目录时间猜测会话。Linux 继续使用普通
+POSIX 脱离进程路径。
+
 用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动启动一次性素材执行器，不需要另开终端。Windows 通过现有 Explorer shell 的普通桌面令牌启动，以继承 RaiDrive/Y:/Z:；macOS/Linux 使用当前登录用户挂载。执行器按 `source_id + relative_path` 绑定当前电脑的根目录，处理任务后立即退出，不安装系统服务。`start-material-executor.ps1` 和 `start-material-executor.sh` 仅用于开发诊断。
 
 Windows 中由 Codex 启动上述工作台时，必须为固定的
@@ -151,6 +169,26 @@ uv run tmall-materials index-folders `
 ```
 
 检查共享目录中的 `folder-scan-summary.json` 和 `folder-candidates.csv`。目录新增、删除或改名后使用相同参数和输出目录加 `--refresh`；它会重新遍历目录树发现差异，但在同一 SQLite 中增量更新 active/inactive 状态。只调整名称或货号匹配规则时加 `--rematch-only`，后者只读取本地 SQLite，不重新遍历 NAS。不得因为单次任务等待较久就改用任意历史任务索引；只能使用当前本机配置指向且身份校验通过的共享索引。
+
+运行中读取同目录的 `folder-index-progress.json`：其中包含 `status`、`phase`、
+`source_system`、`current_relative_path`、发现/命中/错误计数、PID、心跳和耗时。
+工作台只有在 SQLite、候选 CSV 与扫描摘要全部存在时才显示“可复用”。同一目录的
+`.folder-index.lock` 强制单写；`FOLDER_INDEX_BUSY` 表示已有活跃构建，应观察既有进度，
+不得并发启动第二个构建。进程异常退出会保留 `active_scan` 目录队列检查点，使用原参数
+加 `--resume` 精确继续；商品表或 roots 身份变化时拒绝续跑。
+
+已知变化范围时可避免全树扫描：`--refresh-source SOURCE` 刷新一个完整来源，
+`--refresh-prefix SOURCE=RELATIVE_PATH` 只刷新一个稳定相对路径子树；二者均可重复。
+定向刷新只会在已完整扫描的范围内标记 inactive，不影响其他来源或兄弟子树；仍应
+定期执行全量 `--refresh` 作为审计。商品表、名称或货号规则变化时直接使用新的商品表
+执行 `--rematch-only`；roots 身份与商品匹配身份分离，因此不会重新访问 NAS。
+
+目录枚举采用 10 秒无进展超时：只要目录项仍持续返回，大目录可继续扫描；若单个
+SMB/NAS 目录的 `readdir` 或元数据读取停止响应，该目录记录
+`FOLDER_ENUMERATION_TIMEOUT`，已发现目录立即提交检查点并停止继续调度本轮目录 I/O，
+从而避免为多个阻塞目录累计不可取消的线程。此时命令
+返回非零且摘要为 `complete=false`；不得把部分索引解释为完整结果，应检查摘要中的
+稳定 `source_system + relative_path`，恢复共享后对同一索引运行 `--refresh`。
 
 第二阶段选择商品并正式提交后，Codex 只运行以下唯一入口：
 

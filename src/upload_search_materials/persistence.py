@@ -109,7 +109,10 @@ def atomic_write_bytes(
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        key = os.path.normcase(str(target.resolve()))
+        # Locking needs a stable lexical key, not filesystem resolution.  This
+        # also keeps local progress writes from touching unavailable NAS path
+        # components during rematch-only workflows.
+        key = os.path.normcase(os.path.abspath(os.fspath(target)))
         with _replace_locks_guard:
             replace_lock = _replace_locks.setdefault(key, threading.Lock())
         with replace_lock:

@@ -103,7 +103,7 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 采集中出现滑动验证、验证码或风控时，`human-checkpoint.json` 使用同一 session、revision、input SHA、selector SHA、target store 和 attempt 身份，保存 `status`、`reason_code`、`location`、`current_page`、`last_completed_page`、`row_count`、`events[]` 与时间。`events[]` 只记录 `detected/resolved`、检查位置和页码，不保存验证内容、Cookie 或 DOM。Worker 在 `waiting_human_check` 阶段保持心跳；验证元素消失后更新为 `resolved` 并继续同一 attempt。
 
-只读随机动作按随机 1–2 页间隔运行，证据写入 `store-page-evidence.json.safe_actions`，至少包含页码、`view_filled_slot/open_empty_image_text`、商品 ID、坑位序号、状态和 `read_only=true`。动作使用同一浏览器 context 的临时标签页，关闭临时页即退出；不得把动作产生的页面状态写入商品采集 CSV。
+只读随机动作按随机 1–2 页间隔运行，证据写入 `store-page-evidence.json.safe_actions`，至少包含页码、`view_filled_slot/open_empty_image_text`、商品 ID、坑位序号、状态、`source=current_page`、`read_only=true` 和 `page_state_restored`。候选目标只能来自当前采集页的可见行和坑位，不得输入或搜索商品 ID；进入“发图文”表单后优先点击表单框外的遮罩退出，退出详情或表单后必须核验当前 URL、发布表单状态和有序商品 ID 已恢复，再允许翻页。不得把动作产生的页面状态写入商品采集 CSV。
 
 ## Collection readiness and managed attempt
 
@@ -143,6 +143,16 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 - `source_system`、`absolute_path`、`relative_path`、`folder_name`、`parent_relative_path`。
 - `active`、`last_seen_scan_id`：用于 `--refresh` 标记新增、保留和已删除目录。
 - 匹配表保存商品 ID、货号、商品名称、`match_type` 与 `match_status`。
+- metadata 中 `filesystem_identity` 只绑定排序后的 `source_id + 本机 root`；
+  `products_sha256` 单独绑定当前匹配结果。商品表变化可执行 `--rematch-only`，不使目录
+  身份失效。旧版组合 `identity` 在 roots 一致时原地迁移。
+- metadata 中 `active_scan` 是异常中断时的目录 frontier 检查点，包含扫描 ID、范围、
+  当前来源/前缀、待处理相对路径、计数、错误和已完成范围；正常终态会删除。
+
+`folder-index-progress.json` 是可覆盖的机器级运行状态，包含 operation ID、模式、
+`running/complete/partial/failed`、phase、PID、开始/心跳时间、耗时、当前来源与相对路径
+及发现/命中/错误计数。`.folder-index.lock` 是带 PID 和 operation ID 的临时单写租约；
+正常退出删除，进程已不存在时下一写入者可回收。二者不进入时间戳任务目录。
 
 共享 `folder-candidates.csv` 输出当前 active 且命中商品的文件夹。当前任务使用 `snapshot-folder-candidates` 按第二阶段 `selected_product_ids` 生成任务内候选快照，不复制 SQLite。候选按文件夹自身名称匹配，不继承父目录命中；`--rematch-only` 只使用本地文件夹记录重新计算匹配。确认文件夹归属前，不读取文件夹中的图片，也不计算图片 SHA-256。
 

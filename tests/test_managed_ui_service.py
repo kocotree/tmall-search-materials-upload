@@ -268,3 +268,54 @@ def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
         assert inherited == str(
             service_module.current_runtime_identity()["login_session_id"]
         )
+
+
+def test_macos_managed_desktop_submits_launchd_job(tmp_path, monkeypatch):
+    port = _free_port()
+    commands = []
+    states = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(service_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_module.subprocess,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or Completed(),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_claim_started_identity",
+        lambda state: states.append(dict(state)) or state.update(
+            {
+                "pid": 4567,
+                "runtime_identity": state["launcher_runtime_identity"],
+            }
+        )
+        is None,
+    )
+    monkeypatch.setattr(service_module, "_session_is_readable", lambda *_args: True)
+
+    started = start_service(
+        tmp_path,
+        port_start=port,
+        port_end=port,
+        startup_timeout=1,
+        managed_desktop=True,
+    )
+
+    assert started["healthy"] is True
+    assert started["pid"] == 4567
+    assert started["service_launch_channel"] == "macos_launchd"
+    assert started["service_launch_label"].startswith(
+        f"com.kocotree.tmall-materials.ui.{started['session_id']}."
+    )
+    command = commands[0]
+    assert command[:3] == ["/bin/launchctl", "submit", "-l"]
+    assert "/usr/bin/env" in command
+    assert any(value.startswith("TMALL_DESKTOP_LOGIN_SESSION_ID=") for value in command)
+    assert not any(value.startswith("GITHUB_TOKEN=") for value in command)
+    assert states

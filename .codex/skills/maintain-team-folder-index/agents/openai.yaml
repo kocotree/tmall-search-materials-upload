@@ -1,0 +1,4 @@
+interface:
+  display_name: "维护团队素材索引"
+  short_description: "同步校验、增量更新并发布去中心化团队素材源文件夹索引"
+  default_prompt: "Use $maintain-team-folder-index to sync the latest valid team folder-index snapshots or explicitly update and publish one material source."

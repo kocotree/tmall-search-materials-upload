@@ -1180,20 +1180,54 @@ def test_high_value_scan_runs_random_action_every_one_or_two_new_pages():
         settle_delay_ms=0,
         action_wait_ms=500,
         on_page=lambda _page_number, _rows: None,
-        random_action=lambda page_number, product_ids: actions.append(
-            (page_number, product_ids)
-        )
-        or {"status": "completed"},
+        random_action=lambda page_number: actions.append(page_number)
+        or {"status": "completed", "page_state_restored": True},
         random_interval_picker=lambda: next(intervals),
     )
 
     assert [row["商品ID"] for row in rows] == ["100", "200", "300"]
-    assert actions == [(2, ("200",)), (3, ("300",))]
+    assert actions == [2, 3]
     assert [
         event["page_number"]
         for event in page._tmall_collection_events
         if event.get("action") == "random_collection_action"
     ] == [2, 3]
+
+
+def test_high_value_scan_stops_if_random_action_does_not_restore_page():
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 0 篇"],
+        ]
+    )
+
+    with pytest.raises(
+        PaginationStateError, match="RANDOM_ACTION_PAGE_RESTORE_FAILED"
+    ):
+        scan_recommended_material_status(
+            page,
+            {
+                "promotion_tab": "#promotion",
+                "high_value_filter": "#recommended",
+                "promotion_rows": ".promotion-row",
+                "promotion_current_page": "#current",
+                "promotion_first_page": "#first",
+                "promotion_terminal_page": "#terminal",
+                "promotion_next_page": "#next",
+            },
+            collected_at="2026-08-10T10:00:00+08:00",
+            filter_selector_key="high_value_filter",
+            settle_delay_ms=0,
+            action_wait_ms=500,
+            on_page=lambda _page_number, _rows: None,
+            random_action=lambda _page_number: {
+                "status": "skipped",
+                "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
+                "page_state_restored": False,
+            },
+            random_interval_picker=lambda: 1,
+        )
 
 
 def test_high_value_scan_checks_human_verification_around_checkpoint():

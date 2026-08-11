@@ -94,6 +94,8 @@ def _reason_code(error: Exception, phase: str) -> str:
 
 
 def _recovery_action(reason_code: str) -> str:
+    if reason_code == "FOLDER_INDEX_BUILDING":
+        return "等待共享文件夹索引完成；完成后对同一 handoff 重跑处理入口。"
     if reason_code == "FOLDER_INDEX_NOT_READY":
         return "建立或刷新当前机器配置的共享文件夹索引，然后重跑同一处理入口。"
     if reason_code == "FOLDER_INDEX_ACCESS_DENIED":
@@ -201,6 +203,7 @@ def process_product_selection_handoff(
     asset_stage_path = store._stage_path(session_id, "asset_matching")
     shared_candidates = Path(folder_index_root) / "folder-candidates.csv"
     shared_summary = Path(folder_index_root) / "folder-scan-summary.json"
+    shared_progress = Path(folder_index_root) / "folder-index-progress.json"
     task_candidates = asset_stage_path / "folder-candidates.csv"
     task_summary = asset_stage_path / "folder-scan-summary.json"
     folder_review_path = asset_stage_path / "folder-review.json"
@@ -249,6 +252,16 @@ def process_product_selection_handoff(
 
         phase = "snapshot_candidates"
         if not shared_candidates.is_file():
+            if shared_progress.is_file():
+                progress = read_json(shared_progress)
+                if (
+                    isinstance(progress, dict)
+                    and progress.get("status") == "running"
+                ):
+                    raise FileNotFoundError(
+                        "FOLDER_INDEX_BUILDING: "
+                        f"已发现 {int(progress.get('folders_discovered', 0))} 个文件夹"
+                    )
             raise FileNotFoundError(str(shared_candidates))
         temp_candidates = asset_stage_path / (
             f".folder-candidates.{attempt_id or 'pending'}.tmp"
@@ -431,6 +444,7 @@ def process_product_selection_handoff(
             "artifacts": {
                 "shared_candidates": _artifact_state(shared_candidates),
                 "shared_summary": _artifact_state(shared_summary),
+                "shared_progress": _artifact_state(shared_progress),
                 "task_candidates": _artifact_state(task_candidates),
                 "task_summary": _artifact_state(task_summary),
                 "folder_review": _artifact_state(folder_review_path),

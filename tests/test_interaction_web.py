@@ -573,6 +573,43 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
     assert html.count('name="image_roots"') >= 1
 
 
+def test_setup_page_requires_complete_folder_index_artifacts_and_shows_progress(
+    tmp_path,
+):
+    index_root = tmp_path / "folder-index"
+    index_root.mkdir()
+    (index_root / "folder-index.sqlite3").write_bytes(b"partial")
+    (index_root / "folder-index-progress.json").write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "folders_discovered": 321,
+                "current_relative_path": "campaign/current",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        folder_index_root=index_root,
+    )
+
+    response = create_app(
+        tmp_path / "runs", runtime_config=runtime
+    ).test_client().get("/")
+    html = html_module.unescape(response.get_data(as_text=True))
+
+    assert response.status_code == 200
+    assert "正在建立" in html
+    assert "已发现 321 个文件夹" in html
+    assert "campaign/current" in html
+    assert "<strong>可复用</strong>" not in html
+
+
 def test_runtime_image_source_api_saves_checks_and_reloads_multiple_roots(tmp_path):
     workspace = tmp_path / "workspace"
     (workspace / "config").mkdir(parents=True)
@@ -2364,14 +2401,30 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "已选满" not in source
     assert "确认归属并记录别名" not in source
     assert 'candidate?.match_type !== "confirmed_alias"' in source
-
-
     assert "loadFolderImageCounts" in source
     assert "/stages/asset_matching/folder-image-counts" in source
     assert "本机固定操作" in source
     assert "不会触发 Codex handoff" in source
     assert "本机正在加载图片" in source
     assert "历史进度口径" in source
+
+
+def test_asset_matching_internal_decisions_are_hidden_structured_controls(client):
+    html = client.get("/").get_data(as_text=True)
+
+    for name in (
+        "source_types",
+        "folder_decisions",
+        "license_decisions",
+        "asset_decisions",
+    ):
+        assert re.search(
+            rf'<div class="field" data-field="{name}" hidden>\s*'
+            rf'<input id="asset_matching-{name}" name="{name}" '
+            rf'type="hidden" value="\[\]" data-value-kind="json-list"',
+            html,
+        )
+        assert f'<label for="asset_matching-{name}">' not in html
 
 
 def test_generic_result_renderer_includes_optional_agent_actions_as_safe_text():

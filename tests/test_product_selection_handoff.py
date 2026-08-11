@@ -202,6 +202,31 @@ def test_failure_writes_codex_diagnostic_and_same_entry_can_resume(tmp_path):
     assert resolved_diagnostic["resolved_at"]
 
 
+def test_product_selection_reports_an_index_that_is_still_building(tmp_path):
+    store, session_id, _handoff = _submitted_selection(tmp_path)
+    index_root = tmp_path / "building-folder-index"
+    index_root.mkdir()
+    (index_root / "folder-index-progress.json").write_text(
+        json.dumps({"status": "running", "folders_discovered": 4321}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProductSelectionProcessingError) as raised:
+        process_product_selection_handoff(
+            store,
+            session_id,
+            folder_index_root=index_root,
+            claimant_id="test-codex",
+        )
+
+    assert raised.value.reason_code == "FOLDER_INDEX_BUILDING"
+    diagnostic = json.loads(
+        raised.value.diagnostic_path.read_text(encoding="utf-8")
+    )
+    assert diagnostic["artifacts"]["shared_progress"]["exists"] is True
+    assert "等待共享文件夹索引完成" in diagnostic["codex_recovery"]["action"]
+
+
 def test_cli_exposes_single_product_selection_entry():
     args = build_parser().parse_args(
         [

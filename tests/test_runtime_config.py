@@ -66,6 +66,8 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
                 "products_csv": "inputs/products.csv",
                 "runs_root": "task-runs",
                 "folder_index_root": "machine-cache/folders",
+                "team_folder_index_root": "/Volumes/team-index",
+                "team_folder_index_nas_source_id": "zhejiang-kuqu",
                 "selectors_file": "machine/selectors.yaml",
                 "cdp_url": "http://127.0.0.1:9333",
                 "browser_executable": "bin/browser.exe",
@@ -88,6 +90,8 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
     assert runtime.folder_index_root == (
         workspace / "machine-cache" / "folders"
     ).resolve()
+    assert runtime.team_folder_index_root == Path("/Volumes/team-index")
+    assert runtime.team_folder_index_nas_source_id == "zhejiang-kuqu"
     assert runtime.selectors_file is None
     assert runtime.cdp_url == "http://127.0.0.1:9333"
     assert runtime.browser_executable == (workspace / "bin/browser.exe").resolve()
@@ -108,6 +112,22 @@ def test_folder_index_root_can_be_overridden_by_environment(tmp_path):
     )
 
     assert runtime.folder_index_root == shared_index.resolve()
+
+
+def test_team_folder_index_root_can_be_overridden_by_environment(tmp_path):
+    workspace = make_workspace(tmp_path)
+    shared_index = tmp_path / "team-folder-index"
+
+    runtime = load_runtime_config(
+        environ={
+            "TMALL_TEAM_FOLDER_INDEX_ROOT": str(shared_index),
+            "TMALL_TEAM_FOLDER_INDEX_NAS_SOURCE_ID": "ZHEJIANG-KUQU",
+        },
+        start=workspace,
+    )
+
+    assert runtime.team_folder_index_root == shared_index.resolve()
+    assert runtime.team_folder_index_nas_source_id == "zhejiang-kuqu"
 
 
 def test_missing_explicit_config_fails_with_precise_error(tmp_path):

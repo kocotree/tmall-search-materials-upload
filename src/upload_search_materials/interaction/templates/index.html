@@ -215,9 +215,9 @@
                   <p class="field-error" data-field-error="collection_readiness" aria-live="polite"></p>
                   <code data-material-center-url>{{ setup_inputs.material_center_url }}</code>
                 </article>
-                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.folder_index_available else 'pending' }}">
-                  <span>共享文件夹索引</span><strong>{{ "可复用" if setup_inputs.folder_index_available else "首次任务待建立" }}</strong>
-                  <p>系统会自动建立或复用，无需操作。</p>
+                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.folder_index_available else setup_inputs.folder_index_status }}">
+                  <span>共享文件夹索引</span><strong>{{ setup_inputs.folder_index_label }}</strong>
+                  <p>{{ setup_inputs.folder_index_detail }}</p>
                   <input name="folder_index_root" type="hidden" value="{{ setup_inputs.folder_index_root }}" aria-describedby="setup-folder_index_root-error">
                   <p>只会读取本次任务需要的候选内容。</p>
                   <p class="field-error" id="setup-folder_index_root-error" data-field-error="folder_index_root" aria-live="polite"></p>
@@ -360,8 +360,11 @@
             </div>
             <div class="field-grid">
               {% for field in stage.fields %}
-              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'auto_path_list', 'multi_select'] %} field-wide{% endif %}{% if (stage.id == 'completeness' and field.name == 'selected_product_ids') or (stage.id == 'image_review' and field.name == 'decisions') or (stage.id == 'slots_copy' and field.name == 'slot_assignments') or (stage.id == 'approval' and field.name == 'task_ids') %} interaction-data-field{% endif %}" data-field="{{ field.name }}"{% if field.component == 'hidden' or (stage.id == 'approval' and field.name == 'task_ids') %} hidden{% endif %}>
-                {% if field.component in ["path_list", "auto_path_list"] and field.name == "image_roots" %}
+              <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'auto_path_list', 'multi_select'] %} field-wide{% endif %}{% if (stage.id == 'completeness' and field.name == 'selected_product_ids') or (stage.id == 'image_review' and field.name == 'decisions') or (stage.id == 'slots_copy' and field.name == 'slot_assignments') or (stage.id == 'approval' and field.name == 'task_ids') %} interaction-data-field{% endif %}" data-field="{{ field.name }}"{% if field.component in ['hidden', 'hidden_json_list'] or (stage.id == 'approval' and field.name == 'task_ids') %} hidden{% endif %}>
+                {% if field.component == "hidden_json_list" %}
+                <input id="{{ stage.id }}-{{ field.name }}" name="{{ field.name }}" type="hidden" value="[]" data-value-kind="json-list" aria-describedby="{{ stage.id }}-{{ field.name }}-error">
+                <p class="field-error" id="{{ stage.id }}-{{ field.name }}-error" data-field-error="{{ field.name }}" aria-live="polite"></p>
+                {% elif field.component in ["path_list", "auto_path_list"] and field.name == "image_roots" %}
                 <fieldset class="path-list" data-field-group="image_roots">
                   <legend>
                     {{ field.label }}{% if field.required %}<span class="required" aria-label="必填">*</span>{% endif %}
@@ -409,8 +412,10 @@
                 {% endif %}
                 {% endif %}
 
-                {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
-                <p class="field-error" id="{{ stage.id }}-{{ field.name }}-error" data-field-error="{{ field.name }}" aria-live="polite"></p>
+                {% if field.component != "hidden_json_list" %}
+                  {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+                  <p class="field-error" id="{{ stage.id }}-{{ field.name }}-error" data-field-error="{{ field.name }}" aria-live="polite"></p>
+                {% endif %}
               </div>
               {% endfor %}
             </div>

@@ -107,7 +107,7 @@ from ..nas_sources import (
     load_nas_sources,
 )
 from ..platform_support import AssetSourceUnavailable
-from ..persistence import PersistenceAccessDenied
+from ..persistence import PersistenceAccessDenied, read_json
 from ..runtime_identity import (
     LocalResourceIdentityMismatch,
     require_local_resource_identity,
@@ -564,6 +564,39 @@ def create_app(
             if session_id
             else store.runs_root.resolve()
         )
+        folder_index_root = runtime.folder_index_root
+        folder_index_ready = all(
+            (folder_index_root / name).is_file()
+            for name in (
+                "folder-index.sqlite3",
+                "folder-candidates.csv",
+                "folder-scan-summary.json",
+            )
+        )
+        folder_index_status = "ready" if folder_index_ready else "pending"
+        folder_index_label = "可复用" if folder_index_ready else "首次任务待建立"
+        folder_index_detail = "系统会自动建立或复用，无需操作。"
+        progress_path = folder_index_root / "folder-index-progress.json"
+        if not folder_index_ready and progress_path.is_file():
+            try:
+                progress = read_json(progress_path)
+            except (OSError, ValueError):
+                progress = {}
+            progress_status = str(progress.get("status", ""))
+            if progress_status == "running":
+                folder_index_status = "running"
+                folder_index_label = "正在建立"
+                folder_index_detail = (
+                    f"已发现 {int(progress.get('folders_discovered', 0))} 个文件夹；"
+                    f"当前：{progress.get('current_relative_path', '.')}"
+                )
+            elif progress_status in {"partial", "failed"}:
+                folder_index_status = progress_status
+                folder_index_label = "需要续跑" if progress_status == "failed" else "部分完成"
+                folder_index_detail = (
+                    f"已发现 {int(progress.get('folders_discovered', 0))} 个文件夹，"
+                    f"错误 {int(progress.get('error_count', 0))} 项。"
+                )
         return render_template(
             "index.html",
             stages=rendered_stages,
@@ -587,10 +620,11 @@ def create_app(
                 "selectors_file": str(runtime.selectors_file or ""),
                 "cdp_url": runtime.cdp_url,
                 "material_center_url": runtime.material_center_url,
-                "folder_index_root": str(runtime.folder_index_root),
-                "folder_index_available": (
-                    runtime.folder_index_root / "folder-index.sqlite3"
-                ).is_file(),
+                "folder_index_root": str(folder_index_root),
+                "folder_index_available": folder_index_ready,
+                "folder_index_status": folder_index_status,
+                "folder_index_label": folder_index_label,
+                "folder_index_detail": folder_index_detail,
                 "image_sources_configured": bool(runtime.image_sources),
                 "image_config_path": str(
                     runtime.config_path

@@ -44,6 +44,8 @@ class RuntimeConfig:
     runs_root: Path
     nas_sources_file: Path | None = None
     folder_index_root: Path = Path(".local-cache/folder-index")
+    team_folder_index_root: Path | None = None
+    team_folder_index_nas_source_id: str | None = None
     selectors_file: Path | None = None
     cdp_url: str = DEFAULT_CDP_URL
     browser_executable: Path | None = None
@@ -108,6 +110,20 @@ def load_runtime_config(
         if folder_index_value
         else workspace_root / ".local-cache" / "folder-index"
     )
+    team_folder_index_value = (
+        env.get("TMALL_TEAM_FOLDER_INDEX_ROOT")
+        or document.get("team_folder_index_root")
+    )
+    team_folder_index_root = (
+        _resolve_configured_path(team_folder_index_value, workspace_root)
+        if team_folder_index_value
+        else None
+    )
+    team_folder_index_nas_source_id = str(
+        env.get("TMALL_TEAM_FOLDER_INDEX_NAS_SOURCE_ID")
+        or document.get("team_folder_index_nas_source_id")
+        or ""
+    ).strip().casefold() or None
     selectors_value = env.get("TMALL_SELECTORS_FILE") or document.get(
         "selectors_file"
     )
@@ -152,6 +168,8 @@ def load_runtime_config(
         runs_root=runs_root,
         nas_sources_file=nas_sources_file,
         folder_index_root=folder_index_root,
+        team_folder_index_root=team_folder_index_root,
+        team_folder_index_nas_source_id=team_folder_index_nas_source_id,
         selectors_file=selectors_file,
         cdp_url=cdp_url,
         browser_executable=browser_executable,
@@ -350,7 +368,9 @@ def _resolve_table(value: object, workspace_root: Path, pattern: str) -> Discove
 def _resolve_configured_path(value: object, workspace_root: Path) -> Path:
     text = str(value)
     path = Path(text).expanduser()
-    if path.is_absolute() or PureWindowsPath(text).is_absolute():
+    if PureWindowsPath(text).is_absolute() and not path.is_absolute():
+        return Path(str(PureWindowsPath(text)))
+    if path.is_absolute():
         return path
     return (workspace_root / path).resolve()
 
