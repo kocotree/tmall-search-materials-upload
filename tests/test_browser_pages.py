@@ -777,6 +777,49 @@ def test_promotion_scan_waits_until_next_page_product_ids_change():
     assert 250 in page.waited
 
 
+def test_high_value_scan_allows_slow_next_page_hydration():
+    class SlowTransitionPage(DelayedPromotionPage):
+        def __init__(self, pages):
+            super().__init__(pages)
+            self.pending_waited_ms = 0
+
+        def wait_for_timeout(self, milliseconds):
+            self.waited.append(milliseconds)
+            if not self.pending_next:
+                return
+            self.pending_waited_ms += milliseconds
+            if self.pending_waited_ms >= 4_000:
+                self.page_index += 1
+                self.pending_next = False
+
+    page = SlowTransitionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇、当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇、当前发布 1 篇"],
+        ]
+    )
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-07-24T01:57:30+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200"]
+    assert page.pending_waited_ms >= 4_000
+
+
 @pytest.mark.parametrize("initial_page", [0, 1, 2])
 def test_high_value_scan_normalizes_reused_tab_to_first_page(initial_page):
     page = FakePromotionPage(
@@ -1108,6 +1151,82 @@ def test_high_value_scan_accepts_verified_single_page():
         "origin",
         "terminal",
     ]
+
+
+def test_high_value_scan_runs_random_action_every_one_or_two_new_pages():
+    page = FakePromotionPage(
+        [
+            ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
+            ["商品二 商品ID 200 发布坑位到 9 篇，当前发布 1 篇"],
+            ["商品三 商品ID 300 发布坑位到 9 篇，当前发布 2 篇"],
+        ]
+    )
+    intervals = iter((2, 1, 2))
+    actions = []
+
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-08-10T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+        on_page=lambda _page_number, _rows: None,
+        random_action=lambda page_number, product_ids: actions.append(
+            (page_number, product_ids)
+        )
+        or {"status": "completed"},
+        random_interval_picker=lambda: next(intervals),
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200", "300"]
+    assert actions == [(2, ("200",)), (3, ("300",))]
+    assert [
+        event["page_number"]
+        for event in page._tmall_collection_events
+        if event.get("action") == "random_collection_action"
+    ] == [2, 3]
+
+
+def test_high_value_scan_checks_human_verification_around_checkpoint():
+    page = FakePromotionPage(
+        [["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"]]
+    )
+    checkpoints = []
+    checks = []
+
+    scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-08-10T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+        on_page=lambda page_number, _rows: checkpoints.append(page_number),
+        human_check_waiter=lambda page_number, location: checks.append(
+            (page_number, location, tuple(checkpoints))
+        ),
+    )
+
+    assert checks[0] == (1, "before_page", ())
+    assert checks[1] == (1, "after_checkpoint", (1,))
+    assert checks[2] == (1, "before_pagination", (1,))
 
 
 def test_high_value_scan_rejects_skipped_page_transition():

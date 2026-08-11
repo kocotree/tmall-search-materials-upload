@@ -11,6 +11,10 @@ from .browser.config import (
     SelectorConfigError,
     load_selector_profile,
 )
+from .browser.collection_actions import (
+    perform_random_collection_action,
+    random_page_interval,
+)
 from .browser.material_page import (
     SelectorInvalidError,
 )
@@ -20,6 +24,7 @@ from .browser.session import (
     LoginInteractionRequired,
     StoreIdentityError,
     ensure_cdp_browser,
+    human_check_visible,
     open_cdp_page,
     validate_collection_page,
 )
@@ -615,6 +620,7 @@ def process_setup_collection(
     )
     output = artifact_root / "promotion-material-status.csv"
     checkpoint = artifact_root / "promotion-material-status.checkpoint.json"
+    human_checkpoint = artifact_root / "human-checkpoint.json"
     pagination_evidence = artifact_root / "pagination-evidence.json"
     collected_at = _now_iso()
     collected_rows: list[dict[str, str]] = []
@@ -684,6 +690,134 @@ def process_setup_collection(
         )
 
     def collect(live_page: Any) -> list[dict[str, str]]:
+        def wait_for_human_check(
+            target_page: Any,
+            page_number: int,
+            location: str,
+        ) -> None:
+            selector = str(profile.selectors.get("human_check", "")).strip()
+            if not selector or not human_check_visible(target_page, selector):
+                return
+            observed_page = max(1, int(page_number))
+            current = read_json_object(human_checkpoint) or {
+                "schema_version": 1,
+                **checkpoint_context,
+                "events": [],
+            }
+            events = list(current.get("events", []))
+            data_checkpoint = read_json_object(checkpoint) or {}
+            detected_at = _now_iso()
+            events.append(
+                {
+                    "event_type": "detected",
+                    "reason_code": "HUMAN_CHECK",
+                    "location": location,
+                    "current_page": observed_page,
+                    "last_completed_page": int(
+                        data_checkpoint.get("last_completed_page") or 0
+                    ),
+                    "recorded_at": detected_at,
+                }
+            )
+            current.update(
+                {
+                    "status": "waiting_user",
+                    "reason_code": "HUMAN_CHECK",
+                    "location": location,
+                    "current_page": observed_page,
+                    "last_completed_page": int(
+                        data_checkpoint.get("last_completed_page") or 0
+                    ),
+                    "row_count": int(data_checkpoint.get("row_count") or 0),
+                    "events": events,
+                    "updated_at": detected_at,
+                }
+            )
+            _write_json(human_checkpoint, current)
+            elapsed_ms = 0
+            while human_check_visible(target_page, selector):
+                store.renew_processing_claim(session_id, "setup", claim_id)
+                if progress_callback is not None:
+                    progress_callback(
+                        "waiting_human_check",
+                        action="complete_human_check",
+                        target=f"page:{observed_page}",
+                        retry_count=0,
+                        elapsed_ms=elapsed_ms,
+                        current_page=observed_page,
+                        last_completed_page=current[
+                            "last_completed_page"
+                        ],
+                        row_count=current["row_count"],
+                        last_checkpoint_at=detected_at,
+                        pagination_reason_code="HUMAN_CHECK",
+                        next_recovery=(
+                            "请在 CDP Chrome 完成滑动验证；验证通过后会自动继续采集"
+                        ),
+                    )
+                target_page.wait_for_timeout(1_000)
+                elapsed_ms += 1_000
+            resolved_at = _now_iso()
+            current["events"] = [
+                *events,
+                {
+                    "event_type": "resolved",
+                    "reason_code": "HUMAN_CHECK_RESOLVED",
+                    "location": location,
+                    "current_page": observed_page,
+                    "recorded_at": resolved_at,
+                },
+            ]
+            current.update(
+                {
+                    "status": "resolved",
+                    "reason_code": "HUMAN_CHECK_RESOLVED",
+                    "resolved_at": resolved_at,
+                    "updated_at": resolved_at,
+                }
+            )
+            _write_json(human_checkpoint, current)
+            if progress_callback is not None:
+                progress_callback(
+                    "collecting_page",
+                    action="resume_after_human_check",
+                    target=f"page:{observed_page}",
+                    retry_count=0,
+                    current_page=observed_page,
+                    pagination_reason_code="HUMAN_CHECK_RESOLVED",
+                    next_recovery="继续当前 attempt 的分页采集",
+                )
+
+        def wait_on_main_page(page_number: int, location: str) -> None:
+            wait_for_human_check(live_page, page_number, location)
+
+        def run_random_action(
+            page_number: int, product_ids: tuple[str, ...]
+        ) -> dict[str, Any]:
+            store.renew_processing_claim(session_id, "setup", claim_id)
+            if progress_callback is not None:
+                progress_callback(
+                    "random_action",
+                    action="inspect_random_slot",
+                    target=f"page:{page_number}",
+                    retry_count=0,
+                    current_page=page_number,
+                    next_recovery="随机查看动作结束后继续当前分页采集",
+                )
+            return perform_random_collection_action(
+                live_page,
+                product_ids,
+                material_center_url=(
+                    profile.material_center_url
+                    or runtime.material_center_url
+                ),
+                wait_for_human_check=(
+                    lambda target_page, location: wait_for_human_check(
+                        target_page, page_number, location
+                    )
+                ),
+            )
+
         if attempt_id:
             _archive_prior_attempt_checkpoint(
                 collected_root
@@ -700,6 +834,7 @@ def process_setup_collection(
                 retry_count=0,
                 next_recovery="修复选择器后恢复同一 session",
             )
+        wait_on_main_page(0, "before_collection_validation")
         page_evidence = validate_collection_page(
             live_page,
             profile.selectors,
@@ -740,6 +875,9 @@ def process_setup_collection(
             checkpoint_context=checkpoint_context,
             pagination_evidence=pagination_evidence,
             on_pagination_event=report_pagination,
+            human_check_waiter=wait_on_main_page,
+            random_action=run_random_action,
+            random_interval_picker=random_page_interval,
             before_checkpoint=renew_claim,
             on_checkpoint=(
                 (
@@ -1046,12 +1184,16 @@ def process_setup_collection(
             published["promotion_status"],
             published["checkpoint"],
             published["pagination_evidence"],
+            *([str(human_checkpoint)] if human_checkpoint.is_file() else []),
             str(completeness_path),
         ],
         next_action="在第二阶段批量选择待补充商品",
         data={
             "promotion_status": published["promotion_status"],
             "checkpoint": published["checkpoint"],
+            "human_checkpoint": (
+                str(human_checkpoint) if human_checkpoint.is_file() else ""
+            ),
             "pagination_evidence": published["pagination_evidence"],
             "pagination": matrix["pagination"],
             "completeness_matrix": str(completeness_path),

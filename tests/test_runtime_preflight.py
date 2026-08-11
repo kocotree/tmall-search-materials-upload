@@ -24,11 +24,32 @@ def prepared(tmp_path):
     selectors.parent.mkdir()
     selectors.write_text("schema_version: 1\n", encoding="utf-8")
     runtime = RuntimeConfig(
-        workspace_root=workspace,
+        workspace_root=project,
         products=DiscoveredPath(None, "missing"),
         rules=DiscoveredPath(None, "missing"),
         image_sources=(),
         runs_root=workspace / "runs",
+    )
+    return runtime, selectors
+
+
+def prepared_posix(tmp_path):
+    project = tmp_path / "workspace"
+    scripts = project / ".venv" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "python").write_bytes(b"prepared")
+    (scripts / "tmall-materials").write_bytes(b"prepared")
+    (project / "src" / "upload_search_materials").mkdir(parents=True)
+    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    selectors = project / "config" / "selectors.local.yaml"
+    selectors.parent.mkdir()
+    selectors.write_text("schema_version: 1\n", encoding="utf-8")
+    runtime = RuntimeConfig(
+        workspace_root=project,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=project / "runs",
     )
     return runtime, selectors
 
@@ -62,11 +83,31 @@ def test_preflight_is_offline_and_never_invokes_uv_npm_or_powershell(tmp_path):
     assert result["ready"] is True
     assert result["offline"] is True
     assert len(commands) == 1
-    assert commands[0][0].endswith(r".venv\Scripts\python.exe")
+    assert Path(commands[0][0]).parts[-3:] == (
+        ".venv",
+        "Scripts",
+        "python.exe",
+    )
     assert all(
         token not in " ".join(commands[0]).casefold()
         for token in ("uv ", "npm", "powershell", ".ps1")
     )
+
+
+def test_preflight_accepts_posix_project_environment(tmp_path):
+    runtime, selectors = prepared_posix(tmp_path)
+    commands = []
+
+    result = preflight_runtime_environment(
+        runtime,
+        selectors_path=selectors,
+        cdp_url="http://127.0.0.1:9222",
+        runner=successful_runner(commands),
+        cdp_probe=connected,
+    )
+
+    assert result["ready"] is True
+    assert commands[0][0].endswith("/.venv/bin/python")
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ import upload_search_materials.browser.session as session_module
 from upload_search_materials.browser.session import (
     CdpStatus,
     CdpUnavailable,
+    ensure_cdp_browser,
     launch_cdp_browser,
     validate_collection_page,
 )
@@ -165,5 +166,95 @@ def test_launch_passes_material_center_url_to_visible_browser(
     )
 
     assert calls["arguments"][-1] == "https://example.test/materials"
+    assert calls["kwargs"]["start_new_session"] is (session_module.os.name != "nt")
     assert result["reused"] is False
     assert (tmp_path / "profile" / ".tmall-cdp-service.json").is_file()
+
+
+def test_ensure_connected_endpoint_with_no_pages_opens_material_target(
+    monkeypatch, tmp_path
+):
+    endpoint = "http://127.0.0.1:9222"
+    material_url = "https://example.test/materials"
+    opened = []
+
+    monkeypatch.setattr(
+        session_module,
+        "launch_cdp_browser",
+        lambda **_kwargs: {
+            "status": "connected",
+            "reused": True,
+            "endpoint": endpoint,
+            "pages": [],
+        },
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_open_cdp_target",
+        lambda cdp_url, target_url, **_kwargs: opened.append(
+            (cdp_url, target_url)
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "inspect_cdp_endpoint",
+        lambda *_args, **_kwargs: CdpStatus(
+            True,
+            endpoint,
+            ({"id": "page-1", "title": "素材中心", "url": material_url},),
+        ),
+    )
+
+    result = ensure_cdp_browser(
+        executable=None,
+        profile_dir=tmp_path / "profile",
+        cdp_url=endpoint,
+        material_center_url=material_url,
+        startup_timeout_seconds=1,
+    )
+
+    assert opened == [(endpoint, material_url)]
+    assert result["status"] == "connected"
+    assert result["pages"] == [
+        {"id": "page-1", "title": "素材中心", "url": material_url}
+    ]
+
+
+def test_open_cdp_target_uses_local_put_with_encoded_url(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {
+                    "id": "page-1",
+                    "title": "素材中心",
+                    "type": "page",
+                    "url": "https://example.test/materials?a=1&b=2",
+                }
+            ).encode("utf-8")
+
+    class Opener:
+        def open(self, request, *, timeout):
+            captured["method"] = request.get_method()
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(session_module, "_LOOPBACK_OPENER", Opener())
+
+    result = session_module._open_cdp_target(
+        "http://127.0.0.1:9222",
+        "https://example.test/materials?a=1&b=2",
+    )
+
+    assert captured["method"] == "PUT"
+    assert captured["url"].startswith("http://127.0.0.1:9222/json/new?")
+    assert "%3F" in captured["url"] and "%26" in captured["url"]
+    assert result["id"] == "page-1"

@@ -119,8 +119,22 @@ def _check(
 
 def project_environment_status(runtime: RuntimeConfig) -> dict[str, Any]:
     project = runtime.workspace_root
-    executable = project / ".venv" / "Scripts" / "tmall-materials.exe"
-    python = project / ".venv" / "Scripts" / "python.exe"
+    executable_candidates = (
+        project / ".venv" / "Scripts" / "tmall-materials.exe",
+        project / ".venv" / "bin" / "tmall-materials",
+    )
+    python_candidates = (
+        project / ".venv" / "Scripts" / "python.exe",
+        project / ".venv" / "bin" / "python",
+    )
+    executable = next(
+        (candidate for candidate in executable_candidates if candidate.is_file()),
+        executable_candidates[0],
+    )
+    python = next(
+        (candidate for candidate in python_candidates if candidate.is_file()),
+        python_candidates[0],
+    )
     lock = project / "uv.lock"
     source_package = project / "src" / "upload_search_materials"
     ready = (

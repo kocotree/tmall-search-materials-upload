@@ -1,4 +1,4 @@
-"""Bounded Windows-native folder selection for the localhost UI."""
+"""Bounded Windows and macOS native folder selection for the localhost UI."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -28,13 +29,13 @@ PICKER_MESSAGES = {
         "目录选择窗口未能显示，请手工粘贴路径后继续。"
     ),
     "FOLDER_PICKER_GUI_UNAVAILABLE": (
-        "当前运行环境不能显示原生窗口，请手工粘贴本机或 UNC 路径。"
+        "当前运行环境不能显示原生窗口，请手工粘贴本机可访问的完整路径。"
     ),
     "FOLDER_PICKER_UNSUPPORTED": (
-        "当前系统不支持 Windows 原生目录窗口，请手工粘贴路径。"
+        "当前系统不支持原生目录窗口，请手工粘贴路径。"
     ),
     "FOLDER_PICKER_START_FAILED": (
-        "无法启动 Windows 目录选择助手，请手工粘贴路径。"
+        "无法启动系统目录选择助手，请手工粘贴路径。"
     ),
     "FOLDER_PICKER_PROTOCOL_ERROR": (
         "目录选择助手返回无效响应，请重试或手工粘贴路径。"
@@ -87,6 +88,69 @@ def _read_result(path: Path) -> dict[str, Any]:
     return value
 
 
+def _choose_macos_directory(
+    initial_path: str | None,
+    *,
+    timeout_seconds: float,
+    runner: Callable[..., subprocess.CompletedProcess],
+    osascript: str | None,
+) -> str | None:
+    executable = osascript or shutil.which("osascript")
+    if not executable:
+        raise FolderPickerError("FOLDER_PICKER_START_FAILED")
+    script = r'''
+on run argv
+    set dialogTitle to item 1 of argv
+    set initialPath to item 2 of argv
+    try
+        if initialPath is not "" then
+            set selectedFolder to choose folder with prompt dialogTitle default location POSIX file initialPath
+        else
+            set selectedFolder to choose folder with prompt dialogTitle
+        end if
+        return POSIX path of selectedFolder
+    on error number -128
+        return "__TMALL_FOLDER_PICKER_CANCELLED__"
+    end try
+end run
+'''.strip()
+    try:
+        completed = runner(
+            [
+                executable,
+                "-e",
+                script,
+                "选择图片源根目录",
+                _validated_initial_path(initial_path),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, timeout_seconds),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FolderPickerError("FOLDER_PICKER_TIMEOUT") from error
+    except OSError as error:
+        raise FolderPickerError(
+            "FOLDER_PICKER_START_FAILED", detail=str(error)
+        ) from error
+    output = str(completed.stdout or "").strip()
+    if output == "__TMALL_FOLDER_PICKER_CANCELLED__":
+        return None
+    if int(completed.returncode) != 0:
+        raise FolderPickerError(
+            "FOLDER_PICKER_GUI_UNAVAILABLE",
+            detail=str(completed.stderr or "").strip(),
+        )
+    diagnostic = diagnose_image_source(
+        {"label": "selected", "path": output}, timeout_seconds=1.0
+    )
+    if not output or not diagnostic["available"]:
+        raise FolderPickerError("FOLDER_PICKER_INVALID_RESULT")
+    return output
+
+
 def choose_directory(
     initial_path: str | None = None,
     *,
@@ -95,16 +159,25 @@ def choose_directory(
     platform: str | None = None,
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
     powershell: str | None = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    osascript: str | None = None,
 ) -> str | None:
-    """Open one owned Windows native dialog and return an absolute directory."""
+    """Open one native dialog and return an accessible absolute directory."""
 
-    selected_platform = platform or os.name
-    if selected_platform != "nt":
+    selected_platform = platform or ("nt" if os.name == "nt" else sys.platform)
+    if selected_platform not in {"nt", "darwin", "macos"}:
         raise FolderPickerError("FOLDER_PICKER_UNSUPPORTED")
     if not _PICKER_LOCK.acquire(blocking=False):
         raise FolderPickerError("FOLDER_PICKER_BUSY")
     process: subprocess.Popen | None = None
     try:
+        if selected_platform in {"darwin", "macos"}:
+            return _choose_macos_directory(
+                initial_path,
+                timeout_seconds=timeout_seconds,
+                runner=runner,
+                osascript=osascript,
+            )
         executable = powershell or shutil.which("powershell.exe")
         script = _helper_script()
         if not executable or not script.is_file():

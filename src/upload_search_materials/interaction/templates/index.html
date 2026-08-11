@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v=static_asset_version) }}">
 </head>
 <body>
+  <a class="skip-link" href="#main-workspace">跳到当前步骤</a>
   <div class="app-shell" data-component="AppShell" data-session-id="{{ session_id }}" data-runs-root="{{ runs_root }}">
     <aside class="stage-rail" data-component="StageRail" aria-label="任务阶段">
       <div class="brand-block">
@@ -15,12 +16,12 @@
           <img src="{{ url_for('static', filename='kocotree-logo.png', v=static_asset_version) }}" alt="KK树公司">
         </span>
         <div>
-          <p class="eyebrow">MATERIAL OPS</p>
+          <p class="eyebrow">天猫搜推素材</p>
           <p class="brand-name">素材上新工作台</p>
         </div>
       </div>
 
-      <div class="rail-meta">
+      <div class="rail-meta technical-only" aria-hidden="true">
         <span>当前任务</span>
         <strong data-session-label>{{ session_id or "尚未创建" }}</strong>
       </div>
@@ -45,20 +46,20 @@
 
       <div class="rail-footnote">
         <span class="connection-dot" aria-hidden="true"></span>
-        <span>本地持久化 · 无自动发布</span>
+        <span>草稿自动保存 · 发布前再次确认</span>
       </div>
     </aside>
 
-    <main class="workspace">
+    <main class="workspace" id="main-workspace">
       <header class="workspace-header">
         <div>
-          <p class="eyebrow">SCHEMA-DRIVEN WORKFLOW</p>
+          <p class="eyebrow">按页面步骤完成即可</p>
           <h1 data-current-title>{{ stages[0].title }}</h1>
         </div>
         <dl class="header-meta">
           <div><dt>状态</dt><dd><span class="status-badge" data-current-status>编辑中</span></dd></div>
-          <div><dt>任务 ID</dt><dd data-session-label>{{ session_id or "尚未创建" }}</dd></div>
-          <div><dt>Revision</dt><dd data-revision>0</dd></div>
+          <div class="technical-only" aria-hidden="true"><dt>任务 ID</dt><dd data-session-label>{{ session_id or "尚未创建" }}</dd></div>
+          <div class="technical-only" aria-hidden="true"><dt>Revision</dt><dd data-revision>0</dd></div>
         </dl>
       </header>
 
@@ -77,7 +78,7 @@
               <h2>{{ stage.title }}</h2>
               <p>{{ stage.description }}</p>
             </div>
-            <span class="component-pill">{{ stage.component }}</span>
+            <span class="component-pill technical-only" aria-hidden="true">{{ stage.component }}</span>
           </div>
 
           {% if stage.id == "completeness" %}
@@ -142,14 +143,19 @@
           <form class="schema-form" data-stage-form="{{ stage.id }}" novalidate{% if stage.id == "results" %} data-results-recovery hidden{% elif stage.id == "setup" %} hidden{% endif %}>
             {% if stage.id == "setup" %}
             <div class="form-heading">
-              <div><p class="eyebrow">TASK SETUP</p><h3>业务配置</h3></div>
-              <span>只确认本次任务边界</span>
+              <div><p class="eyebrow">第 1 步</p><h3>确认本次任务</h3></div>
+              <span>按下面 3 步完成</span>
             </div>
+            <ol class="operation-steps" aria-label="本页操作步骤">
+              <li><span>1</span><div><strong>确认店铺</strong><p>核对系统识别的店铺名称，并勾选确认。</p></div></li>
+              <li><span>2</span><div><strong>选择图片文件夹</strong><p>添加本次要检索的业务文件夹，名称保持清晰且不重复。</p></div></li>
+              <li><span>3</span><div><strong>提交处理</strong><p>确认页面没有红色提示后，点击底部“提交给 Agent”。</p></div></li>
+            </ol>
             <div class="setup-business-grid">
               <div class="field" data-field="store">
                 <label for="setup-store">目标店铺<span class="required" aria-label="必填">*</span></label>
-                <input id="setup-store" name="store" type="text" required aria-describedby="setup-store-error" placeholder="等待 Agent 从已登录页面识别">
-                <p class="help-text">Agent 读取页面可见店铺名后，用户在下方确认。</p>
+                <input id="setup-store" name="store" type="text" required aria-describedby="setup-store-error" placeholder="系统识别后会自动显示">
+                <p class="help-text">请核对这里显示的是本次要操作的店铺。</p>
                 <p class="field-error" id="setup-store-error" data-field-error="store" aria-live="polite"></p>
               </div>
               <div class="field field-wide" data-field="store_confirmed">
@@ -163,13 +169,13 @@
 
             <section class="setup-auto-section" aria-labelledby="setup-auto-title">
               <div class="form-heading compact-heading">
-                <div><p class="eyebrow">AUTOMATIC INPUTS</p><h3 id="setup-auto-title">自动准备项</h3></div>
-                <span>不需要手填路径</span>
+                <div><p class="eyebrow">系统自动准备</p><h3 id="setup-auto-title">任务所需内容</h3></div>
+                <span>这些内容无需手动配置</span>
               </div>
               <div class="setup-status-grid">
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.products_available else 'false' }}">
                   <span>商品表</span><strong>{{ "已找到" if setup_inputs.products_available else "未找到" }}</strong>
-                  <code>{{ setup_inputs.products_csv }}</code>
+                  <p>系统已自动准备，无需操作。</p>
                   <input name="products_csv" type="hidden" value="{{ setup_inputs.products_csv }}" aria-describedby="setup-products_csv-error">
                   {% set quality = setup_inputs.input_quality %}
                   <p data-input-quality-summary>
@@ -181,13 +187,13 @@
                 </article>
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.rules_available else 'false' }}">
                   <span>规则表</span><strong>{{ "已找到" if setup_inputs.rules_available else "未找到" }}</strong>
-                  <code>{{ setup_inputs.rules_csv }}</code>
+                  <p>系统已自动准备，无需操作。</p>
                   <input name="rules_csv" type="hidden" value="{{ setup_inputs.rules_csv }}" aria-describedby="setup-rules_csv-error">
                   <p class="field-error" id="setup-rules_csv-error" data-field-error="rules_csv" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card" data-ready="pending">
                   <span>搜推素材</span><strong>全量自动采集</strong>
-                  <p>选择“商品分类 → 搜推高价值”，遍历全部分页并写入当前任务目录。</p>
+                  <p>提交后由系统自动采集，无需操作。</p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide collection-runtime-config" data-component="CollectionRuntimeConfig" data-ready="pending" hidden aria-hidden="true">
                   <span>采集运行环境</span><strong data-collection-runtime-summary>正在检测</strong>
@@ -211,51 +217,91 @@
                 </article>
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.folder_index_available else 'pending' }}">
                   <span>共享文件夹索引</span><strong>{{ "可复用" if setup_inputs.folder_index_available else "首次任务待建立" }}</strong>
-                  <code>{{ setup_inputs.folder_index_root }}</code>
+                  <p>系统会自动建立或复用，无需操作。</p>
                   <input name="folder_index_root" type="hidden" value="{{ setup_inputs.folder_index_root }}" aria-describedby="setup-folder_index_root-error">
-                  <p>每台电脑维护一份；任务目录只保存当前商品的候选快照。</p>
+                  <p>只会读取本次任务需要的候选内容。</p>
                   <p class="field-error" id="setup-folder_index_root-error" data-field-error="folder_index_root" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
-                  <span>图片源配置</span><strong data-image-source-summary>{% if image_sources %}上次保存的 {{ image_sources|length }} 个（仅预填）{% else %}本次尚未配置{% endif %}</strong>
-                  <p>这里显示的是本机历史预填项，不是本次任务已经确认的图片源。可以删除、替换或新增；提交时才检测页面中的最终路径。</p>
-                  <p>可直接粘贴本机能够打开的文件夹路径，也可以点击“选择文件夹”。本地磁盘、当前用户已连接的网络盘和 UNC 路径都支持；不要求用户手工转换为 UNC。</p>
-                  <p>本机配置文件：<code>{{ setup_inputs.image_config_path }}</code></p>
-                  <div class="image-source-list" data-image-source-list>
-                    {% for source in image_sources %}
-                    <div class="image-source-row" data-image-source-row data-source-id="{{ source.source_id|default('') }}" data-canonical-unc="{{ source.canonical_unc|default('') }}" data-last-verified-sid="{{ source.last_verified_sid|default('') }}" data-last-verified-at="{{ source.last_verified_at|default('') }}" data-last-status="{{ source.last_status|default('') }}">
-                      <label>来源名称<input name="image_source_labels" type="text" value="{{ source.label }}" data-value-kind="list" maxlength="100" required aria-describedby="setup-image_source_labels-error"></label>
-                      <label>根路径<input name="image_roots" type="text" value="{{ source.path }}" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
-                      <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
-                      <span class="image-source-state" data-image-source-state>尚未检测</span>
-                      <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>采用 UNC</button>
-                      <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
+                  <span>图片文件夹</span><strong data-image-source-summary>{% if image_sources %}已预填 {{ image_sources|length }} 个常用来源{% else %}本次尚未选择{% endif %}</strong>
+                  <p class="section-instruction">按顺序操作：选择文件夹 → 确认来源名称 → 根据需要保存为常用图片源。提交时系统会自动检测。</p>
+                  <p>可以直接粘贴本机能打开的文件夹路径，也可以点击“选择文件夹”。</p>
+                  {% if nas_sources %}
+                  <section class="source-section source-section-shared" aria-labelledby="shared-source-heading">
+                    <div class="source-section-heading">
+                      <div>
+                        <span class="source-section-kicker">共享入口</span>
+                        <h4 id="shared-source-heading">公司共享盘</h4>
+                      </div>
+                      <p>在这里连接并浏览公司共享目录；选中的目录会加入下方“本次图片源”。</p>
                     </div>
-                    {% else %}
-                    <div class="image-source-row" data-image-source-row>
-                      <label>来源名称<input name="image_source_labels" type="text" value="图片源 1" data-value-kind="list" maxlength="100" required aria-describedby="setup-image_source_labels-error"></label>
-                      <label>根路径<input name="image_roots" type="text" value="" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
-                      <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
-                      <span class="image-source-state" data-image-source-state>待配置</span>
-                      <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>采用 UNC</button>
-                      <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
+                    <div class="nas-source-catalog" data-nas-source-catalog>
+                      {% for source in nas_sources %}
+                      <div class="nas-source-row" data-nas-source-row data-source-id="{{ source.source_id }}" data-label="{{ source.label }}">
+                        <div class="nas-source-identity"><strong>{{ source.label }}</strong><code class="technical-only" aria-hidden="true">{{ source.host }}/{{ source.share }}</code></div>
+                        <span class="image-source-state" data-nas-source-state>尚未检测</span>
+                        <div class="nas-source-actions">
+                          <button class="secondary-button" type="button" data-check-nas-source>刷新状态</button>
+                          <button class="secondary-button" type="button" data-connect-nas-source>连接共享盘</button>
+                          <button class="secondary-button" type="button" data-use-nas-source hidden>添加整个共享盘</button>
+                          <button class="secondary-button" type="button" data-browse-nas-source hidden>选择业务目录</button>
+                        </div>
+                        <div class="nas-directory-list" data-nas-directory-list></div>
+                      </div>
+                      {% endfor %}
                     </div>
-                    {% endfor %}
-                  </div>
-                  <div class="image-source-actions">
-                    <button class="secondary-button" type="button" data-add-image-source>添加图片源</button>
-                    <button class="secondary-button" type="button" data-check-image-sources hidden aria-hidden="true">检测路径</button>
-                    <button class="primary-button" type="button" data-save-image-sources>保存为本机配置</button>
-                  </div>
-                  <p class="image-source-feedback" data-image-source-feedback aria-live="polite"></p>
+                  </section>
+                  {% endif %}
+                  <section class="source-section source-section-selected" aria-labelledby="selected-source-heading">
+                    <div class="source-section-heading">
+                      <div>
+                        <span class="source-section-kicker">本次使用</span>
+                        <h4 id="selected-source-heading">本次图片源</h4>
+                      </div>
+                      <p>这里列出本次任务实际保存和检测的图片文件夹，也可以直接添加本机目录。</p>
+                    </div>
+                    <div class="image-source-list" data-image-source-list>
+                      {% for source in image_sources %}
+                      <div class="image-source-row" data-image-source-row data-source-id="{{ source.source_id|default('') }}" data-canonical-unc="{{ source.canonical_unc|default('') }}" data-last-verified-sid="{{ source.last_verified_sid|default('') }}" data-last-verified-at="{{ source.last_verified_at|default('') }}" data-last-status="{{ source.last_status|default('') }}">
+                        <label>来源名称<input name="image_source_labels" type="text" value="{{ source.label }}" data-value-kind="list" maxlength="100" required aria-describedby="setup-image_source_labels-error"></label>
+                        <label>图片文件夹<input name="image_roots" type="text" value="{{ source.path }}" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
+                        <div class="image-source-row-actions">
+                          <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
+                          <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>使用推荐路径</button>
+                          <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
+                        </div>
+                        <span class="image-source-state" data-image-source-state>尚未检测</span>
+                      </div>
+                      {% else %}
+                      <div class="image-source-row" data-image-source-row>
+                        <label>来源名称<input name="image_source_labels" type="text" value="图片源 1" data-value-kind="list" maxlength="100" required aria-describedby="setup-image_source_labels-error"></label>
+                        <label>图片文件夹<input name="image_roots" type="text" value="" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
+                        <div class="image-source-row-actions">
+                          <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
+                          <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>使用推荐路径</button>
+                          <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
+                        </div>
+                        <span class="image-source-state" data-image-source-state>待配置</span>
+                      </div>
+                      {% endfor %}
+                    </div>
+                    <div class="image-source-actions">
+                      <button class="secondary-button" type="button" data-add-image-source>添加另一个图片源</button>
+                      <button class="secondary-button" type="button" data-check-image-sources hidden aria-hidden="true">检测路径</button>
+                      <button class="secondary-button" type="button" data-save-image-sources>保存为常用图片源</button>
+                    </div>
+                    <p class="image-source-feedback" data-image-source-feedback aria-live="polite"></p>
+                  </section>
                   <template data-image-source-template>
                     <div class="image-source-row" data-image-source-row>
                       <label>来源名称<input name="image_source_labels" type="text" value="" data-value-kind="list" maxlength="100" required aria-describedby="setup-image_source_labels-error"></label>
-                      <label>根路径<input name="image_roots" type="text" value="" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
-                      <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
+                      <label>图片文件夹<input name="image_roots" type="text" value="" data-value-kind="list" maxlength="1000" required aria-describedby="setup-image_roots-error"></label>
+                      <div class="image-source-row-actions">
+                        <button class="secondary-button image-source-pick" type="button" data-pick-image-source>选择文件夹</button>
+                        <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>使用推荐路径</button>
+                        <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
+                      </div>
                       <span class="image-source-state" data-image-source-state>待配置</span>
-                      <button class="secondary-button image-source-portable" type="button" data-use-portable-path hidden>采用 UNC</button>
-                      <button class="secondary-button image-source-remove" type="button" data-remove-image-source>删除</button>
                     </div>
                   </template>
                   <p class="field-error" id="setup-image_source_labels-error" data-field-error="image_source_labels" aria-live="polite"></p>
@@ -263,8 +309,8 @@
                 </article>
                 <article class="setup-status-card">
                   <span>运行目录</span><strong>自动隔离</strong>
-                  <code data-setup-task-directory>{{ task_directory }}</code>
-                  <p>新任务按时间戳创建，页面不允许修改根目录。</p>
+                  <code class="technical-only" aria-hidden="true" data-setup-task-directory>{{ task_directory }}</code>
+                  <p>系统会自动保存本次任务记录，无需操作。</p>
                 </article>
                 <article class="setup-status-card">
                   <span>视频</span><strong>本轮延期</strong>
@@ -375,14 +421,14 @@
       </div>
 
       <section class="offline-panel" data-offline-panel aria-live="polite">
-        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong data-connection-label>Agent 未连接</strong></div>
-        <p>网页只保存交接，不会假装启动 Agent。需要时可复制恢复指令并粘贴回原 Codex 任务。</p>
+        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong data-connection-label>Codex 暂未连接</strong></div>
+        <p>如果页面提示需要继续处理，请复制下方说明并粘贴回发起任务的 Codex 对话。页面中的草稿不会丢失。</p>
         <dl>
-          <div><dt>当前任务目录</dt><dd data-task-directory>{{ runs_root }}{{ '\\' if session_id else '' }}{{ session_id }}</dd></div>
+          <div class="technical-only" aria-hidden="true"><dt>当前任务目录</dt><dd data-task-directory>{{ runs_root }}{{ '\\' if session_id else '' }}{{ session_id }}</dd></div>
           <div><dt>当前阶段</dt><dd data-current-stage-label>{{ stages[0].title }}</dd></div>
           <div><dt>最近一次提交时间</dt><dd data-last-submitted>尚未提交</dd></div>
         </dl>
-        <button type="button" class="secondary-button" data-copy-recovery disabled>复制恢复指令</button>
+        <button type="button" class="secondary-button" data-copy-recovery disabled>复制继续处理说明</button>
       </section>
 
       <div class="handoff-spacer" aria-hidden="true"></div>

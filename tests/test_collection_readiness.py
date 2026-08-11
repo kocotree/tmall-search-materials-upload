@@ -5,6 +5,7 @@ import yaml
 from upload_search_materials.collection_readiness import (
     build_collection_readiness,
     create_selector_candidate,
+    project_environment_status,
     promote_selector_candidate,
     validate_selector_candidate,
 )
@@ -12,6 +13,20 @@ from upload_search_materials.browser.material_page import (
     prepare_high_value_validation_page,
 )
 from upload_search_materials.runtime_config import load_runtime_config
+
+
+def test_environment_status_accepts_posix_virtual_environment(tmp_path):
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").touch()
+    (tmp_path / ".venv" / "bin" / "tmall-materials").touch()
+    (tmp_path / "uv.lock").touch()
+    runtime = load_runtime_config(environ={}, start=tmp_path)
+
+    status = project_environment_status(runtime)
+
+    assert status["ready"] is True
+    assert status["reason_code"] == "READY"
+    assert status["evidence"]["python"].endswith("/.venv/bin/python")
 
 
 class Locator:

@@ -101,6 +101,10 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 分页扫描 checkpoint 保存 `schema_version`、`status`、`scan_mode`、`session_id`、`revision`、`input_sha256`、`selector_profile_sha256`、`target_store`、`attempt_id`、`last_completed_page`、`row_count`、`output_sha256`、`pagination_evidence_sha256` 和 `collected_at`。`pagination-evidence.json` 是版本化 attempt 证据，包含绑定后的 origin、transition、terminal 或 failure 事件；每个事件只保存真实页码、末页、下一页状态、有序商品 ID 哈希、选择器身份和时间，不保存凭据或完整 DOM。每完成一页必须先验证当前 claim，再原子更新 CSV，校验商品 ID 唯一，最后更新 checkpoint；中断后不得把未完成页写成已完成。生产阶段不传 `--max-pages`，必须遍历“搜推高价值”的全部分页；该参数只保留给显式 CLI 诊断测试，测试结果不得作为完整的第二阶段候选集。
 
+采集中出现滑动验证、验证码或风控时，`human-checkpoint.json` 使用同一 session、revision、input SHA、selector SHA、target store 和 attempt 身份，保存 `status`、`reason_code`、`location`、`current_page`、`last_completed_page`、`row_count`、`events[]` 与时间。`events[]` 只记录 `detected/resolved`、检查位置和页码，不保存验证内容、Cookie 或 DOM。Worker 在 `waiting_human_check` 阶段保持心跳；验证元素消失后更新为 `resolved` 并继续同一 attempt。
+
+只读随机动作按随机 1–2 页间隔运行，证据写入 `store-page-evidence.json.safe_actions`，至少包含页码、`view_filled_slot/open_empty_image_text`、商品 ID、坑位序号、状态和 `read_only=true`。动作使用同一浏览器 context 的临时标签页，关闭临时页即退出；不得把动作产生的页面状态写入商品采集 CSV。
+
 ## Collection readiness and managed attempt
 
 `collection_readiness` 使用 `schema_version=1`、整体 `ready/status/checked_at` 和独立

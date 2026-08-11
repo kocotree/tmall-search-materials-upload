@@ -97,7 +97,7 @@
 | `REMOTE_SLOT_CONFLICT` | 批准后的目标坑位已发生变化 | 任务退回审核 |
 | `SELECTOR_INVALID` | 必需页面元素不存在或不可见 | 商品资格不变；受影响坑位进入 `needs_manual_review`，停止受影响页面且不写入零值 |
 | `AUTH_EXPIRED` | 登录失效 | 暂停整批，用户重新登录 |
-| `HUMAN_CHECK` | 验证码、扫码、短信或风控 | 暂停整批，等待用户处理 |
+| `HUMAN_CHECK` | 验证码、扫码、短信或风控 | 保存当前 checkpoint 并暂停页面动作；用户验证通过后自动继续同一 attempt |
 | `UPLOAD_REJECTED` | 页面拒绝文件或字段 | 记录原始提示，转人工审核 |
 | `PUBLISH_UNCERTAIN` | 点击发布后没有可信结果 | 禁止重发，先远端回查 |
 | `QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS` | 本地上传后短唯一名称没有恰好命中一张素材卡 | 停在发布前；检查素材选择器，不点击发布 |
@@ -121,7 +121,7 @@
 | `SELECTOR_PLACEHOLDER_REJECTED` | profile 仍包含占位选择器 | 基于当前 DOM 修复本机 profile |
 | `CDP_UNAVAILABLE` | 用户控制的 CDP Chrome 未连接 | 启动专用 profile，并打开官方素材中心 |
 | `LOGIN_INTERACTION_REQUIRED` | 当前页面还不能验证登录店铺 | 写入统一 Agent 诊断，Codex 打开或置前 CDP Chrome；用户登录后自动重试同一 session |
-| `HUMAN_CHECK` | 出现扫码、短信、验证码或风控 | 保留业务状态并写入统一 Agent 诊断；Codex 只引导用户完成无法代办的原生操作 |
+| `HUMAN_CHECK` | 出现扫码、短信、验证码或风控 | 写入 attempt 绑定的 human checkpoint 并保持 Worker 心跳；提示用户在 CDP Chrome 完成验证，验证消失后自动继续，不自动操作滑块 |
 | `STORE_IDENTITY_MISMATCH` | 当前店铺与阶段一目标不一致 | 阻断整批，不写采集行 |
 | `PROCESSING_CLAIM_ACTIVE` | 同一阶段存在未过期处理租约 | 等待当前 Agent 或租约到期 |
 | `PROCESSING_CLAIM_STALE` | 旧 Agent/旧 claim 尝试回写 | 拒绝旧写入，使用当前 claim 恢复 |

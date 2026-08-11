@@ -9,6 +9,7 @@
 - 阶段一页面只显示店铺、图片源等业务配置。工作台自动启动或恢复 CDP Chrome；登录尚未完成时用独立等待页遮住业务表单，用户在千牛原生窗口登录成功后自动继续。不得显示 `collection_readiness.checks`、CDP、DOM、SHA、选择器路径或“验证当前页面”等技术操作。
 - setup handoff 提交后由处理器自动检查生产 profile、当前 DOM、店铺、素材中心和路径。失败统一写入 Agent-only `agent-diagnostics/current.json`；Codex 通过 `diagnose-session` 获取原因、证据和幂等重试入口。“创建本机候选”仍只生成 Git 忽略的 `production=false` profile，示例 profile 永远不能直接提升。
 - setup 处理中显示 `collection_status` 的当前 attempt/worker；phase、heartbeat、页数、持久化行数、checkpoint 和日志优先于旧 `result.json`。旧结果在 history 中显示时间与 reason code，并明确为 superseded。
+- Worker phase 为 `waiting_human_check` 时，页面必须明确显示最后完整页和“请在 CDP Chrome 完成滑动验证；验证通过后自动继续”，不得显示为 Worker 死亡、普通 selector 错误或要求用户重提 setup。只读随机动作显示为短暂的 `random_action`，不得暴露为上传或发布。
 - 恢复按钮仅在租约已过期或拥有关系和进程死亡均已证明时可用。归属不确定时显示等待租约，页面不得提供强制结束 PID。
 - 项目原先没有 `.codex/skills/upload-search-materials/`，fresh repository context 因而可能无法发现 canonical Skill，并可能直接询问店铺名或 NAS 路径。
 - 运行目录、端口、PID、日志和浏览器打开结果原先没有统一的机器可读服务状态。

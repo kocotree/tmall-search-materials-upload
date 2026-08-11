@@ -21,13 +21,20 @@ class Locator:
         self.selector = selector
 
     def count(self):
-        return 1 if self.selector == "[data-store-name]" and self.page.store else 0
+        if self.selector == "[data-store-name]" and self.page.store:
+            return 1
+        if self.selector == "[data-human-check]":
+            return int(self.page.human_checks_remaining > 0)
+        return 0
 
     def inner_text(self):
         return self.page.store
 
     def is_visible(self):
-        return False
+        return (
+            self.selector == "[data-human-check]"
+            and self.page.human_checks_remaining > 0
+        )
 
 
 class Page:
@@ -38,9 +45,15 @@ class Page:
 
     def __init__(self, store="测试店铺"):
         self.store = store
+        self.human_checks_remaining = 0
 
     def locator(self, selector):
         return Locator(self, selector)
+
+    def wait_for_timeout(self, _milliseconds):
+        self.human_checks_remaining = max(
+            0, self.human_checks_remaining - 1
+        )
 
 
 def write_product_table(path: Path, rows: list[dict[str, str]]) -> None:
@@ -236,6 +249,81 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     assert set(page_evidence["field_results"].values()) == {
         "observed_during_collection"
     }
+
+
+def test_setup_processor_checkpoints_human_check_and_auto_resumes(
+    tmp_path, monkeypatch
+):
+    _, session, _, runtime, selectors = prepare_session(
+        tmp_path, [product_row("886506466908")]
+    )
+    page = Page()
+    phases = []
+
+    def scan(_page, _selector_values, **kwargs):
+        rows = [collected_row()]
+        identity = "b" * 64
+        kwargs["on_pagination_event"](
+            {
+                "event_type": "origin",
+                "reason_code": "PAGINATION_ORIGIN_VERIFIED",
+                "current_page": 1,
+                "terminal_page": 1,
+                "next_enabled": False,
+                "ordered_product_id_hash": identity,
+                "product_count": 1,
+            }
+        )
+        kwargs["on_page"](1, rows)
+        page.human_checks_remaining = 2
+        kwargs["human_check_waiter"](1, "after_checkpoint")
+        kwargs["on_pagination_event"](
+            {
+                "event_type": "terminal",
+                "reason_code": "PAGINATION_TERMINAL_VERIFIED",
+                "current_page": 1,
+                "terminal_page": 1,
+                "next_enabled": False,
+                "ordered_product_id_hash": identity,
+                "product_count": 1,
+            }
+        )
+        return rows
+
+    monkeypatch.setattr(
+        "upload_search_materials.supplement_collection."
+        "scan_recommended_material_status",
+        scan,
+    )
+    result = process_setup_collection(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        page=page,
+        progress_callback=lambda phase, **_kwargs: phases.append(phase),
+    )
+
+    attempt_id = result["result"]["attempt_id"]
+    checkpoint = json.loads(
+        (
+            session.path
+            / "collected"
+            / "promotion"
+            / "attempts"
+            / f"a-{attempt_id[:12]}"
+            / "human-checkpoint.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert result["status"] == "completed"
+    assert checkpoint["status"] == "resolved"
+    assert checkpoint["last_completed_page"] == 1
+    assert [event["event_type"] for event in checkpoint["events"]] == [
+        "detected",
+        "resolved",
+    ]
+    assert "waiting_human_check" in phases
+    assert "collecting_page" in phases
 
 
 def test_setup_processor_pauses_for_login_and_resumes_same_session(

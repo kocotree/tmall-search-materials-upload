@@ -24,6 +24,8 @@ COLLECTION_PHASES = frozenset(
         "selecting_high_value",
         "normalizing_pagination",
         "collecting_page",
+        "random_action",
+        "waiting_human_check",
         "verifying_terminal",
         "writing_checkpoint",
         "building_completeness",

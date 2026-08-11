@@ -249,3 +249,127 @@ def test_login_gate_detects_authenticated_store_without_target_store(
     assert result["ready"] is True
     assert result["login_state"] == "authenticated"
     assert result["observed_store"] == "测试店铺"
+
+
+def test_login_gate_detects_authenticated_store_inside_child_frame(
+    monkeypatch, tmp_path
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def nth(self, index):
+            return Locator([self.values[index]])
+
+        def is_visible(self):
+            return bool(self.values and self.values[0][0])
+
+        def inner_text(self):
+            return self.values[0][1]
+
+    class Frame:
+        def locator(self, selector):
+            if "captcha" in selector:
+                return Locator([])
+            return Locator([(True, "iframe 测试店铺")])
+
+    class Page:
+        url = "https://example.test/material-center"
+        frames = [Frame()]
+
+        def bring_to_front(self):
+            return None
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, _selector):
+            return Locator([])
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["ready"] is True
+    assert result["observed_store"] == "iframe 测试店铺"
+
+
+def test_login_gate_blocks_visible_textless_human_check_inside_frame(
+    monkeypatch, tmp_path
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def __init__(self, visible):
+            self.visible = visible
+
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return self
+
+        def is_visible(self):
+            return self.visible
+
+    class Frame:
+        def locator(self, selector):
+            return Locator("captcha" in selector)
+
+    class Page:
+        url = "https://example.test/material-center"
+        frames = [Frame()]
+
+        def bring_to_front(self):
+            return None
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, _selector):
+            return Locator(False)
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["ready"] is False
+    assert result["login_state"] == "human_check"
+    assert result["reason_code"] == "HUMAN_CHECK"

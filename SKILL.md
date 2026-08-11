@@ -134,6 +134,12 @@ checkpoint 与当前 revision、input SHA-256、选择器 SHA-256、店铺和 `a
 匹配私有 ownership token、session/attempt 和进程创建身份时才可判定归属；无法证明
 时不得结束或抢占进程。
 
+每次完整页 checkpoint 成功后，采集器按随机 1–2 页间隔执行一次只读随机动作：在
+同一登录 context 的临时标签页中，从本页商品随机选择一个可用目标，查看一个已填坑位
+后退出，或进入一个空坑位的“发图文”表单后直接退出。临时页必须在 `finally` 中关闭，
+不得填写字段、上传素材、点击确认或发布，也不得改变主采集页的筛选和分页状态。没有
+可用商品、坑位或页面入口时记录安全跳过并继续采集，不能把随机动作失败解释为业务空值。
+
 每次新的“搜推高价值”全量采集在复用素材中心标签页后，必须先刷新一次页面并等待
 列表恢复稳定，以清除上一轮商品 ID 等 SPA 筛选状态。随后必须从“搜推高价值 N”
 选择框读取页面声明的总商品数；只有无 `--max-pages` 的完整采集得到的唯一商品数与
@@ -163,9 +169,11 @@ checkpoint；失败 attempt 保持为不可变历史。
 只用于用户自行登录、扫码、短信、验证码和系统自动化。进入阶段一业务配置前，系统
 自动打开官方素材中心并确认页面已显示登录店铺。处理过程中出现
 `LOGIN_INTERACTION_REQUIRED` 或 `HUMAN_CHECK` 时，处理器保持原 session、revision、
-handoff 与 processing claim，写入统一 Agent 诊断；Codex 自动打开或置前登录窗口，
-只提示用户完成无法代办的原生操作，随后对同一 session 重跑 `process-setup`。不得索取
-或保存登录凭据，前端不得要求用户手动验证页面或重新填写业务数据。
+handoff 与 processing claim。分页采集在每页读取前、完整页 checkpoint 后、随机动作后
+和翻页前检查人机验证；命中时写入与当前 attempt 绑定的 `human-checkpoint.json`，Worker
+持续心跳，页面提示用户在 CDP Chrome 完成验证，验证元素消失后自动从同一 Worker 和
+最后完整页继续。不得自动操作或绕过滑块，也不得索取或保存登录凭据；仅当 Worker 已
+确认退出时才使用原有恢复入口，不要求用户重新填写业务数据。
 
 日常命令直接使用项目 `.venv\Scripts\tmall-materials.exe`；若 console-script 尚未
 生成但项目 Python 和源码已准备，则使用 `.venv\Scripts\python.exe -m
@@ -249,7 +257,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 
 恢复已有 `session_id` 时，页面必须先读取 `session.json` 状态并直接进入有效的 `current_stage`，同时一次性显示全部阶段的真实状态。只打开、刷新、水合图片决定或构建默认坑位不得标记 dirty、自动保存或增加 revision。草稿保存进行中收到“提交给 Agent”时必须明确显示已排队，并在保存成功后使用最新 revision 继续提交；失败或阶段切换时必须明确暂停或取消，禁止静默丢弃点击。查看已完成阶段时显示锁定原因和“进入当前阶段”，不得重新启用写入。
 
-图片源行提供“选择文件夹”，仅由用户点击后通过已验证桌面身份中的单实例 Windows STA 助手打开本机原生目录窗口并回填完整路径。助手使用 request ID、ownership token、PID 身份和私有结果通道，区分启动、窗口可见、选择、取消及选择超时；窗口无法证明可见时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper，保留原输入并聚焦手工输入。仍保留手工输入用于 UNC、远程或无界面环境。取消、窗口不可用、忙碌、超时或返回无效路径时必须保留原输入并显示具体恢复动作。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
+图片源行提供“选择文件夹”，仅由用户点击后通过已验证桌面身份打开本机原生目录窗口并回填完整路径。Windows 使用单实例 STA 助手及 request ID、ownership token、PID 身份和私有结果通道；macOS 使用单实例、限时的系统 AppleScript `choose folder` 对话框。两端都必须区分选择、取消、启动失败、GUI 不可用、超时和无效返回，并保留原输入及手工填写兜底。Windows 窗口无法证明可见时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper。手工输入继续用于 UNC、远程或无界面环境。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
 
 页面无有效等待租约时显示“在当前聊天输入已提交”。同一聊天已有唯一 session 绑定时，
 该短语只触发幂等状态解析；新聊天或绑定不明确时仍要求粘贴页面的完整恢复指令。
@@ -267,6 +275,7 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 - 未显式配置商品表或规则表时，从程序包的 `src/upload_search_materials/docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
 - 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符、UNC 或 macOS 挂载点只保存到 Git 忽略的每机 `config/local-paths.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台电脑可把同一 source ID 绑定到不同本机路径，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:` 或相同 `/Volumes` 名称。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。必须至少配置 1 个名称与路径均非空且不重复的来源。
 - NAS 原图只能由素材执行器读取。页面通过 `gallery-job.json` 排队并自动请求桌面启动；执行器必须在能访问本机挂载的用户会话中运行，校验 source ID 和相对路径，拒绝绝对路径、盘符、`..` 与目录逃逸，只把任务所需预览和校验元数据写回会话目录。每个按钮任务启动一个一次性进程，任务结束即退出，不注册系统服务。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；挂载不可用返回 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并保留用户决定。手工 PowerShell/shell 启动脚本只用于开发诊断，不得作为日常用户步骤。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限。
+- 公司 NAS 共享定义从 `config/nas-sources.yaml` 读取。状态检测必须只读；未挂载时只有用户在配置页明确点击“连接 NAS”，才可打开 Finder/Explorer 的系统 SMB 连接界面并等待用户自行认证。该辅助动作不等于静默挂载，不得携带、读取或保存凭据。当前共享、允许子目录和诊断命令见 [nas-sources.md](references/nas-sources.md)。
 - `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用项目根目录下的 `runs/`。所有任务继续按时间戳目录隔离。
 - 共享文件夹索引路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用本机配置的 `folder_index_root`，默认使用项目根目录下 Git 忽略的 `.local-cache/folder-index/`。它是机器级缓存，不属于任何时间戳任务；任务只保存候选快照。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
+import subprocess
+import sys
 from urllib.request import ProxyHandler
 
 import pytest
@@ -70,6 +72,38 @@ def test_managed_service_starts_reuses_reports_and_stops(tmp_path):
     assert stopped["stopped"] is True
     assert Path(stopped["stdout_log"]).is_file()
     assert Path(stopped["stderr_log"]).is_file()
+
+
+@pytest.mark.skipif(
+    service_module.os.name == "nt",
+    reason="POSIX launcher detachment regression",
+)
+def test_managed_service_survives_launcher_process_exit(tmp_path):
+    port = _free_port()
+    project = Path(__file__).parents[1]
+    script = (
+        "import json, sys; "
+        "from pathlib import Path; "
+        "from upload_search_materials.interaction.service import start_service; "
+        "print(json.dumps(start_service(Path(sys.argv[1]), "
+        "port_start=int(sys.argv[2]), port_end=int(sys.argv[2]), "
+        "startup_timeout=10)))"
+    )
+    launched = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), str(port)],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    started = json.loads(launched.stdout.strip().splitlines()[-1])
+    try:
+        status = status_service(tmp_path, started["session_id"])
+        assert status["status"] == "healthy"
+        assert status["pid"] == started["pid"]
+    finally:
+        stop_service(tmp_path, started["session_id"])
 
 
 def test_unknown_occupied_port_is_skipped(tmp_path):
@@ -195,6 +229,7 @@ def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
     tmp_path, monkeypatch
 ):
     commands = []
+    popen_kwargs = []
 
     class ExitedProcess:
         pid = 12346
@@ -203,8 +238,9 @@ def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
         def poll(self):
             return 17
 
-    def capture(command, **_kwargs):
+    def capture(command, **kwargs):
         commands.append(command)
+        popen_kwargs.append(kwargs)
         return ExitedProcess()
 
     monkeypatch.setattr(
@@ -226,3 +262,9 @@ def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
         )
 
     assert "--ownership-token=-leading-token" in commands[0]
+    assert popen_kwargs[0]["start_new_session"] is (service_module.os.name != "nt")
+    if service_module.os.name != "nt":
+        inherited = popen_kwargs[0]["env"]["TMALL_DESKTOP_LOGIN_SESSION_ID"]
+        assert inherited == str(
+            service_module.current_runtime_identity()["login_session_id"]
+        )

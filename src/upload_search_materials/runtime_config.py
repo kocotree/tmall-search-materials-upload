@@ -16,6 +16,7 @@ from .path_diagnostics import diagnose_image_sources
 PRODUCTS_PATTERN = "天猫商品信息表*产品数据表*数据总表.csv"
 RULES_PATTERN = "天猫商品信息表*每月推品规则*Grid View.csv"
 LOCAL_CONFIG_RELATIVE = Path("config/local-paths.json")
+NAS_SOURCES_RELATIVE = Path("config/nas-sources.yaml")
 LOCAL_SELECTORS_RELATIVE = Path("config/selectors.local.yaml")
 PACKAGE_DOCS_RELATIVE = Path("src/upload_search_materials/docs")
 DEFAULT_CDP_PROFILE_RELATIVE = Path(".local-cache/cdp-profile")
@@ -41,6 +42,7 @@ class RuntimeConfig:
     rules: DiscoveredPath
     image_sources: tuple[dict[str, str], ...]
     runs_root: Path
+    nas_sources_file: Path | None = None
     folder_index_root: Path = Path(".local-cache/folder-index")
     selectors_file: Path | None = None
     cdp_url: str = DEFAULT_CDP_URL
@@ -82,6 +84,16 @@ def load_runtime_config(
         RULES_PATTERN,
     )
     image_sources = _image_sources(document.get("image_sources"), workspace_root)
+    nas_sources_value = env.get("TMALL_NAS_SOURCES_FILE") or document.get(
+        "nas_sources_file"
+    )
+    nas_sources_file = (
+        _resolve_configured_path(nas_sources_value, workspace_root)
+        if nas_sources_value
+        else workspace_root / NAS_SOURCES_RELATIVE
+    )
+    if not nas_sources_file.is_file():
+        nas_sources_file = None
     runs_value = env.get("TMALL_RUNS_ROOT") or document.get("runs_root")
     runs_root = (
         _resolve_configured_path(runs_value, workspace_root)
@@ -138,6 +150,7 @@ def load_runtime_config(
         rules=rules,
         image_sources=image_sources,
         runs_root=runs_root,
+        nas_sources_file=nas_sources_file,
         folder_index_root=folder_index_root,
         selectors_file=selectors_file,
         cdp_url=cdp_url,

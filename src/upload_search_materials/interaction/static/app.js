@@ -164,7 +164,8 @@
   }
 
   function configuredImageSources() {
-    const sources = imageSourceRows().map((row) => {
+    const rows = imageSourceRows();
+    const rawSources = rows.map((row) => {
       const source = {
         label: row.querySelector('[name="image_source_labels"]').value.trim(),
         path: row.querySelector('[name="image_roots"]').value.trim(),
@@ -184,8 +185,19 @@
       }
       return source;
     });
+    const sources = UiState.disambiguateImageSourceLabels(rawSources);
+    let renamedCount = 0;
+    sources.forEach((source, index) => {
+      const input = rows[index].querySelector('[name="image_source_labels"]');
+      if (input.value.trim() === source.label) return;
+      input.value = source.label;
+      renamedCount += 1;
+    });
+    if (renamedCount) {
+      imageSourceConfig.dataset.autoRenamedCount = String(renamedCount);
+    }
     if (!sources.length || sources.some((source) => !source.label || !source.path)) {
-      throw new Error("每个图片源都必须填写来源名称和根路径");
+      throw new Error("每个图片源都必须填写来源名称并选择图片文件夹");
     }
     return sources;
   }
@@ -246,12 +258,15 @@
         row.dataset.lastStatus = diagnostic.last_status || "";
         portable.hidden = !suggestion;
         portable.dataset.path = suggestion;
-        portable.title = suggestion
-          ? `改为跨电脑路径：${suggestion}`
-          : "";
+        portable.title = suggestion ? "使用系统推荐的跨电脑路径" : "";
       });
       const available = payload.image_sources.filter((source) => source.status === "available").length;
-      feedback.textContent = `检测完成：${available} / ${payload.image_sources.length} 个路径可访问。`;
+      const renamedCount = Number(imageSourceConfig.dataset.autoRenamedCount || 0);
+      const renamed = renamedCount
+        ? `已根据业务目录自动区分 ${renamedCount} 个重复来源名称；`
+        : "";
+      feedback.textContent = `${renamed}检测完成：${available} / ${payload.image_sources.length} 个路径可访问。`;
+      imageSourceConfig.dataset.autoRenamedCount = "0";
       return available === payload.image_sources.length;
     } catch (error) {
       feedback.textContent = error.message;
@@ -261,7 +276,7 @@
 
   async function saveImageSources() {
     const feedback = imageSourceConfig.querySelector("[data-image-source-feedback]");
-    feedback.textContent = "正在保存本机配置…";
+    feedback.textContent = "正在保存常用图片源…";
     try {
       const payload = await fetchJson("/api/runtime/image-sources", {
         method: "PUT",
@@ -272,10 +287,118 @@
         row.dataset.sourceId = source.source_id || "";
         row.dataset.canonicalUnc = source.canonical_unc || "";
       });
-      feedback.textContent = `已保存 ${payload.image_sources.length} 个图片源到本机配置。`;
+      const renamedCount = Number(imageSourceConfig.dataset.autoRenamedCount || 0);
+      const renamed = renamedCount
+        ? `已根据业务目录自动区分 ${renamedCount} 个重复来源名称；`
+        : "";
+      feedback.textContent = `${renamed}已保存 ${payload.image_sources.length} 个常用图片源。`;
+      imageSourceConfig.dataset.autoRenamedCount = "0";
       updateImageSourceConfig();
     } catch (error) {
       feedback.textContent = error.message;
+    }
+  }
+
+  function applyNasSourceStatus(source) {
+    const row = [...document.querySelectorAll("[data-nas-source-row]")]
+      .find((item) => item.dataset.sourceId === String(source.source_id || ""));
+    if (!row) return;
+    const status = source.status || source;
+    const state = row.querySelector("[data-nas-source-state]");
+    state.dataset.status = status.state === "ready" ? "available" : "unavailable";
+    state.dataset.reasonCode = status.reason_code || "";
+    state.textContent = status.message || status.reason_code || "状态未知";
+    row.dataset.mountPath = status.mount_path || "";
+    row.dataset.canonicalUnc = source.canonical_unc || "";
+    row.dataset.subpaths = JSON.stringify(source.subpaths || []);
+    row.querySelector("[data-connect-nas-source]").hidden = status.state === "ready";
+    row.querySelector("[data-use-nas-source]").hidden = status.state !== "ready";
+    row.querySelector("[data-browse-nas-source]").hidden = status.state !== "ready";
+  }
+
+  async function refreshNasSources() {
+    const catalog = document.querySelector("[data-nas-source-catalog]");
+    if (!catalog) return;
+    try {
+      const payload = await fetchJson("/api/runtime/nas-sources");
+      (payload.nas_sources || []).forEach(applyNasSourceStatus);
+    } catch (error) {
+      catalog.querySelectorAll("[data-nas-source-state]").forEach((state) => {
+        state.dataset.status = "unavailable";
+        state.textContent = error.userMessage || error.message;
+      });
+    }
+  }
+
+  async function connectNasSource(row) {
+    const state = row.querySelector("[data-nas-source-state]");
+    state.textContent = "正在打开系统 NAS 连接窗口…";
+    try {
+      const payload = await fetchJson(
+        `/api/runtime/nas-sources/${encodeURIComponent(row.dataset.sourceId)}/connect`,
+        { method: "POST", body: "{}" },
+      );
+      state.textContent = payload.next_action || payload.message;
+      window.setTimeout(refreshNasSources, 1500);
+    } catch (error) {
+      state.dataset.status = "unavailable";
+      state.textContent = error.userMessage || error.message;
+    }
+  }
+
+  function useNasSource(row) {
+    addNasDirectory(row, "");
+  }
+
+  function addNasDirectory(row, relativePath) {
+    const root = row.dataset.mountPath || "";
+    if (!root) return;
+    const separator = root.includes("\\") ? "\\" : "/";
+    const relative = String(relativePath || "").replaceAll("/", separator);
+    const path = relative
+      ? `${root.replace(/[\\/]$/, "")}${separator}${relative}`
+      : root;
+    const unc = row.dataset.canonicalUnc || "";
+    const canonicalUnc = relativePath
+      ? `${unc.replace(/[\\/]$/, "")}\\${String(relativePath).replaceAll("/", "\\")}`
+      : unc;
+    appendImageSource(
+      relativePath ? `${row.dataset.label} · ${relativePath}` : row.dataset.label,
+      path,
+      relativePath ? "" : row.dataset.sourceId,
+      canonicalUnc,
+    );
+    updateImageSourceConfig();
+  }
+
+  async function browseNasSource(row, relativePath = "") {
+    const list = row.querySelector("[data-nas-directory-list]");
+    list.textContent = "正在读取当前一级目录…";
+    try {
+      const query = new URLSearchParams({ relative_path: relativePath });
+      const payload = await fetchJson(
+        `/api/runtime/nas-sources/${encodeURIComponent(row.dataset.sourceId)}/directories?${query}`,
+      );
+      list.replaceChildren();
+      if (relativePath) {
+        const chooseCurrent = document.createElement("button");
+        chooseCurrent.type = "button";
+        chooseCurrent.className = "secondary-button";
+        chooseCurrent.dataset.useNasDirectory = relativePath;
+        chooseCurrent.textContent = `使用当前目录：${relativePath}`;
+        list.appendChild(chooseCurrent);
+      }
+      (payload.directories || []).forEach((directory) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary-button";
+        button.dataset.openNasDirectory = directory.relative_path;
+        button.textContent = directory.name;
+        list.appendChild(button);
+      });
+      if (!list.childElementCount) list.textContent = "当前目录没有可浏览的子目录。";
+    } catch (error) {
+      list.textContent = error.userMessage || error.message;
     }
   }
 
@@ -335,7 +458,7 @@
           { bubbles: true, detail: { source: "explicit-user-edit" } },
         ));
         row.querySelector("[data-image-source-state]").textContent =
-          "已采用 UNC，等待检测";
+          "已使用推荐路径，等待检测";
         portable.hidden = true;
         return;
       }
@@ -357,6 +480,22 @@
     });
     imageSourceConfig.querySelector("[data-check-image-sources]").addEventListener("click", checkImageSources);
     imageSourceConfig.querySelector("[data-save-image-sources]").addEventListener("click", saveImageSources);
+    const nasCatalog = document.querySelector("[data-nas-source-catalog]");
+    if (nasCatalog) {
+      nasCatalog.addEventListener("click", (event) => {
+        const row = event.target.closest("[data-nas-source-row]");
+        if (!row) return;
+        if (event.target.closest("[data-connect-nas-source]")) connectNasSource(row);
+        if (event.target.closest("[data-check-nas-source]")) refreshNasSources();
+        if (event.target.closest("[data-use-nas-source]")) useNasSource(row);
+        if (event.target.closest("[data-browse-nas-source]")) browseNasSource(row);
+        const openDirectory = event.target.closest("[data-open-nas-directory]");
+        if (openDirectory) browseNasSource(row, openDirectory.dataset.openNasDirectory);
+        const useDirectory = event.target.closest("[data-use-nas-directory]");
+        if (useDirectory) addNasDirectory(row, useDirectory.dataset.useNasDirectory);
+      });
+      refreshNasSources();
+    }
     updateImageSourceConfig();
   }
 
@@ -871,6 +1010,15 @@
     }
     const worker = currentCollectionStatus?.worker;
     if (currentCollectionStatus?.status === "processing" && worker) {
+      if (worker.phase === "waiting_human_check") {
+        const savedPage = worker.last_completed_page == null
+          ? "尚无完整页"
+          : `已保存到第 ${worker.last_completed_page} 页`;
+        actionMessage.textContent =
+          `检测到滑动验证，${savedPage}。请在 CDP Chrome 中完成验证；` +
+          `验证通过后会自动继续采集。等待 ${Math.floor(Number(worker.elapsed_ms || 0) / 1000)} 秒。`;
+        return;
+      }
       const page = worker.last_completed_page == null
         ? "首个 checkpoint 尚未完成"
         : `已完成第 ${worker.last_completed_page} 页 · ${worker.row_count} 行`;
@@ -2118,7 +2266,7 @@
         element(
           "p",
           "",
-          "选择本次采用的图片；每次勾选都会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，再按每坑 3–9 张提交生成坑位草稿。",
+          "选择本次采用的图片；采用即确认该图片可用于本次发布，每次勾选都会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，提交将按每坑 3–9 张自动生成坑位草稿。",
         ),
       );
       resultSummary.replaceChildren(heading, action);
@@ -5145,6 +5293,7 @@
     clearFieldErrors(form);
     let values;
     try {
+      if (requestedStageId === "setup") configuredImageSources();
       values = serializeForm(form);
     } catch (error) {
       actionMessage.textContent = error.message;
@@ -5543,8 +5692,8 @@
     if (!uiState.recoveryInstruction) await loadRecoveryInstruction(currentStageId);
     if (!uiState.recoveryInstruction) return;
     await navigator.clipboard.writeText(uiState.recoveryInstruction);
-    recoveryButton.textContent = "已复制恢复指令";
-    window.setTimeout(() => { recoveryButton.textContent = "复制恢复指令"; }, 1800);
+    recoveryButton.textContent = "已复制继续处理说明";
+    window.setTimeout(() => { recoveryButton.textContent = "复制继续处理说明"; }, 1800);
   }
 
   async function pollStage() {

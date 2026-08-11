@@ -140,13 +140,18 @@ def current_runtime_identity() -> dict[str, Any]:
             "remote_drive_letters": _windows_remote_drives(),
             "pid": os.getpid(),
         }
+    inherited_login_session = os.environ.get(
+        "TMALL_DESKTOP_LOGIN_SESSION_ID", ""
+    ).strip()
+    try:
+        login_session_id = int(inherited_login_session)
+    except ValueError:
+        login_session_id = os.getsid(0) if hasattr(os, "getsid") else -1
     return {
         "schema_version": IDENTITY_SCHEMA_VERSION,
         "platform": os.name,
         "sid": f"uid:{os.getuid()}" if hasattr(os, "getuid") else "",
-        "login_session_id": (
-            os.getsid(0) if hasattr(os, "getsid") else -1
-        ),
+        "login_session_id": login_session_id,
         "interactive_desktop": False,
         "remote_drive_letters": [],
         "pid": os.getpid(),

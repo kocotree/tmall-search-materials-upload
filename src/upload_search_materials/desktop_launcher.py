@@ -25,6 +25,54 @@ class DesktopLauncherError(ValueError):
     reason_code = "DESKTOP_LAUNCH_ARGUMENT_INVALID"
 
 
+def _page_scopes(page: Any) -> list[Any]:
+    scopes = [page]
+    for frame in list(getattr(page, "frames", ()) or ()):
+        if frame is not None and all(frame is not scope for scope in scopes):
+            scopes.append(frame)
+    return scopes
+
+
+def _visible_locator_texts(
+    scope: Any,
+    selector: str,
+    *,
+    limit: int,
+) -> list[str]:
+    try:
+        locator = scope.locator(selector)
+        count = min(int(locator.count()), limit)
+    except Exception:
+        return []
+    values: list[str] = []
+    for index in range(count):
+        try:
+            candidate = locator.nth(index)
+            if not candidate.is_visible():
+                continue
+            value = str(candidate.inner_text()).strip()
+        except Exception:
+            continue
+        if value:
+            values.append(value)
+    return values
+
+
+def _has_visible_locator(scope: Any, selector: str, *, limit: int) -> bool:
+    try:
+        locator = scope.locator(selector)
+        count = min(int(locator.count()), limit)
+    except Exception:
+        return False
+    for index in range(count):
+        try:
+            if locator.nth(index).is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _inside(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -143,10 +191,14 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                 page.wait_for_timeout(500)
             except Exception:
                 pass
-            challenge = page.locator(selectors["human_check"])
+            scopes = _page_scopes(page)
             challenge_visible = any(
-                challenge.nth(index).is_visible()
-                for index in range(min(challenge.count(), 10))
+                _has_visible_locator(
+                    scope,
+                    selectors["human_check"],
+                    limit=10,
+                )
+                for scope in scopes
             )
             if challenge_visible:
                 return {
@@ -155,14 +207,15 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                     "login_state": "human_check",
                     "reason_code": "HUMAN_CHECK",
                 }
-            store = page.locator(selectors["store_name"])
             observed_store = ""
-            for index in range(min(store.count(), 20)):
-                candidate = store.nth(index)
-                if not candidate.is_visible():
-                    continue
-                observed_store = str(candidate.inner_text()).strip()
-                if observed_store:
+            for scope in scopes:
+                values = _visible_locator_texts(
+                    scope,
+                    selectors["store_name"],
+                    limit=20,
+                )
+                if values:
+                    observed_store = values[0]
                     break
             if observed_store:
                 return {

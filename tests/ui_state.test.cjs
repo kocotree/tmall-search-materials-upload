@@ -297,3 +297,51 @@ test("selection guidance updates per change and excludes duplicate identities", 
   );
   assert.deepEqual(nine.balancedCounts, [3, 3, 3]);
 });
+
+test("duplicate image source labels use the nearest unique business directory", () => {
+  assert.equal(typeof UiState.disambiguateImageSourceLabels, "function");
+  const sources = UiState.disambiguateImageSourceLabels([
+    {
+      label: "浙江酷趣",
+      path: "/Volumes/浙江酷趣/运营中心/营销板块/小红书koc置换&买家秀/优质买家秀/",
+    },
+    {
+      label: "视觉部",
+      path: "/Volumes/视觉部/1-模特图/",
+    },
+    {
+      label: "浙江酷趣",
+      path: "/Volumes/浙江酷趣/运营中心/营销板块/小红书koc置换&淘宝买家秀/优质买家秀/",
+    },
+  ]);
+
+  assert.deepEqual(sources.map((source) => source.label), [
+    "浙江酷趣-小红书koc置换&买家秀",
+    "视觉部",
+    "浙江酷趣-小红书koc置换&淘宝买家秀",
+  ]);
+});
+
+test("image source disambiguation treats Windows roots as machine-local", () => {
+  const sources = UiState.disambiguateImageSourceLabels([
+    { label: "共享素材", path: "Y:\\品牌\\A款\\优质图片" },
+    { label: "共享素材", path: "Z:\\品牌\\B款\\优质图片" },
+  ]);
+
+  assert.deepEqual(sources.map((source) => source.label), [
+    "共享素材-A款",
+    "共享素材-B款",
+  ]);
+});
+
+test("identical image source paths stay duplicated for backend rejection", () => {
+  const sources = UiState.disambiguateImageSourceLabels([
+    { label: "共享素材", path: "\\\\server\\share\\同一目录" },
+    { label: "共享素材", path: "\\\\server\\share\\同一目录" },
+  ]);
+
+  assert.deepEqual(sources.map((source) => source.label), [
+    "共享素材",
+    "共享素材",
+  ]);
+});

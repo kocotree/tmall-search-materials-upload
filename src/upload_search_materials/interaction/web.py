@@ -100,6 +100,13 @@ from ..runtime_config import (
     save_image_sources,
     save_selector_profile_path,
 )
+from ..nas_sources import (
+    browse_nas_folders,
+    check_nas_source,
+    launch_nas_mount,
+    load_nas_sources,
+)
+from ..platform_support import AssetSourceUnavailable
 from ..persistence import PersistenceAccessDenied
 from ..runtime_identity import (
     LocalResourceIdentityMismatch,
@@ -200,6 +207,20 @@ def create_app(
     expected_runtime_identity = (
         (service_identity or {}).get("runtime_identity")
     )
+
+    def configured_nas_sources():
+        if runtime.nas_sources_file is None:
+            return {}
+        return load_nas_sources(runtime.nas_sources_file)
+
+    def selected_nas_source(source_id: str):
+        sources = configured_nas_sources()
+        source = sources.get(source_id)
+        if source is None:
+            raise AssetSourceUnavailable(
+                "NAS_SOURCE_SELECTION_INVALID", f"未知 NAS 来源：{source_id}"
+            )
+        return source
 
     def request_material_executor(
         session_id: str,
@@ -549,6 +570,7 @@ def create_app(
             stage_registry=stage_registry,
             session_id=session_id,
             image_sources=runtime.image_sources,
+            nas_sources=tuple(configured_nas_sources().values()),
             runs_root=str(store.runs_root.resolve()),
             task_directory=str(task_directory),
             static_asset_version=static_asset_version,
@@ -1026,6 +1048,73 @@ def create_app(
                 item["last_status"] = "available"
             projected.append(item)
         return jsonify(image_sources=projected)
+
+    @app.get("/api/runtime/nas-sources")
+    def get_runtime_nas_sources():
+        require_desktop_identity()
+        try:
+            sources = configured_nas_sources()
+            statuses = [check_nas_source(source).as_dict() for source in sources.values()]
+        except (OSError, yaml.YAMLError, AssetSourceUnavailable) as error:
+            reason_code = getattr(error, "reason_code", "NAS_CONFIG_INVALID")
+            return _error(
+                "NAS source check failed", 409, reason_code=reason_code,
+                message=str(error), next_action="检查 NAS 配置或当前系统挂载状态。",
+            )
+        return jsonify(
+            nas_sources=[
+                {
+                    "source_id": source.source_id,
+                    "label": source.label,
+                    "host": source.host,
+                    "share": source.share,
+                    "canonical_unc": source.windows_path,
+                    "subpaths": list(source.subpaths),
+                    "status": status,
+                }
+                for source, status in zip(sources.values(), statuses, strict=True)
+            ],
+            config_path=str(runtime.nas_sources_file or ""),
+        )
+
+    @app.post("/api/runtime/nas-sources/<source_id>/connect")
+    def connect_runtime_nas_source(source_id: str):
+        require_desktop_identity()
+        try:
+            source = selected_nas_source(source_id)
+            status = check_nas_source(source)
+            if status.state == "not_mounted":
+                launch_nas_mount(source)
+        except (OSError, yaml.YAMLError, AssetSourceUnavailable) as error:
+            reason_code = getattr(error, "reason_code", "NAS_MOUNT_LAUNCH_FAILED")
+            return _error(
+                "NAS connection failed", 409, reason_code=reason_code,
+                message=str(error), next_action="在系统窗口完成 NAS 登录后重新检测。",
+            )
+        return jsonify(
+            **status.as_dict(),
+            launched=status.state == "not_mounted",
+            next_action=(
+                "在系统窗口完成 NAS 登录后点击重新检测。"
+                if status.state == "not_mounted" else status.message
+            ),
+        )
+
+    @app.get("/api/runtime/nas-sources/<source_id>/directories")
+    def browse_runtime_nas_source(source_id: str):
+        require_desktop_identity()
+        relative_path = str(request.args.get("relative_path", ""))
+        try:
+            directories = browse_nas_folders(
+                selected_nas_source(source_id), relative_path=relative_path
+            )
+        except (OSError, yaml.YAMLError, AssetSourceUnavailable) as error:
+            reason_code = getattr(error, "reason_code", "ASSET_ROOT_IO_ERROR")
+            return _error(
+                "NAS browse failed", 409, reason_code=reason_code,
+                message=str(error), next_action="连接 NAS 并确认目录权限后重试。",
+            )
+        return jsonify(source_id=source_id, directories=directories)
 
     @app.put("/api/runtime/image-sources")
     def put_runtime_image_sources():

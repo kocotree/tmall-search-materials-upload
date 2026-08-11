@@ -86,6 +86,14 @@ from .folder_index import (
     snapshot_folder_candidates,
     write_folder_candidates,
 )
+from .nas_sources import (
+    browse_nas_folders,
+    check_nas_source,
+    load_nas_sources,
+    prepare_nas_source,
+    statuses_json,
+)
+from .platform_support import AssetSourceUnavailable
 from .io_tables import (
     SchemaError,
     read_basic_materials_xlsx,
@@ -2125,6 +2133,71 @@ def _snapshot_folder_candidates(args) -> int:
         return 2
 
 
+def _selected_nas_sources(args):
+    sources = load_nas_sources(Path(args.config))
+    requested = args.source_id
+    selected_ids = (
+        [requested]
+        if isinstance(requested, str)
+        else list(requested or sources)
+    )
+    unknown = [source_id for source_id in selected_ids if source_id not in sources]
+    if unknown:
+        raise AssetSourceUnavailable(
+            "NAS_SOURCE_SELECTION_INVALID", f"未知 NAS 来源：{', '.join(unknown)}"
+        )
+    return sources, selected_ids
+
+
+def _nas_check(args) -> int:
+    try:
+        sources, selected_ids = _selected_nas_sources(args)
+        statuses = [check_nas_source(sources[source_id]) for source_id in selected_ids]
+    except (OSError, AssetSourceUnavailable) as error:
+        reason = getattr(error, "reason_code", "NAS_CONFIG_INVALID")
+        print(f"NAS 检查失败 [{reason}]：{error}", file=sys.stderr)
+        return 2
+    print(statuses_json(statuses))
+    return 0 if all(status.state == "ready" for status in statuses) else 2
+
+
+def _nas_prepare(args) -> int:
+    try:
+        sources, selected_ids = _selected_nas_sources(args)
+        statuses = [
+            prepare_nas_source(
+                sources[source_id],
+                allow_mount=args.allow_mount,
+                wait_seconds=args.wait_seconds,
+            )
+            for source_id in selected_ids
+        ]
+    except (OSError, AssetSourceUnavailable) as error:
+        reason = getattr(error, "reason_code", "NAS_MOUNT_LAUNCH_FAILED")
+        print(f"NAS 连接失败 [{reason}]：{error}", file=sys.stderr)
+        return 2
+    print(statuses_json(statuses))
+    return 0 if all(status.state == "ready" for status in statuses) else 2
+
+
+def _nas_browse(args) -> int:
+    try:
+        sources, _ = _selected_nas_sources(args)
+        if args.source_id not in sources:
+            raise AssetSourceUnavailable(
+                "NAS_SOURCE_SELECTION_INVALID", f"未知 NAS 来源：{args.source_id}"
+            )
+        folders = browse_nas_folders(
+            sources[args.source_id], relative_path=args.relative_path
+        )
+    except (OSError, AssetSourceUnavailable) as error:
+        reason = getattr(error, "reason_code", "ASSET_ROOT_IO_ERROR")
+        print(f"NAS 浏览失败 [{reason}]：{error}", file=sys.stderr)
+        return 2
+    print(json.dumps(folders, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmall-materials")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2182,6 +2255,27 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_xlsx = subparsers.add_parser("inspect-xlsx", help="Read-only XLSX inspection")
     inspect_xlsx.add_argument("--basic", required=True)
     inspect_xlsx.add_argument("--search", required=True)
+
+    nas_check = subparsers.add_parser(
+        "nas-check", help="只读检查已配置 NAS 的挂载身份和可访问性"
+    )
+    nas_check.add_argument("--config", default="config/nas-sources.yaml")
+    nas_check.add_argument("--source-id", action="append")
+
+    nas_prepare = subparsers.add_parser(
+        "nas-prepare", help="检查 NAS，并在明确授权时打开系统连接窗口"
+    )
+    nas_prepare.add_argument("--config", default="config/nas-sources.yaml")
+    nas_prepare.add_argument("--source-id", action="append")
+    nas_prepare.add_argument("--allow-mount", action="store_true")
+    nas_prepare.add_argument("--wait-seconds", type=float, default=30)
+
+    nas_browse = subparsers.add_parser(
+        "nas-browse", help="只读列出一个 NAS 路径的直接子目录"
+    )
+    nas_browse.add_argument("--config", default="config/nas-sources.yaml")
+    nas_browse.add_argument("--source-id", required=True)
+    nas_browse.add_argument("--relative-path", default="")
 
     inspect_completeness = subparsers.add_parser(
         "inspect-completeness",
@@ -2644,6 +2738,12 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return _report(args)
     if args.command == "inspect-xlsx":
         return _inspect_xlsx(args)
+    if args.command == "nas-check":
+        return _nas_check(args)
+    if args.command == "nas-prepare":
+        return _nas_prepare(args)
+    if args.command == "nas-browse":
+        return _nas_browse(args)
     if args.command == "inspect-completeness":
         return _inspect_completeness(args)
     if args.command == "export":

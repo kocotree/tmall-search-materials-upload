@@ -234,6 +234,87 @@
     return { values, checked };
   }
 
+  function imageSourceBusinessPathParts(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return [];
+    let parts = raw.split(/[\\/]+/).filter(Boolean);
+    if (/^\\\\/.test(raw)) {
+      parts = parts.slice(2);
+    } else if (/^[A-Za-z]:[\\/]/.test(raw)) {
+      parts = parts.slice(1);
+    } else if (
+      /^\/Volumes(?:\/|$)/i.test(raw)
+      && parts.length >= 2
+    ) {
+      parts = parts.slice(2);
+    }
+    return parts;
+  }
+
+  function disambiguateImageSourceLabels(value) {
+    const sources = (Array.isArray(value) ? value : []).map((source) => ({
+      ...source,
+      label: String(source?.label || "").trim(),
+      path: String(source?.path || "").trim(),
+    }));
+    const groups = new Map();
+    sources.forEach((source, index) => {
+      const key = source.label.toLocaleLowerCase();
+      if (!key) return;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(index);
+    });
+    const occupied = new Set(
+      [...groups.entries()]
+        .filter(([, indexes]) => indexes.length === 1)
+        .map(([key]) => key),
+    );
+
+    groups.forEach((indexes) => {
+      if (indexes.length < 2) return;
+      const paths = indexes.map((index) =>
+        imageSourceBusinessPathParts(sources[index].path)
+      );
+      const shortest = Math.min(...paths.map((parts) => parts.length));
+      let commonTail = 0;
+      while (commonTail < shortest) {
+        const components = paths.map((parts) =>
+          parts[parts.length - commonTail - 1].toLocaleLowerCase()
+        );
+        if (!components.every((component) => component === components[0])) break;
+        commonTail += 1;
+      }
+
+      const maximumExtra = Math.max(
+        ...paths.map((parts) => Math.max(0, parts.length - commonTail)),
+      );
+      for (let extra = 1; extra <= maximumExtra; extra += 1) {
+        const candidates = paths.map((parts, offset) => {
+          const end = commonTail ? -commonTail : undefined;
+          const start = -(commonTail + extra);
+          const discriminator = parts.slice(start, end).join(" · ").trim();
+          return discriminator
+            ? `${sources[indexes[offset]].label}-${discriminator}`
+            : "";
+        });
+        const candidateKeys = candidates.map((label) => label.toLocaleLowerCase());
+        if (
+          candidates.some((label) => !label || label.length > 100)
+          || new Set(candidateKeys).size !== candidates.length
+          || candidateKeys.some((key) => occupied.has(key))
+        ) {
+          continue;
+        }
+        indexes.forEach((index, offset) => {
+          sources[index].label = candidates[offset];
+          occupied.add(candidateKeys[offset]);
+        });
+        break;
+      }
+    });
+    return sources;
+  }
+
   function createRequestIdentity(stageId, sessionId, generation) {
     return { stageId, sessionId, generation };
   }
@@ -289,5 +370,6 @@
     submissionView,
     selectInitialStage,
     switchStage,
+    disambiguateImageSourceLabels,
   };
 });

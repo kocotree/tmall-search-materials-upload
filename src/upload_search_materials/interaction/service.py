@@ -308,8 +308,13 @@ def start_service(
     if config:
         command.extend(["--config", config])
     creationflags = 0
+    child_environment = os.environ.copy()
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        child_environment["TMALL_DESKTOP_LOGIN_SESSION_ID"] = str(
+            launcher_runtime_identity["login_session_id"]
+        )
     with stdout_path.open("ab", buffering=0) as stdout, stderr_path.open(
         "ab", buffering=0
     ) as stderr:
@@ -321,6 +326,8 @@ def start_service(
             stderr=stderr,
             close_fds=True,
             creationflags=creationflags,
+            env=child_environment,
+            start_new_session=os.name != "nt",
         )
 
     state = {

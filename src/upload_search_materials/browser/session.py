@@ -9,7 +9,8 @@ import subprocess
 import time
 from typing import Mapping
 from urllib.error import URLError
-from urllib.request import build_opener, ProxyHandler
+from urllib.parse import quote
+from urllib.request import build_opener, ProxyHandler, Request
 
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
@@ -78,6 +79,43 @@ def inspect_cdp_endpoint(cdp_url: str, timeout_seconds: float = 2.0) -> CdpStatu
     return CdpStatus(connected=True, endpoint=endpoint, pages=pages)
 
 
+def _open_cdp_target(
+    cdp_url: str,
+    target_url: str,
+    *,
+    timeout_seconds: float = 2.0,
+) -> dict[str, str]:
+    """Create the first visible page in an otherwise empty local CDP browser."""
+
+    endpoint = str(cdp_url).rstrip("/")
+    if not endpoint.startswith("http://127.0.0.1:"):
+        raise CdpUnavailable("CDP_ENDPOINT_NOT_LOOPBACK")
+    try:
+        port = int(endpoint.rsplit(":", 1)[1])
+    except (IndexError, ValueError) as error:
+        raise CdpUnavailable("CDP_ENDPOINT_INVALID") from error
+    if not 1 <= port <= 65535:
+        raise CdpUnavailable("CDP_ENDPOINT_INVALID")
+    request = Request(
+        f"{endpoint}/json/new?{quote(str(target_url), safe='')}",
+        method="PUT",
+    )
+    try:
+        with _LOOPBACK_OPENER.open(
+            request, timeout=timeout_seconds
+        ) as response:
+            document = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as error:
+        raise CdpUnavailable("CDP_PAGE_OPEN_FAILED") from error
+    if not isinstance(document, Mapping) or document.get("type") != "page":
+        raise CdpUnavailable("CDP_PAGE_OPEN_FAILED")
+    return {
+        "id": str(document.get("id", "")),
+        "title": str(document.get("title", "")),
+        "url": str(document.get("url", target_url)),
+    }
+
+
 def discover_browser_executable(
     environ: Mapping[str, str] | None = None,
 ) -> Path | None:
@@ -141,6 +179,7 @@ def launch_cdp_browser(
         ],
         cwd=str(profile),
         close_fds=True,
+        start_new_session=os.name != "nt",
     )
     state = {
         "schema_version": 1,
@@ -176,19 +215,45 @@ def ensure_cdp_browser(
         cdp_url=cdp_url,
         material_center_url=material_center_url,
     )
-    if launch.get("status") == "connected":
-        return launch
     deadline = time.monotonic() + max(0.1, startup_timeout_seconds)
+    grace_deadline = time.monotonic() + (
+        0.0 if launch.get("status") == "connected" else 0.5
+    )
+    target_requested = False
+    saw_connected_endpoint = False
+    initial_status = None
+    if launch.get("status") == "connected":
+        initial_status = CdpStatus(
+            connected=True,
+            endpoint=str(launch.get("endpoint", cdp_url)),
+            pages=tuple(
+                dict(page)
+                for page in launch.get("pages", [])
+                if isinstance(page, Mapping)
+            ),
+        )
     while time.monotonic() < deadline:
-        status = inspect_cdp_endpoint(cdp_url, timeout_seconds=0.25)
+        status = initial_status or inspect_cdp_endpoint(
+            cdp_url, timeout_seconds=0.25
+        )
+        initial_status = None
         if status.connected:
-            return {
-                **launch,
-                "status": "connected",
-                "endpoint": status.endpoint,
-                "pages": list(status.pages),
-            }
+            saw_connected_endpoint = True
+            if status.pages:
+                return {
+                    **launch,
+                    "status": "connected",
+                    "endpoint": status.endpoint,
+                    "pages": list(status.pages),
+                }
+            if not target_requested and time.monotonic() >= grace_deadline:
+                _open_cdp_target(cdp_url, material_center_url)
+                target_requested = True
         time.sleep(0.1)
+    if saw_connected_endpoint:
+        raise CdpUnavailable(
+            "CDP_PAGE_OPEN_TIMEOUT: endpoint connected but no page appeared"
+        )
     raise CdpUnavailable(
         "CDP_START_TIMEOUT: browser launched but endpoint is unavailable"
     )
@@ -222,9 +287,31 @@ def assert_store_identity(page, selector: str, expected_store: str) -> str:
     )
 
 
-def detect_human_check(page, selector: str) -> None:
+def human_check_visible(page, selector: str) -> bool:
+    """Return whether any configured human-verification surface is visible."""
+
     locator = page.locator(selector)
-    if locator.is_visible():
+    try:
+        count = locator.count()
+    except (AttributeError, PlaywrightError):
+        count = 1
+    if count == 0:
+        try:
+            return bool(locator.is_visible())
+        except PlaywrightError:
+            return False
+    for index in range(count):
+        candidate = locator.nth(index) if count > 1 else locator
+        try:
+            if candidate.is_visible():
+                return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+def detect_human_check(page, selector: str) -> None:
+    if human_check_visible(page, selector):
         raise HumanCheckRequired("检测到验证码、扫码、短信或风控页面，需要用户处理")
 
 

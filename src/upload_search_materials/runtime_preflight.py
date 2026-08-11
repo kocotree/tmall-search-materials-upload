@@ -31,8 +31,22 @@ def environment_fingerprint(project_root: Path) -> dict[str, Any]:
 
     project = Path(project_root).resolve()
     lock = project / "uv.lock"
-    python = project / ".venv" / "Scripts" / "python.exe"
-    executable = project / ".venv" / "Scripts" / "tmall-materials.exe"
+    python_candidates = (
+        project / ".venv" / "Scripts" / "python.exe",
+        project / ".venv" / "bin" / "python",
+    )
+    executable_candidates = (
+        project / ".venv" / "Scripts" / "tmall-materials.exe",
+        project / ".venv" / "bin" / "tmall-materials",
+    )
+    python = next(
+        (candidate for candidate in python_candidates if candidate.is_file()),
+        python_candidates[0],
+    )
+    executable = next(
+        (candidate for candidate in executable_candidates if candidate.is_file()),
+        executable_candidates[0],
+    )
     source_package = project / "src" / "upload_search_materials"
     recorded_path = project / ".environment-fingerprint.json"
     lock_sha = (

@@ -35,6 +35,7 @@ PAGINATION_RECOVERY_GUIDANCE = {
         "下一页不可用，但无法证明当前确为末页，采集已安全停止。"
     ),
 }
+HIGH_VALUE_TRANSITION_TIMEOUT_MS = 15_000
 PAGINATION_RECOVERY_GUIDANCE.update(
     {
         "HIGH_VALUE_REFRESH_FAILED": (
@@ -615,6 +616,12 @@ def scan_recommended_material_status(
     on_phase: Callable[[str, int | None], None] | None = None,
     on_pagination_event: Callable[[dict[str, Any]], None] | None = None,
     expected_page_hashes: Mapping[int, str] | None = None,
+    human_check_waiter: Callable[[int, str], None] | None = None,
+    random_action: Callable[
+        [int, tuple[str, ...]], Mapping[str, Any] | None
+    ]
+    | None = None,
+    random_interval_picker: Callable[[], int] | None = None,
 ) -> list[dict[str, str]]:
     required = (
         "promotion_tab",
@@ -720,6 +727,11 @@ def scan_recommended_material_status(
         if str(row.get("商品ID", "")).strip()
     }
     page_number = 0
+    next_random_action_page = (
+        skip_completed_pages + max(1, int(random_interval_picker()))
+        if random_action is not None and random_interval_picker is not None
+        else None
+    )
     while True:
         page_number += 1
         if pagination_state is not None:
@@ -746,6 +758,8 @@ def scan_recommended_material_status(
                     "PAGINATION_CHECKPOINT_MISMATCH",
                     f"page={page_number}",
                 )
+        if human_check_waiter is not None:
+            human_check_waiter(page_number, "before_page")
         if on_phase is not None:
             on_phase("collecting_page", page_number)
         row_texts = [
@@ -774,8 +788,47 @@ def scan_recommended_material_status(
             values = list(output_by_product.values())
             if on_page:
                 on_page(page_number, values)
+            if human_check_waiter is not None and on_page is not None:
+                human_check_waiter(page_number, "after_checkpoint")
+            if (
+                random_action is not None
+                and on_page is not None
+                and next_random_action_page is not None
+                and page_number >= next_random_action_page
+            ):
+                page_product_ids = tuple(
+                    dict.fromkeys(
+                        match.group(1)
+                        for text in row_texts
+                        if (match := re.search(r"商品ID\s*(\d+)", text))
+                    )
+                )
+                event = dict(
+                    random_action(page_number, page_product_ids) or {}
+                )
+                events = getattr(page, "_tmall_collection_events", None)
+                if not isinstance(events, list):
+                    events = []
+                    setattr(page, "_tmall_collection_events", events)
+                events.append(
+                    {
+                        "action": "random_collection_action",
+                        "page_number": page_number,
+                        **event,
+                    }
+                )
+                interval = (
+                    max(1, int(random_interval_picker()))
+                    if random_interval_picker is not None
+                    else 1
+                )
+                next_random_action_page = page_number + interval
+                if human_check_waiter is not None:
+                    human_check_waiter(page_number, "after_random_action")
         if max_pages is not None and page_number >= max_pages:
             break
+        if human_check_waiter is not None:
+            human_check_waiter(page_number, "before_pagination")
         next_page = page.locator(selectors["promotion_next_page"])
         if not next_page.is_enabled():
             if pagination_state is not None:
@@ -838,6 +891,11 @@ def scan_recommended_material_status(
         )
         poll_ms = 250
         elapsed_ms = 0
+        transition_timeout_ms = (
+            max(action_wait_ms, HIGH_VALUE_TRANSITION_TIMEOUT_MS)
+            if pagination_state is not None
+            else action_wait_ms
+        )
         while True:
             next_row_texts = [
                 text.strip()
@@ -851,7 +909,7 @@ def scan_recommended_material_status(
             )
             if next_ids and next_ids != previous_ids:
                 break
-            if elapsed_ms >= action_wait_ms:
+            if elapsed_ms >= transition_timeout_ms:
                 raise _pagination_error(
                     "PAGINATION_TRANSITION_MISMATCH",
                     "promotion_next_page:rows_unchanged",

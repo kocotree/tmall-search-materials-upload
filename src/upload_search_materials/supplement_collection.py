@@ -205,6 +205,12 @@ def collect_supplement_material_status(
     on_phase: Callable[[str, int | None], None] | None = None,
     pagination_evidence: Path | None = None,
     on_pagination_event: Callable[[dict[str, Any]], None] | None = None,
+    human_check_waiter: Callable[[int, str], None] | None = None,
+    random_action: Callable[
+        [int, tuple[str, ...]], Mapping[str, Any] | None
+    ]
+    | None = None,
+    random_interval_picker: Callable[[], int] | None = None,
 ) -> list[dict[str, str]]:
     """Collect through the one maintained supplement implementation."""
 
@@ -370,6 +376,9 @@ def collect_supplement_material_status(
                 on_phase=on_phase,
                 on_pagination_event=persist_pagination_event,
                 expected_page_hashes=expected_page_hashes,
+                human_check_waiter=human_check_waiter,
+                random_action=random_action,
+                random_interval_picker=random_interval_picker,
             )
         else:
             rows = supplement_material_status(

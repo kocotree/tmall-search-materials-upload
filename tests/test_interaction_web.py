@@ -157,11 +157,12 @@ def test_new_session_hides_legacy_image_review_stage(client, session_id):
 def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports(client):
     html = html_module.unescape(client.get("/").get_data(as_text=True))
 
-    assert "业务配置" in html
-    assert "自动准备项" in html
+    assert "确认本次任务" in html
+    assert "任务所需内容" in html
+    assert "按下面 3 步完成" in html
     assert "高级设置 · 导入已有文件" in html
     assert "搜推素材" in html and "全量自动采集" in html
-    assert "搜推高价值" in html
+    assert "提交后由系统自动采集" in html
     assert 'name="promotion_max_pages"' not in html
     assert 'name="product_scope"' not in html
     assert "在文件夹归属审查中逐步积累" not in html
@@ -169,7 +170,7 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert 'name="month"' not in html
     assert "目标月份" not in html
     assert 'data-setup-login-gate' in html
-    assert "不要求用户手工转换为 UNC" in html
+    assert "本机配置文件：" not in html
     assert 'name="products_csv"' in html and 'type="hidden"' in html
     assert 'name="rules_csv"' in html
     assert html.count('name="image_roots"') >= 3
@@ -543,11 +544,14 @@ def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(clien
     ):
         assert root in html
     assert 'data-component="ImageSourceConfig"' in html
-    assert "上次保存的 3 个（仅预填）" in html
-    assert "提交时才检测页面中的最终路径" in html
-    assert "添加图片源" in html
+    assert "已预填 3 个常用来源" in html
+    assert "提交时系统会自动检测" in html
+    assert "添加另一个图片源" in html
     assert "检测路径" in html
-    assert "保存为本机配置" in html
+    assert "保存为常用图片源" in html
+    assert 'class="source-section source-section-selected"' in html
+    assert 'id="selected-source-heading">本次图片源</h4>' in html
+    assert 'class="image-source-row-actions"' in html
     assert html.count('name="image_source_labels"') >= 3
 
 
@@ -564,8 +568,8 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
     html = html_module.unescape(response.get_data(as_text=True))
 
     assert response.status_code == 200
-    assert "本次尚未配置" in html
-    assert "添加图片源" in html
+    assert "本次尚未选择" in html
+    assert "添加另一个图片源" in html
     assert html.count('name="image_roots"') >= 1
 
 
@@ -684,7 +688,7 @@ def test_folder_picker_api_preserves_cancellation(client, monkeypatch):
     }
 
 
-def test_image_source_frontend_uses_diagnostic_copy_and_unc_action():
+def test_image_source_frontend_uses_diagnostic_copy_and_portable_path_action():
     source = (
         Path(__file__).parents[1]
         / "src"
@@ -698,7 +702,7 @@ def test_image_source_frontend_uses_diagnostic_copy_and_unc_action():
     assert "diagnostic.message" in source
     assert "portable_path_suggestion" in source
     assert "error.userMessage" in source
-    assert "已采用 UNC，等待检测" in source
+    assert "已使用推荐路径，等待检测" in source
     assert "if (!payload.cancelled)" in source
 
 
@@ -803,12 +807,13 @@ def test_every_interactive_field_has_named_control(client):
             assert f'name="{field.name}"' in html
 
 
-def test_page_explains_agent_offline_recovery(client):
+def test_page_explains_codex_offline_recovery_without_exposing_task_path(client):
     html = client.get("/").get_data(as_text=True)
 
-    assert "Agent 未连接" in html
-    assert "复制恢复指令" in html
+    assert "Codex 暂未连接" in html
+    assert "复制继续处理说明" in html
     assert "当前任务目录" in html
+    assert 'class="technical-only" aria-hidden="true"><dt>当前任务目录' in html
     assert "当前阶段" in html
     assert "最近一次提交时间" in html
 
@@ -992,10 +997,12 @@ def test_javascript_supports_dynamic_image_source_configuration(client):
         "appendImageSource",
         "hydrateImageSources",
         "configuredImageSources",
+        "disambiguateImageSourceLabels",
+        "已根据业务目录自动区分",
         "/api/runtime/image-sources/check",
         "/api/runtime/folder-picker",
         'method: "PUT"',
-        "每个图片源都必须填写来源名称和根路径",
+        "每个图片源都必须填写来源名称并选择图片文件夹",
         "scheduleAutoSave",
         "setFormLocked",
         "/withdraw",
@@ -1047,6 +1054,25 @@ def test_compact_styles_keep_result_tables_scrollable_above_fixed_handoff(client
     assert ".table-scroll" in stylesheet
     assert "overflow-x: auto" in stylesheet
     assert ".handoff-spacer" in stylesheet
+    assert "--control-height: 44px" in stylesheet
+    assert ".image-source-row-actions" in stylesheet
+    assert ".image-source-config { grid-column: 1 / -1;" in stylesheet
+    assert ".source-section-shared" in stylesheet
+    assert "background: #eef7f0;" in stylesheet
+    assert ".source-section-selected" in stylesheet
+    assert "background: #eef4fa;" in stylesheet
+    assert ".source-section-heading" in stylesheet
+    assert "grid-template-columns: minmax(0, .65fr) minmax(0, 1.45fr) minmax(0, .9fr);" in stylesheet
+    assert "container: image-source-list / inline-size;" in stylesheet
+    assert "@container image-source-list (max-width: 760px)" in stylesheet
+    assert "@container image-source-list (max-width: 520px)" in stylesheet
+    assert ".nas-source-actions" in stylesheet
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in stylesheet
+    assert '"identity state"' in stylesheet
+    assert 'grid-template-areas: "identity" "state" "actions" "directories";' in stylesheet
+    assert ".nas-source-actions { grid-template-columns: minmax(0, 1fr); }" in stylesheet
+    assert 'grid-template-areas: "name" "path" "actions" "state"' in stylesheet
+    assert ".handoff-actions button { width: 100%; min-width: 0; }" in stylesheet
 
 
 def test_results_stage_rejects_ordinary_submission_without_creating_handoff(
@@ -2684,3 +2710,18 @@ def test_fifth_stage_uses_ai_manual_shared_pool_and_visual_crop():
     assert "@media (max-width: 760px)" in stylesheet
     assert "@media (max-width: 480px)" in stylesheet
     assert ".crop-overlay:focus-visible" in stylesheet
+
+
+def test_collection_ui_prompts_for_human_check_and_auto_resume():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'worker.phase === "waiting_human_check"' in source
+    assert "请在 CDP Chrome 中完成验证" in source
+    assert "验证通过后会自动继续采集" in source
