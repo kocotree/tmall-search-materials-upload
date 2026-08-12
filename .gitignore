@@ -1,5 +1,6 @@
 .worktrees/
 .venv/
+.python-runtime/
 .superpowers/
 .uv-cache*/
 .agent-tmp-*/
@@ -14,14 +15,36 @@ runs/
 .environment-fingerprint.json
 v/
 build/
+dist/
 .tmall-browser-profile/
 __pycache__/
 .pytest_cache/
 *.egg-info/
 *.log
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
 feishu-auth-*.png
 .local-cache/
 .codegraph/
 config/local-paths.json
 config/selectors.local.yaml
 config/selectors.local.yml
+
+# Operating-system and editor-only files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local secrets and temporary design backups
+.env
+.env.*
+!.env.example
+*.bkp
