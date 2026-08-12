@@ -8,7 +8,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
-$Python = Join-Path $ProjectRoot ".venv\Scripts\pythonw.exe"
+$RuntimeRoot = if ($env:TMALL_RUNTIME_ROOT) {
+    [System.IO.Path]::GetFullPath($env:TMALL_RUNTIME_ROOT)
+}
+elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "tmall-search-materials\runtime"
+}
+else {
+    Join-Path $HOME ".local\state\tmall-search-materials\runtime"
+}
+$Python = Join-Path $RuntimeRoot ".venv\Scripts\pythonw.exe"
 if (-not [System.IO.File]::Exists($Python)) {
     throw "Prepared project Python is missing."
 }
@@ -32,11 +41,20 @@ if ($Config) {
     $AllowedConfig = [System.IO.Path]::GetFullPath(
         (Join-Path $ProjectRoot "config")
     )
+    $AllowedUserConfig = [System.IO.Path]::GetFullPath(
+        (Join-Path (Split-Path -Parent $RuntimeRoot) "config")
+    )
     if (
         -not [System.IO.File]::Exists($ResolvedConfig) -or
-        -not $ResolvedConfig.StartsWith(
-            $AllowedConfig + [System.IO.Path]::DirectorySeparatorChar,
-            [System.StringComparison]::OrdinalIgnoreCase
+        -not (
+            $ResolvedConfig.StartsWith(
+                $AllowedConfig + [System.IO.Path]::DirectorySeparatorChar,
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            $ResolvedConfig.StartsWith(
+                $AllowedUserConfig + [System.IO.Path]::DirectorySeparatorChar,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
         )
     ) {
         throw "Config path is invalid."

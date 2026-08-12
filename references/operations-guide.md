@@ -28,9 +28,15 @@ $quickValidate = Join-Path $env:USERPROFILE ".codex\skills\.system\skill-creator
 uv run python -X utf8 $quickValidate .
 ```
 
-`uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 创建或同步 `.venv`。首次同步需要访问 Python 包索引；后续验收使用 `uv lock --check` 检查锁文件是否与 `pyproject.toml` 一致。不要向系统 Python 或 Conda 基础环境直接安装本项目依赖。
+macOS/Linux 使用：
 
-环境检查是启动配置页前唯一允许的阻断。若 `.venv\Scripts\tmall-materials.exe` 已可执行，可以直接启动页面；否则准备 `uv` 并同步环境。此时不得要求用户在聊天中提供店铺名、月份或图片根目录，也不得把这些阶段 1 字段与 `uv` 安装合并成一个前置问题。
+```bash
+./scripts/bootstrap.sh
+```
+
+`uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 在用户数据目录创建或同步独立 `.venv`。若本机没有 Python 3.11，bootstrap 会通过 `uv` 安装受管解释器。首次准备需要网络访问；不要向系统 Python、Plugin 安装缓存或 Conda 基础环境直接安装依赖。
+
+环境检查是启动配置页前唯一允许的阻断。用户级运行环境中的 `tmall-materials` 已可执行时直接启动页面；否则准备 `uv` 并同步环境。不得以 Plugin 缓存目录中缺少 `.venv` 或缓存目录不可写为失败依据。此时不得要求用户在聊天中提供店铺名、月份或图片根目录，也不得把这些阶段 1 字段与环境安装合并成一个前置问题。
 
 如果电脑已有兼容的 Python 3.11 或 3.12，可显式传入路径，避免 `uv` 自动下载解释器：
 
@@ -38,11 +44,11 @@ uv run python -X utf8 $quickValidate .
 .\scripts\bootstrap.cmd -Python "<python.exe>" -Mirror official -WithTests
 ```
 
-网络受限时可把 `-Mirror` 改为 `tuna`、`aliyun` 或 `tencent`。镜像选择会影响 `uv.lock` 的依赖来源；只有明确切换锁文件来源时才传 `-UpdateLock`，并在提交前复核锁文件差异。公开仓库默认保留 `official`，不在源码或配置中保存镜像凭证。`.cmd` 入口只为当前子进程绕过 PowerShell 脚本执行限制，不修改系统执行策略。脚本使用项目内 `.uv-cache`、系统证书和 `--no-managed-python`，避免用户缓存权限及解释器自动下载造成的长时间等待。
+网络受限时可把 `-Mirror` 改为 `tuna`、`aliyun` 或 `tencent`。镜像选择会影响 `uv.lock` 的依赖来源；只有明确切换锁文件来源时才传 `-UpdateLock`，并在提交前复核锁文件差异。公开仓库默认保留 `official`，不在源码或配置中保存镜像凭证。脚本使用用户数据目录中的 runtime、uv-cache 和系统证书。默认位置为 Windows `%LOCALAPPDATA%\tmall-search-materials`，macOS/Linux `~/.local/state/tmall-search-materials`；可分别用 `TMALL_USER_DATA_ROOT` 和 `TMALL_RUNTIME_ROOT` 覆盖。
 
 ### 1.1 每台电脑只配置一次路径
 
-首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。保存时每个来源使用稳定 `source_id + label`，实际盘符或 UNC 是当前电脑的本机绑定；旧的 `label + path` 文件读取时自动补 source ID。另一台电脑可把同一 source ID 绑定到不同盘符或 UNC，无需修改项目文件。也可以复制 `config/local-paths.example.json` 为 `config/local-paths.json` 后手工修改。`local-paths.json` 已被 Git 忽略，不会影响其他电脑，也不得保存 NAS 凭据、目录清单或图片内容。
+首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。保存时每个来源使用稳定 `source_id + label`，实际盘符或 UNC 是当前电脑的本机绑定；旧的 `label + path` 文件读取时自动补 source ID。另一台电脑可把同一 source ID 绑定到不同盘符或 UNC，无需修改项目文件。页面默认写入用户数据目录的 `config/runtime.json`；`config/local-paths.example.json` 仅用于了解字段，不应复制回 Plugin 安装目录。配置不得保存 NAS 凭据、目录清单或图片内容。
 
 每个图片源行的“选择文件夹”由用户点击后启动独立的 Windows STA 助手并打开原生目录选择窗口，只回填已验证的绝对目录，不扫描图片。助手依次记录 `started`、`window_visible`、`selected/cancelled`；窗口无法在可见性期限内证明已显示时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper，保留原输入并继续允许手工输入。取消、窗口忙碌、选择超时、无桌面会话、启动失败或返回无效路径同样不会清空输入。UNC 或无界面环境可直接粘贴路径。
 
@@ -73,10 +79,10 @@ uv run python -X utf8 $quickValidate .
 
 1. `tmall-materials interact --config <配置.json>` 指定配置文件。
 2. `TMALL_CONFIG_FILE` 指定配置文件；`TMALL_WORKSPACE_ROOT`、`TMALL_PRODUCTS_CSV`、`TMALL_RULES_CSV`、`TMALL_RUNS_ROOT` 可单项覆盖。
-3. 项目内 `config/local-paths.json`。
-4. 项目结构自动发现；运行目录默认使用 `<项目根目录>/runs/`。
+3. 用户数据目录中的 `config/runtime.json`；旧版项目内 `config/local-paths.json` 仅作兼容读取。
+4. 项目结构自动发现；运行目录默认使用用户数据目录下的 `runs/`。
 
-共享文件夹索引路径按 `TMALL_FOLDER_INDEX_ROOT`、本机配置 `folder_index_root`、`<项目根目录>/.local-cache/folder-index/` 解析。它是每台电脑唯一维护的机器级缓存，不放入时间戳任务目录。
+共享文件夹索引路径按 `TMALL_FOLDER_INDEX_ROOT`、本机配置 `folder_index_root`、用户数据目录下的 `cache/folder-index/` 解析。它是每台电脑唯一维护的机器级缓存，不放入 Plugin 安装缓存或时间戳任务目录。
 
 路径未配置不会导致交互页面崩溃；只有实际依赖该输入的阶段会保持待配置。路径可用性以受管 UI 服务的 Windows 身份为准；用户在另一个资源管理器窗口能访问，不代表服务会话拥有相同盘符映射或权限。不要把个人用户名、桌面绝对路径或本机盘符写回 `SKILL.md`、Python 源码或已提交的配置。
 
@@ -101,11 +107,10 @@ macOS 使用同一个结构化桌面入口；它把本地 UI 服务提交给当�
 仍须先通过精确 session 和 ownership 校验：
 
 ```bash
-.venv/bin/tmall-materials desktop-workbench \
+"${TMALL_RUNTIME_ROOT:-$HOME/.local/state/tmall-search-materials/runtime}/.venv/bin/tmall-materials" desktop-workbench \
   --runs-root "<项目内精确 runs_root>" \
   --port-start 8765 \
-  --port-end 8795 \
-  --config "config/local-paths.json"
+  --port-end 8795
 ```
 
 macOS 的托管 job 只继承运行所需的路径、区域设置和代码中显式列出的本机配置变量，
@@ -332,7 +337,8 @@ uv run tmall-materials prepare-gallery `
 
 诊断中包含原因、证据、责任边界和同一幂等处理器的重试命令。用户只处理扫码、验证码、
 账号切换或业务配置；不得要求用户修复选择器、执行命令或重新填写已保存的业务数据。
-本机配置仍保存到 Git 忽略的 `config/local-paths.json`，不能使用仓库示例。
+本机配置保存到用户数据目录的 `config/runtime.json`，旧版项目内
+`config/local-paths.json` 仅作兼容读取；不能使用仓库示例作为生产配置。
 
 提交阶段一后执行：
 
@@ -378,11 +384,10 @@ SHA、店铺、attempt、CSV SHA、行数、唯一商品 ID 和最后完成页�
 才用 Playwright 检查真实 DOM；修复现有 selector profile 或 collector、增加回归
 测试，再重跑原 `process-setup`/`supplement`。不要把诊断脚本保留为第二条生产路径。
 
-日常启动和恢复直接调用 `.venv\Scripts\tmall-materials.exe`；若 console-script
-缺失但 Python 和源码已准备，调用 `.venv\Scripts\python.exe -m
-upload_search_materials.cli`，不使用 `uv run`。
-`scripts/bootstrap.cmd` 是唯一依赖同步入口，使用项目 `.uv-cache` 并写入环境指纹；
-已有环境的采集恢复不会访问全局 uv cache、解析或下载包。
+日常启动和恢复调用用户级运行环境中的 `tmall-materials`，不使用 `uv run`。
+Windows 的 `scripts/bootstrap.cmd` 与 macOS/Linux 的 `scripts/bootstrap.sh` 是依赖
+同步入口，使用用户级 uv-cache 并写入或校验环境指纹；已有环境的采集恢复不会解析
+或下载包，也不会向 Plugin 安装缓存写入数据。
 
 ## 5. 启动用户控制的 CDP 浏览器
 

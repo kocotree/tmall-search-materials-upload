@@ -29,6 +29,7 @@ def prepared(tmp_path):
         rules=DiscoveredPath(None, "missing"),
         image_sources=(),
         runs_root=workspace / "runs",
+        user_data_root=workspace / "user-data",
     )
     return runtime, selectors
 
@@ -50,6 +51,7 @@ def prepared_posix(tmp_path):
         rules=DiscoveredPath(None, "missing"),
         image_sources=(),
         runs_root=project / "runs",
+        user_data_root=project / "user-data",
     )
     return runtime, selectors
 

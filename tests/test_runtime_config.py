@@ -26,19 +26,25 @@ def make_workspace(tmp_path: Path) -> Path:
 
 def test_discovers_unique_tables_from_workspace_relative_docs(tmp_path):
     workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
     products = workspace / "src" / "upload_search_materials" / "docs" / PRODUCT_NAME
     rules = workspace / "src" / "upload_search_materials" / "docs" / RULE_NAME
     products.write_text("product", encoding="utf-8")
     rules.write_text("rules", encoding="utf-8")
 
-    runtime = load_runtime_config(environ={}, start=workspace / "src")
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)},
+        start=workspace / "src",
+    )
 
     assert runtime.workspace_root == workspace.resolve()
     assert runtime.products.path == products.resolve()
     assert runtime.products.status == "discovered"
     assert runtime.rules.path == rules.resolve()
-    assert runtime.runs_root == workspace / "runs"
-    assert runtime.folder_index_root == workspace / ".local-cache" / "folder-index"
+    assert runtime.runs_root == user_data / "runs"
+    assert runtime.folder_index_root == user_data / "cache" / "folder-index"
+    assert runtime.browser_profile_dir == user_data / "browser-profile"
+    assert runtime.user_data_root == user_data
     assert runtime.image_sources == ()
 
 
@@ -137,7 +143,10 @@ def test_missing_explicit_config_fails_with_precise_error(tmp_path):
 
 def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
     workspace = make_workspace(tmp_path)
-    runtime = load_runtime_config(environ={}, start=workspace)
+    user_data = tmp_path / "user-data"
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
     first = workspace / "media" / "model"
     second = workspace / "media" / "buyer"
     first.mkdir(parents=True)
@@ -150,13 +159,31 @@ def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
         ],
     )
 
-    assert updated.config_path == workspace / "config/local-paths.json"
+    assert updated.config_path == user_data / "config/runtime.json"
     saved = json.loads(updated.config_path.read_text(encoding="utf-8"))
     assert [item["label"] for item in saved["image_sources"]] == ["模特图", "买家秀"]
     statuses = inspect_image_sources(updated, saved["image_sources"])
     assert [item["status"] for item in statuses] == ["available", "unavailable"]
     assert statuses[0]["reason_code"] == "PATH_AVAILABLE"
     assert statuses[1]["reason_code"] == "PATH_NOT_FOUND"
+
+
+def test_loads_machine_config_from_user_data_root(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    config = user_data / "config/runtime.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps({"cdp_url": "http://127.0.0.1:9333"}),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    assert runtime.config_path == config
+    assert runtime.cdp_url == "http://127.0.0.1:9333"
 
 
 def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):

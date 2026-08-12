@@ -16,7 +16,10 @@ from .runtime_config import RuntimeConfig
 from .time_utils import iso_timestamp
 
 
-BOOTSTRAP_ACTION = "运行 scripts\\bootstrap.cmd -WithTests"
+BOOTSTRAP_ACTION = (
+    "运行 scripts\\bootstrap.cmd（Windows）或 "
+    "scripts/bootstrap.sh（macOS/Linux）"
+)
 
 
 class RuntimePreflightError(RuntimeError):
@@ -26,16 +29,42 @@ class RuntimePreflightError(RuntimeError):
         self.next_action = next_action
 
 
-def environment_fingerprint(project_root: Path) -> dict[str, Any]:
+def runtime_environment_root(project_root: Path) -> Path:
+    configured = str(os.environ.get("TMALL_RUNTIME_ROOT", "")).strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if os.name == "nt":
+        base = str(os.environ.get("LOCALAPPDATA", "")).strip()
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+        return (root / "tmall-search-materials" / "runtime").resolve()
+    state_home = str(os.environ.get("XDG_STATE_HOME", "")).strip()
+    base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
+    return (base / "tmall-search-materials" / "runtime").resolve()
+
+
+def environment_fingerprint(
+    project_root: Path,
+    *,
+    runtime_root: Path | None = None,
+) -> dict[str, Any]:
     """Describe the single prepared module environment used at runtime."""
 
     project = Path(project_root).resolve()
+    runtime_root = (
+        Path(runtime_root).expanduser().resolve()
+        if runtime_root is not None
+        else runtime_environment_root(project)
+    )
     lock = project / "uv.lock"
     python_candidates = (
+        runtime_root / ".venv" / "Scripts" / "python.exe",
+        runtime_root / ".venv" / "bin" / "python",
         project / ".venv" / "Scripts" / "python.exe",
         project / ".venv" / "bin" / "python",
     )
     executable_candidates = (
+        runtime_root / ".venv" / "Scripts" / "tmall-materials.exe",
+        runtime_root / ".venv" / "bin" / "tmall-materials",
         project / ".venv" / "Scripts" / "tmall-materials.exe",
         project / ".venv" / "bin" / "tmall-materials",
     )
@@ -48,7 +77,10 @@ def environment_fingerprint(project_root: Path) -> dict[str, Any]:
         executable_candidates[0],
     )
     source_package = project / "src" / "upload_search_materials"
-    recorded_path = project / ".environment-fingerprint.json"
+    recorded_path = runtime_root / "environment-fingerprint.json"
+    legacy_recorded_path = project / ".environment-fingerprint.json"
+    if not recorded_path.is_file() and legacy_recorded_path.is_file():
+        recorded_path = legacy_recorded_path
     lock_sha = (
         hashlib.sha256(lock.read_bytes()).hexdigest()
         if lock.is_file()
@@ -88,7 +120,8 @@ def environment_fingerprint(project_root: Path) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "project_root": str(project),
-        "uv_cache_dir": str(project / ".uv-cache"),
+        "runtime_root": str(runtime_root),
+        "uv_cache_dir": str(runtime_root / "uv-cache"),
         "lock_path": str(lock),
         "lock_sha256": lock_sha,
         "python": str(python),
@@ -113,7 +146,14 @@ def preflight_runtime_environment(
     """Check prepared local state without dependency resolution or network I/O."""
 
     project = runtime.workspace_root
-    environment = environment_fingerprint(project)
+    environment = environment_fingerprint(
+        project,
+        runtime_root=(
+            runtime.user_data_root / "runtime"
+            if runtime.user_data_root is not None
+            else None
+        ),
+    )
     if not environment["prepared"]:
         raise RuntimePreflightError(
             "ENVIRONMENT_NOT_PREPARED", BOOTSTRAP_ACTION

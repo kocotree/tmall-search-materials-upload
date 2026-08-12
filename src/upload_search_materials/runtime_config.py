@@ -28,6 +28,25 @@ MAX_IMAGE_SOURCES = 50
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 
 
+def default_user_data_root(
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Return a writable, machine-local root outside the Plugin cache."""
+
+    env = os.environ if environ is None else environ
+    explicit = str(env.get("TMALL_USER_DATA_ROOT", "")).strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    if os.name == "nt":
+        base = str(env.get("LOCALAPPDATA", "")).strip()
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+        return (root / "tmall-search-materials").resolve()
+    state_home = str(env.get("XDG_STATE_HOME", "")).strip()
+    if state_home:
+        return (Path(state_home).expanduser() / "tmall-search-materials").resolve()
+    return (Path.home() / ".local" / "state" / "tmall-search-materials").resolve()
+
+
 @dataclass(frozen=True)
 class DiscoveredPath:
     path: Path | None
@@ -52,6 +71,7 @@ class RuntimeConfig:
     browser_profile_dir: Path = DEFAULT_CDP_PROFILE_RELATIVE
     material_center_url: str = DEFAULT_MATERIAL_CENTER_URL
     config_path: Path | None = None
+    user_data_root: Path | None = None
 
 
 def load_runtime_config(
@@ -63,10 +83,13 @@ def load_runtime_config(
     """Resolve paths without requiring a particular username, drive letter, or cwd."""
 
     env = os.environ if environ is None else environ
+    user_data_root = default_user_data_root(env)
     explicit_config = config_path or env.get("TMALL_CONFIG_FILE")
     environment_workspace = env.get("TMALL_WORKSPACE_ROOT")
     preliminary_root = _find_workspace_root(environment_workspace, start=start)
-    selected_config = _select_config_path(explicit_config, preliminary_root)
+    selected_config = _select_config_path(
+        explicit_config, preliminary_root, user_data_root
+    )
     document = _read_config(selected_config)
     workspace_root = (
         preliminary_root
@@ -100,7 +123,7 @@ def load_runtime_config(
     runs_root = (
         _resolve_configured_path(runs_value, workspace_root)
         if runs_value
-        else workspace_root / "runs"
+        else user_data_root / "runs"
     )
     folder_index_value = (
         env.get("TMALL_FOLDER_INDEX_ROOT") or document.get("folder_index_root")
@@ -108,7 +131,7 @@ def load_runtime_config(
     folder_index_root = (
         _resolve_configured_path(folder_index_value, workspace_root)
         if folder_index_value
-        else workspace_root / ".local-cache" / "folder-index"
+        else user_data_root / "cache" / "folder-index"
     )
     team_folder_index_value = (
         env.get("TMALL_TEAM_FOLDER_INDEX_ROOT")
@@ -130,7 +153,7 @@ def load_runtime_config(
     selectors_file = (
         _resolve_configured_path(selectors_value, workspace_root)
         if selectors_value
-        else workspace_root / LOCAL_SELECTORS_RELATIVE
+        else user_data_root / "config" / "selectors.local.yaml"
     )
     if not selectors_file.is_file():
         selectors_file = None
@@ -153,7 +176,7 @@ def load_runtime_config(
     browser_profile_dir = (
         _resolve_configured_path(profile_value, workspace_root)
         if profile_value
-        else workspace_root / DEFAULT_CDP_PROFILE_RELATIVE
+        else user_data_root / "browser-profile"
     )
     material_center_url = str(
         env.get("TMALL_MATERIAL_CENTER_URL")
@@ -176,6 +199,7 @@ def load_runtime_config(
         browser_profile_dir=browser_profile_dir,
         material_center_url=material_center_url,
         config_path=selected_config,
+        user_data_root=user_data_root,
     )
 
 
@@ -248,7 +272,11 @@ def save_image_sources(
     """Persist image roots to the machine-local JSON without changing tracked files."""
 
     sources = normalize_image_sources(value, runtime.workspace_root)
-    target = runtime.config_path or runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    target = runtime.config_path or (
+        runtime.user_data_root / "config/runtime.json"
+        if runtime.user_data_root is not None
+        else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    )
     document = _read_config(target) if target.is_file() else {}
     document["image_sources"] = list(sources)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -272,7 +300,11 @@ def save_selector_profile_path(
     selected = _resolve_configured_path(text, runtime.workspace_root)
     if not selected.is_file():
         raise ValueError("selectors_file does not exist")
-    target = runtime.config_path or runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    target = runtime.config_path or (
+        runtime.user_data_root / "config/runtime.json"
+        if runtime.user_data_root is not None
+        else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    )
     document = _read_config(target) if target.is_file() else {}
     document["selectors_file"] = str(selected)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -318,14 +350,21 @@ def _find_workspace_root(configured: str | None, *, start: Path | None) -> Path:
     return (start or Path.cwd()).resolve()
 
 
-def _select_config_path(value: str | Path | None, workspace_root: Path) -> Path | None:
+def _select_config_path(
+    value: str | Path | None,
+    workspace_root: Path,
+    user_data_root: Path,
+) -> Path | None:
     if value:
         path = Path(value).expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(f"runtime config not found: {path}")
         return path
-    candidate = workspace_root / LOCAL_CONFIG_RELATIVE
-    return candidate if candidate.is_file() else None
+    candidate = user_data_root / "config/runtime.json"
+    if candidate.is_file():
+        return candidate
+    legacy = workspace_root / LOCAL_CONFIG_RELATIVE
+    return legacy if legacy.is_file() else None
 
 
 def _read_config(path: Path | None) -> dict:

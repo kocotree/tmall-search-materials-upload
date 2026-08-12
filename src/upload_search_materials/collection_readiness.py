@@ -28,6 +28,7 @@ from .browser.session import (
 )
 from .collection_runtime import COLLECTION_RUNTIME_SCHEMA_VERSION
 from .runtime_config import RuntimeConfig
+from .runtime_preflight import environment_fingerprint
 from .time_utils import iso_timestamp
 
 
@@ -119,29 +120,15 @@ def _check(
 
 def project_environment_status(runtime: RuntimeConfig) -> dict[str, Any]:
     project = runtime.workspace_root
-    executable_candidates = (
-        project / ".venv" / "Scripts" / "tmall-materials.exe",
-        project / ".venv" / "bin" / "tmall-materials",
+    environment = environment_fingerprint(
+        project,
+        runtime_root=(
+            runtime.user_data_root / "runtime"
+            if runtime.user_data_root is not None
+            else None
+        ),
     )
-    python_candidates = (
-        project / ".venv" / "Scripts" / "python.exe",
-        project / ".venv" / "bin" / "python",
-    )
-    executable = next(
-        (candidate for candidate in executable_candidates if candidate.is_file()),
-        executable_candidates[0],
-    )
-    python = next(
-        (candidate for candidate in python_candidates if candidate.is_file()),
-        python_candidates[0],
-    )
-    lock = project / "uv.lock"
-    source_package = project / "src" / "upload_search_materials"
-    ready = (
-        python.is_file()
-        and lock.is_file()
-        and (executable.is_file() or source_package.is_dir())
-    )
+    ready = bool(environment["prepared"])
     return _check(
         "environment",
         ready=ready,
@@ -150,16 +137,9 @@ def project_environment_status(runtime: RuntimeConfig) -> dict[str, Any]:
         next_action=(
             ""
             if ready
-            else "运行 scripts/bootstrap.cmd 单独准备依赖环境"
+            else "运行 scripts/bootstrap.cmd（Windows）或 scripts/bootstrap.sh（macOS/Linux）准备用户级运行环境"
         ),
-        evidence={
-            "project_root": str(project),
-            "executable": str(executable),
-            "python": str(python),
-            "source_package": str(source_package),
-            "lock": str(lock),
-            "uv_cache": str(project / ".uv-cache"),
-        },
+        evidence=environment,
     )
 
 

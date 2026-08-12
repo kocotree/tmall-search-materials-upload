@@ -1,9 +1,4 @@
 {
-  "workspace_root": "../..",
-  "products_csv": "docs/天猫商品信息表_产品数据表_数据总表.csv",
-  "rules_csv": "docs/天猫商品信息表_每月推品规则（合并）_Grid View.csv",
-  "runs_root": "runs",
-  "folder_index_root": ".local-cache/folder-index",
   "team_folder_index_root": "/Volumes/浙江酷趣/天猫部/搜推素材索引-虾米",
   "team_folder_index_nas_source_id": "zhejiang-kuqu",
   "nas_sources_file": "config/nas-sources.yaml",

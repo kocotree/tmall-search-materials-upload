@@ -50,9 +50,14 @@ _MACOS_ENV_KEYS = frozenset(
         "TMALL_MATERIAL_CENTER_URL",
         "TMALL_NAS_SOURCES_FILE",
         "TMALL_PRODUCTS_CSV",
+        "TMALL_PLUGIN_ROOT",
         "TMALL_RULES_CSV",
         "TMALL_RUNS_ROOT",
+        "TMALL_RUNTIME_ROOT",
         "TMALL_SELECTORS_FILE",
+        "TMALL_TEAM_FOLDER_INDEX_NAS_SOURCE_ID",
+        "TMALL_TEAM_FOLDER_INDEX_ROOT",
+        "TMALL_USER_DATA_ROOT",
         "TMALL_WORKSPACE_ROOT",
         "TMPDIR",
         "UPLOAD_SEARCH_MATERIALS_AI_DEFAULT_SLOT_PLANNING",
@@ -353,11 +358,15 @@ def start_service(
     stderr_path = logs_path / "ui-service.stderr.log"
     query = urlencode({"session_id": session_id})
     url = f"http://127.0.0.1:{port}/?{query}"
-    module_root = Path(__file__).resolve().parents[3]
-    prepared_python = module_root / ".venv" / "Scripts" / "python.exe"
-    runtime_python = (
-        prepared_python if prepared_python.is_file() else Path(sys.executable)
+    configured_plugin_root = str(
+        os.environ.get("TMALL_PLUGIN_ROOT", "")
+    ).strip()
+    module_root = (
+        Path(configured_plugin_root).expanduser().resolve()
+        if configured_plugin_root
+        else Path(__file__).resolve().parents[3]
     )
+    runtime_python = Path(sys.executable)
     command = [
         str(runtime_python),
         "-m",

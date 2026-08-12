@@ -1,6 +1,6 @@
 {
   "name": "tmall-search-materials",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260812065331",
   "description": "天猫搜推素材采集、共享索引、人工审查与安全上传工作流",
   "author": {
     "name": "虾米"

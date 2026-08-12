@@ -13,11 +13,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 $skillRoot = Split-Path -Parent $PSScriptRoot
-$executable = Join-Path $skillRoot ".venv\Scripts\tmall-materials.exe"
-$pythonExecutable = Join-Path $skillRoot ".venv\Scripts\python.exe"
+$env:TMALL_PLUGIN_ROOT = $skillRoot
+$env:TMALL_WORKSPACE_ROOT = $skillRoot
+$runtimeRoot = if ($env:TMALL_RUNTIME_ROOT) {
+    [System.IO.Path]::GetFullPath($env:TMALL_RUNTIME_ROOT)
+}
+elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "tmall-search-materials\runtime"
+}
+else {
+    Join-Path $HOME ".local\state\tmall-search-materials\runtime"
+}
+$executable = Join-Path $runtimeRoot ".venv\Scripts\tmall-materials.exe"
+$pythonExecutable = Join-Path $runtimeRoot ".venv\Scripts\python.exe"
 $sourcePackage = Join-Path $skillRoot "src\upload_search_materials"
 $lockPath = Join-Path $skillRoot "uv.lock"
-$fingerprintPath = Join-Path $skillRoot ".environment-fingerprint.json"
+$fingerprintPath = Join-Path $runtimeRoot "environment-fingerprint.json"
 
 $runtimeExecutable = $executable
 $runtimePrefix = @()

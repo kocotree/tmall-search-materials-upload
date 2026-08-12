@@ -80,7 +80,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 把“运行环境准备”和“阶段 1 业务配置”严格分开：
 
-1. 启动前只检查运行条件：当前 Skill 目录、可执行的既有 `.venv`，或用于创建环境的 `uv`。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
+1. 启动前只检查运行条件：当前 Plugin 目录、用户级可写运行环境，或用于创建环境的 `uv`。不得要求只读 Plugin 安装缓存中预先存在 `.venv`。Windows 使用 `scripts/bootstrap.cmd`，macOS/Linux 使用 `scripts/bootstrap.sh`；脚本在用户数据目录准备 Python 3.11、锁定依赖、虚拟环境和缓存。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
 2. 不得在配置页启动前通过聊天索取店铺名、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
 3. 日常素材任务先通过 `scripts/start-managed-workbench.ps1` 在实际桌面用户会话创建或恢复时间戳会话；Windows 中 Agent 必须为该固定脚本请求宿主桌面权限，并在启动 JSON 中验证 SID 和登录会话，不能把沙箱用户的同会话进程误当成 Explorer 桌面身份。可见网络盘只用于诊断，不得根据历史本机配置阻止配置页启动。只有已经明确不使用图片源、NAS、映射盘和原生目录窗口时才可使用 `scripts/start-ui.cmd`。`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
 4. 让用户在阶段 1 配置页填写并确认店铺和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
@@ -107,7 +107,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 处理阶段一 handoff 时，运行：
 
 ```powershell
-.\.venv\Scripts\python.exe -m upload_search_materials.cli process-setup --runs-root "<runs-root>" --session "<session-id>"
+tmall-materials process-setup --runs-root "<runs-root>" --session "<session-id>"
 ```
 
 该入口必须校验精确 session、stage、revision 和 `input_sha256`，然后复用现有
@@ -119,7 +119,7 @@ Worker，随后立即返回；不得等待全量分页完成。只有显式本�
 `--foreground`。使用以下命令读取唯一权威状态：
 
 ```powershell
-.\.venv\Scripts\python.exe -m upload_search_materials.cli collection-status --runs-root "<runs-root>" --session "<session-id>"
+tmall-materials collection-status --runs-root "<runs-root>" --session "<session-id>"
 ```
 
 状态必须按“当前绑定完成结果 → 活跃且归属可证的 Worker → 已确认死亡可恢复 →
@@ -161,8 +161,8 @@ checkpoint 中已验证的逐页商品身份重放导航。完成采集必须同
 `collected/promotion/current/`，并投影到旧兼容路径。恢复只能复用同一 attempt 的
 checkpoint；失败 attempt 保持为不可变历史。
 
-生产选择器配置遵循：显式 `--selectors`、`TMALL_SELECTORS_FILE`、本机
-`config/local-paths.json`、Git 忽略的 `config/selectors.local.yaml`。优先在
+生产选择器配置遵循：显式 `--selectors`、`TMALL_SELECTORS_FILE`、用户数据目录
+`config/runtime.json` 中保存的路径、用户数据目录 `config/selectors.local.yaml`。优先在
 阶段一前端的“采集运行环境”组件验证并保存；仓库示例、占位选择器和用途不匹配
 的配置不得用于真实页面。
 
@@ -176,11 +176,11 @@ handoff 与 processing claim。分页采集在每页读取前、完整页 checkp
 最后完整页继续。不得自动操作或绕过滑块，也不得索取或保存登录凭据；仅当 Worker 已
 确认退出时才使用原有恢复入口，不要求用户重新填写业务数据。
 
-日常命令直接使用项目 `.venv\Scripts\tmall-materials.exe`；若 console-script 尚未
-生成但项目 Python 和源码已准备，则使用 `.venv\Scripts\python.exe -m
-upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步。项目
-`.uv-cache` 和环境指纹只由 `scripts/bootstrap.cmd` 准备；恢复采集不得下载或解析
-依赖。
+日常命令使用用户级运行环境中的 `tmall-materials`，不得通过 `uv run` 触发隐式
+同步。默认运行根位于 Windows `%LOCALAPPDATA%\tmall-search-materials\runtime`
+或 macOS/Linux `~/.local/state/tmall-search-materials/runtime`，可用
+`TMALL_RUNTIME_ROOT` 覆盖。依赖缓存和环境指纹只由 bootstrap 脚本准备；恢复采集
+不得下载或解析依赖，也不得向 Plugin 安装缓存写入环境或运行数据。
 
 只有现有维护链路持久化了可复现的选择器、导航、弹窗、解析、分页或页面状态错误
 后，才允许用 Playwright 检查真实 DOM。诊断结果必须用于修复现有生产选择器配置
@@ -234,13 +234,13 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 3. 用户在第二阶段选择商品后，以 `selected_product_ids` 作为后续唯一商品边界；月度规则可用于后续文案或业务校验，不得重新扩展或替换该边界。
 4. 默认运行 `tmall-materials supplement` 扫描“搜推高价值”的全部分页，每页增量写入 CSV 和 checkpoint；只对目标容量不明确、解析失败或状态异常的商品，再带 `--scan-mode exact --candidates supplement-candidates.csv` 按精确商品 ID 补采。`--scan-mode recommended` 仅为旧证据和恢复命令保留。
 5. 带 `--backend-status`、已人工确认的素材配置和 AI 文案响应再次运行 dry-run，生成两级任务和 `review.html`。
-6. 用户在“上传任务确认”页选择精确 task ID 并提交后，该提交即为所选任务的正式发布授权。Agent 用项目 Skill 目录内的环境运行 `tmall-materials process-publish-authorization --runs-root <runs-root> --session <session-id>`；该唯一入口校验已领取的 approval handoff，确定性生成或复用发布批次，生成不可变 `approval-manifest.json`，执行发布并把逐任务结果写回原阶段。不得从仓库根目录的其他 `.venv` 运行，不得再手工拼接 bridge/approve/publish 命令，也不得等待第二次生产确认。
+6. 用户在“上传任务确认”页选择精确 task ID 并提交后，该提交即为所选任务的正式发布授权。Agent 用本 Plugin 的用户级运行环境执行 `tmall-materials process-publish-authorization --runs-root <runs-root> --session <session-id>`；该唯一入口校验已领取的 approval handoff，确定性生成或复用发布批次，生成不可变 `approval-manifest.json`，执行发布并把逐任务结果写回原阶段。不得借用其他项目或 Conda base 的环境运行，不得再手工拼接 bridge/approve/publish 命令，也不得等待第二次生产确认。
 
 在交互页面中，上述第 5 步由第四阶段提交自动触发，不再要求用户单独点击 dry-run。上传任务确认页必须同时展示商品、目标坑位、图片数量、批准文案、阻塞项和非阻塞警告；任务默认不勾选，只有用户显式勾选的精确 task ID 才能进入授权。页面只提供一次“提交并自动上传所选任务”，提交后不再显示独立生产确认页。正式上传前仍须在千牛当前页面实时复查目标坑位为空，自动 dry-run 不得把历史页面状态当作发布时事实。
 7. 正式图片上传必须使用项目内 `browser/qianniu_upload.py` 中从 PlaywrightAuto 迁移的千牛搜推流程：精确搜索商品 ID、定位批准的 1-based 空坑位、进入“发图文”跨域表单、把批准的最终图片以 `publish-<SHA前缀>-<随机后缀>.<扩展名>` 短唯一名称上传到素材库、按该名称唯一选中、核对选择数量，再填写已批准标题和正文。正文编辑器须兼容普通 textarea/contenteditable 与 `textarea[data-cangjie-dockey]`。最终按钮优先按千牛发布专用语义 `data-autolog*=publisher_ok_clk` 唯一定位；只有明确“提交发布/发布”文字才可作为兼容入口，禁止按通用“确认/确定”文字点击。发布前保存该商品全部既有 `CopyId_value` 集合；点击一次后重新读取同商品，只有旧集合完整保留且恰好新增一个 ID 才记录成功。千牛会把新素材前插，禁止按原 1-based 位置推断新远端 ID。出现二次确认、点击超时、基线变化或新增 ID 不唯一时进入 `publish_uncertain` 并暂停批次。PlaywrightAuto 目录只作为迁移来源，生产运行不得依赖该外部目录。
 8. 上传中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
-运行 `uv run tmall-materials --help` 查看参数。所有命令从本 skill 目录执行；首次使用优先运行 `scripts/bootstrap.cmd`。启动器支持官方源及显式选择的 HTTPS 镜像、项目内缓存、已有 Python 3.11/3.12 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
+运行用户级环境中的 `tmall-materials --help` 查看参数。所有命令从本 Plugin 目录执行；首次使用 Windows 运行 `scripts/bootstrap.cmd`，macOS/Linux 运行 `scripts/bootstrap.sh`。启动器支持官方源及显式选择的 HTTPS 镜像、用户级缓存、Python 3.11 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
 
 首次使用先按 [operations-guide.md](references/operations-guide.md) 完成安装、CDP 浏览器启动和六阶段命令。所有时间参数必须是带时区的 ISO 8601。
 
@@ -276,13 +276,13 @@ upload_search_materials.cli`。两者都不得通过 `uv run` 触发隐式同步
 
 ### 跨电脑路径解析
 
-- 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、项目内 `config/local-paths.json` 的顺序读取本机配置；该本机文件不得提交到仓库。
+- 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、用户数据目录 `config/runtime.json`、旧版项目内 `config/local-paths.json` 的顺序读取本机配置；本机配置不得提交到仓库。
 - 未显式配置商品表或规则表时，从程序包的 `src/upload_search_materials/docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
-- 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符、UNC 或 macOS 挂载点只保存到 Git 忽略的每机 `config/local-paths.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台电脑可把同一 source ID 绑定到不同本机路径，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:` 或相同 `/Volumes` 名称。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。必须至少配置 1 个名称与路径均非空且不重复的来源。
+- 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符、UNC 或 macOS 挂载点只保存到用户数据目录的每机 `config/runtime.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台电脑可把同一 source ID 绑定到不同本机路径，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:` 或相同 `/Volumes` 名称。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。必须至少配置 1 个名称与路径均非空且不重复的来源。
 - NAS 原图只能由素材执行器读取。页面通过 `gallery-job.json` 排队并自动请求桌面启动；执行器必须在能访问本机挂载的用户会话中运行，校验 source ID 和相对路径，拒绝绝对路径、盘符、`..` 与目录逃逸，只把任务所需预览和校验元数据写回会话目录。每个按钮任务启动一个一次性进程，任务结束即退出，不注册系统服务。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；挂载不可用返回 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并保留用户决定。手工 PowerShell/shell 启动脚本只用于开发诊断，不得作为日常用户步骤。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限。
 - 公司 NAS 共享定义从 `config/nas-sources.yaml` 读取。状态检测必须只读；未挂载时只有用户在配置页明确点击“连接 NAS”，才可打开 Finder/Explorer 的系统 SMB 连接界面并等待用户自行认证。该辅助动作不等于静默挂载，不得携带、读取或保存凭据。当前共享、允许子目录和诊断命令见 [nas-sources.md](references/nas-sources.md)。
-- `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用项目根目录下的 `runs/`。所有任务继续按时间戳目录隔离。
-- 团队快照根路径优先使用 `TMALL_TEAM_FOLDER_INDEX_ROOT`，其次使用本机配置的 `team_folder_index_root`；NAS 身份使用 `team_folder_index_nas_source_id`。本机物化缓存路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用 `folder_index_root`，默认使用项目根目录下 Git 忽略的 `.local-cache/folder-index/`。两者都不属于任何时间戳任务；任务只保存当前商品候选快照。
+- `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用用户数据目录下的 `runs/`。所有任务继续按时间戳目录隔离，不写入 Plugin 安装缓存。
+- 团队快照根路径优先使用 `TMALL_TEAM_FOLDER_INDEX_ROOT`，其次使用本机配置的 `team_folder_index_root`；NAS 身份使用 `team_folder_index_nas_source_id`。本机物化缓存路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用 `folder_index_root`，默认使用用户数据目录下的 `cache/folder-index/`。两者都不属于任何时间戳任务；任务只保存当前商品候选快照。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。
 
 - 不保存或输出密码、Cookie、Token、短信码、二维码登录数据。

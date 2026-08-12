@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 from typing import Any
 
 from .runtime_config import RuntimeConfig
@@ -26,15 +27,24 @@ def _validate_session(session_id: str) -> str:
 
 
 def _project_root() -> Path:
+    configured = str(os.environ.get("TMALL_PLUGIN_ROOT", "")).strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
     return Path(__file__).resolve().parents[2]
 
 
 def _python_executable(project_root: Path, *, windowed: bool) -> Path:
+    active = type(project_root)(sys.executable).resolve()
     if os.name == "nt":
         name = "pythonw.exe" if windowed else "python.exe"
-        candidate = project_root / ".venv" / "Scripts" / name
+        sibling = active.with_name(name)
+        candidate = (
+            sibling
+            if sibling.is_file()
+            else project_root / ".venv" / "Scripts" / name
+        )
     else:
-        candidate = project_root / ".venv" / "bin" / "python"
+        candidate = active if active.is_file() else project_root / ".venv" / "bin" / "python"
     if not candidate.is_file():
         raise MaterialExecutorLaunchError("prepared_python_missing")
     return candidate
@@ -44,12 +54,14 @@ def _config_argument(runtime: RuntimeConfig) -> list[str]:
     path = runtime.config_path
     if path is None:
         return []
-    resolved = Path(path).resolve()
-    allowed = (_project_root() / "config").resolve()
-    try:
-        resolved.relative_to(allowed)
-    except ValueError as error:
-        raise MaterialExecutorLaunchError("config_outside_project") from error
+    resolved = type(_project_root())(path).resolve()
+    allowed_roots = [(_project_root() / "config").resolve()]
+    if runtime.user_data_root is not None:
+        allowed_roots.append((runtime.user_data_root / "config").resolve())
+    if not any(
+        resolved == root or root in resolved.parents for root in allowed_roots
+    ):
+        raise MaterialExecutorLaunchError("config_outside_allowed_roots")
     if not resolved.is_file() or resolved.suffix.casefold() != ".json":
         raise MaterialExecutorLaunchError("config_invalid")
     return ["--config", str(resolved)]

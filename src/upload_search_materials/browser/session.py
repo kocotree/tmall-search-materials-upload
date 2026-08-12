@@ -42,6 +42,12 @@ _WINDOWS_BROWSER_CANDIDATES = (
     ("PROGRAMFILES(X86)", "Microsoft/Edge/Application/msedge.exe"),
     ("LOCALAPPDATA", "Microsoft/Edge/Application/msedge.exe"),
 )
+_POSIX_BROWSER_CANDIDATES = (
+    Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    Path.home() / "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+)
 
 
 @dataclass(frozen=True)
@@ -121,7 +127,14 @@ def discover_browser_executable(
 ) -> Path | None:
     """Find Chrome or Edge even when Windows did not add it to PATH."""
 
-    discovered = shutil.which("chrome") or shutil.which("msedge")
+    discovered = (
+        shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("chrome")
+        or shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("msedge")
+    )
     if discovered:
         return Path(discovered)
     env = os.environ if environ is None else environ
@@ -130,6 +143,9 @@ def discover_browser_executable(
         if not root:
             continue
         candidate = Path(root) / Path(relative)
+        if candidate.is_file():
+            return candidate
+    for candidate in _POSIX_BROWSER_CANDIDATES:
         if candidate.is_file():
             return candidate
     return None

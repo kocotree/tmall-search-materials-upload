@@ -32,7 +32,10 @@ def test_default_runtime_session_is_git_ignored_and_has_no_authentication_data(
         capture_output=True,
         text=True,
     )
-    runtime = load_runtime_config(environ={}, start=workspace)
+    user_data = tmp_path / "user-data"
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
     session = SessionStore(runtime.runs_root).create_session()
     state = json.loads(
         (session.path / "session.json").read_text(encoding="utf-8")
@@ -47,7 +50,7 @@ def test_default_runtime_session_is_git_ignored_and_has_no_authentication_data(
     ).stdout
     persisted = json.dumps(state, ensure_ascii=False).casefold()
 
-    assert runtime.runs_root == workspace / "runs"
+    assert runtime.runs_root == user_data / "runs"
     assert "runs/" not in status.replace("\\", "/")
     for secret_name in (
         "password",
@@ -59,7 +62,9 @@ def test_default_runtime_session_is_git_ignored_and_has_no_authentication_data(
         assert secret_name not in persisted
 
 
-def test_prepared_environment_is_independent_of_global_uv_cache(tmp_path):
+def test_prepared_environment_is_independent_of_global_uv_cache(
+    tmp_path, monkeypatch
+):
     project = tmp_path / "upload-search-materials"
     scripts = project / ".venv" / "Scripts"
     scripts.mkdir(parents=True)
@@ -67,10 +72,12 @@ def test_prepared_environment_is_independent_of_global_uv_cache(tmp_path):
     (scripts / "tmall-materials.exe").write_bytes(b"prepared")
     (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
 
+    runtime_root = tmp_path / "user-runtime"
+    monkeypatch.setenv("TMALL_RUNTIME_ROOT", str(runtime_root))
     status = environment_fingerprint(project)
 
     assert status["prepared"] is True
-    assert status["uv_cache_dir"] == str(project / ".uv-cache")
+    assert status["uv_cache_dir"] == str(runtime_root / "uv-cache")
 
 
 def test_environment_fingerprint_accepts_windows_powershell_utf8_bom(tmp_path):
@@ -129,3 +136,24 @@ def test_module_environment_wins_when_repository_root_also_has_venv(tmp_path):
     assert status["prepared"] is True
     assert Path(status["python"]) == module_python
     assert Path(status["python"]) != root_python
+
+
+def test_user_runtime_environment_wins_over_plugin_cache_venv(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "plugin-cache"
+    plugin_python = project / ".venv" / "bin" / "python"
+    plugin_python.parent.mkdir(parents=True)
+    plugin_python.write_bytes(b"plugin-cache")
+    (project / "src" / "upload_search_materials").mkdir(parents=True)
+    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    runtime_root = tmp_path / "user-runtime"
+    runtime_python = runtime_root / ".venv" / "bin" / "python"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_bytes(b"user-runtime")
+    monkeypatch.setenv("TMALL_RUNTIME_ROOT", str(runtime_root))
+
+    status = environment_fingerprint(project)
+
+    assert Path(status["python"]) == runtime_python
+    assert Path(status["python"]) != plugin_python

@@ -135,6 +135,20 @@ def test_discovery_finds_standard_windows_browser_location(
     ) == chrome
 
 
+def test_discovery_finds_standard_macos_browser_location(
+    monkeypatch, tmp_path
+):
+    chrome = tmp_path / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome"
+    chrome.parent.mkdir(parents=True)
+    chrome.write_bytes(b"fake")
+    monkeypatch.setattr(session_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(
+        session_module, "_POSIX_BROWSER_CANDIDATES", (chrome,)
+    )
+
+    assert session_module.discover_browser_executable({}) == chrome
+
+
 def test_launch_passes_material_center_url_to_visible_browser(
     monkeypatch, tmp_path
 ):

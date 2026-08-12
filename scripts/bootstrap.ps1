@@ -14,7 +14,23 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $configFile = Join-Path $projectRoot "config\uv-$Mirror.toml"
-$cacheDir = Join-Path $projectRoot ".uv-cache"
+$runtimeRoot = if ($env:TMALL_RUNTIME_ROOT) {
+    [System.IO.Path]::GetFullPath($env:TMALL_RUNTIME_ROOT)
+}
+elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "tmall-search-materials\runtime"
+}
+else {
+    Join-Path $HOME ".local\state\tmall-search-materials\runtime"
+}
+$environmentDir = Join-Path $runtimeRoot ".venv"
+$cacheDir = Join-Path $runtimeRoot "uv-cache"
+New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+$env:UV_PROJECT_ENVIRONMENT = $environmentDir
+$commonArguments = @(
+    "--config-file", $configFile,
+    "--cache-dir", $cacheDir
+)
 
 $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
 if ($uvCommand) {
@@ -36,20 +52,20 @@ if (-not $uvExecutable) {
 }
 
 if (-not $Python) {
-    $Python = (& $uvExecutable python find --no-managed-python ">=3.11").Trim()
+    $PythonResult = & $uvExecutable @commonArguments python find --no-managed-python ">=3.11" 2>$null
+    $Python = if ($PythonResult) { ([string]$PythonResult).Trim() } else { "" }
     if ($LASTEXITCODE -ne 0 -or -not $Python) {
-        throw "PYTHON_NOT_AVAILABLE: set TMALL_PYTHON or pass -Python with a Python >=3.11 executable."
+        & $uvExecutable @commonArguments python install 3.11 --default --system-certs
+        if ($LASTEXITCODE -ne 0) {
+            throw "PYTHON_INSTALL_FAILED: install Python 3.11 or pass -Python."
+        }
+        $Python = (& $uvExecutable @commonArguments python find "3.11").Trim()
     }
 }
 
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "PYTHON_NOT_AVAILABLE: '$Python' is not an executable file."
 }
-
-$commonArguments = @(
-    "--config-file", $configFile,
-    "--cache-dir", $cacheDir
-)
 
 Push-Location $projectRoot
 try {
@@ -66,6 +82,7 @@ try {
     $syncArguments = @(
         "sync",
         "--locked",
+        "--no-editable",
         "--python", $Python,
         "--no-managed-python",
         "--system-certs"
@@ -79,7 +96,7 @@ try {
         throw "DEPENDENCY_SYNC_FAILED: the lockfile may belong to another mirror. Rerun with -UpdateLock only when intentionally changing the lock source."
     }
 
-    $cliExecutable = Join-Path $projectRoot ".venv\Scripts\tmall-materials.exe"
+    $cliExecutable = Join-Path $environmentDir "Scripts\tmall-materials.exe"
     if (-not (Test-Path -LiteralPath $cliExecutable -PathType Leaf)) {
         throw "CLI_SMOKE_TEST_FAILED: tmall-materials entry point was not installed."
     }
@@ -89,13 +106,14 @@ try {
         throw "CLI_SMOKE_TEST_FAILED: dependencies installed, but tmall-materials did not start."
     }
 
-    $fingerprintPath = Join-Path $projectRoot ".environment-fingerprint.json"
+    $fingerprintPath = Join-Path $runtimeRoot "environment-fingerprint.json"
     $lockPath = Join-Path $projectRoot "uv.lock"
     $fingerprint = [ordered]@{
         schema_version = 1
         lock_sha256 = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
         python = (Resolve-Path -LiteralPath $Python).Path
         executable = (Resolve-Path -LiteralPath $cliExecutable).Path
+        launch_identity = (Resolve-Path -LiteralPath $cliExecutable).Path
         uv_cache_dir = (Resolve-Path -LiteralPath $cacheDir).Path
         prepared_at = [DateTimeOffset]::Now.ToString("o")
     }

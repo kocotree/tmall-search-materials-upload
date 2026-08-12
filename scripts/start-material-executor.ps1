@@ -8,7 +8,18 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot "..")
 )
-$Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+$env:TMALL_PLUGIN_ROOT = $ProjectRoot
+$env:TMALL_WORKSPACE_ROOT = $ProjectRoot
+$RuntimeRoot = if ($env:TMALL_RUNTIME_ROOT) {
+    [System.IO.Path]::GetFullPath($env:TMALL_RUNTIME_ROOT)
+}
+elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "tmall-search-materials\runtime"
+}
+else {
+    Join-Path $HOME ".local\state\tmall-search-materials\runtime"
+}
+$Python = Join-Path $RuntimeRoot ".venv\Scripts\python.exe"
 if (-not [System.IO.File]::Exists($Python)) {
     throw "Prepared project Python is missing."
 }

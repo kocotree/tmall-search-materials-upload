@@ -873,11 +873,9 @@ def create_app(
             Path(selected)
             if selected
             else (
-                runtime.workspace_root
-                / "upload-search-materials"
-                / "config"
-                / "selectors.local.yaml"
-            )
+                runtime.user_data_root
+                or runtime.workspace_root / ".local-cache"
+            ) / "config" / "selectors.local.yaml"
         )
         if target.is_file():
             try:

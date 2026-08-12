@@ -13,7 +13,7 @@ def test_plugin_manifest_exposes_both_business_skills():
     )
 
     assert manifest["name"] == "tmall-search-materials"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"].startswith("0.1.0")
     assert manifest["skills"] == "./skills/"
     assert {
         path.name

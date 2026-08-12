@@ -6,11 +6,9 @@ PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 export TMALL_PLUGIN_ROOT="$PROJECT_ROOT"
 export TMALL_WORKSPACE_ROOT="$PROJECT_ROOT"
 RUNTIME_ROOT=${TMALL_RUNTIME_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/tmall-search-materials/runtime}
-PYTHON="$RUNTIME_ROOT/.venv/bin/python"
+CLI="$RUNTIME_ROOT/.venv/bin/tmall-materials"
 
-if [ ! -x "$PYTHON" ]; then
-  echo "Prepared project Python is missing." >&2
-  exit 2
+if [ ! -x "$CLI" ]; then
+  "$SCRIPT_DIR/bootstrap.sh"
 fi
-
-exec "$PYTHON" -m upload_search_materials.cli material-executor --watch "$@"
+exec "$CLI" ui-start "$@"
