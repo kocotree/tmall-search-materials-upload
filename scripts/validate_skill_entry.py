@@ -40,7 +40,7 @@ def _frontmatter(text: str, path: Path) -> dict:
 def validate(repository_root: Path) -> list[str]:
     errors: list[str] = []
     canonical = repository_root / "SKILL.md"
-    entry = repository_root / ".codex" / "skills" / "upload-search-materials" / "SKILL.md"
+    entry = repository_root / "skills" / "upload-search-materials" / "SKILL.md"
     metadata = repository_root / "agents" / "openai.yaml"
     entry_metadata = entry.parent / "agents" / "openai.yaml"
     for path in (canonical, entry, metadata, entry_metadata):

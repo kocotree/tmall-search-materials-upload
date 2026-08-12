@@ -1,0 +1,21 @@
+{
+  "name": "tmall-materials-team",
+  "interface": {
+    "displayName": "天猫搜推素材团队插件"
+  },
+  "plugins": [
+    {
+      "name": "tmall-search-materials",
+      "source": {
+        "source": "url",
+        "url": "git@gitee.com:QuanLongZhang/tmall-search-materials-upload.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

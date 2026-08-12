@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = $skillRoot
 $canonicalPath = Join-Path $skillRoot "SKILL.md"
-$entryPath = Join-Path $repositoryRoot ".codex\skills\upload-search-materials\SKILL.md"
+$entryPath = Join-Path $repositoryRoot "skills\upload-search-materials\SKILL.md"
 
 if (-not (Test-Path -LiteralPath $canonicalPath -PathType Leaf)) {
     throw "SKILL_CANONICAL_NOT_FOUND: $canonicalPath"

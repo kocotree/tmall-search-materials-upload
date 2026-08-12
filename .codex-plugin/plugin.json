@@ -1,0 +1,33 @@
+{
+  "name": "tmall-search-materials",
+  "version": "0.1.0",
+  "description": "天猫搜推素材采集、共享索引、人工审查与安全上传工作流",
+  "author": {
+    "name": "虾米"
+  },
+  "repository": "https://gitee.com/QuanLongZhang/tmall-search-materials-upload",
+  "keywords": [
+    "tmall",
+    "search-materials",
+    "folder-index",
+    "media-upload"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "天猫搜推素材",
+    "shortDescription": "共享索引、素材审查与可恢复安全上传",
+    "longDescription": "通过交互页面完成天猫搜推素材采集、团队文件夹索引同步、人工选图、确定性编排、审批和安全上传。",
+    "developerName": "运营中心-天猫部 · 虾米",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "启动或恢复天猫搜推素材上传任务。",
+      "同步最新的团队素材文件夹索引。",
+      "增量更新并发布指定素材源索引。"
+    ]
+  }
+}

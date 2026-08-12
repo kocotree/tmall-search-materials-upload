@@ -14,6 +14,8 @@ from .agent_diagnostics import write_exception_diagnostic
 from .folder_index import build_folder_review_data, snapshot_folder_candidates
 from .interaction.session import InteractionConflict, SessionStore
 from .reporting import read_json
+from .runtime_config import RuntimeConfig
+from .team_folder_index import sync_snapshots
 
 
 PROCESSOR_NAME = "product-selection-to-folder-review"
@@ -94,6 +96,11 @@ def _reason_code(error: Exception, phase: str) -> str:
 
 
 def _recovery_action(reason_code: str) -> str:
+    if reason_code.startswith("TEAM_INDEX_"):
+        return (
+            "检查团队索引 NAS 或最后校验通过的本机缓存；"
+            "没有有效快照时由用户明确决定是否增量更新指定素材源。"
+        )
     if reason_code == "FOLDER_INDEX_BUILDING":
         return "等待共享文件夹索引完成；完成后对同一 handoff 重跑处理入口。"
     if reason_code == "FOLDER_INDEX_NOT_READY":
@@ -185,6 +192,7 @@ def process_product_selection_handoff(
     folder_index_root: Path,
     claimant_id: str = "codex-agent",
     config_path: str | Path | None = None,
+    runtime: RuntimeConfig | None = None,
 ) -> dict[str, Any]:
     """Claim one completeness handoff and publish folder-review UI data.
 
@@ -249,6 +257,18 @@ def process_product_selection_handoff(
             raise InteractionConflict("PRODUCT_SELECTION_INPUT_HASH_MISMATCH")
         input_document = store._read_json(input_path, "input")
         selected = _selected_product_ids(input_document)
+
+        phase = "sync_team_index"
+        if runtime is not None and runtime.team_folder_index_root is not None:
+            products_snapshot = (
+                store._session_path(session_id) / "inputs" / "products.csv"
+            )
+            sync_snapshots(
+                shared_root=runtime.team_folder_index_root,
+                local_root=folder_index_root,
+                products_path=products_snapshot,
+                image_sources=runtime.image_sources,
+            )
 
         phase = "snapshot_candidates"
         if not shared_candidates.is_file():

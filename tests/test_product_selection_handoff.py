@@ -12,6 +12,7 @@ from upload_search_materials.product_selection_handoff import (
     ProductSelectionProcessingError,
     process_product_selection_handoff,
 )
+from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
 FIELDS = [
@@ -154,6 +155,57 @@ def test_one_processor_prepares_folder_review_and_advances_stage(tmp_path):
     )
     assert repeated["status"] == "completed"
     assert repeated["idempotent"] is True
+
+
+def test_product_selection_syncs_configured_team_index_before_snapshot(
+    tmp_path, monkeypatch
+):
+    store, session_id, _handoff = _submitted_selection(tmp_path)
+    index_root = tmp_path / "local-folder-index"
+    team_root = tmp_path / "team-folder-index"
+    products_snapshot = store._session_path(session_id) / "inputs" / "products.csv"
+    products_snapshot.parent.mkdir(parents=True)
+    products_snapshot.write_text("products", encoding="utf-8")
+    calls = []
+
+    def fake_sync(**kwargs):
+        calls.append(kwargs)
+        _write_shared_index(kwargs["local_root"])
+        return {"complete": True}
+
+    monkeypatch.setattr(
+        "upload_search_materials.product_selection_handoff.sync_snapshots",
+        fake_sync,
+    )
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(
+            {
+                "source_id": "source-a",
+                "label": "Source A",
+                "path": str(tmp_path / "media"),
+            },
+        ),
+        runs_root=store.runs_root,
+        folder_index_root=index_root,
+        team_folder_index_root=team_root,
+    )
+
+    result = process_product_selection_handoff(
+        store,
+        session_id,
+        folder_index_root=index_root,
+        claimant_id="test-codex",
+        runtime=runtime,
+    )
+
+    assert result["status"] == "completed"
+    assert len(calls) == 1
+    assert calls[0]["shared_root"] == team_root
+    assert calls[0]["local_root"] == index_root
+    assert calls[0]["products_path"] == products_snapshot
 
 
 def test_failure_writes_codex_diagnostic_and_same_entry_can_resume(tmp_path):

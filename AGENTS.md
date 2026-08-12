@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本项目是一个面向天猫搜推素材任务的 Codex Skill。它通过本地交互页面组织商品配置、素材源选择、文件夹匹配、人工选图、确定性坑位编排、文案确认、dry-run、审批和最终上传。
+本项目是一个面向天猫搜推素材任务的 Codex Plugin。Plugin 内包含 `upload-search-materials` 与 `maintain-team-folder-index` 两个独立 Skill：前者通过本地交互页面组织商品配置、素材源选择、文件夹匹配、人工选图、确定性坑位编排、文案确认、dry-run、审批和最终上传；后者负责去中心化团队文件夹索引的校验、同步、显式增量更新和不可变快照发布。
 
 项目不是通用 NAS 客户端，也不是无人值守发布服务。NAS 只作为只读素材来源；生产写入、发布授权和关键业务选择必须遵守 Skill 中的人工确认边界。
 
@@ -14,7 +14,9 @@
 
 ## 主要目录
 
-- `SKILL.md`：Skill 的主要业务契约、执行边界和交互要求。
+- `.codex-plugin/plugin.json`：Plugin 的安装、发现和界面元数据。
+- `skills/`：Plugin 对外提供的两个 Skill；`upload-search-materials` 入口加载根目录 canonical `SKILL.md`。
+- `SKILL.md`：上传 Skill 的 canonical 业务契约、执行边界和交互要求。
 - `src/upload_search_materials/`：Python 主程序。
   - `interaction/`：Flask 本地交互页面、会话状态、前端资源和原生目录选择器。
   - `browser/`：千牛/素材中心浏览器自动化能力。

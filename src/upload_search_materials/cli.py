@@ -2925,6 +2925,7 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                 folder_index_root=runtime.folder_index_root,
                 claimant_id=args.claimant_id,
                 config_path=args.config,
+                runtime=runtime,
             )
         except ProductSelectionProcessingError as error:
             print(
