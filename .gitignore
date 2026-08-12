@@ -48,3 +48,7 @@ Thumbs.db
 .env.*
 !.env.example
 *.bkp
+
+
+明天修复的问题.md
+test_plan.md
