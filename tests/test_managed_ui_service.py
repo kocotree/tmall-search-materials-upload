@@ -274,6 +274,8 @@ def test_macos_managed_desktop_submits_launchd_job(tmp_path, monkeypatch):
     port = _free_port()
     commands = []
     states = []
+    project_root = tmp_path / "plugin-version"
+    workspace_root = tmp_path / "runtime-workspace"
 
     class Completed:
         returncode = 0
@@ -305,6 +307,8 @@ def test_macos_managed_desktop_submits_launchd_job(tmp_path, monkeypatch):
         port_end=port,
         startup_timeout=1,
         managed_desktop=True,
+        project_root=project_root,
+        workspace_root=workspace_root,
     )
 
     assert started["healthy"] is True
@@ -317,5 +321,9 @@ def test_macos_managed_desktop_submits_launchd_job(tmp_path, monkeypatch):
     assert command[:3] == ["/bin/launchctl", "submit", "-l"]
     assert "/usr/bin/env" in command
     assert any(value.startswith("TMALL_DESKTOP_LOGIN_SESSION_ID=") for value in command)
+    assert f"TMALL_PLUGIN_ROOT={project_root.resolve()}" in command
+    assert f"TMALL_WORKSPACE_ROOT={workspace_root.resolve()}" in command
     assert not any(value.startswith("GITHUB_TOKEN=") for value in command)
+    assert started["project_root"] == str(project_root.resolve())
+    assert started["workspace_root"] == str(workspace_root.resolve())
     assert states

@@ -316,19 +316,46 @@ def start_service(
     open_system_browser: bool = False,
     config: str | None = None,
     managed_desktop: bool = False,
+    project_root: Path | None = None,
+    workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     store = SessionStore(runs_root)
     launcher_runtime_identity = current_runtime_identity()
+    configured_plugin_root = str(
+        os.environ.get("TMALL_PLUGIN_ROOT", "")
+    ).strip()
+    module_root = (
+        Path(project_root).expanduser().resolve()
+        if project_root is not None
+        else Path(configured_plugin_root).expanduser().resolve()
+        if configured_plugin_root
+        else Path(__file__).resolve().parents[3]
+    )
+    configured_workspace_root = str(
+        os.environ.get("TMALL_WORKSPACE_ROOT", "")
+    ).strip()
+    resolved_workspace_root = (
+        Path(workspace_root).expanduser().resolve()
+        if workspace_root is not None
+        else Path(configured_workspace_root).expanduser().resolve()
+        if configured_workspace_root
+        else module_root
+    )
     if session_id:
         store.load_session(session_id)
     else:
         session_id = store.create_session().session_id
 
     existing = _read_state(store, session_id)
-    existing_is_healthy = bool(
+    existing_identity_is_healthy = bool(
         existing
         and _healthy_identity(existing)
         and _session_is_readable(existing, session_id)
+    )
+    existing_is_healthy = bool(
+        existing_identity_is_healthy
+        and existing.get("project_root") == str(module_root)
+        and existing.get("workspace_root") == str(resolved_workspace_root)
     )
     if existing_is_healthy:
         if same_local_resource_identity(
@@ -340,6 +367,8 @@ def start_service(
             existing["session_readable"] = True
             existing["reused"] = True
             return _result(existing)
+        stop_service(runs_root, session_id)
+    elif existing_identity_is_healthy:
         stop_service(runs_root, session_id)
     elif existing and existing.get("service_launch_channel") == "macos_launchd":
         stale_label = str(existing.get("service_launch_label", "")).strip()
@@ -358,14 +387,6 @@ def start_service(
     stderr_path = logs_path / "ui-service.stderr.log"
     query = urlencode({"session_id": session_id})
     url = f"http://127.0.0.1:{port}/?{query}"
-    configured_plugin_root = str(
-        os.environ.get("TMALL_PLUGIN_ROOT", "")
-    ).strip()
-    module_root = (
-        Path(configured_plugin_root).expanduser().resolve()
-        if configured_plugin_root
-        else Path(__file__).resolve().parents[3]
-    )
     runtime_python = Path(sys.executable)
     command = [
         str(runtime_python),
@@ -384,6 +405,8 @@ def start_service(
         command.extend(["--config", config])
     creationflags = 0
     child_environment = os.environ.copy()
+    child_environment["TMALL_PLUGIN_ROOT"] = str(module_root)
+    child_environment["TMALL_WORKSPACE_ROOT"] = str(resolved_workspace_root)
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
@@ -445,6 +468,8 @@ def start_service(
         "schema_version": SERVICE_SCHEMA_VERSION,
         "session_id": session_id,
         "runs_root": str(store._runs_root),
+        "project_root": str(module_root),
+        "workspace_root": str(resolved_workspace_root),
         "pid": initial_pid,
         "launcher_pid": int(launcher_runtime_identity["pid"]),
         "launcher_runtime_identity": launcher_runtime_identity,
@@ -599,6 +624,11 @@ def restart_service(runs_root: Path, session_id: str, **kwargs: Any) -> dict[str
         and existing.get("service_launch_channel") == "macos_launchd"
     ):
         kwargs["managed_desktop"] = True
+    if existing:
+        if "project_root" not in kwargs and existing.get("project_root"):
+            kwargs["project_root"] = Path(str(existing["project_root"]))
+        if "workspace_root" not in kwargs and existing.get("workspace_root"):
+            kwargs["workspace_root"] = Path(str(existing["workspace_root"]))
     if existing and _healthy_identity(existing):
         stop_service(runs_root, session_id)
     return start_service(runs_root, session_id=session_id, **kwargs)

@@ -57,6 +57,7 @@ def test_interaction_commands_are_exposed_with_registry_stage_choices():
     parser = build_parser()
 
     interact = parser.parse_args(["interact", "--runs-root", "runs"])
+    desktop = parser.parse_args(["desktop-workbench"])
     wait = parser.parse_args(
         [
             "wait-handoff",
@@ -74,6 +75,9 @@ def test_interaction_commands_are_exposed_with_registry_stage_choices():
 
     assert interact.command == "interact"
     assert interact.port == 8765
+    assert desktop.command == "desktop-workbench"
+    assert desktop.runs_root is None
+    assert desktop.project_root is None
     assert wait.command == "wait-handoff"
     assert wait.timeout is None
     assert tuple(stage_action.choices) == tuple(stage.id for stage in STAGES)

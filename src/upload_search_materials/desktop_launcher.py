@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,7 @@ def validate_desktop_launch(
     port_end: int,
     config: Path | None,
     project_root: Path | None = None,
+    allowed_runs_root: Path | None = None,
 ) -> dict[str, Any]:
     fixed_project = (
         Path(project_root).resolve()
@@ -113,7 +115,15 @@ def validate_desktop_launch(
     )
     repository_root = fixed_project.parent.resolve()
     resolved_runs = Path(runs_root).resolve()
-    if not _inside(resolved_runs, repository_root):
+    resolved_allowed_runs = (
+        Path(allowed_runs_root).resolve()
+        if allowed_runs_root is not None
+        else None
+    )
+    if not _inside(resolved_runs, repository_root) and not (
+        resolved_allowed_runs is not None
+        and _inside(resolved_runs, resolved_allowed_runs)
+    ):
         raise DesktopLauncherError("runs_root_outside_project")
     if session_id is not None and not SESSION_PATTERN.fullmatch(
         str(session_id)
@@ -278,10 +288,26 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
 
 
 def launch_desktop_workbench(**kwargs: Any) -> dict[str, Any]:
-    launch = validate_desktop_launch(**kwargs)
+    configured_plugin_root = str(
+        os.environ.get("TMALL_PLUGIN_ROOT", "")
+    ).strip()
+    project_root = Path(
+        kwargs.get("project_root")
+        or configured_plugin_root
+        or Path(__file__).resolve().parents[2]
+    ).resolve()
     runtime = load_runtime_config(
-        launch["config"],
-        start=launch["project_root"],
+        kwargs.get("config"),
+        start=project_root,
+    )
+    launch = validate_desktop_launch(
+        runs_root=kwargs.get("runs_root") or runtime.runs_root,
+        session_id=kwargs.get("session_id"),
+        port_start=kwargs.get("port_start", 8765),
+        port_end=kwargs.get("port_end", 8795),
+        config=kwargs.get("config"),
+        project_root=project_root,
+        allowed_runs_root=runtime.runs_root,
     )
     login_browser = ensure_login_browser(runtime)
     result = start_service(
@@ -291,5 +317,7 @@ def launch_desktop_workbench(**kwargs: Any) -> dict[str, Any]:
         port_end=launch["port_end"],
         config=str(launch["config"]) if launch["config"] else None,
         managed_desktop=True,
+        project_root=launch["project_root"],
+        workspace_root=runtime.workspace_root,
     )
     return {**result, "login_browser": login_browser}

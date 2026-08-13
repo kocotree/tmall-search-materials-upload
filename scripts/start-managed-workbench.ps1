@@ -1,6 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$RunsRoot,
+    [string]$RunsRoot = "",
     [string]$Session = "",
     [int]$PortStart = 8765,
     [int]$PortEnd = 8795,
@@ -36,10 +35,13 @@ if (-not [System.IO.File]::Exists($Python)) {
 $Arguments = @(
     "-m", "upload_search_materials.cli",
     "desktop-workbench",
-    "--runs-root", $RunsRoot,
+    "--project-root", $ProjectRoot,
     "--port-start", [string]$PortStart,
     "--port-end", [string]$PortEnd
 )
+if ($RunsRoot) {
+    $Arguments += @("--runs-root", $RunsRoot)
+}
 if ($Session) {
     $Arguments += @("--session", $Session)
 }

@@ -2524,8 +2524,9 @@ def build_parser() -> argparse.ArgumentParser:
         "desktop-workbench",
         help=argparse.SUPPRESS,
     )
-    desktop.add_argument("--runs-root", required=True)
+    desktop.add_argument("--runs-root")
     desktop.add_argument("--config")
+    desktop.add_argument("--project-root", help=argparse.SUPPRESS)
     desktop.add_argument("--session")
     desktop.add_argument("--port-start", type=int, default=8765)
     desktop.add_argument("--port-end", type=int, default=8795)
@@ -3098,11 +3099,14 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
     if args.command == "desktop-workbench":
         try:
             result = launch_desktop_workbench(
-                runs_root=Path(args.runs_root),
+                runs_root=Path(args.runs_root) if args.runs_root else None,
                 session_id=args.session,
                 port_start=args.port_start,
                 port_end=args.port_end,
                 config=Path(args.config) if args.config else None,
+                project_root=(
+                    Path(args.project_root) if args.project_root else None
+                ),
             )
         except (DesktopLauncherError, ManagedServiceError) as error:
             print(
@@ -3137,6 +3141,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     startup_timeout=args.startup_timeout,
                     open_system_browser=args.open_system_browser,
                     config=args.config,
+                    project_root=Path(__file__).resolve().parents[2],
+                    workspace_root=runtime.workspace_root,
                 )
                 result["login_browser"] = login_browser
             elif args.command == "ui-restart":
@@ -3152,6 +3158,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     startup_timeout=args.startup_timeout,
                     open_system_browser=args.open_system_browser,
                     config=args.config,
+                    project_root=Path(__file__).resolve().parents[2],
+                    workspace_root=runtime.workspace_root,
                 )
                 result["login_browser"] = login_browser
             elif args.command == "ui-status":

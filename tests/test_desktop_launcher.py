@@ -66,6 +66,23 @@ def test_desktop_launcher_allows_new_session_in_desktop_identity(tmp_path):
     assert result["session_id"] is None
 
 
+def test_desktop_launcher_allows_configured_user_data_runs_root(tmp_path):
+    project = _project(tmp_path)
+    user_runs = tmp_path.parent / "user-state" / "runs"
+
+    result = validate_desktop_launch(
+        runs_root=user_runs,
+        session_id=None,
+        port_start=8765,
+        port_end=8795,
+        config=None,
+        project_root=project,
+        allowed_runs_root=user_runs,
+    )
+
+    assert result["runs_root"] == user_runs.resolve()
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -231,6 +248,68 @@ def test_desktop_workbench_requests_managed_desktop_service(monkeypatch, tmp_pat
     assert result["healthy"] is True
     assert result["login_browser"] == {"connected": True}
     assert calls[0][1]["managed_desktop"] is True
+    assert calls[0][1]["project_root"] == tmp_path
+    assert calls[0][1]["workspace_root"] == tmp_path
+
+
+def test_desktop_workbench_defaults_to_runtime_runs_root(monkeypatch, tmp_path):
+    project = _project(tmp_path)
+    runtime_runs = tmp_path.parent / "user-state" / "runs"
+    runtime = RuntimeConfig(
+        workspace_root=project,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=runtime_runs,
+    )
+    calls = []
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.load_runtime_config",
+        lambda *_args, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.start_service",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"healthy": True},
+    )
+
+    launch_desktop_workbench(project_root=project)
+
+    assert calls[0][0][0] == runtime_runs.resolve()
+
+
+def test_desktop_workbench_uses_explicit_plugin_root_environment(
+    monkeypatch, tmp_path
+):
+    project = _project(tmp_path)
+    runtime = RuntimeConfig(
+        workspace_root=project,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=project.parent / "runs",
+    )
+    calls = []
+    monkeypatch.setenv("TMALL_PLUGIN_ROOT", str(project))
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.load_runtime_config",
+        lambda *_args, **kwargs: calls.append(kwargs) or runtime,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.start_service",
+        lambda *_args, **_kwargs: {"healthy": True},
+    )
+
+    launch_desktop_workbench()
+
+    assert calls[0]["start"] == project.resolve()
 
 
 def test_login_gate_detects_authenticated_store_without_target_store(

@@ -95,7 +95,6 @@ macOS/Linux 使用：
 ```powershell
 cd .\upload-search-materials
 .\scripts\start-managed-workbench.ps1 `
-  -RunsRoot "<项目内精确 runs_root>" `
   -PortStart 8765 `
   -PortEnd 8795 `
   -Config ".\config\local-paths.json"
@@ -107,11 +106,17 @@ macOS 使用同一个结构化桌面入口；它把本地 UI 服务提交给当�
 仍须先通过精确 session 和 ownership 校验：
 
 ```bash
-"${TMALL_RUNTIME_ROOT:-$HOME/.local/state/tmall-search-materials/runtime}/.venv/bin/tmall-materials" desktop-workbench \
-  --runs-root "<项目内精确 runs_root>" \
+./scripts/start-managed-workbench.sh \
   --port-start 8765 \
   --port-end 8795
 ```
+
+新任务省略 `--runs-root`，默认使用用户数据目录中的稳定 `runs/`（macOS/Linux 默认为
+`~/.local/state/tmall-search-materials/runs`，Windows 默认为
+`%LOCALAPPDATA%\tmall-search-materials\runs`），不得写入 Plugin 安装目录或版本缓存。
+恢复已有任务时才传启动结果或恢复指令记录的精确 `--runs-root` 与 `--session`。
+启动器会把当前 Plugin 根目录和运行时工作区显式传给托管子进程；不得依赖
+`launchd`、当前工作目录或 Plugin 缓存软链接推断配置位置。
 
 macOS 的托管 job 只继承运行所需的路径、区域设置和代码中显式列出的本机配置变量，
 不按变量名前缀复制宿主环境，也不保存 NAS 凭据、Cookie 或 Token。恢复已有任务时

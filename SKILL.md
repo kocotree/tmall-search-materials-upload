@@ -28,14 +28,19 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 值、批准或生产授权，不得创建 handoff，也不得选择最新 runs 目录。新聊天、上下文
 丢失或 session 有歧义时，必须使用页面生成的完整恢复指令。
 
-日常状态与恢复：
+新任务启动时省略 `-RunsRoot`，让工作台使用用户数据目录下的稳定 `runs/`；恢复任务时必须从启动结果或恢复指令沿用该任务的精确 `runs_root`。不得把新任务写入 Plugin 安装目录或版本缓存。日常状态与恢复：
 
 ```powershell
-scripts\start-managed-workbench.ps1 -RunsRoot "<runs-root>" -Session "<session-id>"
+scripts\start-managed-workbench.ps1
+scripts\start-managed-workbench.ps1 -RunsRoot "<精确 runs-root>" -Session "<session-id>"
 tmall-materials ui-status --runs-root <runs-root> --session <session-id>
 tmall-materials ui-restart --runs-root <runs-root> --session <session-id>
 tmall-materials ui-stop --runs-root <runs-root> --session <session-id>
 ```
+
+macOS/Linux 新任务使用 `./scripts/start-managed-workbench.sh`；恢复时追加
+`--runs-root "<精确 runs-root>" --session "<session-id>"`。固定脚本必须从当前 Plugin
+版本目录执行，以把真实 Plugin 根目录显式传给用户级运行环境和托管子进程。
 
 `tmall-materials interact` 只用于前台调试，不是日常入口。完整原因码、字段路由、聊天降级信封和跨电脑约束见 [frontend-interaction-contract.md](references/frontend-interaction-contract.md)；长命令见 [operations-guide.md](references/operations-guide.md)。
 
