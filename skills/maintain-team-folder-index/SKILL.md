@@ -36,6 +36,8 @@ Read [references/protocol.md](references/protocol.md) when diagnosing snapshot v
 
 5. Existing valid team snapshots are preferred and never refreshed automatically. If a configured source has no valid shared snapshot, automatically build its directory-only index and publish the first immutable snapshot without requesting a second authorization.
 
+Directory enumeration uses a 60-second no-progress timeout so large SMB/NAS directories can return their first entry without being treated as stalled. A timeout still produces a partial result that must not be published; refresh the same local index after NAS access recovers.
+
 ## Explicit incremental update
 
 Only enter this flow when the user explicitly asks to update a named source that already has a valid snapshot.

@@ -13,6 +13,7 @@ from upload_search_materials.asset_matching import PathMatch
 from upload_search_materials.cli import main
 import upload_search_materials.folder_index as folder_index_module
 from upload_search_materials.folder_index import (
+    DEFAULT_DIRECTORY_INACTIVITY_TIMEOUT_SECONDS,
     build_folder_review_data,
     build_folder_index,
     count_candidate_folder_images,
@@ -36,6 +37,10 @@ class FolderMatcher:
                 (),
             ),
         )
+
+
+def test_folder_index_default_directory_inactivity_timeout_allows_slow_nas():
+    assert DEFAULT_DIRECTORY_INACTIVITY_TIMEOUT_SECONDS == 60.0
 
 
 def test_candidate_folder_image_count_only_enumerates_supported_paths(tmp_path):
