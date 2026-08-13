@@ -7,6 +7,7 @@ import pytest
 
 from upload_search_materials.team_folder_index import (
     TeamFolderIndexError,
+    ensure_missing_snapshots,
     publish_snapshot,
     snapshot_status,
     sync_snapshots,
@@ -77,6 +78,69 @@ def make_products(path: Path) -> None:
                 "品类-公司维度划分": "测试",
             }
         )
+
+
+def test_ensure_missing_snapshots_keeps_valid_existing_snapshot(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    products = tmp_path / "products.csv"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    make_products(products)
+    published = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+        canonical_source=r"\\nas\media\source-a",
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.team_folder_index.build_folder_index",
+        lambda **_kwargs: pytest.fail("valid snapshots must not be rebuilt"),
+    )
+
+    result = ensure_missing_snapshots(
+        shared_root=shared,
+        local_root=tmp_path / "local",
+        products_path=products,
+        image_sources=({
+            "source_id": "source-a",
+            "path": str(tmp_path / "media"),
+            "canonical_unc": r"\\nas\media\source-a",
+        },),
+    )
+
+    assert result["created"] == []
+    assert result["existing_source_ids"] == ["source-a"]
+    status = snapshot_status(shared_root=shared, local_root=tmp_path / "local")
+    assert status["sources"][0]["snapshot_id"] == published["snapshot_id"]
+
+
+def test_ensure_missing_snapshots_builds_and_publishes_first_snapshot(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    products = tmp_path / "products.csv"
+    make_products(products)
+    media = tmp_path / "media"
+    (media / "season" / "SKU1").mkdir(parents=True)
+
+    result = ensure_missing_snapshots(
+        shared_root=shared,
+        local_root=tmp_path / "local",
+        products_path=products,
+        image_sources=({
+            "source_id": "source-a",
+            "path": str(media),
+            "canonical_unc": r"\\nas\media\source-a",
+        },),
+    )
+
+    assert len(result["created"]) == 1
+    assert result["created"][0]["source_id"] == "source-a"
+    assert result["existing_source_ids"] == []
+    status = snapshot_status(shared_root=shared, local_root=tmp_path / "local")
+    assert status["using"] == "shared"
+    assert status["sources"][0]["status"] == "valid"
 
 
 def test_publish_creates_portable_immutable_snapshot(tmp_path):

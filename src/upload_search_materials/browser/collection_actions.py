@@ -139,6 +139,28 @@ def _click_outside_publish_form(page: Any, opened_scope: Any | None) -> bool:
         except Exception:
             continue
 
+    # Current Material Center revisions render the cross-origin preview iframe
+    # inside a parent-page ``next-drawer``. Its dismissible backdrop is a
+    # sibling of the drawer, not part of the iframe, so target that exact
+    # backdrop before falling back to viewport geometry.
+    try:
+        parent_backdrops = page.locator(
+            ".next-overlay-wrapper.opened > .next-overlay-backdrop"
+        )
+        for index in range(parent_backdrops.count()):
+            backdrop = parent_backdrops.nth(index)
+            if not backdrop.is_visible():
+                continue
+            backdrop.click(
+                position={"x": 8, "y": 8},
+                force=True,
+                timeout=1_500,
+            )
+            if _wait_for_publish_form_to_close(page):
+                return True
+    except Exception:
+        pass
+
     # Other revisions size the iframe to the form card and keep the backdrop
     # in the parent page. Click the centre of the largest viewport band that
     # is provably outside the iframe element.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from upload_search_materials.cli import build_parser, main
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.product_selection_handoff import (
     ProductSelectionProcessingError,
+    _ensure_team_index_mount,
     process_product_selection_handoff,
 )
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
@@ -157,12 +159,55 @@ def test_one_processor_prepares_folder_review_and_advances_stage(tmp_path):
     assert repeated["idempotent"] is True
 
 
+def test_team_index_mount_is_prepared_and_fixed_subdirectory_is_created(
+    tmp_path, monkeypatch
+):
+    mount_root = tmp_path / "mounted-share"
+    mount_root.mkdir()
+    shared_root = mount_root / "天猫部" / "搜推素材索引-虾米"
+    source = object()
+    monkeypatch.setattr(
+        "upload_search_materials.product_selection_handoff.load_nas_sources",
+        lambda _path: {"team-index": source},
+    )
+    prepared = []
+
+    def fake_prepare(value, *, allow_mount):
+        prepared.append((value, allow_mount))
+        return SimpleNamespace(
+            state="ready",
+            reason_code="PATH_AVAILABLE",
+            mount_path=str(mount_root),
+        )
+
+    monkeypatch.setattr(
+        "upload_search_materials.product_selection_handoff.prepare_nas_source",
+        fake_prepare,
+    )
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        nas_sources_file=tmp_path / "nas-sources.yaml",
+        team_folder_index_root=shared_root,
+        team_folder_index_nas_source_id="team-index",
+    )
+
+    _ensure_team_index_mount(runtime)
+
+    assert prepared == [(source, True)]
+    assert shared_root.is_dir()
+
+
 def test_product_selection_syncs_configured_team_index_before_snapshot(
     tmp_path, monkeypatch
 ):
     store, session_id, _handoff = _submitted_selection(tmp_path)
     index_root = tmp_path / "local-folder-index"
     team_root = tmp_path / "team-folder-index"
+    team_root.mkdir()
     products_snapshot = store._session_path(session_id) / "inputs" / "products.csv"
     products_snapshot.parent.mkdir(parents=True)
     products_snapshot.write_text("products", encoding="utf-8")
@@ -176,6 +221,11 @@ def test_product_selection_syncs_configured_team_index_before_snapshot(
     monkeypatch.setattr(
         "upload_search_materials.product_selection_handoff.sync_snapshots",
         fake_sync,
+    )
+    ensured = []
+    monkeypatch.setattr(
+        "upload_search_materials.product_selection_handoff.ensure_missing_snapshots",
+        lambda **kwargs: ensured.append(kwargs),
     )
     runtime = RuntimeConfig(
         workspace_root=tmp_path,
@@ -203,9 +253,61 @@ def test_product_selection_syncs_configured_team_index_before_snapshot(
 
     assert result["status"] == "completed"
     assert len(calls) == 1
+    assert len(ensured) == 1
     assert calls[0]["shared_root"] == team_root
     assert calls[0]["local_root"] == index_root
     assert calls[0]["products_path"] == products_snapshot
+
+
+def test_product_selection_bootstraps_missing_snapshots_before_sync(
+    tmp_path, monkeypatch
+):
+    store, session_id, _handoff = _submitted_selection(tmp_path)
+    index_root = tmp_path / "local-folder-index"
+    team_root = tmp_path / "team-folder-index"
+    team_root.mkdir()
+    products_snapshot = store._session_path(session_id) / "inputs" / "products.csv"
+    products_snapshot.parent.mkdir(parents=True)
+    products_snapshot.write_text("products", encoding="utf-8")
+    events = []
+
+    def fake_ensure(**kwargs):
+        events.append(("ensure", kwargs))
+        return {"created": [{"source_id": "source-a"}]}
+
+    def fake_sync(**kwargs):
+        events.append(("sync", kwargs))
+        _write_shared_index(kwargs["local_root"])
+        return {"complete": True}
+
+    monkeypatch.setattr(
+        "upload_search_materials.product_selection_handoff.ensure_missing_snapshots",
+        fake_ensure,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.product_selection_handoff.sync_snapshots",
+        fake_sync,
+    )
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=({"source_id": "source-a", "path": str(tmp_path)},),
+        runs_root=store.runs_root,
+        folder_index_root=index_root,
+        team_folder_index_root=team_root,
+    )
+
+    result = process_product_selection_handoff(
+        store,
+        session_id,
+        folder_index_root=index_root,
+        claimant_id="test-codex",
+        runtime=runtime,
+    )
+
+    assert result["status"] == "completed"
+    assert [event[0] for event in events] == ["ensure", "sync"]
 
 
 def test_failure_writes_codex_diagnostic_and_same_entry_can_resume(tmp_path):

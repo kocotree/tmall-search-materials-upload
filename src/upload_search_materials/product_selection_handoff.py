@@ -13,9 +13,10 @@ from typing import Any
 from .agent_diagnostics import write_exception_diagnostic
 from .folder_index import build_folder_review_data, snapshot_folder_candidates
 from .interaction.session import InteractionConflict, SessionStore
+from .nas_sources import load_nas_sources, prepare_nas_source
 from .reporting import read_json
 from .runtime_config import RuntimeConfig
-from .team_folder_index import sync_snapshots
+from .team_folder_index import ensure_missing_snapshots, sync_snapshots
 
 
 PROCESSOR_NAME = "product-selection-to-folder-review"
@@ -144,6 +145,26 @@ def _advance_to_asset_matching(store: SessionStore, session_id: str) -> None:
         store._write_session_state(session_id, state)
 
 
+def _ensure_team_index_mount(runtime: RuntimeConfig) -> None:
+    shared_root = runtime.team_folder_index_root
+    if shared_root is None or Path(shared_root).is_dir():
+        return
+    if runtime.nas_sources_file is None or not runtime.team_folder_index_nas_source_id:
+        raise RuntimeError("TEAM_INDEX_MOUNT_CONFIG_MISSING")
+    sources = load_nas_sources(runtime.nas_sources_file)
+    source = sources.get(runtime.team_folder_index_nas_source_id)
+    if source is None:
+        raise RuntimeError("TEAM_INDEX_MOUNT_SOURCE_MISSING")
+    status = prepare_nas_source(source, allow_mount=True)
+    if status.state != "ready":
+        raise RuntimeError(status.reason_code or "TEAM_INDEX_MOUNT_FAILED")
+    mount_root = Path(status.mount_path).resolve()
+    target = Path(shared_root).resolve()
+    if not target.is_relative_to(mount_root):
+        raise RuntimeError("TEAM_INDEX_SHARED_ROOT_OUTSIDE_MOUNT")
+    target.mkdir(parents=True, exist_ok=True)
+
+
 def _completed_transition(
     store: SessionStore,
     session_id: str,
@@ -262,6 +283,13 @@ def process_product_selection_handoff(
         if runtime is not None and runtime.team_folder_index_root is not None:
             products_snapshot = (
                 store._session_path(session_id) / "inputs" / "products.csv"
+            )
+            _ensure_team_index_mount(runtime)
+            ensure_missing_snapshots(
+                shared_root=runtime.team_folder_index_root,
+                local_root=folder_index_root,
+                products_path=products_snapshot,
+                image_sources=runtime.image_sources,
             )
             sync_snapshots(
                 shared_root=runtime.team_folder_index_root,

@@ -15,7 +15,9 @@ import time
 import uuid
 from typing import Iterable, Mapping, Sequence
 
+from .asset_index import NamedRoot
 from .asset_matching import ProductPathMatcher
+from .folder_index import build_folder_index
 from .io_tables import read_product_csv, validate_product_records
 from .persistence import atomic_write_dict_csv, atomic_write_json, read_json
 
@@ -234,6 +236,72 @@ def publish_snapshot(
             if staging.exists():
                 shutil.rmtree(staging)
     return {"source_id": source_id, "snapshot_id": snapshot_id, "folder_count": len(folders)}
+
+
+def ensure_missing_snapshots(
+    *,
+    shared_root: Path,
+    local_root: Path,
+    products_path: Path,
+    image_sources: Sequence[Mapping[str, str]],
+    publisher: str = "automatic-upload-workflow",
+) -> dict[str, object]:
+    """Build and publish only configured sources without a valid snapshot."""
+
+    shared_root = Path(shared_root)
+    if not shared_root.is_dir():
+        raise TeamFolderIndexError("TEAM_INDEX_SHARED_ROOT_UNAVAILABLE")
+    products_path = Path(products_path)
+    products = read_product_csv(products_path)
+    validation = validate_product_records(products)
+    if not products or validation.batch_blocking:
+        raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_INVALID")
+    matcher = ProductPathMatcher.from_products(products, validation)
+    products_sha256 = hashlib.sha256(products_path.read_bytes()).hexdigest()
+    created = []
+    existing = []
+    for binding in image_sources:
+        source_id = _safe_source_id(str(binding.get("source_id", "")))
+        try:
+            _snapshot_for_source(shared_root, source_id)
+            existing.append(source_id)
+            continue
+        except TeamFolderIndexError:
+            pass
+        canonical_source = str(binding.get("canonical_unc", "")).strip()
+        if not canonical_source:
+            raise TeamFolderIndexError(
+                f"TEAM_INDEX_LOCAL_CANONICAL_SOURCE_MISSING: {source_id}"
+            )
+        declared_root = Path(str(binding.get("path", "")))
+        if declared_root.is_symlink() or not declared_root.is_dir():
+            raise TeamFolderIndexError(
+                f"TEAM_INDEX_LOCAL_BINDING_UNAVAILABLE: {source_id}"
+            )
+        build_root = Path(local_root) / "team-build" / source_id
+        database_path = build_root / "folder-index.sqlite3"
+        refreshing = database_path.is_file()
+        build_folder_index(
+            database_path=database_path,
+            products_sha256=products_sha256,
+            roots=(NamedRoot(source_id, declared_root.resolve()),),
+            matcher=matcher,
+            refresh=refreshing,
+            target_sources=(source_id,) if refreshing else (),
+        )
+        created.append(publish_snapshot(
+            database_path=database_path,
+            shared_root=shared_root,
+            source_id=source_id,
+            canonical_source=canonical_source,
+            publisher=publisher,
+        ))
+    return {
+        "schema_version": 1,
+        "mode": "automatic_missing_snapshot_bootstrap",
+        "created": created,
+        "existing_source_ids": existing,
+    }
 
 
 def validate_snapshot(

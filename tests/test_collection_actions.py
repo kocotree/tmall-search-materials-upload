@@ -115,10 +115,16 @@ class Page:
         self.keyboard = Keyboard()
         self.context = Context(self)
         self.waited = []
+        self.parent_backdrop = None
 
     def locator(self, selector):
         if selector == ".promotion-row":
             return LocatorList(self.rows)
+        if (
+            selector == ".next-overlay-wrapper.opened > .next-overlay-backdrop"
+            and self.parent_backdrop is not None
+        ):
+            return LocatorList([self.parent_backdrop])
         return LocatorList()
 
     def wait_for_timeout(self, milliseconds):
@@ -244,6 +250,21 @@ def test_publish_form_exit_clicks_backdrop_outside_form_first():
     collection_actions._close_opened_action(page, publish_frame)
 
     assert backdrop.clicked_positions == [{"x": 8, "y": 8}]
+    assert page.keyboard.keys == []
+    assert collection_actions._publish_frame_visible(page) is False
+
+
+def test_publish_form_exit_clicks_parent_next_drawer_backdrop():
+    page = Page([Row("600")])
+    page.parent_backdrop = Backdrop(page)
+    publish_frame = Frame(
+        f"https://example.test{collection_actions.PUBLISH_FRAME_FRAGMENT}"
+    )
+    page.frames = [publish_frame]
+
+    collection_actions._close_opened_action(page, publish_frame)
+
+    assert page.parent_backdrop.clicked_positions == [{"x": 8, "y": 8}]
     assert page.keyboard.keys == []
     assert collection_actions._publish_frame_visible(page) is False
 

@@ -5,7 +5,7 @@ description: Maintain decentralized, reusable folder-index snapshots for team ma
 
 # Maintain Team Folder Index
 
-Use the repository CLI as the deterministic implementation. Keep NAS access read-only except for an explicit publish requested by the user.
+Use the repository CLI as the deterministic implementation. An ordinary upload workflow may automatically publish the first immutable snapshot for a configured source when no valid shared snapshot exists.
 
 ## Fixed team location
 
@@ -22,7 +22,7 @@ Read [references/protocol.md](references/protocol.md) when diagnosing snapshot v
 
    `tmall-materials team-folder-index status --config config/local-paths.json`
 
-3. If the shared path is unavailable and the user asked to use or sync the team index, invoke the existing OS-owned SMB connection flow:
+3. If the shared path is unavailable while an upload workflow needs the team index, automatically invoke the existing OS-owned SMB connection flow:
 
    `tmall-materials nas-prepare --config config/nas-sources.yaml --source-id zhejiang-kuqu --allow-mount`
 
@@ -34,11 +34,11 @@ Read [references/protocol.md](references/protocol.md) when diagnosing snapshot v
 
    If NAS is unavailable, this command may use the last verified local snapshot cache. Report that fallback explicitly.
 
-5. Do not scan, refresh, or publish merely because an index is old or absent locally. Existing valid team snapshots are preferred.
+5. Existing valid team snapshots are preferred and never refreshed automatically. If a configured source has no valid shared snapshot, automatically build its directory-only index and publish the first immutable snapshot without requesting a second authorization.
 
 ## Explicit incremental update
 
-Only enter this flow when the user explicitly asks to update a named source.
+Only enter this flow when the user explicitly asks to update a named source that already has a valid snapshot.
 
 1. Resolve the requested `source_id` and its local root from `image_sources`.
 2. Refresh that source or a precise relative subtree with the existing `index-folders --refresh-source` or `--refresh-prefix` command. Never broaden a subtree request into a full-source scan without confirmation.

@@ -28,6 +28,7 @@ Publishing acquires `sources/<source_id>/.publish.lock` with exclusive creation 
 
 - Hash, schema, source ID, or canonical-source mismatch: do not use that snapshot.
 - Requested source has no local binding: block that requested sync or publish.
-- Shared path unavailable: use verified local cache if present; otherwise stop and offer the OS SMB connection flow.
+- Shared path unavailable during an upload workflow: automatically open the OS SMB connection flow; after system authentication and mount-identity validation, create the fixed index subdirectory if needed and continue.
+- Configured source missing a valid shared snapshot: automatically build a directory-only local index and publish its first immutable snapshot. Existing valid snapshots are never automatically refreshed.
 - Partial source refresh or empty source: do not publish.
 - Publish conflict: leave both local indexes untouched, wait for the other publisher to finish, then re-check status.
