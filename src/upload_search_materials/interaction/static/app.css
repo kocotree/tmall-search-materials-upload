@@ -490,6 +490,27 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   border-radius: 50%;
   animation: setup-login-spin 0.9s linear infinite;
 }
+.setup-login-gate[data-state="ready"] {
+  min-height: 0;
+  padding: 16px 20px;
+  border-color: #b9ddc6;
+  background: #eef9f2;
+}
+.setup-login-gate[data-state="ready"] .setup-login-gate-spinner {
+  border: 0;
+  animation: none;
+}
+.setup-login-gate[data-state="ready"] .setup-login-gate-spinner::after {
+  content: "✓";
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  background: #2f7d4b;
+  color: #fff;
+  font-weight: 800;
+}
 @keyframes setup-login-spin { to { transform: rotate(360deg); } }
 .setup-advanced {
   margin-top: 24px;
@@ -855,6 +876,15 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .action-message { margin: 0; color: var(--muted); font-size: 11px; text-align: center; }
 .handoff-actions { display: flex; min-width: 0; gap: 10px; }
 .handoff-actions button { min-width: 140px; }
+.submit-validation-hint {
+  align-self: center;
+  max-width: 210px;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: right;
+}
+.submit-validation-hint[hidden] { display: none; }
 
 .primary-button, .secondary-button, .button-primary, .button-secondary {
   display: inline-flex;

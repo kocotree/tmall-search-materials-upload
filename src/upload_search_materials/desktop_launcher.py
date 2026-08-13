@@ -73,6 +73,22 @@ def _has_visible_locator(scope: Any, selector: str, *, limit: int) -> bool:
     return False
 
 
+def _is_login_url(url: str) -> bool:
+    normalized = str(url).strip().casefold()
+    return any(
+        marker in normalized
+        for marker in ("login", "passport", "oauth", "authorize")
+    )
+
+
+def _is_material_center_url(url: str) -> bool:
+    normalized = str(url).strip().casefold()
+    return any(
+        marker in normalized
+        for marker in ("material-center", "material-management")
+    )
+
+
 def _inside(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -206,6 +222,7 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                     "ready": False,
                     "login_state": "human_check",
                     "reason_code": "HUMAN_CHECK",
+                    "observed_url": str(page.url),
                 }
             observed_store = ""
             for scope in scopes:
@@ -226,12 +243,29 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                     "observed_url": str(page.url),
                     "reason_code": "READY",
                 }
+            observed_url = str(page.url)
+            if _is_login_url(observed_url):
+                return {
+                    **browser,
+                    "ready": False,
+                    "login_state": "interaction_required",
+                    "observed_url": observed_url,
+                    "reason_code": "LOGIN_INTERACTION_REQUIRED",
+                }
+            if _is_material_center_url(observed_url):
+                return {
+                    **browser,
+                    "ready": False,
+                    "login_state": "store_unrecognized",
+                    "observed_url": observed_url,
+                    "reason_code": "STORE_IDENTITY_NOT_FOUND",
+                }
             return {
                 **browser,
                 "ready": False,
-                "login_state": "interaction_required",
-                "observed_url": str(page.url),
-                "reason_code": "LOGIN_INTERACTION_REQUIRED",
+                "login_state": "opening_material_center",
+                "observed_url": observed_url,
+                "reason_code": "MATERIAL_CENTER_OPENING",
             }
     except Exception as error:
         return {

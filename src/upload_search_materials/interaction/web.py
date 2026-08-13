@@ -1237,21 +1237,30 @@ def create_app(
 
     @app.get("/api/runtime/login-status")
     def get_runtime_login_status():
-        """Automatic login gate; the business UI never exposes diagnostics."""
+        """Return a safe, user-facing state for the automatic login gate."""
 
         require_desktop_identity()
         state = inspect_login_browser(runtime)
         ready = state.get("ready") is True
         login_state = str(state.get("login_state", "preparing"))
-        if ready:
-            public_message = "千牛已准备完成"
-        elif login_state in {"interaction_required", "human_check"}:
-            public_message = "请在已打开的千牛窗口完成登录"
-        else:
-            public_message = "正在准备千牛登录窗口"
+        public_status = {
+            "browser_unavailable": "chrome_unavailable",
+            "opening_material_center": "opening_material_center",
+            "interaction_required": "waiting_for_login",
+            "human_check": "waiting_for_login",
+            "store_unrecognized": "store_unrecognized",
+            "authenticated": "ready",
+        }.get(login_state, "opening_material_center")
+        public_message = {
+            "chrome_unavailable": "专用 Chrome 未启动",
+            "opening_material_center": "已连接 Chrome，正在打开千牛",
+            "waiting_for_login": "千牛页面已打开，等待用户登录",
+            "store_unrecognized": "已登录，但暂未识别店铺",
+            "ready": "已识别店铺，可以配置",
+        }[public_status]
         return jsonify(
             ready=ready,
-            status="ready" if ready else "waiting_for_login",
+            status=public_status,
             message=public_message,
             login_state=login_state,
             reason_code=str(state.get("reason_code", "")),

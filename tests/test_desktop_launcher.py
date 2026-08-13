@@ -415,3 +415,70 @@ def test_login_gate_blocks_visible_textless_human_check_inside_frame(
     assert result["ready"] is False
     assert result["login_state"] == "human_check"
     assert result["reason_code"] == "HUMAN_CHECK"
+
+
+@pytest.mark.parametrize(
+    ("url", "login_state", "reason_code"),
+    (
+        (
+            "https://login.taobao.com/member/login.jhtml",
+            "interaction_required",
+            "LOGIN_INTERACTION_REQUIRED",
+        ),
+        (
+            "https://myseller.taobao.com/material-center/index",
+            "store_unrecognized",
+            "STORE_IDENTITY_NOT_FOUND",
+        ),
+        (
+            "https://myseller.taobao.com/workbench",
+            "opening_material_center",
+            "MATERIAL_CENTER_OPENING",
+        ),
+    ),
+)
+def test_login_gate_distinguishes_page_and_login_states(
+    monkeypatch, tmp_path, url, login_state, reason_code
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def count(self):
+            return 0
+
+    class Page:
+        def __init__(self):
+            self.url = url
+
+        def bring_to_front(self):
+            return None
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, _selector):
+            return Locator()
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["ready"] is False
+    assert result["login_state"] == login_state
+    assert result["reason_code"] == reason_code

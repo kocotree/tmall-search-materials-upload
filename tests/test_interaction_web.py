@@ -200,11 +200,47 @@ def test_setup_login_gate_uses_automatic_safe_status(client, monkeypatch):
     assert response.json == {
         "ready": True,
         "status": "ready",
-        "message": "千牛已准备完成",
+        "message": "已识别店铺，可以配置",
         "login_state": "authenticated",
         "reason_code": "READY",
         "observed_store": "测试店铺",
     }
+
+
+@pytest.mark.parametrize(
+    ("login_state", "status", "message"),
+    (
+        ("browser_unavailable", "chrome_unavailable", "专用 Chrome 未启动"),
+        (
+            "opening_material_center",
+            "opening_material_center",
+            "已连接 Chrome，正在打开千牛",
+        ),
+        ("interaction_required", "waiting_for_login", "千牛页面已打开，等待用户登录"),
+        ("human_check", "waiting_for_login", "千牛页面已打开，等待用户登录"),
+        ("store_unrecognized", "store_unrecognized", "已登录，但暂未识别店铺"),
+    ),
+)
+def test_setup_login_gate_exposes_distinct_safe_waiting_states(
+    client, monkeypatch, login_state, status, message
+):
+    monkeypatch.setattr(
+        web_module,
+        "inspect_login_browser",
+        lambda _runtime: {
+            "ready": False,
+            "login_state": login_state,
+            "reason_code": "WAITING",
+        },
+    )
+
+    response = client.get("/api/runtime/login-status")
+
+    assert response.status_code == 200
+    assert response.json["ready"] is False
+    assert response.json["status"] == status
+    assert response.json["message"] == message
+    assert response.json["observed_store"] == ""
 
 
 def test_setup_login_browser_route_reuses_or_opens_visible_browser(
@@ -1043,8 +1079,35 @@ def test_javascript_supports_dynamic_image_source_configuration(client):
         "scheduleAutoSave",
         "setFormLocked",
         "/withdraw",
+        "focusFirstIncompleteImageSource",
+        'row.scrollIntoView({ behavior: "smooth", block: "center" })',
+        "还有 ${count} 个图片源未填写完整",
     ):
         assert expected in javascript
+
+    html = client.get("/").get_data(as_text=True)
+    assert "data-setup-image-source-incomplete" in html
+
+
+def test_javascript_exposes_distinct_login_gate_copy(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+    backend = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "web.py"
+    ).read_text(encoding="utf-8")
+
+    for expected in (
+        "工作台服务未运行",
+        "专用 Chrome 未启动",
+        "已连接 Chrome，正在打开千牛",
+        "千牛页面已打开，等待用户登录",
+        "已登录，但暂未识别店铺",
+        "已识别店铺，可以配置",
+    ):
+        assert expected in javascript or expected in backend
 
 
 def test_javascript_selects_result_renderers_by_schema_component(client):

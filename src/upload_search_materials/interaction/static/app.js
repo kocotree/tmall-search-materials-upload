@@ -12,6 +12,9 @@
   const panels = [...document.querySelectorAll("[data-stage-panel]")];
   const saveButton = document.querySelector("[data-save-draft]");
   const submitButton = document.querySelector("[data-submit-stage]");
+  const setupImageSourceIncomplete = document.querySelector(
+    "[data-setup-image-source-incomplete]",
+  );
   const recoveryButton = document.querySelector("[data-copy-recovery]");
   const withdrawButton = document.querySelector("[data-withdraw-submission]");
   const offlinePanel = document.querySelector("[data-offline-panel]");
@@ -130,6 +133,36 @@
       : [];
   }
 
+  function incompleteImageSourceRows() {
+    return imageSourceRows().filter((row) =>
+      !row.querySelector('[name="image_source_labels"]')?.value.trim()
+      || !row.querySelector('[name="image_roots"]')?.value.trim()
+    );
+  }
+
+  function updateImageSourceIncompleteHint() {
+    if (!setupImageSourceIncomplete) return;
+    const count = currentStageId === "setup"
+      ? incompleteImageSourceRows().length
+      : 0;
+    setupImageSourceIncomplete.hidden = count === 0;
+    setupImageSourceIncomplete.textContent = count
+      ? `还有 ${count} 个图片源未填写完整`
+      : "";
+  }
+
+  function focusFirstIncompleteImageSource() {
+    const row = incompleteImageSourceRows()[0];
+    if (!row) return false;
+    const labelInput = row.querySelector('[name="image_source_labels"]');
+    const pathInput = row.querySelector('[name="image_roots"]');
+    const target = !labelInput?.value.trim() ? labelInput : pathInput;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    target?.setAttribute("aria-invalid", "true");
+    target?.focus({ preventScroll: true });
+    return true;
+  }
+
   function updateImageSourceConfig() {
     if (!imageSourceConfig) return;
     const rows = imageSourceRows();
@@ -143,6 +176,7 @@
     rows.forEach((row) => {
       row.querySelector("[data-remove-image-source]").disabled = rows.length <= 1;
     });
+    updateImageSourceIncompleteHint();
   }
 
   function appendImageSource(
@@ -698,7 +732,12 @@
           if (storeInput && !storeInput.value.trim() && payload.observed_store) {
             storeInput.value = payload.observed_store;
           }
-          setupLoginGate.hidden = true;
+          setupLoginGate.hidden = false;
+          setupLoginGate.dataset.state = "ready";
+          title.textContent = "已识别店铺，可以配置";
+          message.textContent = payload.observed_store
+            ? `当前识别店铺：${payload.observed_store}`
+            : payload.message;
           setupForm.hidden = false;
           setupLoginReady = true;
           renderStatus();
@@ -707,15 +746,22 @@
         setupLoginReady = false;
         setupForm.hidden = true;
         setupLoginGate.hidden = false;
-        title.textContent = "等待千牛登录";
-        message.textContent = payload.message
-          || "请在自动打开的千牛窗口完成登录，成功后这里会自动继续。";
+        setupLoginGate.dataset.state = payload.status || "preparing";
+        title.textContent = payload.message || "已连接 Chrome，正在打开千牛";
+        message.textContent = payload.status === "chrome_unavailable"
+          ? "系统将继续尝试启动专用 Chrome。"
+          : payload.status === "waiting_for_login"
+            ? "请在 Plugin 自动打开的 Chrome 千牛窗口中完成登录。"
+            : payload.status === "store_unrecognized"
+              ? "请保持千牛素材中心页面打开，系统会继续识别当前店铺。"
+              : "系统正在打开千牛素材中心，请稍候。";
       } catch (error) {
         setupLoginReady = false;
         setupForm.hidden = true;
         setupLoginGate.hidden = false;
-        title.textContent = "正在恢复千牛环境";
-        message.textContent = "系统正在自动处理，请稍候。";
+        setupLoginGate.dataset.state = "service_unavailable";
+        title.textContent = "工作台服务未运行";
+        message.textContent = "请恢复当前工作台会话后再继续配置。";
       }
       renderStatus();
       window.setTimeout(poll, 1500);
@@ -838,6 +884,7 @@
   }
 
   function renderStatus() {
+    updateImageSourceIncompleteHint();
     const status = uiState.dirty ? "draft" : uiState.serverStatus;
     const copy = statusCopy[status] || statusCopy.draft;
     statusBadge.textContent = copy;
@@ -5390,6 +5437,17 @@
       return;
     }
     clearFieldErrors(form);
+    if (
+      mode === "submit"
+      && requestedStageId === "setup"
+      && focusFirstIncompleteImageSource()
+    ) {
+      const count = incompleteImageSourceRows().length;
+      updateImageSourceIncompleteHint();
+      actionMessage.textContent = `还有 ${count} 个图片源未填写完整，请补充后再提交。`;
+      persistenceInFlight = false;
+      return;
+    }
     let values;
     try {
       values = serializeForm(form);
