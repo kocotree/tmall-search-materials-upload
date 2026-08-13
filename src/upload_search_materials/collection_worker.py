@@ -37,7 +37,11 @@ from .runtime_identity import (
     runtime_identity_for_pid,
     same_local_resource_identity,
 )
-from .setup_collection import _claim_setup, process_setup_collection
+from .setup_collection import (
+    _claim_setup,
+    _write_selector_failure_result,
+    process_setup_collection,
+)
 from .time_utils import iso_timestamp
 
 
@@ -264,23 +268,6 @@ def launch_collection_worker(
 
     if local_resource_identity is not None:
         require_local_resource_identity(local_resource_identity)
-    selected_profile = selectors_path or runtime.selectors_file
-    if selected_profile is None:
-        raise SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND")
-    try:
-        preflight = preflight_runtime_environment(
-            runtime,
-            selectors_path=selected_profile,
-            cdp_url=cdp_url or runtime.cdp_url,
-        )
-    except RuntimePreflightError as error:
-        raise InteractionConflict(str(error)) from error
-    environment = preflight["environment"]
-    profile = load_selector_profile(
-        selected_profile,
-        purpose="high_value_collection",
-        production=True,
-    )
     store = SessionStore(runs_root)
     handoff, claim = _claim_setup(store, session_id, claimant_id)
     if "completed_result" in claim:
@@ -305,7 +292,52 @@ def launch_collection_worker(
         }
     if state == "indeterminate":
         raise InteractionConflict("COLLECTION_WORKER_OWNERSHIP_INDETERMINATE")
-
+    selected_profile = selectors_path or runtime.selectors_file
+    if selected_profile is None:
+        return _write_selector_failure_result(
+            store,
+            session_id,
+            handoff,
+            claim,
+            SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND"),
+            attempt_id=attempt_id,
+        )
+    try:
+        profile = load_selector_profile(
+            selected_profile,
+            purpose="high_value_collection",
+            production=True,
+        )
+    except SelectorConfigError as error:
+        return _write_selector_failure_result(
+            store,
+            session_id,
+            handoff,
+            claim,
+            error,
+            attempt_id=attempt_id,
+        )
+    try:
+        preflight = preflight_runtime_environment(
+            runtime,
+            selectors_path=selected_profile,
+            cdp_url=cdp_url or runtime.cdp_url,
+        )
+    except RuntimePreflightError as error:
+        result = store.write_result(
+            session_id,
+            "setup",
+            int(handoff["revision"]),
+            str(handoff["input_sha256"]),
+            status="needs_user_input",
+            summary="本机运行环境预检未通过",
+            blocking_reasons=[error.reason_code],
+            next_action=error.next_action,
+            claim_id=str(claim["claim_id"]),
+            attempt_id=attempt_id,
+        )
+        return {"status": "needs_user_input", "result": result}
+    environment = preflight["environment"]
     setup_input = store.read_optional_stage_document(
         session_id, "setup", "input"
     )

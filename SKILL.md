@@ -169,7 +169,18 @@ checkpoint；失败 attempt 保持为不可变历史。
 生产选择器配置遵循：显式 `--selectors`、`TMALL_SELECTORS_FILE`、用户数据目录
 `config/runtime.json` 中保存的路径、用户数据目录 `config/selectors.local.yaml`。优先在
 阶段一前端的“采集运行环境”组件验证并保存；仓库示例、占位选择器和用途不匹配
-的配置不得用于真实页面。
+的配置不得用于真实页面。生产 profile 通过真实 DOM 校验后，必须原子复制到用户数据
+目录 `config/selectors.local.yaml` 并让 `config/runtime.json` 指向该稳定副本；不得只保存
+开发仓库、Plugin 安装目录或版本缓存中的原路径。Plugin 更新与跨版本恢复必须复用这个
+稳定副本。显式 `process-setup --selectors` 同样先校验并安装稳定副本，再把该路径传给
+受管工作台服务；不得在跨进程派发时丢失该参数。
+
+启动器取得 setup claim 后，选择器缺失、无效或离线运行环境预检失败时，必须写入与当前
+revision、input SHA-256 和 attempt 绑定的 `needs_user_input` 结果及
+`agent-diagnostics/current.json`，并由结果事务释放精确 processing claim；不得仅返回
+HTTP 409 或留下无结果的过期租约。修复后只恢复同一幂等入口。`--project-root` 属于启动器
+内部兼容参数，即使未显示在 `--help` 中也不能据此判断本机 CLI 版本过旧；应通过实际参数
+解析或 `environment-status` 的项目/运行时身份验证能力。
 
 业务页和 CDP Chrome 是两个窗口：业务页只保存配置、选择、编辑与确认；CDP Chrome
 只用于用户自行登录、扫码、短信、验证码和系统自动化。进入阶段一业务配置前，系统

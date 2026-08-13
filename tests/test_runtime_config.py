@@ -8,6 +8,7 @@ from upload_search_materials.runtime_config import (
     load_runtime_config,
     normalize_image_sources,
     save_image_sources,
+    save_selector_profile_path,
 )
 
 
@@ -184,6 +185,34 @@ def test_loads_machine_config_from_user_data_root(tmp_path):
 
     assert runtime.config_path == config
     assert runtime.cdp_url == "http://127.0.0.1:9333"
+
+
+def test_selector_profile_is_installed_in_stable_user_data(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    source = workspace / "temporary-plugin-cache" / "selectors.local.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_text("production: true\nprofile_name: local\n", encoding="utf-8")
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    updated = save_selector_profile_path(runtime, source)
+    installed = user_data / "config" / "selectors.local.yaml"
+    source.unlink()
+    reloaded = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    assert updated.selectors_file == installed.resolve()
+    assert installed.read_text(encoding="utf-8") == (
+        "production: true\nprofile_name: local\n"
+    )
+    assert reloaded.selectors_file == installed.resolve()
+    saved = json.loads(
+        (user_data / "config/runtime.json").read_text(encoding="utf-8")
+    )
+    assert saved["selectors_file"] == str(installed.resolve())
 
 
 def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):

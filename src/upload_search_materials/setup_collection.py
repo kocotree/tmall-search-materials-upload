@@ -381,6 +381,45 @@ def _persist_selector_error(
     return path
 
 
+def _write_selector_failure_result(
+    store: SessionStore,
+    session_id: str,
+    handoff: dict[str, Any],
+    claim: dict[str, Any],
+    error: SelectorConfigError,
+    *,
+    attempt_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist a retryable selector failure and release the exact claim."""
+
+    evidence = _persist_selector_error(
+        store._session_path(session_id), handoff, error
+    )
+    missing = str(error).split(":", 1)[0] == "SELECTOR_PROFILE_NOT_FOUND"
+    result = store.write_result(
+        session_id,
+        "setup",
+        int(handoff["revision"]),
+        str(handoff["input_sha256"]),
+        status="needs_user_input",
+        summary=(
+            "需要在配置页设置并验证生产选择器"
+            if missing
+            else "生产选择器配置无效"
+        ),
+        blocking_reasons=[str(error)],
+        evidence=[str(evidence)],
+        next_action="在前端修复生产选择器后恢复同一会话",
+        claim_id=str(claim["claim_id"]),
+        attempt_id=(
+            attempt_id
+            or str(claim.get("attempt_id", "")).strip()
+            or None
+        ),
+    )
+    return {"status": "needs_user_input", "result": result}
+
+
 def _publish_attempt(
     session_path: Path,
     *,
@@ -555,21 +594,14 @@ def process_setup_collection(
     selected_profile_path = selectors_path or runtime.selectors_file
     if selected_profile_path is None:
         error = SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND")
-        evidence = _persist_selector_error(session_path, handoff, error)
-        result = store.write_result(
+        return _write_selector_failure_result(
+            store,
             session_id,
-            "setup",
-            int(handoff["revision"]),
-            str(handoff["input_sha256"]),
-            status="needs_user_input",
-            summary="需要在配置页设置并验证生产选择器",
-            blocking_reasons=[str(error)],
-            evidence=[str(evidence)],
-            next_action="在前端修复生产选择器后恢复同一会话",
-            claim_id=claim_id,
+            handoff,
+            claim,
+            error,
             attempt_id=attempt_id,
         )
-        return {"status": "needs_user_input", "result": result}
     try:
         if progress_callback is not None:
             progress_callback("validating_profile")
@@ -579,21 +611,14 @@ def process_setup_collection(
             production=True,
         )
     except SelectorConfigError as error:
-        evidence = _persist_selector_error(session_path, handoff, error)
-        result = store.write_result(
+        return _write_selector_failure_result(
+            store,
             session_id,
-            "setup",
-            int(handoff["revision"]),
-            str(handoff["input_sha256"]),
-            status="needs_user_input",
-            summary="生产选择器配置无效",
-            blocking_reasons=[str(error)],
-            evidence=[str(evidence)],
-            next_action="在前端修复生产选择器后恢复同一会话",
-            claim_id=claim_id,
+            handoff,
+            claim,
+            error,
             attempt_id=attempt_id,
         )
-        return {"status": "needs_user_input", "result": result}
 
     collected_root = session_path / "collected" / "promotion"
     artifact_root = (

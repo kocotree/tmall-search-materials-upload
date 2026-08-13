@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -199,6 +200,74 @@ def test_launcher_returns_promptly_and_reuses_matching_live_worker(
     assert calls[0][1]["stdout"] is calls[0][1]["stderr"]
     assert calls[0][1]["cwd"] == str(runtime.workspace_root)
     assert "ownership_token" not in first["worker"]
+
+
+def test_missing_selector_writes_retryable_result_and_releases_claim(tmp_path):
+    runtime, runs, store, session, _ = prepare(tmp_path)
+    runtime = replace(runtime, selectors_file=None)
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.5,
+        claimant_id="collection-worker",
+    )
+
+    launched = launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+    )
+
+    assert launched["status"] == "needs_user_input"
+    assert launched["result"]["blocking_reasons"] == [
+        "SELECTOR_PROFILE_NOT_FOUND"
+    ]
+    assert store.processing_claim(session.session_id, "setup") is None
+    assert store.load_session(session.session_id)["stages"]["setup"]["status"] == (
+        "needs_user_input"
+    )
+    assert (session.path / "collected" / "selector-error.json").is_file()
+    diagnostic = json.loads(
+        (session.path / "agent-diagnostics" / "current.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert diagnostic["reason_code"] == "SELECTOR_PROFILE_NOT_FOUND"
+
+
+def test_preflight_failure_writes_result_and_releases_claim(tmp_path, monkeypatch):
+    runtime, runs, store, session, selectors = prepare(tmp_path)
+
+    def fail_preflight(*_args, **_kwargs):
+        from upload_search_materials.runtime_preflight import RuntimePreflightError
+
+        raise RuntimePreflightError(
+            "ENVIRONMENT_NOT_PREPARED", "运行 bootstrap 后恢复同一会话"
+        )
+
+    monkeypatch.setattr(
+        "upload_search_materials.runtime_preflight.preflight_runtime_environment",
+        fail_preflight,
+    )
+
+    launched = launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+    )
+
+    assert launched["status"] == "needs_user_input"
+    assert launched["result"]["blocking_reasons"] == [
+        "ENVIRONMENT_NOT_PREPARED"
+    ]
+    assert store.processing_claim(session.session_id, "setup") is None
+    diagnostic = json.loads(
+        (session.path / "agent-diagnostics" / "current.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert diagnostic["reason_code"] == "ENVIRONMENT_NOT_PREPARED"
 
 
 def test_posix_worker_defers_identity_check_to_child_process(

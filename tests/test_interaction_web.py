@@ -337,7 +337,10 @@ def test_collection_runtime_panel_validates_and_saves_local_profile(
             encoding="utf-8"
         )
     )
-    assert config["selectors_file"] == str(selectors)
+    installed = tmp_path / "config" / "selectors.local.yaml"
+    assert config["selectors_file"] == str(installed.resolve())
+    assert saved.json["selectors_file"] == str(installed.resolve())
+    assert installed.read_bytes() == selectors.read_bytes()
 
 
 def test_collection_runtime_reports_session_login_and_store_evidence(

@@ -11,6 +11,7 @@ import pytest
 
 import upload_search_materials.interaction.service as service_module
 from upload_search_materials.interaction.service import (
+    dispatch_collection_start,
     ManagedServiceError,
     SERVICE_STATE_FILE,
     start_service,
@@ -25,6 +26,54 @@ def test_managed_ui_health_check_bypasses_system_proxy_for_loopback():
         isinstance(handler, ProxyHandler)
         for handler in service_module._LOOPBACK_OPENER.handlers
     )
+
+
+def test_collection_dispatch_forwards_stable_selector_and_cdp(tmp_path, monkeypatch):
+    captured = {}
+    selector = tmp_path / "config" / "selectors.local.yaml"
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"status":"processing"}'
+
+    class Opener:
+        def open(self, request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(
+        service_module,
+        "_read_state",
+        lambda *_args: {
+            "port": 8768,
+            "ownership_token": "owned",
+            "status": "healthy",
+        },
+    )
+    monkeypatch.setattr(service_module, "_healthy_identity", lambda _state: True)
+    monkeypatch.setattr(service_module, "_LOOPBACK_OPENER", Opener())
+
+    result = dispatch_collection_start(
+        tmp_path,
+        "20260813_120000",
+        claimant_id="codex-agent",
+        selectors_path=selector,
+        cdp_url="http://127.0.0.1:9333",
+    )
+
+    assert result == {"status": "processing"}
+    assert captured["payload"] == {
+        "claimant_id": "codex-agent",
+        "selectors_path": str(selector),
+        "cdp_url": "http://127.0.0.1:9333",
+    }
 
 
 def _free_port() -> int:

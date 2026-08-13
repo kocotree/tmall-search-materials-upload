@@ -292,7 +292,7 @@ def save_image_sources(
 def save_selector_profile_path(
     runtime: RuntimeConfig, value: str | Path
 ) -> RuntimeConfig:
-    """Persist one validated machine-local selector profile path."""
+    """Install one validated selector profile outside the Plugin cache."""
 
     text = str(value).strip()
     if not text or "\x00" in text or len(text) > 1000:
@@ -300,13 +300,24 @@ def save_selector_profile_path(
     selected = _resolve_configured_path(text, runtime.workspace_root)
     if not selected.is_file():
         raise ValueError("selectors_file does not exist")
-    target = runtime.config_path or (
+    installed = (
+        runtime.user_data_root / LOCAL_SELECTORS_RELATIVE
+        if runtime.user_data_root is not None
+        else runtime.workspace_root / LOCAL_SELECTORS_RELATIVE
+    ).resolve()
+    if selected.resolve() != installed:
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        selector_temporary = installed.with_name(f".{installed.name}.tmp")
+        selector_temporary.write_bytes(selected.read_bytes())
+        os.replace(selector_temporary, installed)
+    target = (
         runtime.user_data_root / "config/runtime.json"
         if runtime.user_data_root is not None
-        else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+        else runtime.config_path
+        or runtime.workspace_root / LOCAL_CONFIG_RELATIVE
     )
     document = _read_config(target) if target.is_file() else {}
-    document["selectors_file"] = str(selected)
+    document["selectors_file"] = str(installed)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.tmp")
     temporary.write_text(
@@ -316,7 +327,7 @@ def save_selector_profile_path(
     os.replace(temporary, target)
     return replace(
         runtime,
-        selectors_file=selected,
+        selectors_file=installed,
         config_path=target,
     )
 

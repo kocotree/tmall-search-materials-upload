@@ -345,6 +345,18 @@ uv run tmall-materials prepare-gallery `
 本机配置保存到用户数据目录的 `config/runtime.json`，旧版项目内
 `config/local-paths.json` 仅作兼容读取；不能使用仓库示例作为生产配置。
 
+真实页面验证通过的生产选择器会原子安装到用户数据目录
+`config/selectors.local.yaml`，`config/runtime.json` 只引用这个稳定副本。开发仓库、
+Plugin 安装目录和版本缓存中的原文件都不是长期配置位置；升级 Plugin 不会覆盖稳定副本。
+显式传入 `process-setup --selectors <文件>` 时也先完成同样的校验与安装，再把稳定路径
+转发给已经运行的工作台服务。
+
+若选择器缺失/无效或离线运行环境预检失败，启动器必须把 setup 写成
+`needs_user_input`，生成 `agent-diagnostics/current.json` 并释放当前 processing claim。
+出现“processing 但没有 result”的状态属于启动器故障，不应要求用户重新提交业务配置。
+启动器的 `--project-root` 是内部兼容参数，可能从普通 `--help` 隐藏；判断版本能力时应
+实际解析该参数或读取 `environment-status`，不能只凭帮助文本断言 CLI 过旧。
+
 提交阶段一后执行：
 
 ```powershell

@@ -680,11 +680,15 @@ def create_app(
         claimant_id = str(
             payload.get("claimant_id", "collection-worker")
         ).strip() or "collection-worker"
+        selected = str(payload.get("selectors_path", "")).strip()
+        selected_cdp_url = str(payload.get("cdp_url", "")).strip()
         try:
             result = launch_collection_worker(
                 runs_root=store.runs_root,
                 session_id=session_id,
                 runtime=runtime,
+                selectors_path=Path(selected) if selected else None,
+                cdp_url=selected_cdp_url or None,
                 claimant_id=claimant_id,
                 local_resource_identity=expected_runtime_identity,
             )
@@ -982,7 +986,7 @@ def create_app(
                 )
             runtime = save_selector_profile_path(runtime, selector_path)
             active_profile = load_selector_profile(
-                selector_path,
+                runtime.selectors_file,
                 purpose="high_value_collection",
                 production=True,
             )
@@ -1045,17 +1049,22 @@ def create_app(
                 production=True,
             )
             runtime = save_selector_profile_path(runtime, profile.path)
+            active_profile = load_selector_profile(
+                runtime.selectors_file,
+                purpose="high_value_collection",
+                production=True,
+            )
         except (OSError, ValueError, SelectorConfigError) as error:
             return _validation_error(
                 {"selectors_file": str(error)}
             )
         return jsonify(
             saved=True,
-            selectors_file=str(profile.path),
-            profile_name=profile.name,
-            profile_version=profile.version,
-            profile_sha256=profile.sha256,
-            purpose=profile.purpose,
+            selectors_file=str(active_profile.path),
+            profile_name=active_profile.name,
+            profile_version=active_profile.version,
+            profile_sha256=active_profile.sha256,
+            purpose=active_profile.purpose,
         )
 
     @app.post("/api/runtime/image-sources/check")

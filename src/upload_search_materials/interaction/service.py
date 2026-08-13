@@ -112,6 +112,8 @@ def dispatch_collection_start(
     session_id: str,
     *,
     claimant_id: str,
+    selectors_path: Path | None = None,
+    cdp_url: str | None = None,
 ) -> dict[str, Any] | None:
     """Ask the owned desktop service to create its collection child."""
 
@@ -126,10 +128,12 @@ def dispatch_collection_start(
                 "managed desktop service identity cannot be verified",
             )
         return None
-    payload = json.dumps(
-        {"claimant_id": claimant_id},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    payload_document = {"claimant_id": claimant_id}
+    if selectors_path is not None:
+        payload_document["selectors_path"] = str(selectors_path)
+    if cdp_url:
+        payload_document["cdp_url"] = str(cdp_url)
+    payload = json.dumps(payload_document, ensure_ascii=False).encode("utf-8")
     request = Request(
         (
             f"http://127.0.0.1:{state['port']}/api/internal/"

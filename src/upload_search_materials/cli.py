@@ -137,7 +137,7 @@ from .reporting import (
     write_summary,
     write_supplement_candidates,
 )
-from .runtime_config import load_runtime_config
+from .runtime_config import load_runtime_config, save_selector_profile_path
 from .team_folder_index import (
     TeamFolderIndexError,
     publish_snapshot,
@@ -2868,13 +2868,20 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
     if args.command == "process-setup":
         try:
             runtime = load_runtime_config(args.config)
+            selectors_path = runtime.selectors_file
+            if args.selectors:
+                profile = load_selector_profile(
+                    Path(args.selectors),
+                    purpose="high_value_collection",
+                    production=True,
+                )
+                runtime = save_selector_profile_path(runtime, profile.path)
+                selectors_path = runtime.selectors_file
             arguments = {
                 "runs_root": Path(args.runs_root),
                 "session_id": args.session,
                 "runtime": runtime,
-                "selectors_path": (
-                    Path(args.selectors) if args.selectors else None
-                ),
+                "selectors_path": selectors_path,
                 "cdp_url": args.cdp_url,
                 "claimant_id": args.claimant_id,
             }
@@ -2889,6 +2896,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
                     Path(args.runs_root),
                     args.session,
                     claimant_id=args.claimant_id,
+                    selectors_path=selectors_path,
+                    cdp_url=args.cdp_url,
                 )
                 if result is None:
                     result = launch_collection_worker(**arguments)
@@ -2898,6 +2907,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
             ManagedServiceError,
             OSError,
             SchemaError,
+            SelectorConfigError,
+            ValueError,
         ) as error:
             print(
                 json.dumps(
