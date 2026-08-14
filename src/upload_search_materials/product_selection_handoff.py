@@ -100,7 +100,8 @@ def _recovery_action(reason_code: str) -> str:
     if reason_code.startswith("TEAM_INDEX_"):
         return (
             "检查团队索引 NAS 或最后校验通过的本机缓存；"
-            "没有有效快照时由用户明确决定是否增量更新指定素材源。"
+            "没有有效快照时自动建立并发布第一份不可变快照，无需再次口头授权；"
+            "只有已有快照的增量更新才需要用户明确指定素材源。"
         )
     if reason_code == "FOLDER_INDEX_BUILDING":
         return "等待共享文件夹索引完成；完成后对同一 handoff 重跑处理入口。"

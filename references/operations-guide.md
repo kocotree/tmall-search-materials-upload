@@ -133,7 +133,7 @@ Windows 中由 Codex 启动上述工作台时，必须为固定的
 本次页面里最终填写的图片源。若服务运行在 Codex 沙箱账户，先停止该精确 session
 的服务，再以桌面权限恢复；不要让用户通过重复点击图片按钮解决身份错误。
 
-它返回精确 `session_id`、PID、端口、日志、URL、Windows SID、登录会话、交互桌面状态和可见网络盘。Agent 优先用 Codex 内置浏览器打开 URL；恢复任务时增加 `-Session "<session-id>"`，不得猜测最新目录。只有明确不访问任何本机素材资源的只读流程才使用 `scripts\start-ui.cmd`；`tmall-materials interact` 只保留为会持续占用终端的前台调试入口。
+它返回精确 `session_id`、PID、端口、日志、URL、Windows SID、登录会话、交互桌面状态和可见网络盘。Agent 优先用 Codex 内置浏览器打开 URL；恢复任务时增加 `-Session "<session-id>"`，不得猜测最新目录。此后每次提醒用户登录、配置、选择、审查、确认或恢复时，Agent 都必须先从启动结果或该精确 session 的 `ui-status` 读取当前 `url`，并在同一条消息中提供可点击链接；不得硬编码端口或复用旧 URL。只有明确不访问任何本机素材资源的只读流程才使用 `scripts\start-ui.cmd`；`tmall-materials interact` 只保留为会持续占用终端的前台调试入口。
 
 恢复已有任务时：
 

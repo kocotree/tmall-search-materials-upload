@@ -5340,7 +5340,6 @@
     clearFieldErrors(form);
     let values;
     try {
-      if (requestedStageId === "setup") configuredImageSources();
       values = serializeForm(form);
     } catch (error) {
       actionMessage.textContent = error.message;

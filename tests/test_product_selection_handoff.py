@@ -12,6 +12,7 @@ from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.product_selection_handoff import (
     ProductSelectionProcessingError,
     _ensure_team_index_mount,
+    _recovery_action,
     process_product_selection_handoff,
 )
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
@@ -354,6 +355,13 @@ def test_failure_writes_codex_diagnostic_and_same_entry_can_resume(tmp_path):
     )
     assert resolved_diagnostic["status"] == "resolved"
     assert resolved_diagnostic["resolved_at"]
+
+
+def test_team_index_recovery_does_not_request_first_snapshot_authorization():
+    action = _recovery_action("TEAM_INDEX_NO_VALID_SNAPSHOT")
+
+    assert "无需再次口头授权" in action
+    assert "只有已有快照的增量更新" in action
 
 
 def test_product_selection_reports_an_index_that_is_still_building(tmp_path):

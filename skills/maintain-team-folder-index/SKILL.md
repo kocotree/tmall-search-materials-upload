@@ -5,7 +5,7 @@ description: Maintain decentralized, reusable folder-index snapshots for team ma
 
 # Maintain Team Folder Index
 
-Use the repository CLI as the deterministic implementation. An ordinary upload workflow may automatically publish the first immutable snapshot for a configured source when no valid shared snapshot exists.
+Use the repository CLI as the deterministic implementation. An ordinary upload workflow must automatically publish the first immutable snapshot for a configured source when no valid shared snapshot exists, without requesting a second verbal authorization.
 
 ## Fixed team location
 

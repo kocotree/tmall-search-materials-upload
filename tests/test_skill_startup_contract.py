@@ -12,6 +12,33 @@ def test_skill_requires_ui_before_requesting_stage_one_business_inputs():
     assert "只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值" in skill
 
 
+def test_every_user_interaction_reminder_includes_exact_workbench_url():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    entry = (
+        SKILL_ROOT / "skills" / "upload-search-materials" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "每次在聊天中提醒用户执行任何交互操作前" in skill
+    assert "ui-status --runs-root <精确 runs-root> --session <精确 session-id>" in skill
+    assert "同一条提醒中提供可点击的工作台链接" in skill
+    assert "Before every user-interaction reminder" in entry
+    assert "Never hardcode a port" in entry
+
+
+def test_first_shared_snapshot_does_not_require_second_verbal_authorization():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    entry = (
+        SKILL_ROOT / "skills" / "upload-search-materials" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    index_skill = (
+        SKILL_ROOT / "skills" / "maintain-team-folder-index" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "自动发布缺失的第一份有效快照，无需再次索取口头授权" in skill
+    assert "without asking for a second verbal authorization" in entry
+    assert "without requesting a second verbal authorization" in index_skill
+
+
 def test_operations_guide_keeps_environment_and_setup_inputs_separate():
     guide = (SKILL_ROOT / "references" / "operations-guide.md").read_text(
         encoding="utf-8"

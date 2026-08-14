@@ -2468,6 +2468,22 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "确认归属并记录别名" not in source
     assert 'candidate?.match_type !== "confirmed_alias"' in source
     assert "loadFolderImageCounts" in source
+
+
+def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    function_body = source.split(
+        "async function prepareLocalGallery(button)", 1
+    )[1].split("async function persistStage", 1)[0]
+
+    assert "requestedStageId" not in function_body
     assert "/stages/asset_matching/folder-image-counts" in source
     assert "本机固定操作" in source
     assert "不会触发 Codex handoff" in source
