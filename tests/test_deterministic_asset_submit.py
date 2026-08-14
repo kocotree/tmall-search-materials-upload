@@ -101,6 +101,12 @@ def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
     )
     assert cached.status_code == 200
     assert len(cached.json["entries"]) == 9
+    cache_document = SessionStore._read_json(
+        store._stage_path(session_id, "asset_matching")
+        / "selection-preflight-cache.json",
+        "selection-preflight-cache",
+    )
+    assert cache_document["algorithm_version"] == 2
 
     final_payload = {
         "request_id": "final-material-submit-1",

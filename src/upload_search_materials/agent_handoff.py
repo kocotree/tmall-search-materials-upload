@@ -410,6 +410,13 @@ def read_agent_request(
         or value.get("status") not in REQUEST_STATES
     ):
         raise InteractionConflict("Agent request identity is invalid")
+    if value.get("kind") == "copy_draft":
+        # Project the current execution contract even for durable requests
+        # created by an older Plugin.  This keeps a resumed Agent from asking
+        # for an extra chat confirmation before it invokes the processor.
+        value["recovery_prompt"] = recovery_prompt(
+            store, session_id, request_id, kind="copy_draft"
+        )
     return value
 
 
@@ -1121,8 +1128,11 @@ def recovery_prompt(
         return (
             "继续当前 upload-search-materials 任务，不要创建新 session。"
             f"读取文案请求：{request_path}；"
-            "调用唯一 process-copy-request 入口，复用项目现有千牛文案 "
-            "Playwright 流程，逐坑保存并回填结果。不要自行生成商品文案。"
+            "该请求已由用户在工作台完成图片处理时授予限定执行权限，"
+            "直接调用唯一 process-copy-request 入口，复用项目现有千牛文案 "
+            "Playwright 流程，逐坑上传首张已验证成品图、调用千牛内置 AI、"
+            "读取文案并退出未发布表单。禁止在聊天中再次索取同意、授权或确认；"
+            "不得点击填充文案、确认或发布，也不要自行生成商品文案。"
         )
     return (
         "继续当前 upload-search-materials 任务，不要创建新 session。"

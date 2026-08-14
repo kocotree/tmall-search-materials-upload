@@ -126,6 +126,7 @@ from .stages import (
 
 
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
+SELECTION_PREFLIGHT_ALGORITHM_VERSION = 2
 
 
 def _input_quality_summary(path: Path | None) -> dict[str, Any]:
@@ -289,10 +290,22 @@ def create_app(
     def read_selection_preflight_cache(session_id: str) -> dict[str, Any]:
         path = selection_preflight_cache_path(session_id)
         if not path.is_file():
-            return {"schema_version": 1, "algorithm_version": 1, "entries": {}}
+            return {
+                "schema_version": 1,
+                "algorithm_version": SELECTION_PREFLIGHT_ALGORITHM_VERSION,
+                "entries": {},
+            }
         document = store._read_json(path, "selection-preflight-cache")
-        if not isinstance(document.get("entries"), dict):
-            document["entries"] = {}
+        if (
+            document.get("algorithm_version")
+            != SELECTION_PREFLIGHT_ALGORITHM_VERSION
+            or not isinstance(document.get("entries"), dict)
+        ):
+            return {
+                "schema_version": 1,
+                "algorithm_version": SELECTION_PREFLIGHT_ALGORITHM_VERSION,
+                "entries": {},
+            }
         return document
 
     def selection_preflight_identity(
@@ -301,7 +314,7 @@ def create_app(
         return hashlib.sha256(
             json.dumps(
                 {
-                    "algorithm_version": 1,
+                    "algorithm_version": SELECTION_PREFLIGHT_ALGORITHM_VERSION,
                     "asset_id": str(candidate.get("asset_id", "")),
                     "product_id": str(candidate.get("product_id", "")),
                     "source_sha256": str(candidate.get("sha256", "")),
@@ -364,7 +377,7 @@ def create_app(
         item = feedback.get("items", [{}])[0]
         entry = {
             "schema_version": 1,
-            "algorithm_version": 1,
+            "algorithm_version": SELECTION_PREFLIGHT_ALGORITHM_VERSION,
             "asset_id": str(candidate.get("asset_id", "")),
             "product_id": str(candidate.get("product_id", "")),
             "source_sha256": str(candidate.get("sha256", "")),
@@ -384,6 +397,7 @@ def create_app(
         }
         with store._session_lock(session_id):
             cache = read_selection_preflight_cache(session_id)
+            cache["algorithm_version"] = SELECTION_PREFLIGHT_ALGORITHM_VERSION
             cache["entries"][entry["asset_id"]] = entry
             cache["updated_at"] = entry["checked_at"]
             store._write_json_atomic(

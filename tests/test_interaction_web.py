@@ -904,7 +904,7 @@ def test_every_interactive_field_has_named_control(client):
 def test_page_explains_codex_offline_recovery_without_exposing_task_path(client):
     html = client.get("/").get_data(as_text=True)
 
-    assert "Codex 暂未连接" in html
+    assert "Agent 未连接" in html
     assert "复制继续处理说明" in html
     assert "当前任务目录" in html
     assert 'class="technical-only" aria-hidden="true"><dt>当前任务目录' in html
@@ -1070,7 +1070,14 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "已提交，等待 Agent" in javascript
     assert "Agent 处理中" in javascript
     assert "补充后重新提交" in javascript
+    assert "Agent 正在监听" in javascript
+    assert "Agent 正在处理" in javascript
     assert "Agent 未连接" in javascript
+    assert "maxConcurrent: 6" in javascript
+    assert "maxWeight: 8" in javascript
+    assert "排队中，可取消采用" in javascript
+    assert "已取消采用；后台结果仅用于缓存" in javascript
+    assert "selectionPreflightConcurrency = 3" not in javascript
     assert "2000" in javascript
     assert "/api/sessions" in javascript
     assert "/draft" in javascript

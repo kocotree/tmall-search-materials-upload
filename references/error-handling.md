@@ -123,6 +123,7 @@
 | `PUBLISH_UNCERTAIN` | 点击发布后没有可信结果 | 禁止重发，先远端回查 |
 | `QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS` | 本地上传后短唯一名称没有恰好命中一张素材卡 | 停在发布前；检查素材选择器，不点击发布 |
 | `QIANNIU_CONTENT_FIELD_MISSING` | 标题或正文控件不可识别，包括 Cangjie 代理 textarea 变化 | 停在发布前；更新现有表单定位并回归测试 |
+| `COPY_DRAFT_AUTHORIZATION_INVALID` | 文案请求的限定授权缺失、被改写，或与当前首图/最终输出指纹不一致 | 不启动千牛浏览器动作；保留现场并从工作台当前有效图片输出重新创建请求 |
 | `QIANNIU_PUBLISH_BUTTON_AMBIGUOUS` | 发布专用语义或明确发布按钮不是唯一可见 | 停在发布前；禁止降级点击通用确认按钮 |
 | `QIANNIU_REMOTE_BASELINE_MISSING` | 发布前没有保存同商品远端 ID 集合 | 禁止点击发布 |
 | `QIANNIU_REMOTE_ID_DELTA_AMBIGUOUS` | 发布后旧 ID 消失，或新增 ID 不是恰好一个 | 标记 `publish_uncertain`，禁止按坑位位置猜测或重发 |

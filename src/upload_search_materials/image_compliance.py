@@ -9,6 +9,7 @@ from io import BytesIO
 import json
 import math
 from pathlib import Path
+import time
 from typing import Any, Mapping, Protocol
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -509,6 +510,104 @@ def inspect_image_source(
     return result
 
 
+def load_image_preflight_source(
+    source_path: Path,
+    *,
+    policy: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], Image.Image | None, str, dict[str, float]]:
+    """Read, hash, and decode one source exactly once for ratio probes."""
+
+    image_policy = normalize_image_policy(policy or default_image_policy())
+    source = Path(source_path).resolve()
+    started = time.perf_counter()
+    inspected_at = datetime.now(timezone.utc).isoformat()
+    try:
+        stat = source.stat()
+        read_started = time.perf_counter()
+        payload = source.read_bytes()
+        read_ms = (time.perf_counter() - read_started) * 1000
+    except OSError:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        return (
+            {
+                "source_path": str(source),
+                "readable": False,
+                "validation_status": "blocked",
+                "reason_codes": ["SOURCE_UNREADABLE"],
+                "reason_messages": [REASON_MESSAGES["SOURCE_UNREADABLE"]],
+                "inspected_at": inspected_at,
+            },
+            None,
+            "",
+            {"read_ms": elapsed_ms, "sha256_ms": 0.0, "decode_ms": 0.0},
+        )
+
+    sha_started = time.perf_counter()
+    source_sha256 = hashlib.sha256(payload).hexdigest() if payload else ""
+    sha256_ms = (time.perf_counter() - sha_started) * 1000
+    reasons: list[str] = []
+    width = height = None
+    source_format = ""
+    mode = ""
+    decoded: Image.Image | None = None
+    decode_started = time.perf_counter()
+    try:
+        with Image.open(BytesIO(payload)) as opened:
+            source_format = str(
+                opened.format or source.suffix.lstrip(".")
+            ).upper()
+            decoded = ImageOps.exif_transpose(opened)
+            decoded.load()
+            width, height = decoded.size
+            mode = str(decoded.mode)
+            if int(width) * int(height) > image_policy["max_pixels"]:
+                reasons.append("IMAGE_PIXEL_LIMIT_EXCEEDED")
+    except (OSError, UnidentifiedImageError, ValueError):
+        reasons.append("SOURCE_UNREADABLE")
+        decoded = None
+    decode_ms = (time.perf_counter() - decode_started) * 1000
+    if not width or not height:
+        reasons.append("SOURCE_METADATA_MISSING")
+    extension = source.suffix.casefold().lstrip(".")
+    if extension not in image_policy["formats"]:
+        reasons.append("IMAGE_FORMAT_UNSUPPORTED")
+    unique_reasons = list(dict.fromkeys(reasons))
+    inspection = {
+        "source_path": str(source),
+        "format": source_format,
+        "extension": extension,
+        "mode": mode,
+        "size_bytes": int(stat.st_size),
+        "size_display": format_size(int(stat.st_size)),
+        "width": int(width) if width else None,
+        "height": int(height) if height else None,
+        "ratio_value": (
+            round(int(width) / int(height), 6) if width and height else None
+        ),
+        "ratio_display": ratio_display(width, height),
+        "sha256": source_sha256,
+        "readable": not unique_reasons,
+        "validation_status": "valid" if not unique_reasons else "blocked",
+        "reason_codes": unique_reasons,
+        "reason_messages": [
+            REASON_MESSAGES.get(reason, reason) for reason in unique_reasons
+        ],
+        "file_mtime_ns": int(stat.st_mtime_ns),
+        "inspected_at": inspected_at,
+        "cache_hit": False,
+    }
+    return (
+        inspection,
+        decoded,
+        source_format,
+        {
+            "read_ms": round(read_ms, 3),
+            "sha256_ms": round(sha256_ms, 3),
+            "decode_ms": round(decode_ms, 3),
+        },
+    )
+
+
 def classify_image(
     *,
     width: int | None,
@@ -870,6 +969,91 @@ class PillowImageCompressionProvider:
         return None
 
 
+def probe_loaded_crop_output_size(
+    image: Image.Image,
+    *,
+    source_format: str,
+    target_ratio: str,
+    normalized_box: Mapping[str, Any],
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Encode one ratio from an already decoded source image."""
+
+    started = time.perf_counter()
+    image_policy = normalize_image_policy(policy or default_image_policy())
+    minimum = round(float(image_policy["min_size_kb"]) * KIB)
+    maximum = round(float(image_policy["max_size_mb"]) * MIB)
+    output_policy = image_policy["output"]
+    normalized_format = str(source_format or "").upper()
+    validated = validate_normalized_crop(
+        normalized_box,
+        target_ratio=target_ratio,
+        width=image.width,
+        height=image.height,
+    )
+    pixel = validated["pixel"]
+    cropped = image.crop(
+        (
+            pixel["x"],
+            pixel["y"],
+            pixel["x"] + pixel["width"],
+            pixel["y"] + pixel["height"],
+        )
+    )
+    rendered: Image.Image | None = None
+    rgba: Image.Image | None = None
+    canvas: Image.Image | None = None
+    try:
+        if cropped.mode in {"RGBA", "LA"} or (
+            cropped.mode == "P" and "transparency" in cropped.info
+        ):
+            rgba = cropped.convert("RGBA")
+            canvas = Image.new(
+                "RGBA", rgba.size, output_policy["background_color"]
+            )
+            canvas.alpha_composite(rgba)
+            rendered = canvas.convert("RGB")
+        else:
+            rendered = cropped.convert("RGB")
+        buffer = BytesIO()
+        save_options: dict[str, Any] = {}
+        if normalized_format == "JPEG":
+            save_options = {
+                "quality": int(output_policy["quality_max"]),
+                "optimize": bool(output_policy["optimize"]),
+                "progressive": bool(output_policy["progressive"]),
+            }
+        elif normalized_format == "PNG":
+            save_options = {"optimize": bool(output_policy["optimize"])}
+        elif normalized_format == "WEBP":
+            save_options = {"quality": int(output_policy["quality_max"])}
+        elif normalized_format == "GIF":
+            save_options = {"optimize": bool(output_policy["optimize"])}
+        elif normalized_format not in {"BMP", "HEIC", "HEIF"}:
+            raise ValueError("IMAGE_FORMAT_UNSUPPORTED")
+        rendered.save(buffer, format=normalized_format, **save_options)
+        size_bytes = buffer.tell()
+    finally:
+        if rendered is not None:
+            rendered.close()
+        if canvas is not None:
+            canvas.close()
+        if rgba is not None:
+            rgba.close()
+        cropped.close()
+    return {
+        "output_size_bytes": size_bytes,
+        "minimum_size_bytes": minimum,
+        "maximum_size_bytes": maximum,
+        "meets_minimum": size_bytes >= minimum,
+        "meets_maximum": size_bytes <= maximum,
+        "meets_size_range": minimum <= size_bytes <= maximum,
+        "probe_quality": int(output_policy["quality_max"]),
+        "probe_format": normalized_format,
+        "encode_ms": round((time.perf_counter() - started) * 1000, 3),
+    }
+
+
 def probe_crop_output_size(
     source_path: Path,
     *,
@@ -879,67 +1063,20 @@ def probe_crop_output_size(
 ) -> dict[str, Any]:
     """Render a same-format crop in memory and check the upload size range."""
 
-    image_policy = normalize_image_policy(policy or default_image_policy())
-    minimum = round(float(image_policy["min_size_kb"]) * KIB)
-    maximum = round(float(image_policy["max_size_mb"]) * MIB)
-    output_policy = image_policy["output"]
     with Image.open(Path(source_path).resolve()) as opened:
         source_format = str(opened.format or "").upper()
         image = ImageOps.exif_transpose(opened)
-        validated = validate_normalized_crop(
-            normalized_box,
+        image.load()
+    try:
+        return probe_loaded_crop_output_size(
+            image,
+            source_format=source_format,
             target_ratio=target_ratio,
-            width=image.width,
-            height=image.height,
+            normalized_box=normalized_box,
+            policy=policy,
         )
-        pixel = validated["pixel"]
-        cropped = image.crop(
-            (
-                pixel["x"],
-                pixel["y"],
-                pixel["x"] + pixel["width"],
-                pixel["y"] + pixel["height"],
-            )
-        )
-        if cropped.mode in {"RGBA", "LA"} or (
-            cropped.mode == "P" and "transparency" in cropped.info
-        ):
-            rgba = cropped.convert("RGBA")
-            canvas = Image.new(
-                "RGBA", rgba.size, output_policy["background_color"]
-            )
-            canvas.alpha_composite(rgba)
-            cropped = canvas.convert("RGB")
-        else:
-            cropped = cropped.convert("RGB")
-        buffer = BytesIO()
-        save_options: dict[str, Any] = {}
-        if source_format == "JPEG":
-            save_options = {
-                "quality": int(output_policy["quality_max"]),
-                "optimize": bool(output_policy["optimize"]),
-                "progressive": bool(output_policy["progressive"]),
-            }
-        elif source_format == "PNG":
-            save_options = {"optimize": bool(output_policy["optimize"])}
-        elif source_format == "WEBP":
-            save_options = {"quality": int(output_policy["quality_max"])}
-        elif source_format == "GIF":
-            save_options = {"optimize": bool(output_policy["optimize"])}
-        elif source_format not in {"BMP", "HEIC", "HEIF"}:
-            raise ValueError("IMAGE_FORMAT_UNSUPPORTED")
-        cropped.save(buffer, format=source_format, **save_options)
-    size_bytes = buffer.tell()
-    return {
-        "output_size_bytes": size_bytes,
-        "minimum_size_bytes": minimum,
-        "maximum_size_bytes": maximum,
-        "meets_minimum": size_bytes >= minimum,
-        "meets_maximum": size_bytes <= maximum,
-        "meets_size_range": minimum <= size_bytes <= maximum,
-        "probe_quality": int(output_policy["quality_max"]),
-        "probe_format": source_format,
-    }
+    finally:
+        image.close()
 
 
 def generate_crop_derivative(

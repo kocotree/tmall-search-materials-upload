@@ -15,10 +15,10 @@ from .image_compliance import (
     PillowImageCompressionProvider,
     classify_image,
     generate_crop_derivative,
-    inspect_image_source,
+    load_image_preflight_source,
     maximum_inscribed_crop,
     normalize_image_policy,
-    probe_crop_output_size,
+    probe_loaded_crop_output_size,
     provider_contract_payload,
     snapshot_image_policy,
     validate_normalized_crop,
@@ -79,10 +79,11 @@ def build_image_review_data(
             )
             continue
         source_path = Path(str(candidate.get("source_path", "")))
-        inspection = inspect_image_source(
-            source_path,
-            policy=image_policy,
-            cache_path=inspection_cache_path,
+        inspection, decoded_image, source_format, performance = (
+            load_image_preflight_source(
+                source_path,
+                policy=image_policy,
+            )
         )
         size_bytes = inspection.get("size_bytes")
         width = inspection.get("width")
@@ -117,36 +118,41 @@ def build_image_review_data(
             )
         crop_options = {}
         crop_size_probes: dict[str, dict[str, Any]] = {}
-        if preflight["selectable"]:
-            for ratio in image_policy["allowed_aspect_ratios"]:
-                crop = maximum_inscribed_crop(int(width), int(height), ratio)
-                probe = probe_crop_output_size(
-                    source_path,
-                    target_ratio=ratio,
-                    normalized_box=crop["normalized"],
-                    policy=image_policy,
-                )
-                crop_size_probes[ratio] = probe
-                if probe["meets_size_range"]:
-                    crop_options[ratio] = crop
-            if not crop_options:
-                preflight["selectable"] = False
-                preflight["status"] = "blocked"
-                preflight["reason_codes"] = list(
-                    dict.fromkeys(
-                        [
-                            *preflight["reason_codes"],
-                            (
-                                "OUTPUT_SIZE_BELOW_MINIMUM"
-                                if all(
-                                    not item.get("meets_minimum", False)
-                                    for item in crop_size_probes.values()
-                                )
-                                else "IMAGE_SIZE_EXCEEDED"
-                            ),
-                        ]
+        try:
+            if preflight["selectable"] and decoded_image is not None:
+                for ratio in image_policy["allowed_aspect_ratios"]:
+                    crop = maximum_inscribed_crop(int(width), int(height), ratio)
+                    probe = probe_loaded_crop_output_size(
+                        decoded_image,
+                        source_format=source_format,
+                        target_ratio=ratio,
+                        normalized_box=crop["normalized"],
+                        policy=image_policy,
                     )
-                )
+                    crop_size_probes[ratio] = probe
+                    if probe["meets_size_range"]:
+                        crop_options[ratio] = crop
+                if not crop_options:
+                    preflight["selectable"] = False
+                    preflight["status"] = "blocked"
+                    preflight["reason_codes"] = list(
+                        dict.fromkeys(
+                            [
+                                *preflight["reason_codes"],
+                                (
+                                    "OUTPUT_SIZE_BELOW_MINIMUM"
+                                    if all(
+                                        not item.get("meets_minimum", False)
+                                        for item in crop_size_probes.values()
+                                    )
+                                    else "IMAGE_SIZE_EXCEEDED"
+                                ),
+                            ]
+                        )
+                    )
+        finally:
+            if decoded_image is not None:
+                decoded_image.close()
         duplicate = bool(source_sha256 and source_sha256 in seen_sha256)
         if duplicate:
             duplicate_count += 1
@@ -187,6 +193,13 @@ def build_image_review_data(
                 "reason_codes": preflight["reason_codes"],
                 "crop_options": crop_options,
                 "crop_size_probes": crop_size_probes,
+                "preflight_performance": {
+                    **performance,
+                    "ratio_encode_ms": {
+                        ratio: probe.get("encode_ms", 0.0)
+                        for ratio, probe in crop_size_probes.items()
+                    },
+                },
                 "ratio_options": {
                     ratio: {
                         "ratio": ratio,

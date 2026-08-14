@@ -60,7 +60,7 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
-test("processing stays accepted when its heartbeat is old", () => {
+test("a live processing claim reports that the Agent is processing", () => {
   assert.equal(typeof UiState.connectionView, "function");
   let state = UiState.createState("asset_matching");
   state = UiState.receiveStage(state, {
@@ -70,10 +70,187 @@ test("processing stays accepted when its heartbeat is old", () => {
     lastAgentHeartbeat: "2026-07-21T08:00:00Z",
   });
 
-  const view = UiState.connectionView(state, Date.parse("2026-07-21T09:00:00Z"));
+  const view = UiState.connectionView(
+    state,
+    Date.parse("2026-07-21T09:00:00Z"),
+    {
+      processingClaim: {
+        expired: false,
+        lease_expires_at: "2026-07-21T09:05:00Z",
+      },
+    },
+  );
   assert.equal(view.offline, false);
   assert.equal(view.statusLabel, "Agent 处理中");
-  assert.equal(view.connectionLabel, "Agent 心跳暂不可见");
+  assert.equal(view.connectionLabel, "Agent 正在处理");
+});
+
+test("a live wait reports listening even when the old heartbeat is stale", () => {
+  let state = UiState.createState("setup");
+  state = UiState.receiveStage(state, {
+    stageId: "setup",
+    status: "draft",
+    lastAgentHeartbeat: "2026-07-21T08:00:00Z",
+  });
+
+  const view = UiState.connectionView(
+    state,
+    Date.parse("2026-07-21T09:00:00Z"),
+    {
+      agentWait: {
+        expired: false,
+        expires_at: "2026-07-21T09:00:30Z",
+        remaining_seconds: 30,
+      },
+    },
+  );
+  assert.equal(view.offline, false);
+  assert.equal(view.connectionLabel, "Agent 正在监听");
+});
+
+test("expired leases report disconnected regardless of an old heartbeat", () => {
+  let state = UiState.createState("setup");
+  state = UiState.receiveStage(state, {
+    stageId: "setup",
+    status: "ready_for_agent",
+    lastAgentHeartbeat: "2026-07-21T08:59:59Z",
+  });
+
+  const view = UiState.connectionView(
+    state,
+    Date.parse("2026-07-21T09:00:00Z"),
+    {
+      agentWait: {
+        expired: true,
+        expires_at: "2026-07-21T08:59:59Z",
+        remaining_seconds: 0,
+      },
+    },
+  );
+  assert.equal(view.offline, true);
+  assert.equal(view.connectionLabel, "Agent 未连接");
+});
+
+test("selection preflight weights expensive formats and large images", () => {
+  assert.equal(UiState.selectionPreflightWeight({
+    width: 1440,
+    height: 1920,
+    format: "JPEG",
+  }), 1);
+  assert.equal(UiState.selectionPreflightWeight({
+    width: 1440,
+    height: 1920,
+    format: "PNG",
+  }), 2);
+  assert.equal(UiState.selectionPreflightWeight({
+    width: 8000,
+    height: 5000,
+    format: "JPEG",
+  }), 3);
+  assert.equal(UiState.selectionPreflightWeight({
+    width: 10000,
+    height: 7000,
+    format: "JPEG",
+  }), 4);
+});
+
+test("selection preflight scheduler runs six normal images from one source", async () => {
+  const releases = [];
+  const started = [];
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    maxConcurrent: 6,
+    maxWeight: 8,
+    execute: (candidate) => new Promise((resolve) => {
+      started.push(candidate.asset_id);
+      releases.push(() => resolve({ status: "passed" }));
+    }),
+  });
+  const requests = Array.from({ length: 6 }, (_, index) => scheduler.select({
+    asset_id: `asset-${index}`,
+    source_system: "same-nas-source",
+    width: 1440,
+    height: 1920,
+    format: "JPEG",
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(started.length, 6);
+  releases.forEach((release) => release());
+  await Promise.all(requests);
+});
+
+test("selection preflight scheduler limits expensive images by total weight", async () => {
+  const releases = [];
+  const started = [];
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    maxConcurrent: 6,
+    maxWeight: 8,
+    execute: (candidate) => new Promise((resolve) => {
+      started.push(candidate.asset_id);
+      releases.push(() => resolve({ status: "passed" }));
+    }),
+  });
+  const requests = Array.from({ length: 5 }, (_, index) => scheduler.select({
+    asset_id: `png-${index}`,
+    source_system: "same-nas-source",
+    width: 1440,
+    height: 1920,
+    format: "PNG",
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(started.length, 4);
+  releases[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(started.length, 5);
+  releases.slice(1).forEach((release) => release());
+  await Promise.all(requests);
+});
+
+test("queued preflight can be cancelled before it starts", async () => {
+  let releaseFirst;
+  const started = [];
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    maxConcurrent: 1,
+    maxWeight: 1,
+    execute: (candidate) => new Promise((resolve) => {
+      started.push(candidate.asset_id);
+      if (candidate.asset_id === "first") releaseFirst = resolve;
+    }),
+  });
+  const first = scheduler.select({ asset_id: "first", width: 1, height: 1 });
+  const second = scheduler.select({ asset_id: "second", width: 1, height: 1 });
+  scheduler.cancel("second");
+  assert.deepEqual(await second, { status: "cancelled", cancelled: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["first"]);
+  releaseFirst({ status: "passed" });
+  await first;
+});
+
+test("running preflight keeps its cache result but not cancelled selection intent", async () => {
+  let release;
+  let executions = 0;
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    execute: () => new Promise((resolve) => {
+      executions += 1;
+      release = resolve;
+    }),
+  });
+  const request = scheduler.select({ asset_id: "asset-a", width: 1, height: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  scheduler.cancel("asset-a");
+  assert.equal(scheduler.get("asset-a").desiredSelected, false);
+  release({ status: "passed", feasible_ratios: ["1:1"] });
+  await request;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(executions, 1);
+  assert.equal(scheduler.get("asset-a").state, "completed");
+  assert.equal(scheduler.get("asset-a").desiredSelected, false);
+  assert.equal(scheduler.get("asset-a").result.status, "passed");
+
+  const reused = await scheduler.select({ asset_id: "asset-a", width: 1, height: 1 });
+  assert.equal(reused.status, "passed");
+  assert.equal(executions, 1);
+  assert.equal(scheduler.get("asset-a").desiredSelected, true);
 });
 
 test("stage switch clears recovery cache and ignores the prior request", () => {

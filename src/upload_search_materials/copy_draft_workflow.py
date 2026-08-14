@@ -25,6 +25,7 @@ from .agent_handoff import (
     fail_agent_request,
     find_equivalent_agent_request,
     read_agent_request,
+    recovery_prompt,
     retry_agent_request,
 )
 from .browser.qianniu_copy import QianniuCopyError, generate_qianniu_copy_drafts
@@ -38,6 +39,18 @@ from .slot_workflow import (
 
 
 PROCESSOR = "process-copy-request"
+COPY_AUTHORIZATION_SCHEMA_VERSION = 1
+COPY_AUTHORIZATION_SCOPE = (
+    "upload_slot_seed_image",
+    "invoke_qianniu_builtin_ai",
+    "read_generated_copy",
+    "exit_unpublished_form",
+)
+COPY_AUTHORIZATION_SOURCES = {
+    "workbench_image_completion",
+    "workbench_copy_regeneration",
+    "legacy_workbench_copy_request",
+}
 
 
 class CopyDraftProcessingError(RuntimeError):
@@ -49,6 +62,165 @@ class CopyDraftProcessingError(RuntimeError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _copy_seed_images(slots: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return the exact first verified output authorized for every slot."""
+
+    seeds: list[dict[str, Any]] = []
+    for slot in slots:
+        ordered_outputs = slot.get("ordered_outputs", [])
+        if not isinstance(ordered_outputs, list) or not ordered_outputs:
+            raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+        outputs = sorted(
+            (dict(item) for item in ordered_outputs if isinstance(item, Mapping)),
+            key=lambda item: int(item.get("order", 0)),
+        )
+        if not outputs:
+            raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+        seed = outputs[0]
+        seeds.append(
+            {
+                "slot_id": str(slot.get("slot_id", "")),
+                "product_id": str(slot.get("product_id", "")),
+                "asset_id": str(seed.get("asset_id", "")),
+                "output_sha256": str(seed.get("output_sha256", "")),
+                "output_path": str(seed.get("output_path", "")),
+                "order": int(seed.get("order", 0)),
+            }
+        )
+    if any(
+        not seed["slot_id"]
+        or not seed["asset_id"]
+        or len(seed["output_sha256"]) != 64
+        or not seed["output_path"]
+        for seed in seeds
+    ):
+        raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+    return seeds
+
+
+def _build_copy_authorization(
+    *,
+    session_id: str,
+    context_revision: int,
+    slot_plan_revision: int,
+    outputs_identity: str,
+    slots: list[Mapping[str, Any]],
+    source: str,
+    granted_at: str | None = None,
+) -> dict[str, Any]:
+    authorization = {
+        "schema_version": COPY_AUTHORIZATION_SCHEMA_VERSION,
+        "status": "granted",
+        "source": source,
+        "granted_at": granted_at or _now(),
+        "session_id": session_id,
+        "stage_id": "slots_copy",
+        "context_revision": int(context_revision),
+        "slot_plan_revision": int(slot_plan_revision),
+        "final_outputs_sha256": outputs_identity,
+        "seed_images": _copy_seed_images(slots),
+        "scope": list(COPY_AUTHORIZATION_SCOPE),
+        "requires_chat_confirmation": False,
+        "publish_allowed": False,
+    }
+    authorization["authorization_sha256"] = _canonical_sha256(authorization)
+    return authorization
+
+
+def _validate_or_migrate_copy_authorization(
+    store: SessionStore,
+    session_id: str,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed on tampering, while upgrading requests from older Plugins."""
+
+    context = request.get("request_context", {})
+    slots = context.get("slots", []) if isinstance(context, Mapping) else []
+    if not isinstance(slots, list) or not slots:
+        raise InteractionConflict("AGENT_COPY_REQUEST_HAS_NO_SLOTS")
+    stage_path = store._stage_path(session_id, "slots_copy")
+    processed_path = stage_path / "processed-outputs.json"
+    if not processed_path.is_file():
+        raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+    processed = SessionStore._read_json(processed_path, "processed-outputs")
+    outputs_identity = final_outputs_sha256(processed)
+    if outputs_identity != str(context.get("final_outputs_sha256", "")):
+        raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+
+    authorization = context.get("authorization")
+    if authorization is None:
+        # Before this contract existed, copy_draft could only be created by the
+        # workbench completion/regeneration actions.  Reconstructing the grant
+        # is safe only while the immutable final-output fingerprint still
+        # matches the legacy request exactly.
+        authorization = _build_copy_authorization(
+            session_id=session_id,
+            context_revision=int(request.get("context_revision", -1)),
+            slot_plan_revision=int(context.get("slot_plan_revision", -1)),
+            outputs_identity=outputs_identity,
+            slots=slots,
+            source="legacy_workbench_copy_request",
+            granted_at=str(request.get("created_at") or _now()),
+        )
+        upgraded = dict(request)
+        upgraded_context = dict(context)
+        upgraded_context["authorization"] = authorization
+        upgraded["request_context"] = upgraded_context
+        upgraded["recovery_prompt"] = recovery_prompt(
+            store,
+            session_id,
+            str(request.get("request_id", "")),
+            kind="copy_draft",
+        )
+        store._write_json_atomic(
+            _request_root(
+                store, session_id, str(request.get("request_id", ""))
+            )
+            / "request.json",
+            upgraded,
+        )
+        request = upgraded
+        context = upgraded_context
+    if not isinstance(authorization, Mapping):
+        raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+
+    supplied_hash = str(authorization.get("authorization_sha256", ""))
+    unsigned = dict(authorization)
+    unsigned.pop("authorization_sha256", None)
+    valid = (
+        int(authorization.get("schema_version", -1))
+        == COPY_AUTHORIZATION_SCHEMA_VERSION
+        and authorization.get("status") == "granted"
+        and authorization.get("source") in COPY_AUTHORIZATION_SOURCES
+        and authorization.get("session_id") == session_id
+        and authorization.get("stage_id") == "slots_copy"
+        and int(authorization.get("context_revision", -1))
+        == int(request.get("context_revision", -2))
+        and int(authorization.get("slot_plan_revision", -1))
+        == int(context.get("slot_plan_revision", -2))
+        and authorization.get("final_outputs_sha256") == outputs_identity
+        and authorization.get("seed_images") == _copy_seed_images(slots)
+        and authorization.get("scope") == list(COPY_AUTHORIZATION_SCOPE)
+        and authorization.get("requires_chat_confirmation") is False
+        and authorization.get("publish_allowed") is False
+        and supplied_hash == _canonical_sha256(unsigned)
+    )
+    if not valid:
+        raise InteractionConflict("COPY_DRAFT_AUTHORIZATION_INVALID")
+    return request
 
 
 def _request_root(
@@ -109,6 +281,7 @@ def create_copy_draft_request(
         raise ValueError("final image outputs are not ready")
     processed = SessionStore._read_json(processed_path, "processed-outputs")
     outputs_identity = final_outputs_sha256(processed)
+    context_revision = int(state["stages"]["slots_copy"]["revision"])
     context_fingerprint = hashlib.sha256(
         f"{outputs_identity}|{copy_provider}".encode("utf-8")
     ).hexdigest()
@@ -117,7 +290,7 @@ def create_copy_draft_request(
             store,
             session_id,
             kind="copy_draft",
-            context_revision=int(state["stages"]["slots_copy"]["revision"]),
+            context_revision=context_revision,
             context_fingerprint=context_fingerprint,
         )
         if existing is not None:
@@ -140,22 +313,26 @@ def create_copy_draft_request(
         if not isinstance(slot, Mapping):
             continue
         product_id = str(slot.get("product_id", ""))
+        ordered_outputs = sorted(
+            (
+                {
+                    "asset_id": str(output.get("asset_id", "")),
+                    "output_sha256": str(output.get("output_sha256", "")),
+                    "output_path": str(output.get("output_path", "")),
+                    "order": int(output.get("order", 0)),
+                }
+                for output in slot.get("outputs", [])
+                if isinstance(output, Mapping)
+            ),
+            key=lambda output: output["order"],
+        )
         slots.append(
             {
                 "slot_id": str(slot.get("slot_id", "")),
                 "product_id": product_id,
                 "target_ratio": str(slot.get("target_ratio", "")),
                 "theme": str(slot.get("theme", "")),
-                "ordered_outputs": [
-                    {
-                        "asset_id": str(output.get("asset_id", "")),
-                        "output_sha256": str(output.get("output_sha256", "")),
-                        "output_path": str(output.get("output_path", "")),
-                        "order": int(output.get("order", 0)),
-                    }
-                    for output in slot.get("outputs", [])
-                    if isinstance(output, Mapping)
-                ],
+                "ordered_outputs": ordered_outputs,
                 "trusted_source_fields": {
                     "商品标题": product_titles.get(product_id, "")
                 },
@@ -164,12 +341,25 @@ def create_copy_draft_request(
     if not slots:
         raise ValueError("copy request has no slots")
 
+    authorization = _build_copy_authorization(
+        session_id=session_id,
+        context_revision=context_revision,
+        slot_plan_revision=int(current["plan_revision"]),
+        outputs_identity=outputs_identity,
+        slots=slots,
+        source=(
+            "workbench_copy_regeneration"
+            if regenerate
+            else "workbench_image_completion"
+        ),
+    )
+
     created = create_agent_request(
         store,
         session_id,
         kind="copy_draft",
         candidates=[],
-        context_revision=int(state["stages"]["slots_copy"]["revision"]),
+        context_revision=context_revision,
         request_context={
             "slot_plan_revision": int(current["plan_revision"]),
             "final_outputs_sha256": outputs_identity,
@@ -178,6 +368,7 @@ def create_copy_draft_request(
             "processor": PROCESSOR,
             "slots": slots,
             "prohibited_terms": [],
+            "authorization": authorization,
         },
     )
     if current.get("workflow_state") != "completed":
@@ -217,6 +408,9 @@ def process_copy_draft_request(
     if request.get("status") == "completed":
         response_path = _request_root(store, session_id, request_id) / "response.json"
         return SessionStore._read_json(response_path, "response")
+    request = _validate_or_migrate_copy_authorization(
+        store, session_id, request
+    )
     if request.get("status") == "failed":
         request = retry_agent_request(
             store, session_id, request_id, actor=actor

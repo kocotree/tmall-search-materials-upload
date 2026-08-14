@@ -174,7 +174,7 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 ## Asset Gallery Result
 
-素材匹配阶段使用 `workflow_step` 区分同一阶段内的两步：目录审查为 `folder_review`，本地 Worker 生成图片期间为 `gallery_preparing`，可选图结果为 `image_selection`。文件夹确认使用 `local_action` 事务更新 revision，但不生成 `handoff.json`。`gallery-job.json` 绑定 session/stage、revision/input SHA-256、文件夹决定 SHA-256、商品边界、候选策略、图片策略和本地资源身份；每次执行保留在 `gallery-attempts/<attempt_id>/`。图片画廊还包含 `gallery_identity`：`session_id`、`stage_id`、`prepared_from_revision`、`prepared_from_input_sha256`、`folder_decisions_sha256`、`prepared_folder_keys`。勾选单张图片时的双比例预裁剪结果写入 `selection-preflight-cache.json`，条目以 `asset_id` 索引，并绑定源 SHA-256、图片策略 SHA-256 和算法版本；该文件是可失效重建的任务内缓存，不是 handoff。最终选图提交只接受当前任务且当前采用文件夹为已准备范围子集的画廊；重新采用未准备文件夹会使画廊失效。最终校验成功后写入 `selected-asset-preflight.json`、`final-material-package.json` 和唯一的 `handoff_kind=final_material_selection` 交接。
+素材匹配阶段使用 `workflow_step` 区分同一阶段内的两步：目录审查为 `folder_review`，本地 Worker 生成图片期间为 `gallery_preparing`，可选图结果为 `image_selection`。文件夹确认使用 `local_action` 事务更新 revision，但不生成 `handoff.json`。`gallery-job.json` 绑定 session/stage、revision/input SHA-256、文件夹决定 SHA-256、商品边界、候选策略、图片策略和本地资源身份；每次执行保留在 `gallery-attempts/<attempt_id>/`。图片画廊还包含 `gallery_identity`：`session_id`、`stage_id`、`prepared_from_revision`、`prepared_from_input_sha256`、`folder_decisions_sha256`、`prepared_folder_keys`。勾选单张图片时的双比例预裁剪结果写入 `selection-preflight-cache.json`，条目以 `asset_id` 索引，并绑定源 SHA-256、图片策略 SHA-256 和算法版本；算法版本 2 表示单次读取/解码后完成双比例编码探测。前端队列另维护 `queued|running|completed|cancelled|failed`、当前采用意图、意图版本和任务权重；该瞬时状态不进入 handoff，只有预裁剪通过且仍为最新采用意图时才写入正式图片决定。该文件是可失效重建的任务内缓存，不是 handoff。最终选图提交只接受当前任务且当前采用文件夹为已准备范围子集的画廊；重新采用未准备文件夹会使画廊失效。最终校验成功后写入 `selected-asset-preflight.json`、`final-material-package.json` 和唯一的 `handoff_kind=final_material_selection` 交接。
 
 素材匹配阶段的 `result.json.data` 包含：
 
@@ -279,7 +279,7 @@ Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
 - 坑位必须包含主题、数量理由、3–9 张唯一有序图片、逐图角色/理由/新增信息、未采用原因和预计裁剪压缩数。
 - `crop-preflight.json` 绑定已确认的 `plan_revision`、`plan_sha256`、完整裁剪/压缩参数、逐图输出身份、检查数量、`minimum_size_bytes=204800` 和通过时间。只有该绑定与当前计划及页面参数完全一致时，图片完成按钮才可用；任何坑位、顺序、比例、裁剪框或压缩参数变化都会使其失效。
 - `processed-outputs.json` 同时保存计划 SHA 和包含裁剪参数的 processing SHA；输出逐图保存源/输出 SHA、宽高、大小、比例和顺序。它只可由仍然有效的 `crop-preflight.json` 转换得到，完成时复核任务内实际文件，不重复读取共享盘原图或重新裁剪。
-- `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；请求创建后状态为 `pending_agent`，由 Codex 的唯一 `process-copy-request` 入口领取。`progress.json` 保存 `pending|processing|completed|failed`、总坑位数、已完成数、当前 `slot_id`、逐坑已完成草稿及最后错误；正式 `response.json` 只在全部坑位完成后写入，并逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
+- `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；`request_context.authorization` 固定记录 `status=granted`、授权来源、session/stage/revision、最终输出 SHA、各坑位首图身份、允许动作清单、`requires_chat_confirmation=false`、`publish_allowed=false` 及整个授权信封的 SHA-256。请求创建后状态为 `pending_agent`，由 Codex 的唯一 `process-copy-request` 入口领取；处理器必须在打开浏览器前复核授权信封与当前不可变输出，旧版请求仅在最终输出指纹仍精确一致时补齐限定授权。`progress.json` 保存 `pending|processing|completed|failed`、总坑位数、已完成数、当前 `slot_id`、逐坑已完成草稿及最后错误；正式 `response.json` 只在全部坑位完成后写入，并逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
 图片分析缓存键由源 SHA-256、`codex-agent-handoff`、模型标识和 schema 版本共同确定。
 # Agent wait envelope
 

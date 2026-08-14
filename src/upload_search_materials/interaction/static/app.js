@@ -76,10 +76,24 @@
   let setupLoginGateStarted = false;
   let selectedAssetValidation = null;
   const selectionPreflights = new Map();
-  const pendingSelectionPreflights = new Map();
-  const selectionPreflightQueue = [];
-  let activeSelectionPreflights = 0;
-  const selectionPreflightConcurrency = 3;
+  const selectionPreflightCardRefreshers = new Map();
+  const appliedSelectionPreflightIntents = new Map();
+  const selectionPreflightScheduler = UiState.createSelectionPreflightScheduler({
+    maxConcurrent: 6,
+    maxWeight: 8,
+    execute: async (candidate) => {
+      const assetId = String(candidate.asset_id || "");
+      const entry = await fetchJson(apiPath(
+        `/stages/asset_matching/assets/${encodeURIComponent(assetId)}/selection-preflight`,
+      ), { method: "POST", body: "{}" });
+      selectionPreflights.set(assetId, entry);
+      return entry;
+    },
+    onChange: (job) => {
+      selectionPreflightCardRefreshers.get(job.assetId)?.();
+      if (currentStageId === "asset_matching") renderStatus();
+    },
+  });
   let selectionPreflightHydrationKey = "";
   let selectionPreflightHydrationInFlight = false;
 
@@ -930,7 +944,10 @@
     ) {
       submitButton.disabled = true;
     }
-    if (currentStageId === "asset_matching" && pendingSelectionPreflights.size) {
+    if (
+      currentStageId === "asset_matching"
+      && selectionPreflightScheduler.desiredPendingCount()
+    ) {
       submitButton.disabled = true;
       submitButton.textContent = "正在检测所选图片…";
     }
@@ -1145,7 +1162,7 @@
     const wait = currentHandoffStatus.agent_wait;
     if (currentHandoffStatus.status === "waiting" && wait) {
       actionMessage.textContent =
-        `Codex 在线（心跳租约约 ${Math.max(0, Number(wait.remaining_seconds || 0))} 秒）；` +
+        `Agent 正在监听（心跳租约约 ${Math.max(0, Number(wait.remaining_seconds || 0))} 秒）；` +
         `本轮最长等待还剩约 ${Math.max(0, Number(wait.budget_remaining_seconds || 0))} 秒。` +
         `表单仍可正常编辑。`;
       return;
@@ -1765,48 +1782,16 @@
     }
   }
 
-  function drainSelectionPreflightQueue() {
-    while (
-      activeSelectionPreflights < selectionPreflightConcurrency
-      && selectionPreflightQueue.length
-    ) {
-      const job = selectionPreflightQueue.shift();
-      activeSelectionPreflights += 1;
-      fetchJson(apiPath(
-        `/stages/asset_matching/assets/${encodeURIComponent(job.assetId)}/selection-preflight`,
-      ), { method: "POST", body: "{}" })
-        .then((entry) => {
-          selectionPreflights.set(job.assetId, entry);
-          job.resolve(entry);
-        })
-        .catch(job.reject)
-        .finally(() => {
-          activeSelectionPreflights -= 1;
-          pendingSelectionPreflights.delete(job.assetId);
-          if (!pendingSelectionPreflights.size && currentStageId === "asset_matching") {
-            renderStatus();
-          }
-          drainSelectionPreflightQueue();
-        });
-    }
-  }
-
-  async function runSelectionPreflight(candidate) {
+  function runSelectionPreflight(candidate) {
     const assetId = String(candidate.asset_id || "");
-    if (!assetId) throw new Error("候选图片缺少稳定标识");
+    if (!assetId) return Promise.reject(new Error("候选图片缺少稳定标识"));
     const existing = selectionPreflightFor(assetId);
-    if (existing?.status && existing.status !== "pending") return existing;
-    if (pendingSelectionPreflights.has(assetId)) {
-      return pendingSelectionPreflights.get(assetId);
+    if (existing?.status && existing.status !== "pending") {
+      return selectionPreflightScheduler.get(assetId)
+        ? selectionPreflightScheduler.select(candidate)
+        : Promise.resolve(existing);
     }
-    const promise = new Promise((resolve, reject) => {
-      selectionPreflightQueue.push({ assetId, resolve, reject });
-    });
-    pendingSelectionPreflights.set(assetId, promise);
-    submitButton.disabled = true;
-    submitButton.textContent = "正在检测所选图片…";
-    drainSelectionPreflightQueue();
-    return promise;
+    return selectionPreflightScheduler.select(candidate);
   }
 
   function candidateIsSelectable(candidate) {
@@ -2543,7 +2528,8 @@
         displayedCandidates.forEach((candidate) => {
           const assetId = String(candidate.asset_id || "");
           const selectionCheck = selectionPreflightFor(assetId);
-          const checking = pendingSelectionPreflights.has(assetId);
+          const selectionJob = selectionPreflightScheduler.get(assetId);
+          const checking = ["queued", "running"].includes(selectionJob?.state);
           const selectable = candidateIsSelectable(candidate)
             && !hashesUsedElsewhere.has(String(candidate.sha256 || ""))
             && selectionCheck?.status !== "blocked";
@@ -2588,31 +2574,12 @@
           const selectLabel = element("label", "asset-check");
           const select = document.createElement("input");
           select.type = "checkbox";
-          select.checked = selectedIds.has(assetId);
-          select.disabled = !selectable || checking;
+          select.checked = selectionJob?.desiredSelected || selectedIds.has(assetId);
+          select.disabled = !selectable;
           selectLabel.append(select, document.createTextNode("采用"));
           controls.append(selectLabel);
-          if (checking) {
-            controls.appendChild(element("span", "asset-warning", "正在检查 1:1、3:4 预裁剪…"));
-          } else if (selectionCheck?.status === "passed") {
-            controls.appendChild(element(
-              "span",
-              "asset-selection-check is-passed",
-              `预裁剪通过：${selectionCheck.feasible_ratios.join("、")}`,
-            ));
-          } else if (selectionCheck?.status === "warning") {
-            controls.appendChild(element(
-              "span",
-              "asset-warning",
-              selectionCheck.message,
-            ));
-          } else if (selectionCheck?.status === "blocked") {
-            controls.appendChild(element(
-              "span",
-              "asset-selection-check is-blocked",
-              selectionCheck.message,
-            ));
-          }
+          const selectionFeedback = element("span", "asset-selection-check");
+          controls.appendChild(selectionFeedback);
           if (candidate.match_status === "needs_manual_confirmation") {
             controls.appendChild(element("span", "asset-warning", "名称候选来自已采用文件夹"));
           } else if (!candidate.preflight || !candidate.source_inspection) {
@@ -2642,51 +2609,118 @@
           card.append(image, meta, controls);
           grid.appendChild(card);
 
-          select.addEventListener("change", async () => {
+          const persistCurrentSelection = () => {
+            persistSelectedCandidates(
+              productId,
+              productCandidates.filter(
+                (item) => selectedIds.has(String(item.asset_id)),
+              ),
+            );
+          };
+
+          const refreshSelectionCard = () => {
+            const job = selectionPreflightScheduler.get(assetId);
+            const result = selectionPreflightFor(assetId);
+            const isQueued = job?.state === "queued" && job.desiredSelected;
+            const isRunning = job?.state === "running";
+            const desired = job
+              ? job.desiredSelected
+              : selectedIds.has(assetId);
+            select.checked = desired;
+            select.disabled = !selectable || result?.status === "blocked";
+            select.indeterminate = false;
+            card.classList.toggle("is-selected", selectedIds.has(assetId));
+            card.dataset.selectionPreflightStatus = isQueued
+              ? "queued"
+              : isRunning && desired
+                ? "checking"
+                : isRunning
+                  ? "cancelled"
+                  : result?.status || "unchecked";
+            selectionFeedback.className = "asset-selection-check";
+            if (isQueued) {
+              selectionFeedback.classList.add("asset-warning");
+              selectionFeedback.textContent = "排队中，可取消采用";
+            } else if (isRunning && desired) {
+              selectionFeedback.classList.add("asset-warning");
+              selectionFeedback.textContent = "正在检查 1:1、3:4 预裁剪，可取消采用";
+            } else if (isRunning) {
+              selectionFeedback.classList.add("asset-warning");
+              selectionFeedback.textContent = "已取消采用；后台结果仅用于缓存";
+            } else if (result?.status === "passed") {
+              selectionFeedback.classList.add("is-passed");
+              selectionFeedback.textContent = `预裁剪通过：${result.feasible_ratios.join("、")}`;
+            } else if (result?.status === "warning") {
+              selectionFeedback.classList.add("asset-warning");
+              selectionFeedback.textContent = result.message;
+            } else if (result?.status === "blocked") {
+              selectionFeedback.classList.add("is-blocked");
+              selectionFeedback.textContent = result.message;
+            } else {
+              selectionFeedback.textContent = "";
+            }
+          };
+          selectionPreflightCardRefreshers.set(assetId, refreshSelectionCard);
+          refreshSelectionCard();
+
+          const applySelectionPreflight = (result) => {
+            if (!result || result.cancelled || result.status === "cancelled") {
+              refreshSelectionCard();
+              return;
+            }
+            const job = selectionPreflightScheduler.get(assetId);
+            if ((job && !job.desiredSelected) || (!job && !select.checked)) {
+              refreshSelectionCard();
+              return;
+            }
+            const intentVersion = job?.intentVersion || 0;
+            if (
+              job
+              && appliedSelectionPreflightIntents.get(assetId) === intentVersion
+            ) return;
+            if (job) {
+              appliedSelectionPreflightIntents.set(assetId, intentVersion);
+            }
+            if (result.status === "blocked") {
+              selectionPreflightScheduler.cancel(assetId);
+              selectedIds.delete(assetId);
+              persistLicense(assetId, false);
+              actionMessage.textContent = result.message;
+            } else {
+              selectedIds.add(assetId);
+              persistLicense(assetId, true);
+              actionMessage.textContent = result.status === "warning"
+                ? result.message
+                : "图片预裁剪检查通过。";
+            }
+            persistCurrentSelection();
+            refreshSelectionCard();
+            updateSelectionSummary();
+            renderSelected();
+          };
+
+          select.addEventListener("change", () => {
             if (select.checked) {
-              select.disabled = true;
-              select.indeterminate = true;
-              card.dataset.selectionPreflightStatus = "checking";
               actionMessage.textContent = "正在检查所选图片的 1:1、3:4 预裁剪…";
-              try {
-                const result = await runSelectionPreflight(candidate);
-                select.indeterminate = false;
-                if (result.status === "blocked") {
-                  select.checked = false;
-                  selectedIds.delete(assetId);
-                  persistLicense(assetId, false);
-                  actionMessage.textContent = result.message;
-                } else {
-                  selectedIds.add(assetId);
-                  persistLicense(assetId, true);
-                  actionMessage.textContent = result.status === "warning"
-                    ? result.message
-                    : "图片预裁剪检查通过。";
-                }
-              } catch (error) {
-                select.indeterminate = false;
-                select.checked = false;
+              const request = runSelectionPreflight(candidate);
+              refreshSelectionCard();
+              request.then(applySelectionPreflight).catch((error) => {
+                selectionPreflightScheduler.cancel(assetId);
                 selectedIds.delete(assetId);
                 persistLicense(assetId, false);
                 actionMessage.textContent = error.userMessage || error.message;
-              }
-              persistSelectedCandidates(
-                productId,
-                productCandidates.filter(
-                  (item) => selectedIds.has(String(item.asset_id)),
-                ),
-              );
-              draw();
+                persistCurrentSelection();
+                refreshSelectionCard();
+                updateSelectionSummary();
+                renderSelected();
+              });
               return;
-            } else {
-              selectedIds.delete(assetId);
-              persistLicense(assetId, false);
             }
-            persistSelectedCandidates(
-              productId,
-              productCandidates.filter((item) => selectedIds.has(String(item.asset_id))),
-            );
-            card.classList.toggle("is-selected", select.checked);
+            selectionPreflightScheduler.cancel(assetId);
+            selectedIds.delete(assetId);
+            persistLicense(assetId, false);
+            persistCurrentSelection();
+            refreshSelectionCard();
             updateSelectionSummary();
             renderSelected();
           });
@@ -2770,15 +2804,18 @@
             remove.type = "button";
             remove.addEventListener("click", () => {
               const assetId = String(candidate.asset_id);
+              selectionPreflightScheduler.cancel(assetId);
+              selectedIds.delete(assetId);
               persistLicense(assetId, false);
               persistSelectedCandidates(
                 productId,
                 productCandidates.filter(
-                  (value) => latestIds.has(String(value.asset_id))
-                    && String(value.asset_id) !== assetId,
+                  (value) => selectedIds.has(String(value.asset_id)),
                 ),
               );
-              draw();
+              selectionPreflightCardRefreshers.get(assetId)?.();
+              updateSelectionSummary();
+              renderSelected();
             });
             item.append(image, element("small", "", candidate.source_system || "未知来源"));
             if (validation && validation.severity !== "ok") {
@@ -2833,7 +2870,7 @@
         const active = issueFilter.getAttribute("aria-pressed") === "true";
         issueFilter.setAttribute("aria-pressed", String(!active));
         issueFilter.textContent = active ? "只看需处理素材" : "查看全部已选素材";
-        draw();
+        renderSelected();
       });
       draw();
     });
@@ -5474,8 +5511,11 @@
       const decisions = Array.isArray(values.asset_decisions)
         ? values.asset_decisions.filter((item) => item?.decision === "selected")
         : [];
-      if (pendingSelectionPreflights.size) {
-        const message = `还有 ${pendingSelectionPreflights.size} 张图片正在进行预裁剪检查，请等待完成。`;
+      const pendingSelectionCount = (
+        selectionPreflightScheduler.desiredPendingCount()
+      );
+      if (pendingSelectionCount) {
+        const message = `还有 ${pendingSelectionCount} 张图片正在进行预裁剪检查，请等待完成。`;
         showFieldErrors(form, { asset_decisions: message });
         actionMessage.textContent = message;
         persistenceInFlight = false;
@@ -5799,9 +5839,12 @@
         currentGalleryJob = galleryPayload?.gallery_job || null;
         currentGalleryProgress = currentGalleryJob?.progress || null;
       }
-      const connection = UiState.connectionView(uiState, Date.now());
+      const connection = UiState.connectionView(uiState, Date.now(), {
+        agentWait: currentHandoffStatus?.agent_wait || null,
+        processingClaim: currentProcessingClaim,
+      });
       connectionLabel.textContent = connection.connectionLabel;
-      offlinePanel.hidden = connection.connectionLabel === "Agent 已连接";
+      offlinePanel.hidden = !connection.offline;
       const galleryChanged = requestedStageId === "asset_matching"
         && (
           priorGalleryStatus !== (currentGalleryJob?.status || null)

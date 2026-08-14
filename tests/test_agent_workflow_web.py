@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from upload_search_materials.agent_handoff import (
     claim_agent_request,
@@ -14,6 +15,7 @@ from upload_search_materials.copy_draft_workflow import (
 )
 from upload_search_materials.image_compliance import default_image_policy
 from upload_search_materials.interaction.session import (
+    InteractionConflict,
     LEGACY_AI_COMPATIBILITY_PROFILE,
     SessionStore,
 )
@@ -758,13 +760,7 @@ def test_copy_progress_autosave_does_not_supersede_open_request(tmp_path):
     )["status"] == "pending_agent"
 
 
-def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
-    tmp_path, monkeypatch
-):
-    from types import SimpleNamespace
-    import upload_search_materials.copy_draft_workflow as workflow
-
-    client, store, session_id = _prepared_slot_client(tmp_path)
+def _queue_copy_request(client, store, session_id):
     current_endpoint = (
         f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"
     )
@@ -797,11 +793,45 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
         json={"crop_parameters": {}},
     )
     assert completed.status_code == 200, completed.json
-    request_id = completed.json["copy_request_id"]
+    return completed.json["copy_request_id"]
+
+
+def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
     request_document = read_agent_request(store, session_id, request_id)
     assert request_document["kind"] == "copy_draft"
     assert request_document["status"] == "pending_agent"
     assert "process-copy-request" in request_document["recovery_prompt"]
+    assert (
+        "禁止在聊天中再次索取同意、授权或确认"
+        in request_document["recovery_prompt"]
+    )
+    authorization = request_document["request_context"]["authorization"]
+    assert authorization["status"] == "granted"
+    assert authorization["source"] == "workbench_image_completion"
+    assert authorization["requires_chat_confirmation"] is False
+    assert authorization["publish_allowed"] is False
+    assert authorization["final_outputs_sha256"] == request_document[
+        "request_context"
+    ]["final_outputs_sha256"]
+    first_output = request_document["request_context"]["slots"][0][
+        "ordered_outputs"
+    ][0]
+    assert authorization["seed_images"] == [{
+        "slot_id": "slot-a",
+        "product_id": "P1",
+        "asset_id": "asset-0",
+        "output_sha256": first_output["output_sha256"],
+        "output_path": first_output["output_path"],
+        "order": first_output["order"],
+    }]
+    assert len(authorization["authorization_sha256"]) == 64
 
     calls = []
 
@@ -848,6 +878,104 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
     ).json
     assert detail["progress"]["status"] == "completed"
     assert detail["progress"]["completed_count"] == detail["progress"]["total_count"]
+
+
+def test_copy_processor_rejects_tampered_authorization_before_browser(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
+    request = read_agent_request(store, session_id, request_id)
+    request["request_context"]["authorization"]["publish_allowed"] = True
+    request_path = (
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "request.json"
+    )
+    store._write_json_atomic(request_path, request)
+
+    monkeypatch.setattr(
+        workflow,
+        "generate_qianniu_copy_drafts",
+        lambda *_args, **_kwargs: pytest.fail("browser must not run"),
+    )
+    with pytest.raises(
+        InteractionConflict, match="COPY_DRAFT_AUTHORIZATION_INVALID"
+    ):
+        process_copy_draft_request(
+            store,
+            session_id,
+            request_id,
+            runtime=SimpleNamespace(
+                cdp_url="http://127.0.0.1:9222",
+                material_center_url="https://example.test/materials",
+            ),
+            page=object(),
+        )
+    assert read_agent_request(store, session_id, request_id)["status"] == (
+        "pending_agent"
+    )
+
+
+def test_copy_processor_upgrades_legacy_request_without_chat_confirmation(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
+    request_path = (
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "request.json"
+    )
+    request = SessionStore._read_json(request_path, "request")
+    request["request_context"].pop("authorization")
+    request["recovery_prompt"] = "旧版恢复提示"
+    store._write_json_atomic(request_path, request)
+
+    projected = read_agent_request(store, session_id, request_id)
+    assert "禁止在聊天中再次索取同意、授权或确认" in projected[
+        "recovery_prompt"
+    ]
+
+    def fake_generate(_page, slots, *, material_center_url):
+        assert material_center_url == "https://example.test/materials"
+        return [{
+            "slot_id": slots[0]["slot_id"],
+            "product_id": slots[0]["product_id"],
+            "title": "兼容旧请求",
+            "description": "无需重新创建任务。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+    assert response["result"]["copy_drafts"][0]["title"] == "兼容旧请求"
+    upgraded = SessionStore._read_json(request_path, "request")
+    assert upgraded["request_context"]["authorization"]["source"] == (
+        "legacy_workbench_copy_request"
+    )
+    assert upgraded["request_context"]["authorization"][
+        "requires_chat_confirmation"
+    ] is False
 
 
 def test_copy_slots_keep_distinct_remote_occurrences_across_checkpoint_calls():

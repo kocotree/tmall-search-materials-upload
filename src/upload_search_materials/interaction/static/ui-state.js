@@ -70,22 +70,191 @@
     return { createdAt: typeof createdAt === "string" ? createdAt : null };
   }
 
-  function connectionView(state, now, heartbeatWindowMs = 10000) {
-    const heartbeatAt = Date.parse(state.lastAgentHeartbeat || "");
-    const heartbeatIsRecent = Number.isFinite(heartbeatAt)
-      && now >= heartbeatAt
-      && now - heartbeatAt < heartbeatWindowMs;
-    if (state.serverStatus === "processing") {
+  function leaseIsLive(lease, now, expiresAtField, remainingSecondsField) {
+    if (!lease || typeof lease !== "object" || lease.expired === true) return false;
+    const expiresAt = Date.parse(lease[expiresAtField] || "");
+    if (Number.isFinite(expiresAt)) return now < expiresAt;
+    const remainingSeconds = Number(lease[remainingSecondsField]);
+    if (Number.isFinite(remainingSeconds)) return remainingSeconds > 0;
+    return lease.expired === false;
+  }
+
+  function connectionView(state, now, presence = {}) {
+    const waitIsLive = leaseIsLive(
+      presence.agentWait || presence.agent_wait,
+      now,
+      "expires_at",
+      "remaining_seconds",
+    );
+    const processingIsLive = leaseIsLive(
+      presence.processingClaim || presence.processing_claim,
+      now,
+      "lease_expires_at",
+      "remaining_seconds",
+    );
+    if (processingIsLive) {
       return {
         offline: false,
         statusLabel: statusLabels.processing,
-        connectionLabel: heartbeatIsRecent ? "Agent 已连接" : "Agent 心跳暂不可见",
+        connectionLabel: "Agent 正在处理",
+      };
+    }
+    if (waitIsLive) {
+      return {
+        offline: false,
+        statusLabel: statusLabels[state.serverStatus] || statusLabels.draft,
+        connectionLabel: "Agent 正在监听",
       };
     }
     return {
-      offline: !heartbeatIsRecent,
+      offline: true,
       statusLabel: statusLabels[state.serverStatus] || statusLabels.draft,
-      connectionLabel: heartbeatIsRecent ? "Agent 已连接" : "Agent 未连接",
+      connectionLabel: "Agent 未连接",
+    };
+  }
+
+  function selectionPreflightWeight(candidate) {
+    const width = Math.max(0, Number(candidate?.width || candidate?.source_inspection?.width || 0));
+    const height = Math.max(0, Number(candidate?.height || candidate?.source_inspection?.height || 0));
+    const pixels = width * height;
+    const format = String(
+      candidate?.format || candidate?.source_inspection?.format || "",
+    ).toUpperCase();
+    if (pixels >= 60_000_000) return 4;
+    if (pixels > 30_000_000) return 3;
+    if (pixels > 12_000_000 || ["PNG", "GIF", "HEIC", "HEIF"].includes(format)) {
+      return 2;
+    }
+    return 1;
+  }
+
+  function createSelectionPreflightScheduler({
+    execute,
+    onChange = () => {},
+    maxConcurrent = 6,
+    maxWeight = 8,
+  } = {}) {
+    if (typeof execute !== "function") throw new TypeError("execute is required");
+    const jobs = new Map();
+    const queue = [];
+    let activeCount = 0;
+    let activeWeight = 0;
+
+    const snapshot = (job) => job ? {
+      assetId: job.assetId,
+      state: job.state,
+      desiredSelected: job.desiredSelected,
+      intentVersion: job.intentVersion,
+      weight: job.weight,
+      result: job.result,
+      error: job.error,
+    } : null;
+
+    const notify = (job) => onChange(snapshot(job));
+
+    function drain() {
+      while (activeCount < maxConcurrent && queue.length) {
+        const index = queue.findIndex(
+          (job) => activeWeight + job.weight <= maxWeight,
+        );
+        if (index < 0) return;
+        const [job] = queue.splice(index, 1);
+        if (job.state !== "queued") continue;
+        job.state = "running";
+        activeCount += 1;
+        activeWeight += job.weight;
+        notify(job);
+        Promise.resolve()
+          .then(() => execute(job.candidate))
+          .then((result) => {
+            job.state = "completed";
+            job.result = result;
+            job.resolve(result);
+          })
+          .catch((error) => {
+            job.state = "failed";
+            job.error = error;
+            job.reject(error);
+          })
+          .finally(() => {
+            activeCount -= 1;
+            activeWeight -= job.weight;
+            notify(job);
+            drain();
+          });
+      }
+    }
+
+    function createJob(candidate) {
+      const assetId = String(candidate?.asset_id || "");
+      let resolve;
+      let reject;
+      const promise = new Promise((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      const job = {
+        assetId,
+        candidate,
+        state: "queued",
+        desiredSelected: true,
+        intentVersion: 1,
+        weight: Math.min(maxWeight, selectionPreflightWeight(candidate)),
+        result: null,
+        error: null,
+        promise,
+        resolve,
+        reject,
+      };
+      jobs.set(assetId, job);
+      queue.push(job);
+      notify(job);
+      drain();
+      return job;
+    }
+
+    function select(candidate) {
+      const assetId = String(candidate?.asset_id || "");
+      if (!assetId) return Promise.reject(new Error("候选图片缺少稳定标识"));
+      let job = jobs.get(assetId);
+      if (!job || ["cancelled", "failed"].includes(job.state)) {
+        job = createJob(candidate);
+        return job.promise;
+      }
+      job.desiredSelected = true;
+      job.intentVersion += 1;
+      notify(job);
+      if (job.state === "completed") return Promise.resolve(job.result);
+      return job.promise;
+    }
+
+    function cancel(assetId) {
+      const job = jobs.get(String(assetId || ""));
+      if (!job) return null;
+      job.desiredSelected = false;
+      job.intentVersion += 1;
+      if (job.state === "queued") {
+        const index = queue.indexOf(job);
+        if (index >= 0) queue.splice(index, 1);
+        job.state = "cancelled";
+        job.resolve({ status: "cancelled", cancelled: true });
+      }
+      notify(job);
+      drain();
+      return snapshot(job);
+    }
+
+    function desiredPendingCount() {
+      return [...jobs.values()].filter(
+        (job) => job.desiredSelected && ["queued", "running"].includes(job.state),
+      ).length;
+    }
+
+    return {
+      cancel,
+      desiredPendingCount,
+      get: (assetId) => snapshot(jobs.get(String(assetId || ""))),
+      select,
     };
   }
 
@@ -349,6 +518,7 @@
     connectionView,
     controlPresentation,
     createRequestIdentity,
+    createSelectionPreflightScheduler,
     createState,
     draftRequestBody,
     fifthStagePage,
@@ -369,6 +539,7 @@
     stageSnapshot,
     submissionView,
     selectInitialStage,
+    selectionPreflightWeight,
     switchStage,
     disambiguateImageSourceLabels,
   };

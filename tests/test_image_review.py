@@ -73,6 +73,48 @@ def test_build_review_reinspects_selected_assets_and_computes_both_boxes(tmp_pat
     }
 
 
+def test_build_review_reads_and_decodes_source_once_for_both_ratios(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.image_compliance as compliance
+
+    source = tmp_path / "single-decode.jpg"
+    Image.effect_noise((1800, 2400), 100).convert("RGB").save(
+        source, quality=94
+    )
+    real_open = compliance.Image.open
+    open_count = 0
+
+    def counted_open(*args, **kwargs):
+        nonlocal open_count
+        open_count += 1
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(compliance.Image, "open", counted_open)
+    data = build_image_review_data(
+        [_candidate(source)],
+        [{
+            "asset_id": "asset-a",
+            "product_id": "P1",
+            "decision": "selected",
+            "selection_order": 1,
+        }],
+        policy=_permissive_policy(),
+        policy_sha256="policy",
+        asset_matching_revision=4,
+    )
+
+    asset = data["assets"][0]
+    assert open_count == 1
+    assert set(asset["crop_size_probes"]) == {"3:4", "1:1"}
+    assert set(asset["preflight_performance"]["ratio_encode_ms"]) == {
+        "3:4",
+        "1:1",
+    }
+    assert asset["preflight_performance"]["read_ms"] >= 0
+    assert asset["preflight_performance"]["decode_ms"] >= 0
+
+
 def test_review_keeps_unreadable_asset_as_auditable_blocked_row(tmp_path):
     data = build_image_review_data(
         [_candidate(tmp_path / "missing.jpg")],
