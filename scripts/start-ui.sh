@@ -6,9 +6,9 @@ PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 export TMALL_PLUGIN_ROOT="$PROJECT_ROOT"
 export TMALL_WORKSPACE_ROOT="$PROJECT_ROOT"
 RUNTIME_ROOT=${TMALL_RUNTIME_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/tmall-search-materials/runtime}
-CLI="$RUNTIME_ROOT/.venv/bin/tmall-materials"
+PYTHON="$RUNTIME_ROOT/.venv/bin/python"
 
-if [ ! -x "$CLI" ]; then
+if [ ! -x "$PYTHON" ]; then
   "$SCRIPT_DIR/bootstrap.sh"
 fi
-exec "$CLI" ui-start "$@"
+exec "$PYTHON" "$SCRIPT_DIR/run-plugin.py" ui-start "$@"

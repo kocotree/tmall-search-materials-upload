@@ -31,11 +31,16 @@ fi
 UV_PROJECT_ENVIRONMENT="$ENVIRONMENT_DIR" uv \
   --config-file "$CONFIG_FILE" \
   --cache-dir "$CACHE_DIR" \
-  sync --locked --no-editable --python "$PYTHON" --no-managed-python --system-certs
+  sync --locked --no-install-project --python "$PYTHON" --no-managed-python --system-certs
 
-CLI="$ENVIRONMENT_DIR/bin/tmall-materials"
-if [ ! -x "$CLI" ]; then
-  echo "CLI_SMOKE_TEST_FAILED: tmall-materials entry point was not installed." >&2
+RUNTIME_PYTHON="$ENVIRONMENT_DIR/bin/python"
+if [ ! -x "$RUNTIME_PYTHON" ]; then
+  echo "RUNTIME_SMOKE_TEST_FAILED: prepared Python was not installed." >&2
   exit 2
 fi
-"$CLI" --help
+"$RUNTIME_PYTHON" "$SCRIPT_DIR/run-plugin.py" --help
+"$RUNTIME_PYTHON" "$SCRIPT_DIR/write-runtime-fingerprint.py" \
+  --project-root "$PROJECT_ROOT" \
+  --runtime-root "$RUNTIME_ROOT" \
+  --python "$RUNTIME_PYTHON" \
+  --uv-cache-dir "$CACHE_DIR"

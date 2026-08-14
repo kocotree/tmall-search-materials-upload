@@ -1,4 +1,5 @@
 import html as html_module
+import hashlib
 import json
 import re
 import subprocess
@@ -399,7 +400,8 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
 ):
     workspace = tmp_path / "workspace"
     project = workspace
-    scripts = project / ".venv" / "Scripts"
+    user_data = workspace / "user-data"
+    scripts = user_data / "runtime" / ".venv" / "Scripts"
     scripts.mkdir(parents=True)
     (workspace / "src" / "upload_search_materials" / "docs").mkdir(
         parents=True
@@ -414,14 +416,30 @@ def test_guided_selector_bootstrap_validates_and_promotes_current_dom(
         encoding="utf-8",
     )
     (scripts / "python.exe").write_bytes(b"prepared")
-    (scripts / "tmall-materials.exe").write_bytes(b"prepared")
-    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    plugin_launcher = project / "scripts" / "run-plugin.py"
+    plugin_launcher.parent.mkdir()
+    plugin_launcher.touch()
+    lock = project / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    (user_data / "runtime" / "environment-fingerprint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+                "python": str((scripts / "python.exe").resolve()),
+                "dependency_mode": "no-install-project",
+                "launch_mode": "current-plugin-source",
+            }
+        ),
+        encoding="utf-8",
+    )
     runtime = RuntimeConfig(
         workspace_root=workspace,
         products=DiscoveredPath(None, "missing"),
         rules=DiscoveredPath(None, "missing"),
         image_sources=(),
         runs_root=workspace / "runs",
+        user_data_root=user_data,
     )
 
     class Locator:

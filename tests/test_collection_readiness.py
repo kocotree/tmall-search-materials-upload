@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 import yaml
@@ -16,17 +18,46 @@ from upload_search_materials.runtime_config import load_runtime_config
 
 
 def test_environment_status_accepts_posix_virtual_environment(tmp_path):
-    (tmp_path / ".venv" / "bin").mkdir(parents=True)
-    (tmp_path / ".venv" / "bin" / "python").touch()
-    (tmp_path / ".venv" / "bin" / "tmall-materials").touch()
-    (tmp_path / "uv.lock").touch()
-    runtime = load_runtime_config(environ={}, start=tmp_path)
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: test\ndescription: test\n---\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='test'\nversion='0'\n", encoding="utf-8"
+    )
+    runtime_root = tmp_path / "user-data" / "runtime"
+    python = runtime_root / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    (tmp_path / "src" / "upload_search_materials").mkdir(parents=True)
+    launcher = tmp_path / "scripts" / "run-plugin.py"
+    launcher.parent.mkdir()
+    launcher.touch()
+    lock = tmp_path / "uv.lock"
+    lock.touch()
+    (runtime_root / "environment-fingerprint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+                "python": str(python.resolve()),
+                "dependency_mode": "no-install-project",
+                "launch_mode": "current-plugin-source",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(tmp_path / "user-data")},
+        start=tmp_path,
+    )
 
     status = project_environment_status(runtime)
 
     assert status["ready"] is True
     assert status["reason_code"] == "READY"
-    assert status["evidence"]["python"].endswith("/.venv/bin/python")
+    assert status["evidence"]["python"].endswith(
+        "/user-data/runtime/.venv/bin/python"
+    )
 
 
 class Locator:
@@ -235,7 +266,10 @@ def test_readiness_keeps_checks_independent_without_nas_access(tmp_path, monkeyp
         "[project]\nname='test'\n",
         encoding="utf-8",
     )
-    runtime = load_runtime_config(environ={}, start=workspace)
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(workspace / "user-data")},
+        start=workspace,
+    )
     monkeypatch.setattr(
         "upload_search_materials.collection_readiness.inspect_cdp_endpoint",
         lambda *_args, **_kwargs: type(

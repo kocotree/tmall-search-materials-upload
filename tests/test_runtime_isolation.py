@@ -9,6 +9,40 @@ from upload_search_materials.collection_worker import environment_fingerprint
 from upload_search_materials.runtime_config import load_runtime_config
 
 
+def prepare_dependency_runtime(
+    project: Path,
+    runtime_root: Path,
+    *,
+    windows: bool = True,
+    bom: bool = False,
+) -> Path:
+    python = (
+        runtime_root / ".venv" / "Scripts" / "python.exe"
+        if windows
+        else runtime_root / ".venv" / "bin" / "python"
+    )
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_bytes(b"prepared")
+    (project / "src" / "upload_search_materials").mkdir(parents=True, exist_ok=True)
+    launcher = project / "scripts" / "run-plugin.py"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("# launcher\n", encoding="utf-8")
+    lock = project / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    fingerprint = {
+        "schema_version": 2,
+        "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "python": str(python.resolve()),
+        "dependency_mode": "no-install-project",
+        "launch_mode": "current-plugin-source",
+    }
+    encoding = "utf-8-sig" if bom else "utf-8"
+    (runtime_root / "environment-fingerprint.json").write_bytes(
+        json.dumps(fingerprint).encode(encoding)
+    )
+    return python
+
+
 def test_default_runtime_session_is_git_ignored_and_has_no_authentication_data(
     tmp_path,
 ):
@@ -66,13 +100,8 @@ def test_prepared_environment_is_independent_of_global_uv_cache(
     tmp_path, monkeypatch
 ):
     project = tmp_path / "upload-search-materials"
-    scripts = project / ".venv" / "Scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "python.exe").write_bytes(b"prepared")
-    (scripts / "tmall-materials.exe").write_bytes(b"prepared")
-    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
-
     runtime_root = tmp_path / "user-runtime"
+    prepare_dependency_runtime(project, runtime_root)
     monkeypatch.setenv("TMALL_RUNTIME_ROOT", str(runtime_root))
     status = environment_fingerprint(project)
 
@@ -82,23 +111,10 @@ def test_prepared_environment_is_independent_of_global_uv_cache(
 
 def test_environment_fingerprint_accepts_windows_powershell_utf8_bom(tmp_path):
     project = tmp_path / "upload-search-materials"
-    scripts = project / ".venv" / "Scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "python.exe").write_bytes(b"prepared")
-    executable = scripts / "tmall-materials.exe"
-    executable.write_bytes(b"prepared")
-    lock = project / "uv.lock"
-    lock.write_text("version = 1\n", encoding="utf-8")
-    fingerprint = {
-        "schema_version": 1,
-        "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
-        "executable": str(executable.resolve()),
-    }
-    (project / ".environment-fingerprint.json").write_bytes(
-        json.dumps(fingerprint).encode("utf-8-sig")
-    )
+    runtime_root = tmp_path / "runtime"
+    prepare_dependency_runtime(project, runtime_root, bom=True)
 
-    status = environment_fingerprint(project)
+    status = environment_fingerprint(project, runtime_root=runtime_root)
 
     assert status["prepared"] is True
     assert status["fingerprint_status"] == "matched"
@@ -118,24 +134,24 @@ def test_missing_or_stale_prepared_environment_is_reason_coded(tmp_path):
     assert stale["prepared"] is False
 
 
-def test_module_environment_wins_when_repository_root_also_has_venv(tmp_path):
+def test_user_runtime_is_required_even_when_plugin_cache_has_venv(tmp_path):
     workspace = tmp_path / "workspace"
     root_python = workspace / ".venv" / "Scripts" / "python.exe"
     module = workspace / "upload-search-materials"
-    module_python = module / ".venv" / "Scripts" / "python.exe"
+    plugin_python = module / ".venv" / "Scripts" / "python.exe"
     root_python.parent.mkdir(parents=True)
     root_python.write_bytes(b"incomplete-root")
-    module_python.parent.mkdir(parents=True)
-    module_python.write_bytes(b"prepared-module")
-    (module / "src" / "upload_search_materials").mkdir(parents=True)
-    lock = module / "uv.lock"
-    lock.write_text("version = 1\n", encoding="utf-8")
+    plugin_python.parent.mkdir(parents=True)
+    plugin_python.write_bytes(b"plugin-cache")
+    runtime_root = tmp_path / "user-runtime"
+    runtime_python = prepare_dependency_runtime(module, runtime_root)
 
-    status = environment_fingerprint(module)
+    status = environment_fingerprint(module, runtime_root=runtime_root)
 
     assert status["prepared"] is True
-    assert Path(status["python"]) == module_python
+    assert Path(status["python"]) == runtime_python
     assert Path(status["python"]) != root_python
+    assert Path(status["python"]) != plugin_python
 
 
 def test_user_runtime_environment_wins_over_plugin_cache_venv(

@@ -199,8 +199,11 @@ handoff 与 processing claim。分页采集在每页读取前、完整页 checkp
 最后完整页继续。不得自动操作或绕过滑块，也不得索取或保存登录凭据；仅当 Worker 已
 确认退出时才使用原有恢复入口，不要求用户重新填写业务数据。
 
-日常命令使用用户级运行环境中的 `tmall-materials`，不得通过 `uv run` 触发隐式
-同步。默认运行根位于 Windows `%LOCALAPPDATA%\tmall-search-materials\runtime`
+日常命令必须通过当前 Plugin 目录中的 `scripts\run-plugin.cmd`（Windows）或
+`./scripts/run-plugin.sh`（macOS/Linux）执行；本文中的 `tmall-materials ...` 仅是
+CLI 语义简写，不代表用户级环境中安装了一份业务包。启动器使用用户级 `.venv` 的
+Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代码，且不得通过
+`uv run` 触发隐式同步。默认运行根位于 Windows `%LOCALAPPDATA%\tmall-search-materials\runtime`
 或 macOS/Linux `~/.local/state/tmall-search-materials/runtime`，可用
 `TMALL_RUNTIME_ROOT` 覆盖。依赖缓存和环境指纹只由 bootstrap 脚本准备；恢复采集
 不得下载或解析依赖，也不得向 Plugin 安装缓存写入环境或运行数据。
@@ -263,7 +266,11 @@ handoff 与 processing claim。分页采集在每页读取前、完整页 checkp
 7. 正式图片上传必须使用项目内 `browser/qianniu_upload.py` 中从 PlaywrightAuto 迁移的千牛搜推流程：精确搜索商品 ID、定位批准的 1-based 空坑位、进入“发图文”跨域表单、把批准的最终图片以 `publish-<SHA前缀>-<随机后缀>.<扩展名>` 短唯一名称上传到素材库、按该名称唯一选中、核对选择数量，再填写已批准标题和正文。正文编辑器须兼容普通 textarea/contenteditable 与 `textarea[data-cangjie-dockey]`。最终按钮优先按千牛发布专用语义 `data-autolog*=publisher_ok_clk` 唯一定位；只有明确“提交发布/发布”文字才可作为兼容入口，禁止按通用“确认/确定”文字点击。发布前保存该商品全部既有 `CopyId_value` 集合；点击一次后重新读取同商品，只有旧集合完整保留且恰好新增一个 ID 才记录成功。千牛会把新素材前插，禁止按原 1-based 位置推断新远端 ID。出现二次确认、点击超时、基线变化或新增 ID 不唯一时进入 `publish_uncertain` 并暂停批次。PlaywrightAuto 目录只作为迁移来源，生产运行不得依赖该外部目录。
 8. 上传中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
-运行用户级环境中的 `tmall-materials --help` 查看参数。所有命令从本 Plugin 目录执行；首次使用 Windows 运行 `scripts/bootstrap.cmd`，macOS/Linux 运行 `scripts/bootstrap.sh`。启动器支持官方源及显式选择的 HTTPS 镜像、用户级缓存、Python 3.11 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
+运行当前 Plugin 的 `scripts\run-plugin.cmd --help`（Windows）或
+`./scripts/run-plugin.sh --help`（macOS/Linux）查看参数。用户级 `.venv` 只安装
+Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_search_materials`
+业务包；Plugin 更新后的业务代码和页面资源因此无需再次 bootstrap 即可生效。
+所有命令从本 Plugin 目录执行；首次使用 Windows 运行 `scripts/bootstrap.cmd`，macOS/Linux 运行 `scripts/bootstrap.sh`。启动器支持官方源及显式选择的 HTTPS 镜像、用户级缓存、Python 3.11 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
 
 首次使用先按 [operations-guide.md](references/operations-guide.md) 完成安装、CDP 浏览器启动和六阶段命令。所有时间参数必须是带时区的 ISO 8601。
 

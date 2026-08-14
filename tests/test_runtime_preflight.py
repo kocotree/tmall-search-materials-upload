@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,14 +14,41 @@ from upload_search_materials.runtime_preflight import (
 )
 
 
+def write_prepared_runtime(project: Path, runtime_root: Path, *, windows: bool) -> Path:
+    binary = (
+        runtime_root / ".venv" / "Scripts" / "python.exe"
+        if windows
+        else runtime_root / ".venv" / "bin" / "python"
+    )
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"prepared")
+    launcher = project / "scripts" / "run-plugin.py"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("# launcher\n", encoding="utf-8")
+    lock = project / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    (runtime_root / "environment-fingerprint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+                "python": str(binary.resolve()),
+                "dependency_mode": "no-install-project",
+                "launch_mode": "current-plugin-source",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return binary
+
+
 def prepared(tmp_path):
     workspace = tmp_path / "workspace"
     project = workspace / "upload-search-materials"
-    scripts = project / ".venv" / "Scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "python.exe").write_bytes(b"prepared")
     (project / "src" / "upload_search_materials").mkdir(parents=True)
-    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    write_prepared_runtime(
+        project, workspace / "user-data" / "runtime", windows=True
+    )
     selectors = project / "config" / "selectors.local.yaml"
     selectors.parent.mkdir()
     selectors.write_text("schema_version: 1\n", encoding="utf-8")
@@ -36,12 +65,10 @@ def prepared(tmp_path):
 
 def prepared_posix(tmp_path):
     project = tmp_path / "workspace"
-    scripts = project / ".venv" / "bin"
-    scripts.mkdir(parents=True)
-    (scripts / "python").write_bytes(b"prepared")
-    (scripts / "tmall-materials").write_bytes(b"prepared")
     (project / "src" / "upload_search_materials").mkdir(parents=True)
-    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    write_prepared_runtime(
+        project, project / "user-data" / "runtime", windows=False
+    )
     selectors = project / "config" / "selectors.local.yaml"
     selectors.parent.mkdir()
     selectors.write_text("schema_version: 1\n", encoding="utf-8")
@@ -109,7 +136,7 @@ def test_preflight_accepts_posix_project_environment(tmp_path):
     )
 
     assert result["ready"] is True
-    assert commands[0][0].endswith("/.venv/bin/python")
+    assert commands[0][0].endswith("/user-data/runtime/.venv/bin/python")
 
 
 @pytest.mark.parametrize(

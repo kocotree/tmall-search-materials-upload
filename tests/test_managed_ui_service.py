@@ -311,6 +311,13 @@ def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
         )
 
     assert "--ownership-token=-leading-token" in commands[0]
+    assert Path(commands[0][1]).name == "run-plugin.py"
+    assert "-m" not in commands[0]
+    assert Path(
+        popen_kwargs[0]["env"]["PYTHONPATH"].split(
+            service_module.os.pathsep
+        )[0]
+    ).name == "src"
     assert popen_kwargs[0]["start_new_session"] is (service_module.os.name != "nt")
     if service_module.os.name != "nt":
         inherited = popen_kwargs[0]["env"]["TMALL_DESKTOP_LOGIN_SESSION_ID"]
@@ -325,6 +332,9 @@ def test_macos_managed_desktop_submits_launchd_job(tmp_path, monkeypatch):
     states = []
     project_root = tmp_path / "plugin-version"
     workspace_root = tmp_path / "runtime-workspace"
+    launcher = project_root / "scripts" / "run-plugin.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.touch()
 
     class Completed:
         returncode = 0

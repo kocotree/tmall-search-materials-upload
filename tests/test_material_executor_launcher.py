@@ -26,11 +26,11 @@ def test_windows_launcher_delegates_to_desktop_shell_script(
     tmp_path, monkeypatch
 ):
     project = tmp_path / "upload-search-materials"
-    python = project / ".venv" / "Scripts" / "pythonw.exe"
+    python = tmp_path / "user-runtime" / ".venv" / "Scripts" / "pythonw.exe"
     python.parent.mkdir(parents=True)
     python.write_bytes(b"")
     script = project / "scripts" / "launch-material-executor-desktop.ps1"
-    script.parent.mkdir()
+    script.parent.mkdir(parents=True)
     script.write_text("", encoding="utf-8")
     config = project / "config" / "local-paths.json"
     config.parent.mkdir()
@@ -44,6 +44,11 @@ def test_windows_launcher_delegates_to_desktop_shell_script(
 
     monkeypatch.setattr(launcher_module, "_project_root", lambda: project)
     monkeypatch.setattr(launcher_module.os, "name", "nt")
+    monkeypatch.setattr(
+        launcher_module.sys,
+        "executable",
+        str(python.with_name("python.exe")),
+    )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
     result = launch_material_executor(

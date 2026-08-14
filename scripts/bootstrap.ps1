@@ -82,7 +82,7 @@ try {
     $syncArguments = @(
         "sync",
         "--locked",
-        "--no-editable",
+        "--no-install-project",
         "--python", $Python,
         "--no-managed-python",
         "--system-certs"
@@ -96,31 +96,25 @@ try {
         throw "DEPENDENCY_SYNC_FAILED: the lockfile may belong to another mirror. Rerun with -UpdateLock only when intentionally changing the lock source."
     }
 
-    $cliExecutable = Join-Path $environmentDir "Scripts\tmall-materials.exe"
-    if (-not (Test-Path -LiteralPath $cliExecutable -PathType Leaf)) {
-        throw "CLI_SMOKE_TEST_FAILED: tmall-materials entry point was not installed."
+    $runtimePython = Join-Path $environmentDir "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $runtimePython -PathType Leaf)) {
+        throw "RUNTIME_SMOKE_TEST_FAILED: prepared Python was not installed."
     }
 
-    & $cliExecutable --help
+    $pluginLauncher = Join-Path $PSScriptRoot "run-plugin.py"
+    & $runtimePython $pluginLauncher --help
     if ($LASTEXITCODE -ne 0) {
-        throw "CLI_SMOKE_TEST_FAILED: dependencies installed, but tmall-materials did not start."
+        throw "RUNTIME_SMOKE_TEST_FAILED: dependencies installed, but current Plugin source did not start."
     }
 
-    $fingerprintPath = Join-Path $runtimeRoot "environment-fingerprint.json"
-    $lockPath = Join-Path $projectRoot "uv.lock"
-    $fingerprint = [ordered]@{
-        schema_version = 1
-        lock_sha256 = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        python = (Resolve-Path -LiteralPath $Python).Path
-        executable = (Resolve-Path -LiteralPath $cliExecutable).Path
-        launch_identity = (Resolve-Path -LiteralPath $cliExecutable).Path
-        uv_cache_dir = (Resolve-Path -LiteralPath $cacheDir).Path
-        prepared_at = [DateTimeOffset]::Now.ToString("o")
+    & $runtimePython (Join-Path $PSScriptRoot "write-runtime-fingerprint.py") `
+        --project-root $projectRoot `
+        --runtime-root $runtimeRoot `
+        --python $runtimePython `
+        --uv-cache-dir $cacheDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNTIME_FINGERPRINT_FAILED: prepared dependency environment could not be recorded."
     }
-    $temporaryFingerprint = "$fingerprintPath.tmp"
-    $fingerprint | ConvertTo-Json -Depth 4 |
-        Set-Content -LiteralPath $temporaryFingerprint -Encoding UTF8
-    Move-Item -LiteralPath $temporaryFingerprint -Destination $fingerprintPath -Force
 }
 finally {
     Pop-Location

@@ -23,17 +23,11 @@ else {
 }
 $Python = Join-Path $RuntimeRoot ".venv\Scripts\python.exe"
 if (-not [System.IO.File]::Exists($Python)) {
-    $LegacyPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-    if ([System.IO.File]::Exists($LegacyPython)) {
-        $Python = $LegacyPython
-    }
-}
-if (-not [System.IO.File]::Exists($Python)) {
-    throw "Prepared project Python is missing."
+    throw "Prepared user runtime Python is missing."
 }
 
 $Arguments = @(
-    "-m", "upload_search_materials.cli",
+    (Join-Path $PSScriptRoot "run-plugin.py"),
     "desktop-workbench",
     "--project-root", $ProjectRoot,
     "--port-start", [string]$PortStart,

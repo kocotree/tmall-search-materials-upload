@@ -24,32 +24,30 @@ elseif ($env:LOCALAPPDATA) {
 else {
     Join-Path $HOME ".local\state\tmall-search-materials\runtime"
 }
-$executable = Join-Path $runtimeRoot ".venv\Scripts\tmall-materials.exe"
 $pythonExecutable = Join-Path $runtimeRoot ".venv\Scripts\python.exe"
 $sourcePackage = Join-Path $skillRoot "src\upload_search_materials"
+$pluginLauncher = Join-Path $PSScriptRoot "run-plugin.py"
 $lockPath = Join-Path $skillRoot "uv.lock"
 $fingerprintPath = Join-Path $runtimeRoot "environment-fingerprint.json"
 
-$runtimeExecutable = $executable
-$runtimePrefix = @()
-if (
-    -not (Test-Path -LiteralPath $runtimeExecutable -PathType Leaf) -and
-    (Test-Path -LiteralPath $pythonExecutable -PathType Leaf) -and
-    (Test-Path -LiteralPath $sourcePackage -PathType Container)
-) {
-    $runtimeExecutable = $pythonExecutable
-    $runtimePrefix = @("-m", "upload_search_materials.cli")
-}
+$runtimeExecutable = $pythonExecutable
+$runtimePrefix = @($pluginLauncher)
 
-$environmentReady = Test-Path -LiteralPath $runtimeExecutable -PathType Leaf
+$environmentReady = (
+    (Test-Path -LiteralPath $runtimeExecutable -PathType Leaf) -and
+    (Test-Path -LiteralPath $sourcePackage -PathType Container) -and
+    (Test-Path -LiteralPath $pluginLauncher -PathType Leaf)
+)
 if ($environmentReady -and (Test-Path -LiteralPath $fingerprintPath -PathType Leaf)) {
     try {
         $fingerprint = Get-Content -LiteralPath $fingerprintPath -Raw -Encoding UTF8 |
             ConvertFrom-Json
         $currentLock = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $environmentReady = (
-            [int]$fingerprint.schema_version -eq 1 -and
-            [string]$fingerprint.lock_sha256 -eq $currentLock
+            [int]$fingerprint.schema_version -eq 2 -and
+            [string]$fingerprint.lock_sha256 -eq $currentLock -and
+            [string]$fingerprint.dependency_mode -eq "no-install-project" -and
+            [string]$fingerprint.launch_mode -eq "current-plugin-source"
         )
     }
     catch {
@@ -69,8 +67,8 @@ if (-not $environmentReady) {
     if ($LASTEXITCODE -ne 0) {
         throw "RUNTIME_BOOTSTRAP_FAILED: bootstrap did not complete."
     }
-    $runtimeExecutable = $executable
-    $runtimePrefix = @()
+    $runtimeExecutable = $pythonExecutable
+    $runtimePrefix = @($pluginLauncher)
 }
 
 $arguments = @("ui-start", "--port-start", $PortStart, "--port-end", $PortEnd)

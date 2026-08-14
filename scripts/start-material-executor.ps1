@@ -25,7 +25,7 @@ if (-not [System.IO.File]::Exists($Python)) {
 }
 
 $Arguments = @(
-    "-m", "upload_search_materials.cli",
+    (Join-Path $PSScriptRoot "run-plugin.py"),
     "material-executor",
     "--watch",
     "--idle-timeout", [string]$IdleTimeout

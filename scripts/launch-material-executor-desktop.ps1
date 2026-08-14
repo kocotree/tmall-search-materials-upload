@@ -30,8 +30,7 @@ function Quote-NativeArgument([string]$Value) {
 }
 
 $ExecutorArguments = @(
-    "-m",
-    "upload_search_materials.cli",
+    (Join-Path $ProjectRoot "scripts\run-plugin.py"),
     "material-executor",
     "--session",
     $Session

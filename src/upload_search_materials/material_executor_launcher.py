@@ -9,6 +9,7 @@ import subprocess
 import sys
 from typing import Any
 
+from .plugin_runtime import plugin_cli_command
 from .runtime_config import RuntimeConfig
 
 
@@ -34,17 +35,13 @@ def _project_root() -> Path:
 
 
 def _python_executable(project_root: Path, *, windowed: bool) -> Path:
-    active = type(project_root)(sys.executable).resolve()
+    active = type(project_root)(os.path.abspath(sys.executable))
     if os.name == "nt":
         name = "pythonw.exe" if windowed else "python.exe"
         sibling = active.with_name(name)
-        candidate = (
-            sibling
-            if sibling.is_file()
-            else project_root / ".venv" / "Scripts" / name
-        )
+        candidate = sibling
     else:
-        candidate = active if active.is_file() else project_root / ".venv" / "bin" / "python"
+        candidate = active
     if not candidate.is_file():
         raise MaterialExecutorLaunchError("prepared_python_missing")
     return candidate
@@ -126,15 +123,14 @@ def launch_material_executor(
         }
 
     python = _python_executable(project_root, windowed=False)
-    command = [
-        str(python),
-        "-m",
-        "upload_search_materials.cli",
+    command = plugin_cli_command(
+        project_root,
         "material-executor",
         "--session",
         session,
         *config_args,
-    ]
+        python=python,
+    )
     try:
         process = subprocess.Popen(
             command,

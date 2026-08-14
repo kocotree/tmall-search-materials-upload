@@ -29,6 +29,7 @@ from .collection_runtime import (
     write_json_atomic,
 )
 from .interaction.session import InteractionConflict, SessionStore
+from .plugin_runtime import plugin_cli_command
 from .runtime_config import RuntimeConfig, load_runtime_config
 from .runtime_preflight import environment_fingerprint
 from .runtime_identity import (
@@ -375,10 +376,8 @@ def launch_collection_worker(
     _save_current_attempt(session_path, attempt)
 
     ownership_token = secrets.token_urlsafe(32)
-    argv = [
-        str(environment["python"]),
-        "-m",
-        "upload_search_materials.cli",
+    argv = plugin_cli_command(
+        runtime.workspace_root,
         "collection-worker",
         "--runs-root",
         str(Path(runs_root).resolve()),
@@ -394,7 +393,8 @@ def launch_collection_worker(
         str(profile.path),
         "--cdp-url",
         cdp_url or runtime.cdp_url,
-    ]
+        python=str(environment["python"]),
+    )
     if runtime.config_path is not None:
         argv.extend(["--config", str(runtime.config_path)])
     if local_resource_identity is not None:

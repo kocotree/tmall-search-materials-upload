@@ -59,24 +59,13 @@ def environment_fingerprint(
     python_candidates = (
         runtime_root / ".venv" / "Scripts" / "python.exe",
         runtime_root / ".venv" / "bin" / "python",
-        project / ".venv" / "Scripts" / "python.exe",
-        project / ".venv" / "bin" / "python",
-    )
-    executable_candidates = (
-        runtime_root / ".venv" / "Scripts" / "tmall-materials.exe",
-        runtime_root / ".venv" / "bin" / "tmall-materials",
-        project / ".venv" / "Scripts" / "tmall-materials.exe",
-        project / ".venv" / "bin" / "tmall-materials",
     )
     python = next(
         (candidate for candidate in python_candidates if candidate.is_file()),
         python_candidates[0],
     )
-    executable = next(
-        (candidate for candidate in executable_candidates if candidate.is_file()),
-        executable_candidates[0],
-    )
     source_package = project / "src" / "upload_search_materials"
+    launcher = project / "scripts" / "run-plugin.py"
     recorded_path = runtime_root / "environment-fingerprint.json"
     legacy_recorded_path = project / ".environment-fingerprint.json"
     if not recorded_path.is_file() and legacy_recorded_path.is_file():
@@ -89,44 +78,41 @@ def environment_fingerprint(
     files_ready = bool(
         lock_sha
         and python.is_file()
-        and (executable.is_file() or source_package.is_dir())
+        and source_package.is_dir()
+        and launcher.is_file()
     )
-    launch_identity = (
-        str(executable.resolve())
-        if executable.is_file()
-        else f"{python.resolve()} -m upload_search_materials.cli"
-    )
+    launch_identity = f"{python.resolve()} {launcher.resolve()}"
     try:
         recorded = read_json(recorded_path) if recorded_path.is_file() else None
     except (OSError, json.JSONDecodeError):
         recorded = {"schema_version": 0}
     if recorded is None:
-        fingerprint_status = "legacy_prepared" if files_ready else "missing"
-        fingerprint_match = files_ready
+        fingerprint_status = "missing"
+        fingerprint_match = False
     else:
         if not isinstance(recorded, dict):
             recorded = {"schema_version": 0}
         fingerprint_match = bool(
-            int(recorded.get("schema_version", 0)) == 1
+            int(recorded.get("schema_version", 0)) == 2
             and recorded.get("lock_sha256") == lock_sha
-            and str(
-                recorded.get(
-                    "launch_identity", recorded.get("executable", "")
-                )
-            )
-            == launch_identity
+            and recorded.get("dependency_mode") == "no-install-project"
+            and recorded.get("launch_mode") == "current-plugin-source"
+            and Path(str(recorded.get("python", ""))).resolve()
+            == python.resolve()
         )
         fingerprint_status = "matched" if fingerprint_match else "stale"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "project_root": str(project),
         "runtime_root": str(runtime_root),
         "uv_cache_dir": str(runtime_root / "uv-cache"),
         "lock_path": str(lock),
         "lock_sha256": lock_sha,
         "python": str(python),
-        "executable": str(executable),
+        "executable": str(python),
         "launch_identity": launch_identity,
+        "launcher": str(launcher),
+        "dependency_mode": "no-install-project",
         "source_package": str(source_package),
         "fingerprint_path": str(recorded_path),
         "fingerprint_status": fingerprint_status,

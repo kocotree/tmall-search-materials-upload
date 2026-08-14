@@ -20,6 +20,7 @@ import webbrowser
 
 from .session import InteractionPathError, SessionStore
 from ..persistence import atomic_write_json, read_json
+from ..plugin_runtime import plugin_child_environment, plugin_cli_command
 from ..runtime_identity import (
     current_runtime_identity,
     same_local_resource_identity,
@@ -391,11 +392,8 @@ def start_service(
     stderr_path = logs_path / "ui-service.stderr.log"
     query = urlencode({"session_id": session_id})
     url = f"http://127.0.0.1:{port}/?{query}"
-    runtime_python = Path(sys.executable)
-    command = [
-        str(runtime_python),
-        "-m",
-        "upload_search_materials.cli",
+    command = plugin_cli_command(
+        module_root,
         "interact",
         "--runs-root",
         str(store._runs_root),
@@ -404,13 +402,15 @@ def start_service(
         "--port",
         str(port),
         f"--ownership-token={token}",
-    ]
+    )
     if config:
         command.extend(["--config", config])
     creationflags = 0
-    child_environment = os.environ.copy()
-    child_environment["TMALL_PLUGIN_ROOT"] = str(module_root)
-    child_environment["TMALL_WORKSPACE_ROOT"] = str(resolved_workspace_root)
+    child_environment = plugin_child_environment(
+        module_root,
+        base=os.environ,
+        workspace_root=resolved_workspace_root,
+    )
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:

@@ -143,8 +143,7 @@ def run_bounded_path_probe(
         )
         command = [
             sys.executable,
-            "-m",
-            "upload_search_materials.path_probe",
+            str(Path(__file__).resolve().with_name("path_probe.py")),
             "--request",
             str(request_path),
             "--response",

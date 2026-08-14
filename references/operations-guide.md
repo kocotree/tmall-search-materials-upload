@@ -20,7 +20,7 @@ uv run tmall-materials migrate-deterministic-selection --runs-root <runs目录> 
 
 ## 1. 安装与检查
 
-在本 skill 目录使用 `uv` 管理 Python 3.11、锁文件和虚拟环境：
+在本 Plugin 目录使用 `uv` 管理 Python 3.11、锁文件和依赖虚拟环境：
 
 ```powershell
 .\scripts\bootstrap.cmd -Mirror official -WithTests
@@ -34,9 +34,13 @@ macOS/Linux 使用：
 ./scripts/bootstrap.sh
 ```
 
-`uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 在用户数据目录创建或同步独立 `.venv`。若本机没有 Python 3.11，bootstrap 会通过 `uv` 安装受管解释器。首次准备需要网络访问；不要向系统 Python、Plugin 安装缓存或 Conda 基础环境直接安装依赖。
+`uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 在用户数据目录创建或同步独立 `.venv`。该环境只保存 Python 和第三方依赖，不安装 Plugin 自身的 `upload_search_materials` 业务包。所有启动器都用这个 Python 执行当前 Plugin 目录的 `scripts/run-plugin.py`，因此页面、Worker 和素材执行器始终加载同一版本的 `src/`。若本机没有 Python 3.11，bootstrap 会通过 `uv` 安装受管解释器。首次准备需要网络访问；不要向系统 Python、Plugin 安装缓存或 Conda 基础环境直接安装依赖。
 
-环境检查是启动配置页前唯一允许的阻断。用户级运行环境中的 `tmall-materials` 已可执行时直接启动页面；否则准备 `uv` 并同步环境。不得以 Plugin 缓存目录中缺少 `.venv` 或缓存目录不可写为失败依据。此时不得要求用户在聊天中提供店铺名、月份或图片根目录，也不得把这些阶段 1 字段与环境安装合并成一个前置问题。
+环境检查是启动配置页前唯一允许的阻断。用户级依赖环境和当前 Plugin 启动器均就绪时直接启动页面；否则准备 `uv` 并同步依赖。不得以 Plugin 缓存目录中缺少 `.venv` 或缓存目录不可写为失败依据。此时不得要求用户在聊天中提供店铺名、月份或图片根目录，也不得把这些阶段 1 字段与环境安装合并成一个前置问题。
+
+文档中的 `tmall-materials ...` 表示 CLI 子命令。安装后的实际调用入口是 Windows
+`scripts\run-plugin.cmd ...` 或 macOS/Linux `./scripts/run-plugin.sh ...`；`uv run`
+只用于开发测试，不用于已安装 Plugin 的日常任务。
 
 如果电脑已有兼容的 Python 3.11 或 3.12，可显式传入路径，避免 `uv` 自动下载解释器：
 
@@ -401,10 +405,11 @@ SHA、店铺、attempt、CSV SHA、行数、唯一商品 ID 和最后完成页�
 才用 Playwright 检查真实 DOM；修复现有 selector profile 或 collector、增加回归
 测试，再重跑原 `process-setup`/`supplement`。不要把诊断脚本保留为第二条生产路径。
 
-日常启动和恢复调用用户级运行环境中的 `tmall-materials`，不使用 `uv run`。
-Windows 的 `scripts/bootstrap.cmd` 与 macOS/Linux 的 `scripts/bootstrap.sh` 是依赖
-同步入口，使用用户级 uv-cache 并写入或校验环境指纹；已有环境的采集恢复不会解析
-或下载包，也不会向 Plugin 安装缓存写入数据。
+日常启动和恢复调用当前 Plugin 的 `scripts\run-plugin.cmd` 或
+`./scripts/run-plugin.sh`，不使用 `uv run`。Windows 的 `scripts/bootstrap.cmd` 与
+macOS/Linux 的 `scripts/bootstrap.sh` 只是依赖同步入口，使用用户级 uv-cache 并写入
+或校验环境指纹；业务代码只从当前 Plugin 加载。已有环境的采集恢复不会解析或下载包，
+也不会向 Plugin 安装缓存写入数据。
 
 ## 5. 启动用户控制的 CDP 浏览器
 

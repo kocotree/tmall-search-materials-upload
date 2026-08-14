@@ -199,6 +199,8 @@ def test_launcher_returns_promptly_and_reuses_matching_live_worker(
     assert calls[0][1]["stdin"] is not None
     assert calls[0][1]["stdout"] is calls[0][1]["stderr"]
     assert calls[0][1]["cwd"] == str(runtime.workspace_root)
+    assert Path(calls[0][0][0][1]).name == "run-plugin.py"
+    assert "-m" not in calls[0][0][0]
     assert "ownership_token" not in first["worker"]
 
 

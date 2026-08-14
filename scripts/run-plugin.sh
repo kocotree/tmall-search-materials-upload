@@ -2,15 +2,12 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-export TMALL_PLUGIN_ROOT="$PROJECT_ROOT"
-export TMALL_WORKSPACE_ROOT="$PROJECT_ROOT"
 RUNTIME_ROOT=${TMALL_RUNTIME_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/tmall-search-materials/runtime}
 PYTHON="$RUNTIME_ROOT/.venv/bin/python"
 
 if [ ! -x "$PYTHON" ]; then
-  echo "Prepared project Python is missing." >&2
+  echo "PREPARED_RUNTIME_MISSING: run scripts/bootstrap.sh first." >&2
   exit 2
 fi
 
-exec "$PYTHON" "$SCRIPT_DIR/run-plugin.py" material-executor --watch "$@"
+exec "$PYTHON" "$SCRIPT_DIR/run-plugin.py" "$@"

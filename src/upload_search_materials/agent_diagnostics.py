@@ -52,7 +52,7 @@ def retry_command(
     }
     command = processor or commands.get(stage_id, "resume-session")
     return (
-        ".\\.venv\\Scripts\\python.exe -m upload_search_materials.cli "
+        "scripts\\run-plugin.cmd "
         f'{command} --runs-root "{Path(runs_root)}" --session "{session_id}"'
     )
 
