@@ -4,7 +4,7 @@
 
 1. 开发阶段先完成代码、Skill、参考文档和测试修改，再运行针对性测试、受影响模块回归、语法检查、`git diff --check` 与 Skill/Plugin 结构校验。版本号必须在这些工作完成后最后生成；版本号生成后如果又修改了任何会随 Plugin 分发的文件，必须重新生成一个从未发布过的新版本号。
 2. Plugin 版本是不可变发布标识。同一个版本号只能对应唯一且固定的一套文件内容，禁止在 Gitee、Marketplace 或本机安装缓存中以“相同版本号、不同代码内容”的方式覆盖发布。任何会影响安装内容或运行行为的变更，包括 `src/`、`skills/`、`scripts/`、`config/`、`references/`、manifest 和启动契约，都必须发布新版本。
-3. 发布前核对 `.codex-plugin/plugin.json` 中的版本号、当前 Git commit、待提交文件和 diff 范围；提交并推送后，再确认远程 `main` 指向预期 commit，远程 manifest 的版本号与本次发布一致。不得先让测试端安装某个版本，再继续修改该版本的内容。
+3. 发布前核对 `.codex-plugin/plugin.json` 中的版本号、当前 Git commit、待提交文件和 diff 范围；提交并推送后，再确认远程目标发布分支指向预期 commit（当前 Windows Plugin 为 `win`），远程 manifest 的版本号与本次发布一致。不得先让测试端安装某个版本，再继续修改该版本的内容。
 4. 必须区分以下三个更新层级，不能把其中任意一层更新成功等同于整套运行环境已更新：
    - `codex plugin marketplace upgrade tmall-materials-team` 只更新 Marketplace 清单及其 Git 检出。
    - Plugin 安装会根据 manifest 版本写入或复用本机版本缓存；如果版本号未变化，移除后重新添加仍可能复用旧缓存。

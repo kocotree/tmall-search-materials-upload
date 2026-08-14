@@ -32,7 +32,7 @@ def test_plugin_does_not_publish_workspace_only_skills():
     assert not any(name.startswith("openspec-") for name in plugin_skill_names)
 
 
-def test_team_marketplace_installs_plugin_from_gitee_main():
+def test_team_marketplace_installs_plugin_from_gitee_win():
     marketplace = json.loads(
         (
             REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json"
@@ -50,7 +50,7 @@ def test_team_marketplace_installs_plugin_from_gitee_main():
                     "git@gitee.com:QuanLongZhang/"
                     "tmall-search-materials-upload.git"
                 ),
-                "ref": "main",
+                "ref": "win",
             },
             "policy": {
                 "installation": "AVAILABLE",
