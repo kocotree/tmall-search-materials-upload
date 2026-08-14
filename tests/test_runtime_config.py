@@ -73,7 +73,7 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
                 "products_csv": "inputs/products.csv",
                 "runs_root": "task-runs",
                 "folder_index_root": "machine-cache/folders",
-                "team_folder_index_root": "/Volumes/team-index",
+                "team_folder_index_root": r"\\192.168.110.20\浙江酷趣\team-index",
                 "team_folder_index_nas_source_id": "zhejiang-kuqu",
                 "selectors_file": "machine/selectors.yaml",
                 "cdp_url": "http://127.0.0.1:9333",
@@ -97,7 +97,9 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
     assert runtime.folder_index_root == (
         workspace / "machine-cache" / "folders"
     ).resolve()
-    assert runtime.team_folder_index_root == Path("/Volumes/team-index")
+    assert runtime.team_folder_index_root == Path(
+        r"\\192.168.110.20\浙江酷趣\team-index"
+    )
     assert runtime.team_folder_index_nas_source_id == "zhejiang-kuqu"
     assert runtime.selectors_file is None
     assert runtime.cdp_url == "http://127.0.0.1:9333"

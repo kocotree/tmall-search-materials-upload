@@ -480,15 +480,15 @@ test("duplicate image source labels use the nearest unique business directory", 
   const sources = UiState.disambiguateImageSourceLabels([
     {
       label: "浙江酷趣",
-      path: "/Volumes/浙江酷趣/运营中心/营销板块/小红书koc置换&买家秀/优质买家秀/",
+      path: "\\\\192.168.110.20\\浙江酷趣\\运营中心\\营销板块\\小红书koc置换&买家秀\\优质买家秀\\",
     },
     {
       label: "视觉部",
-      path: "/Volumes/视觉部/1-模特图/",
+      path: "\\\\192.168.124.85\\视觉部\\1-模特图\\",
     },
     {
       label: "浙江酷趣",
-      path: "/Volumes/浙江酷趣/运营中心/营销板块/小红书koc置换&淘宝买家秀/优质买家秀/",
+      path: "\\\\192.168.110.20\\浙江酷趣\\运营中心\\营销板块\\小红书koc置换&淘宝买家秀\\优质买家秀\\",
     },
   ]);
 

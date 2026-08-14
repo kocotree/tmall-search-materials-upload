@@ -237,7 +237,7 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
             wait_until="networkidle",
         )
         wide.get_by_role("button", name="图片裁剪与压缩").wait_for()
-        assert wide.locator("[data-stage-id]").count() >= 8
+        assert wide.locator("[data-stage-id]").count() >= 7
         assert (
             wide.evaluate(
                 "document.documentElement.scrollWidth <= window.innerWidth"

@@ -35,7 +35,8 @@ def test_skill_documents_ai_as_advisory_and_production_as_manual_only():
     assert "不能触发 dry-run" in combined
     assert "`approval/exact_authorization`" in boundary_doc
     assert "`production_confirmation/production_write`" in boundary_doc
-    assert boundary_doc.count("`manual_only`（默认）") >= 3
+    assert boundary_doc.count("`manual_only`（默认）") >= 2
+    assert "`production_confirmation/production_write` | 历史只读" in boundary_doc
 
 
 def test_agent_request_recovery_is_bounded_and_has_safe_fallbacks():

@@ -3,7 +3,6 @@ nas_sources:
     label: 浙江酷趣
     host: 192.168.110.20
     share: 浙江酷趣
-    macos_mount_path: /Volumes/浙江酷趣
     windows_path: '\\192.168.110.20\浙江酷趣'
     license_status: unknown
     subpaths:
@@ -13,7 +12,6 @@ nas_sources:
     label: 视觉部
     host: 192.168.124.85
     share: 视觉部
-    macos_mount_path: /Volumes/视觉部
     windows_path: '\\192.168.124.85\视觉部'
     license_status: unknown
     subpaths: []

@@ -19,7 +19,6 @@ nas_sources:
     label: 视觉部
     host: 192.168.124.85
     share: 视觉部
-    macos_mount_path: /Volumes/视觉部
     windows_path: '\\\\192.168.124.85\\视觉部'
     subpaths: []
 """.strip(),
@@ -34,7 +33,7 @@ def test_nas_status_endpoint_returns_catalog_and_mount_binding(tmp_path, monkeyp
     monkeypatch.setattr(
         "upload_search_materials.interaction.web.check_nas_source",
         lambda source: NasSourceStatus(
-            source.source_id, "ready", "", "/Volumes/视觉部", "NAS 来源已挂载且可读"
+            source.source_id, "ready", "", r"\\192.168.124.85\视觉部", "NAS 来源已连接且可读"
         ),
     )
     client = create_app(workspace / "runs", runtime).test_client()
@@ -44,7 +43,7 @@ def test_nas_status_endpoint_returns_catalog_and_mount_binding(tmp_path, monkeyp
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["nas_sources"][0]["source_id"] == "visual-department"
-    assert payload["nas_sources"][0]["status"]["mount_path"] == "/Volumes/视觉部"
+    assert payload["nas_sources"][0]["status"]["mount_path"] == r"\\192.168.124.85\视觉部"
     assert payload["nas_sources"][0]["canonical_unc"] == r"\\192.168.124.85\视觉部"
     page = client.get("/")
     page_source = page.get_data(as_text=True)
@@ -61,7 +60,7 @@ def test_connect_endpoint_only_launches_after_explicit_post(tmp_path, monkeypatc
         "upload_search_materials.interaction.web.check_nas_source",
         lambda source: NasSourceStatus(
             source.source_id, "not_mounted", "NAS_NOT_MOUNTED",
-            "/Volumes/视觉部", "NAS 共享尚未挂载",
+            r"\\192.168.124.85\视觉部", "NAS 共享尚未连接",
         ),
     )
     monkeypatch.setattr(

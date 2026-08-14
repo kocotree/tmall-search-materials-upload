@@ -14,12 +14,8 @@ from upload_search_materials.runtime_preflight import (
 )
 
 
-def write_prepared_runtime(project: Path, runtime_root: Path, *, windows: bool) -> Path:
-    binary = (
-        runtime_root / ".venv" / "Scripts" / "python.exe"
-        if windows
-        else runtime_root / ".venv" / "bin" / "python"
-    )
+def write_prepared_runtime(project: Path, runtime_root: Path) -> Path:
+    binary = runtime_root / ".venv" / "Scripts" / "python.exe"
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"prepared")
     launcher = project / "scripts" / "run-plugin.py"
@@ -46,9 +42,7 @@ def prepared(tmp_path):
     workspace = tmp_path / "workspace"
     project = workspace / "upload-search-materials"
     (project / "src" / "upload_search_materials").mkdir(parents=True)
-    write_prepared_runtime(
-        project, workspace / "user-data" / "runtime", windows=True
-    )
+    write_prepared_runtime(project, workspace / "user-data" / "runtime")
     selectors = project / "config" / "selectors.local.yaml"
     selectors.parent.mkdir()
     selectors.write_text("schema_version: 1\n", encoding="utf-8")
@@ -59,26 +53,6 @@ def prepared(tmp_path):
         image_sources=(),
         runs_root=workspace / "runs",
         user_data_root=workspace / "user-data",
-    )
-    return runtime, selectors
-
-
-def prepared_posix(tmp_path):
-    project = tmp_path / "workspace"
-    (project / "src" / "upload_search_materials").mkdir(parents=True)
-    write_prepared_runtime(
-        project, project / "user-data" / "runtime", windows=False
-    )
-    selectors = project / "config" / "selectors.local.yaml"
-    selectors.parent.mkdir()
-    selectors.write_text("schema_version: 1\n", encoding="utf-8")
-    runtime = RuntimeConfig(
-        workspace_root=project,
-        products=DiscoveredPath(None, "missing"),
-        rules=DiscoveredPath(None, "missing"),
-        image_sources=(),
-        runs_root=project / "runs",
-        user_data_root=project / "user-data",
     )
     return runtime, selectors
 
@@ -121,22 +95,6 @@ def test_preflight_is_offline_and_never_invokes_uv_npm_or_powershell(tmp_path):
         token not in " ".join(commands[0]).casefold()
         for token in ("uv ", "npm", "powershell", ".ps1")
     )
-
-
-def test_preflight_accepts_posix_project_environment(tmp_path):
-    runtime, selectors = prepared_posix(tmp_path)
-    commands = []
-
-    result = preflight_runtime_environment(
-        runtime,
-        selectors_path=selectors,
-        cdp_url="http://127.0.0.1:9222",
-        runner=successful_runner(commands),
-        cdp_probe=connected,
-    )
-
-    assert result["ready"] is True
-    assert commands[0][0].endswith("/user-data/runtime/.venv/bin/python")
 
 
 @pytest.mark.parametrize(

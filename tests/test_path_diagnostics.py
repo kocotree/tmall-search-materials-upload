@@ -44,7 +44,8 @@ def test_missing_company_drive_mapping_has_specific_recovery(path):
     assert diagnostic["available"] is False
     assert diagnostic["path_kind"] == "mapped_drive"
     assert diagnostic["reason_code"] == "DRIVE_NOT_MAPPED"
-    assert "UNC" in diagnostic["next_action"]
+    assert "选择文件夹" in diagnostic["next_action"]
+    assert "完整文件夹路径" in diagnostic["next_action"]
 
 
 def test_local_directory_uses_metadata_only_probe(tmp_path, monkeypatch):

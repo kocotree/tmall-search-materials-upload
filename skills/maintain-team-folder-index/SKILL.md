@@ -9,7 +9,6 @@ Use the repository CLI as the deterministic implementation. An ordinary upload w
 
 ## Fixed team location
 
-- macOS path: `/Volumes/浙江酷趣/天猫部/搜推素材索引-虾米`
 - NAS source ID: `zhejiang-kuqu`
 - Canonical share: `\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米`
 

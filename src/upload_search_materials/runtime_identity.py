@@ -122,38 +122,23 @@ def _windows_remote_drives() -> list[str]:
 def current_runtime_identity() -> dict[str, Any]:
     """Return non-sensitive identity facts; never enumerate source contents."""
 
-    if os.name == "nt":
-        try:
-            sid = _windows_sid()
-        except OSError:
-            sid = ""
-        try:
-            session_id = _windows_session_id()
-        except OSError:
-            session_id = -1
-        return {
-            "schema_version": IDENTITY_SCHEMA_VERSION,
-            "platform": "windows",
-            "sid": sid,
-            "login_session_id": session_id,
-            "interactive_desktop": _windows_interactive_desktop(),
-            "remote_drive_letters": _windows_remote_drives(),
-            "pid": os.getpid(),
-        }
-    inherited_login_session = os.environ.get(
-        "TMALL_DESKTOP_LOGIN_SESSION_ID", ""
-    ).strip()
+    if os.name != "nt":
+        raise LocalResourceIdentityMismatch("windows_required")
     try:
-        login_session_id = int(inherited_login_session)
-    except ValueError:
-        login_session_id = os.getsid(0) if hasattr(os, "getsid") else -1
+        sid = _windows_sid()
+    except OSError:
+        sid = ""
+    try:
+        session_id = _windows_session_id()
+    except OSError:
+        session_id = -1
     return {
         "schema_version": IDENTITY_SCHEMA_VERSION,
-        "platform": os.name,
-        "sid": f"uid:{os.getuid()}" if hasattr(os, "getuid") else "",
-        "login_session_id": login_session_id,
-        "interactive_desktop": False,
-        "remote_drive_letters": [],
+        "platform": "windows",
+        "sid": sid,
+        "login_session_id": session_id,
+        "interactive_desktop": _windows_interactive_desktop(),
+        "remote_drive_letters": _windows_remote_drives(),
         "pid": os.getpid(),
     }
 

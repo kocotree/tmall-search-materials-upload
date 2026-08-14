@@ -148,7 +148,7 @@
 | `PROCESSING_CLAIM_ACTIVE` | 同一阶段存在未过期处理租约 | 等待当前 Agent 或租约到期 |
 | `PROCESSING_CLAIM_STALE` | 旧 Agent/旧 claim 尝试回写 | 拒绝旧写入，使用当前 claim 恢复 |
 | `SETUP_INPUT_HASH_MISMATCH` | handoff 与当前 input 不一致 | 停止并重新提交正确 revision |
-| `ENVIRONMENT_NOT_PREPARED` | 用户级运行环境缺失或与 `uv.lock` 不一致 | Windows 运行 `scripts/bootstrap.cmd`，macOS/Linux 运行 `scripts/bootstrap.sh`；恢复采集不得隐式同步 |
+| `ENVIRONMENT_NOT_PREPARED` | 用户级运行环境缺失或与 `uv.lock` 不一致 | 运行 `scripts/bootstrap.cmd`；恢复采集不得隐式同步 |
 | `SELECTOR_DOM_NOT_VALIDATED` | profile 未通过当前素材中心 DOM 验证 | Codex 读取 Agent 诊断，修复并验证本机 profile 后重跑同一处理入口 |
 | `SELECTOR_FIELD_INVALID:<field>` | 当前 DOM 中某个必需字段验证失败 | 保留非生产候选并按字段修复 |
 | `MATERIAL_PAGE_REQUIRED` | CDP 页面不是官方素材中心 | 用户在 CDP Chrome 打开官方页面 |

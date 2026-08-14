@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -68,24 +67,6 @@ def test_windows_process_identity_matches_between_parent_and_child():
     finally:
         child.terminate()
         child.wait(timeout=5)
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process identity contract")
-def test_posix_process_identity_uses_stable_ps_fallback(monkeypatch):
-    monkeypatch.setattr(
-        worker_module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout="Sun Aug 10 16:20:00 2026 501\n",
-        ),
-    )
-
-    first = worker_module.process_identity(987654)
-    second = worker_module.process_identity(987654)
-
-    assert first == second
-    assert first.startswith("posix:987654:")
 
 
 def write_products(path: Path) -> None:
@@ -270,40 +251,6 @@ def test_preflight_failure_writes_result_and_releases_claim(tmp_path, monkeypatc
         )
     )
     assert diagnostic["reason_code"] == "ENVIRONMENT_NOT_PREPARED"
-
-
-def test_posix_worker_defers_identity_check_to_child_process(
-    tmp_path, monkeypatch
-):
-    runtime, runs, _, session, selectors = prepare(tmp_path)
-    local_identity = {
-        "platform": "posix",
-        "sid": "uid:501",
-        "login_session_id": 123,
-        "interactive_desktop": False,
-    }
-    monkeypatch.setattr(
-        worker_module,
-        "require_local_resource_identity",
-        lambda expected: expected,
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "runtime_identity_for_pid",
-        lambda _pid: pytest.fail("POSIX child identity is verified in the child"),
-    )
-
-    launched = launch_collection_worker(
-        runs_root=runs,
-        session_id=session.session_id,
-        runtime=runtime,
-        selectors_path=selectors,
-        popen=lambda *_args, **_kwargs: Process(),
-        identity_provider=lambda pid: f"process:{pid}",
-        local_resource_identity=local_identity,
-    )
-
-    assert launched["status"] == "processing"
 
 
 def test_status_separates_old_selector_result_from_current_worker(

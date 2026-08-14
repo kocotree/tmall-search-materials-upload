@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -111,31 +110,9 @@ def _windows_process_creation_identity(pid: int) -> str | None:
 def process_identity(pid: int) -> str | None:
     if int(pid) <= 0:
         return None
-    if os.name == "nt":
-        return _windows_process_creation_identity(pid)
-    stat = Path(f"/proc/{int(pid)}/stat")
-    try:
-        fields = stat.read_text(encoding="utf-8").split()
-    except OSError:
-        fields = []
-    if len(fields) > 21:
-        return f"proc:{pid}:{fields[21]}"
-    try:
-        completed = subprocess.run(
-            ["ps", "-p", str(int(pid)), "-o", "lstart=", "-o", "uid="],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
+    if os.name != "nt":
         return None
-    evidence = " ".join(completed.stdout.split())
-    if completed.returncode != 0 or not evidence:
-        return None
-    digest = hashlib.sha256(evidence.encode("utf-8")).hexdigest()[:24]
-    return f"posix:{pid}:{digest}"
+    return _windows_process_creation_identity(pid)
 
 
 def _probe_process(pid: int) -> bool | None:
@@ -423,10 +400,7 @@ def launch_collection_worker(
         )
     verify_child_token = bool(
         local_resource_identity is not None
-        and (
-            os.name == "nt"
-            or local_resource_identity.get("platform") == "windows"
-        )
+        and local_resource_identity.get("platform") == "windows"
     )
     if verify_child_token:
         child_identity = runtime_identity_for_pid(int(process.pid))

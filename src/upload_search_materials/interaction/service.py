@@ -10,7 +10,6 @@ import secrets
 import signal
 import socket
 import subprocess
-import sys
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -32,39 +31,6 @@ DEFAULT_PORT_START = 8765
 DEFAULT_PORT_END = 8795
 SERVICE_STATE_FILE = ".ui-service.json"
 _LOOPBACK_OPENER = build_opener(ProxyHandler({}))
-_MACOS_LAUNCHCTL = Path("/bin/launchctl")
-_MACOS_ENV_KEYS = frozenset(
-    {
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "PATH",
-        "PYTHONIOENCODING",
-        "PYTHONUTF8",
-        "SSL_CERT_FILE",
-        "TMALL_BROWSER_EXECUTABLE",
-        "TMALL_CDP_PROFILE_DIR",
-        "TMALL_CDP_URL",
-        "TMALL_CONFIG_FILE",
-        "TMALL_DESKTOP_LOGIN_SESSION_ID",
-        "TMALL_FOLDER_INDEX_ROOT",
-        "TMALL_MATERIAL_CENTER_URL",
-        "TMALL_NAS_SOURCES_FILE",
-        "TMALL_PRODUCTS_CSV",
-        "TMALL_PLUGIN_ROOT",
-        "TMALL_RULES_CSV",
-        "TMALL_RUNS_ROOT",
-        "TMALL_RUNTIME_ROOT",
-        "TMALL_SELECTORS_FILE",
-        "TMALL_TEAM_FOLDER_INDEX_NAS_SOURCE_ID",
-        "TMALL_TEAM_FOLDER_INDEX_ROOT",
-        "TMALL_USER_DATA_ROOT",
-        "TMALL_WORKSPACE_ROOT",
-        "TMPDIR",
-        "UPLOAD_SEARCH_MATERIALS_AI_DEFAULT_SLOT_PLANNING",
-        "UPLOAD_SEARCH_MATERIALS_THREE_STEP_SLOT_UI",
-    }
-)
 
 
 class ManagedServiceError(RuntimeError):
@@ -214,33 +180,6 @@ def _claim_started_identity(state: dict[str, Any]) -> bool:
     return True
 
 
-def _macos_launch_label(session_id: str, token: str) -> str:
-    stable_token = "".join(character for character in token if character.isalnum())
-    return f"com.kocotree.tmall-materials.ui.{session_id}.{stable_token[:12]}"
-
-
-def _macos_launch_environment(environment: dict[str, str]) -> list[str]:
-    return [
-        f"{key}={value}"
-        for key, value in sorted(environment.items())
-        if key in _MACOS_ENV_KEYS
-    ]
-
-
-def _remove_macos_launchd_job(label: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(_MACOS_LAUNCHCTL), "remove", label],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=5,
-        check=False,
-    )
-
-
 def _session_is_readable(state: dict[str, Any], session_id: str) -> bool:
     health = _url_json(
         f"http://127.0.0.1:{state.get('port')}/api/health/sessions/{session_id}"
@@ -375,13 +314,6 @@ def start_service(
         stop_service(runs_root, session_id)
     elif existing_identity_is_healthy:
         stop_service(runs_root, session_id)
-    elif existing and existing.get("service_launch_channel") == "macos_launchd":
-        stale_label = str(existing.get("service_launch_label", "")).strip()
-        if stale_label:
-            try:
-                _remove_macos_launchd_job(stale_label)
-            except (OSError, subprocess.SubprocessError):
-                pass
 
     port = _select_port(port_start, port_end)
     token = secrets.token_urlsafe(32)
@@ -405,68 +337,27 @@ def start_service(
     )
     if config:
         command.extend(["--config", config])
-    creationflags = 0
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     child_environment = plugin_child_environment(
         module_root,
         base=os.environ,
         workspace_root=resolved_workspace_root,
     )
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    else:
-        child_environment["TMALL_DESKTOP_LOGIN_SESSION_ID"] = str(
-            launcher_runtime_identity["login_session_id"]
-        )
-    use_macos_launchd = managed_desktop and sys.platform == "darwin"
-    process: subprocess.Popen[bytes] | None = None
-    launch_submit: subprocess.CompletedProcess[str] | None = None
-    launch_label = ""
-    if use_macos_launchd:
-        launch_label = _macos_launch_label(session_id, token)
-        launch_submit = subprocess.run(
-            [
-                str(_MACOS_LAUNCHCTL),
-                "submit",
-                "-l",
-                launch_label,
-                "-o",
-                str(stdout_path),
-                "-e",
-                str(stderr_path),
-                "--",
-                "/usr/bin/env",
-                *_macos_launch_environment(child_environment),
-                *command,
-            ],
+    with stdout_path.open("ab", buffering=0) as stdout, stderr_path.open(
+        "ab", buffering=0
+    ) as stderr:
+        process = subprocess.Popen(
+            command,
             cwd=module_root,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
+            stdout=stdout,
+            stderr=stderr,
+            close_fds=True,
+            creationflags=creationflags,
+            env=child_environment,
+            start_new_session=False,
         )
-        initial_pid = int(launcher_runtime_identity["pid"])
-        launch_channel = "macos_launchd"
-    else:
-        with stdout_path.open("ab", buffering=0) as stdout, stderr_path.open(
-            "ab", buffering=0
-        ) as stderr:
-            process = subprocess.Popen(
-                command,
-                cwd=module_root,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                close_fds=True,
-                creationflags=creationflags,
-                env=child_environment,
-                start_new_session=os.name != "nt",
-            )
-        initial_pid = process.pid
-        launch_channel = "subprocess"
+    initial_pid = process.pid
 
     state = {
         "schema_version": SERVICE_SCHEMA_VERSION,
@@ -489,21 +380,8 @@ def start_service(
         "browser_channel": "not_attempted",
         "browser_opened": False,
         "reused": False,
-        "service_launch_channel": launch_channel,
+        "service_launch_channel": "windows_subprocess",
     }
-    if launch_label:
-        state["service_launch_label"] = launch_label
-    if launch_submit is not None and launch_submit.returncode != 0:
-        state["status"] = "failed"
-        state["failure_reason_code"] = "UI_START_FAILED"
-        state["exit_code"] = launch_submit.returncode
-        _write_json_atomic(_state_path(store, session_id), state)
-        detail = (launch_submit.stderr or launch_submit.stdout).strip()
-        raise ManagedServiceError(
-            "UI_START_FAILED",
-            detail or "macOS launchd rejected the interaction service",
-            f'tmall-materials ui-restart --runs-root "{store._runs_root}" --session {session_id}',
-        )
     _write_json_atomic(_state_path(store, session_id), state)
     deadline = time.monotonic() + max(0.5, startup_timeout)
     while time.monotonic() < deadline:
@@ -535,12 +413,7 @@ def start_service(
                 os.kill(int(health["pid"]), signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        if launch_label:
-            try:
-                _remove_macos_launchd_job(launch_label)
-            except (OSError, subprocess.SubprocessError):
-                pass
-        elif process is not None:
+        if process is not None:
             process.terminate()
             try:
                 process.wait(timeout=3)
@@ -590,19 +463,10 @@ def stop_service(runs_root: Path, session_id: str) -> dict[str, Any]:
             "recorded PID no longer matches the ownership token and listening endpoint",
             "inspect the recorded logs and start a new managed service",
         )
-    stopped_via_launchd = False
-    if state.get("service_launch_channel") == "macos_launchd":
-        label = str(state.get("service_launch_label", "")).strip()
-        if label:
-            try:
-                stopped_via_launchd = _remove_macos_launchd_job(label).returncode == 0
-            except (OSError, subprocess.SubprocessError):
-                stopped_via_launchd = False
-    if not stopped_via_launchd:
-        try:
-            os.kill(int(state["pid"]), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    try:
+        os.kill(int(state["pid"]), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and _healthy_identity(state):
         time.sleep(0.1)
@@ -622,12 +486,6 @@ def stop_service(runs_root: Path, session_id: str) -> dict[str, Any]:
 
 def restart_service(runs_root: Path, session_id: str, **kwargs: Any) -> dict[str, Any]:
     existing = _read_state(SessionStore(runs_root), session_id)
-    if (
-        "managed_desktop" not in kwargs
-        and existing
-        and existing.get("service_launch_channel") == "macos_launchd"
-    ):
-        kwargs["managed_desktop"] = True
     if existing:
         if "project_root" not in kwargs and existing.get("project_root"):
             kwargs["project_root"] = Path(str(existing["project_root"]))

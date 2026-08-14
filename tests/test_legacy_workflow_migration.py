@@ -175,7 +175,7 @@ def test_migrated_browser_hides_legacy_stage_and_reports_two_page_mode(tmp_path)
     assert page.status_code == 200
     html = page.get_data(as_text=True)
     assert 'data-stage-id="image_review"' not in html
-    assert html.count('data-stage-id="') == 8
+    assert html.count('data-stage-id="') == 7
 
     plan = client.get(
         f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"

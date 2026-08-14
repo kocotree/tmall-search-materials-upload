@@ -205,9 +205,6 @@ def test_approval_fallback_is_exact_and_rejects_broad_acknowledgement(tmp_path):
     values = {
         "task_ids": ["task-001"],
         "confirmed_by": "tester",
-        "confirmed_at": "2026-07-29T12:00:00+08:00",
-        "valid_until": "2026-07-29T13:00:00+08:00",
-        "acknowledgement": True,
     }
     accepted = client.post(
         f"/api/sessions/{session_id}/stages/approval/chat-fallback",
@@ -264,15 +261,14 @@ def test_fallback_cannot_overwrite_submitted_or_processing_stage(tmp_path):
             "values": {
                 "store": "测试店铺",
                 "store_confirmed": True,
-                "month": "2026-07",
                 "products_csv": "products.csv",
                 "rules_csv": "rules.csv",
                 "image_source_labels": ["来源"],
-                "image_roots": ["Z:\\素材"],
+                "image_roots": [str(tmp_path)],
             },
         },
     )
-    assert direct_submit.status_code == 202
+    assert direct_submit.status_code == 202, direct_submit.json
     rejected = client.post(
         f"/api/sessions/{session_id}/stages/setup/chat-fallback",
         json={

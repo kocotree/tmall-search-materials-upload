@@ -1,4 +1,4 @@
-"""Portable, machine-local path resolution for the material workflow."""
+"""Windows machine-local path resolution for the material workflow."""
 
 from __future__ import annotations
 
@@ -37,14 +37,9 @@ def default_user_data_root(
     explicit = str(env.get("TMALL_USER_DATA_ROOT", "")).strip()
     if explicit:
         return Path(explicit).expanduser().resolve()
-    if os.name == "nt":
-        base = str(env.get("LOCALAPPDATA", "")).strip()
-        root = Path(base) if base else Path.home() / "AppData" / "Local"
-        return (root / "tmall-search-materials").resolve()
-    state_home = str(env.get("XDG_STATE_HOME", "")).strip()
-    if state_home:
-        return (Path(state_home).expanduser() / "tmall-search-materials").resolve()
-    return (Path.home() / ".local" / "state" / "tmall-search-materials").resolve()
+    base = str(env.get("LOCALAPPDATA", "")).strip()
+    root = Path(base) if base else Path.home() / "AppData" / "Local"
+    return (root / "tmall-search-materials").resolve()
 
 
 @dataclass(frozen=True)

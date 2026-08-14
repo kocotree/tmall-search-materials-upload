@@ -1,21 +1,19 @@
 {
-  "team_folder_index_root": "/Volumes/浙江酷趣/天猫部/搜推素材索引-虾米",
+  "team_folder_index_root": "\\\\192.168.110.20\\浙江酷趣\\天猫部\\搜推素材索引-虾米",
   "team_folder_index_nas_source_id": "zhejiang-kuqu",
   "nas_sources_file": "config/nas-sources.yaml",
   "image_sources": [
     {
-      "source_id": "visual-model-images",
-      "label": "视觉部 · 模特图",
-      "path": "Y:\\视觉部\\1-模特图",
-      "canonical_unc": "\\\\nas.example\\media\\model-images"
+      "source_id": "zhejiang-kuqu",
+      "label": "浙江酷趣",
+      "path": "\\\\192.168.110.20\\浙江酷趣",
+      "canonical_unc": "\\\\192.168.110.20\\浙江酷趣"
     },
     {
-      "label": "小红书 KOC 置换 · 淘宝买家秀",
-      "path": "Z:\\浙江酷趣\\运营中心\\营销板块\\小红书koc置换&淘宝买家秀\\优质买家秀"
-    },
-    {
-      "label": "小红书 KOC 置换 · 买家秀",
-      "path": "Z:\\浙江酷趣\\运营中心\\营销板块\\小红书koc置换&买家秀\\优质买家秀"
+      "source_id": "visual-department",
+      "label": "视觉部",
+      "path": "\\\\192.168.124.85\\视觉部",
+      "canonical_unc": "\\\\192.168.124.85\\视觉部"
     }
   ]
 }

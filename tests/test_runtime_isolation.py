@@ -158,13 +158,13 @@ def test_user_runtime_environment_wins_over_plugin_cache_venv(
     tmp_path, monkeypatch
 ):
     project = tmp_path / "plugin-cache"
-    plugin_python = project / ".venv" / "bin" / "python"
+    plugin_python = project / ".venv" / "Scripts" / "python.exe"
     plugin_python.parent.mkdir(parents=True)
     plugin_python.write_bytes(b"plugin-cache")
     (project / "src" / "upload_search_materials").mkdir(parents=True)
     (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     runtime_root = tmp_path / "user-runtime"
-    runtime_python = runtime_root / ".venv" / "bin" / "python"
+    runtime_python = runtime_root / ".venv" / "Scripts" / "python.exe"
     runtime_python.parent.mkdir(parents=True)
     runtime_python.write_bytes(b"user-runtime")
     monkeypatch.setenv("TMALL_RUNTIME_ROOT", str(runtime_root))

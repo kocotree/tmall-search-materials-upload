@@ -150,7 +150,11 @@ def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, 
             calls["load"].append(session_id)
 
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
-    monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
+    monkeypatch.setattr(
+        cli_module,
+        "create_app",
+        lambda runs_root, runtime_config=None, **_kwargs: app,
+    )
     monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     code = main(["interact", "--runs-root", str(tmp_path), "--port", "9123"])
@@ -182,7 +186,11 @@ def test_interact_resumes_explicit_session_without_creating_another(
             return {"session_id": session_id}
 
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
-    monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
+    monkeypatch.setattr(
+        cli_module,
+        "create_app",
+        lambda runs_root, runtime_config=None, **_kwargs: app,
+    )
     monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     code = main(
@@ -215,7 +223,11 @@ def test_interact_uses_environment_only_when_runs_root_is_absent(
 
     monkeypatch.setenv("TMALL_RUNS_ROOT", str(environment_root))
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
-    monkeypatch.setattr(cli_module, "create_app", lambda runs_root, runtime_config=None: app)
+    monkeypatch.setattr(
+        cli_module,
+        "create_app",
+        lambda runs_root, runtime_config=None, **_kwargs: app,
+    )
     monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 
     assert main(["interact"]) == 0
@@ -259,7 +271,9 @@ def test_interact_defaults_to_runtime_project_runs_root(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_module, "load_runtime_config", lambda config=None: runtime)
     monkeypatch.setattr(cli_module, "SessionStore", FakeStore)
     monkeypatch.setattr(
-        cli_module, "create_app", lambda runs_root, runtime_config=None: app
+        cli_module,
+        "create_app",
+        lambda runs_root, runtime_config=None, **_kwargs: app,
     )
     monkeypatch.setattr(cli_module, "_port_is_available", lambda port: True)
 

@@ -1,4 +1,4 @@
-"""Launch one material job in the logged-in desktop user's mount context."""
+"""Launch one material job in the logged-in Windows desktop context."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import subprocess
 import sys
 from typing import Any
 
-from .plugin_runtime import plugin_cli_command
 from .runtime_config import RuntimeConfig
 
 
@@ -34,14 +33,9 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _python_executable(project_root: Path, *, windowed: bool) -> Path:
+def _python_executable(project_root: Path) -> Path:
     active = type(project_root)(os.path.abspath(sys.executable))
-    if os.name == "nt":
-        name = "pythonw.exe" if windowed else "python.exe"
-        sibling = active.with_name(name)
-        candidate = sibling
-    else:
-        candidate = active
+    candidate = active.with_name("pythonw.exe")
     if not candidate.is_file():
         raise MaterialExecutorLaunchError("prepared_python_missing")
     return candidate
@@ -73,79 +67,52 @@ def launch_material_executor(
     session = _validate_session(session_id)
     project_root = _project_root()
     config_args = _config_argument(runtime)
-    if os.name == "nt":
-        _python_executable(project_root, windowed=True)
-        launcher = project_root / "scripts" / "launch-material-executor-desktop.ps1"
-        if not launcher.is_file():
-            raise MaterialExecutorLaunchError("desktop_launcher_missing")
-        command = [
-            "powershell.exe",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(launcher),
-            "-ProjectRoot",
-            str(project_root),
-            "-Session",
-            session,
-        ]
-        if config_args:
-            command.extend(("-Config", config_args[1]))
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=str(project_root),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-                creationflags=creationflags,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise MaterialExecutorLaunchError(str(error)) from error
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout).strip()
-            raise MaterialExecutorLaunchError(
-                detail or f"desktop_launcher_exit_{completed.returncode}"
-            )
-        return {
-            "status": "requested",
-            "launch_channel": "windows_explorer",
-            "session_id": session,
-        }
-
-    python = _python_executable(project_root, windowed=False)
-    command = plugin_cli_command(
-        project_root,
-        "material-executor",
-        "--session",
+    if os.name != "nt":
+        raise MaterialExecutorLaunchError("windows_required")
+    _python_executable(project_root)
+    launcher = project_root / "scripts" / "launch-material-executor-desktop.ps1"
+    if not launcher.is_file():
+        raise MaterialExecutorLaunchError("desktop_launcher_missing")
+    command = [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(launcher),
+        "-ProjectRoot",
+        str(project_root),
+        "-Session",
         session,
-        *config_args,
-        python=python,
-    )
+    ]
+    if config_args:
+        command.extend(("-Config", config_args[1]))
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        process = subprocess.Popen(
+        completed = subprocess.run(
             command,
             cwd=str(project_root),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            creationflags=creationflags,
+            check=False,
         )
-    except OSError as error:
+    except (OSError, subprocess.TimeoutExpired) as error:
         raise MaterialExecutorLaunchError(str(error)) from error
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise MaterialExecutorLaunchError(
+            detail or f"desktop_launcher_exit_{completed.returncode}"
+        )
     return {
-        "status": "started",
-        "launch_channel": "current_desktop",
+        "status": "requested",
+        "launch_channel": "windows_explorer",
         "session_id": session,
-        "pid": int(process.pid),
     }

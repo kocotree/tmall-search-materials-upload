@@ -411,11 +411,6 @@
       parts = parts.slice(2);
     } else if (/^[A-Za-z]:[\\/]/.test(raw)) {
       parts = parts.slice(1);
-    } else if (
-      /^\/Volumes(?:\/|$)/i.test(raw)
-      && parts.length >= 2
-    ) {
-      parts = parts.slice(2);
     }
     return parts;
   }

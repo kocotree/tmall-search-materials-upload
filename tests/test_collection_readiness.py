@@ -17,7 +17,7 @@ from upload_search_materials.browser.material_page import (
 from upload_search_materials.runtime_config import load_runtime_config
 
 
-def test_environment_status_accepts_posix_virtual_environment(tmp_path):
+def test_environment_status_accepts_windows_virtual_environment(tmp_path):
     (tmp_path / "SKILL.md").write_text(
         "---\nname: test\ndescription: test\n---\n", encoding="utf-8"
     )
@@ -25,7 +25,7 @@ def test_environment_status_accepts_posix_virtual_environment(tmp_path):
         "[project]\nname='test'\nversion='0'\n", encoding="utf-8"
     )
     runtime_root = tmp_path / "user-data" / "runtime"
-    python = runtime_root / ".venv" / "bin" / "python"
+    python = runtime_root / ".venv" / "Scripts" / "python.exe"
     python.parent.mkdir(parents=True)
     python.touch()
     (tmp_path / "src" / "upload_search_materials").mkdir(parents=True)
@@ -55,8 +55,10 @@ def test_environment_status_accepts_posix_virtual_environment(tmp_path):
 
     assert status["ready"] is True
     assert status["reason_code"] == "READY"
-    assert status["evidence"]["python"].endswith(
-        "/user-data/runtime/.venv/bin/python"
+    assert Path(status["evidence"]["python"]).parts[-3:] == (
+        ".venv",
+        "Scripts",
+        "python.exe",
     )
 
 

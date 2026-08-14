@@ -73,7 +73,7 @@ def test_child_commands_use_current_plugin_launcher(tmp_path):
 def test_fingerprint_records_dependencies_without_installing_project(tmp_path):
     plugin = tmp_path / "plugin"
     runtime = tmp_path / "runtime"
-    python = runtime / ".venv" / "bin" / "python"
+    python = runtime / ".venv" / "Scripts" / "python.exe"
     python.parent.mkdir(parents=True)
     python.touch()
     (runtime / "uv-cache").mkdir()
@@ -109,19 +109,13 @@ def test_fingerprint_records_dependencies_without_installing_project(tmp_path):
 
 
 def test_bootstrap_and_fixed_launchers_do_not_use_installed_business_cli():
-    bootstrap_sh = (REPOSITORY_ROOT / "scripts" / "bootstrap.sh").read_text()
     bootstrap_ps1 = (REPOSITORY_ROOT / "scripts" / "bootstrap.ps1").read_text()
-    assert "--no-install-project" in bootstrap_sh
     assert '"--no-install-project"' in bootstrap_ps1
-    assert "--no-editable" not in bootstrap_sh
     assert '"--no-editable"' not in bootstrap_ps1
 
     for name in (
-        "start-managed-workbench.sh",
         "start-managed-workbench.ps1",
-        "start-ui.sh",
         "start-ui.ps1",
-        "start-material-executor.sh",
         "start-material-executor.ps1",
         "launch-material-executor-desktop.ps1",
     ):

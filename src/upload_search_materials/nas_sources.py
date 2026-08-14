@@ -1,4 +1,4 @@
-"""Portable SMB source catalog, mount checks, and safe folder selection."""
+"""Windows SMB source catalog, access checks, and safe folder selection."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import time
 from typing import Callable, Iterable
-from urllib.parse import quote, unquote
 
 import yaml
 
@@ -27,30 +26,16 @@ class NasSource:
     label: str
     host: str
     share: str
-    macos_mount_path: str
     windows_path: str
     subpaths: tuple[str, ...]
     license_status: str = "unknown"
 
-    @property
-    def smb_url(self) -> str:
-        return f"smb://{self.host}/{quote(self.share, safe='')}"
-
     def root_for(self, platform: RuntimePlatform) -> str:
-        if platform == "macos":
-            return self.macos_mount_path
         if platform == "windows":
             return self.windows_path
         raise AssetSourceUnavailable(
             "NAS_PLATFORM_UNSUPPORTED", f"NAS 辅助连接暂不支持当前系统：{platform}"
         )
-
-
-@dataclass(frozen=True)
-class SmbMount:
-    host: str
-    share: str
-    mount_path: str
 
 
 @dataclass(frozen=True)
@@ -158,9 +143,6 @@ def load_nas_sources(path: Path) -> dict[str, NasSource]:
             label=str(row.get("label", source_id)).strip() or source_id,
             host=host,
             share=share,
-            macos_mount_path=str(
-                row.get("macos_mount_path", f"/Volumes/{share}")
-            ).strip(),
             windows_path=str(row.get("windows_path", rf"\\{host}\{share}")).strip(),
             subpaths=subpaths,
             license_status=license_status,
@@ -168,72 +150,14 @@ def load_nas_sources(path: Path) -> dict[str, NasSource]:
     return sources
 
 
-def parse_macos_smb_mounts(output: str) -> list[SmbMount]:
-    mounts: list[SmbMount] = []
-    for line in output.splitlines():
-        if " (smbfs," not in line or " on " not in line:
-            continue
-        source, remainder = line.split(" on ", 1)
-        mount_path = remainder.split(" (smbfs,", 1)[0]
-        decoded_source = unquote(source)
-        without_credentials = decoded_source.rsplit("@", 1)[-1].lstrip("/")
-        if "/" not in without_credentials:
-            continue
-        host, share = without_credentials.split("/", 1)
-        mounts.append(SmbMount(host, share, unquote(mount_path)))
-    return mounts
-
-
-def current_macos_smb_mounts() -> list[SmbMount]:
-    try:
-        completed = subprocess.run(
-            ["/sbin/mount"], check=True, capture_output=True, text=True
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise AssetSourceUnavailable(
-            "NAS_MOUNT_CHECK_FAILED", "无法读取当前 macOS SMB 挂载状态"
-        ) from error
-    return parse_macos_smb_mounts(completed.stdout)
-
-
 def check_nas_source(
     source: NasSource,
     *,
     platform: RuntimePlatform | None = None,
-    macos_mounts: Iterable[SmbMount] | None = None,
     path_resolver: Callable[..., object] = resolve_asset_root,
 ) -> NasSourceStatus:
     current_platform = platform or detect_runtime_platform()
     expected_path = source.root_for(current_platform)
-    if current_platform == "macos":
-        mounts = (
-            list(macos_mounts)
-            if macos_mounts is not None
-            else current_macos_smb_mounts()
-        )
-        matching = next(
-            (
-                mount for mount in mounts
-                if mount.host.casefold() == source.host.casefold()
-                and mount.share.casefold() == source.share.casefold()
-            ),
-            None,
-        )
-        if matching is None:
-            if Path(expected_path).exists():
-                return NasSourceStatus(
-                    source.source_id, "blocked", "NAS_MOUNT_IDENTITY_MISMATCH",
-                    expected_path, "期望挂载点已存在，但不是配置的 SMB 来源",
-                )
-            return NasSourceStatus(
-                source.source_id, "not_mounted", "NAS_NOT_MOUNTED",
-                expected_path, "NAS 共享尚未挂载",
-            )
-        if Path(matching.mount_path) != Path(expected_path):
-            return NasSourceStatus(
-                source.source_id, "blocked", "NAS_MOUNT_PATH_MISMATCH",
-                matching.mount_path, f"共享挂载到了非预期路径，期望 {expected_path}",
-            )
     try:
         checked = path_resolver(expected_path, platform=current_platform)
     except AssetSourceUnavailable as error:
@@ -259,17 +183,11 @@ def launch_nas_mount(
     """Open the OS-owned SMB UI; never pass or persist credentials."""
 
     current_platform = platform or detect_runtime_platform()
-    command = (
-        ["open", source.smb_url]
-        if current_platform == "macos"
-        else ["explorer.exe", source.windows_path]
-        if current_platform == "windows"
-        else None
-    )
-    if command is None:
+    if current_platform != "windows":
         raise AssetSourceUnavailable(
             "NAS_PLATFORM_UNSUPPORTED", f"NAS 辅助连接暂不支持当前系统：{current_platform}"
         )
+    command = ["explorer.exe", source.windows_path]
     run = launcher or (lambda value: subprocess.run(value, check=True))
     try:
         run(command)

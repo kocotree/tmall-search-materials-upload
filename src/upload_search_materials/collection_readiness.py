@@ -137,7 +137,7 @@ def project_environment_status(runtime: RuntimeConfig) -> dict[str, Any]:
         next_action=(
             ""
             if ready
-            else "运行 scripts/bootstrap.cmd（Windows）或 scripts/bootstrap.sh（macOS/Linux）准备用户级运行环境"
+            else "运行 scripts\\bootstrap.cmd 准备 Windows 用户级运行环境"
         ),
         evidence=environment,
     )

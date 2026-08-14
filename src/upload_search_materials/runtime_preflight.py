@@ -16,10 +16,7 @@ from .runtime_config import RuntimeConfig
 from .time_utils import iso_timestamp
 
 
-BOOTSTRAP_ACTION = (
-    "运行 scripts\\bootstrap.cmd（Windows）或 "
-    "scripts/bootstrap.sh（macOS/Linux）"
-)
+BOOTSTRAP_ACTION = "运行 scripts\\bootstrap.cmd 准备 Windows 用户级运行环境"
 
 
 class RuntimePreflightError(RuntimeError):
@@ -33,13 +30,9 @@ def runtime_environment_root(project_root: Path) -> Path:
     configured = str(os.environ.get("TMALL_RUNTIME_ROOT", "")).strip()
     if configured:
         return Path(configured).expanduser().resolve()
-    if os.name == "nt":
-        base = str(os.environ.get("LOCALAPPDATA", "")).strip()
-        root = Path(base) if base else Path.home() / "AppData" / "Local"
-        return (root / "tmall-search-materials" / "runtime").resolve()
-    state_home = str(os.environ.get("XDG_STATE_HOME", "")).strip()
-    base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
-    return (base / "tmall-search-materials" / "runtime").resolve()
+    base = str(os.environ.get("LOCALAPPDATA", "")).strip()
+    root = Path(base) if base else Path.home() / "AppData" / "Local"
+    return (root / "tmall-search-materials" / "runtime").resolve()
 
 
 def environment_fingerprint(
@@ -58,7 +51,6 @@ def environment_fingerprint(
     lock = project / "uv.lock"
     python_candidates = (
         runtime_root / ".venv" / "Scripts" / "python.exe",
-        runtime_root / ".venv" / "bin" / "python",
     )
     python = next(
         (candidate for candidate in python_candidates if candidate.is_file()),

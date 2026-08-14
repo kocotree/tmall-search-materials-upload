@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
-import subprocess
-import sys
 from urllib.request import ProxyHandler
 
 import pytest
@@ -121,38 +119,6 @@ def test_managed_service_starts_reuses_reports_and_stops(tmp_path):
     assert stopped["stopped"] is True
     assert Path(stopped["stdout_log"]).is_file()
     assert Path(stopped["stderr_log"]).is_file()
-
-
-@pytest.mark.skipif(
-    service_module.os.name == "nt",
-    reason="POSIX launcher detachment regression",
-)
-def test_managed_service_survives_launcher_process_exit(tmp_path):
-    port = _free_port()
-    project = Path(__file__).parents[1]
-    script = (
-        "import json, sys; "
-        "from pathlib import Path; "
-        "from upload_search_materials.interaction.service import start_service; "
-        "print(json.dumps(start_service(Path(sys.argv[1]), "
-        "port_start=int(sys.argv[2]), port_end=int(sys.argv[2]), "
-        "startup_timeout=10)))"
-    )
-    launched = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), str(port)],
-        cwd=project,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    started = json.loads(launched.stdout.strip().splitlines()[-1])
-    try:
-        status = status_service(tmp_path, started["session_id"])
-        assert status["status"] == "healthy"
-        assert status["pid"] == started["pid"]
-    finally:
-        stop_service(tmp_path, started["session_id"])
 
 
 def test_unknown_occupied_port_is_skipped(tmp_path):
@@ -318,71 +284,4 @@ def test_ownership_token_starting_with_dash_is_passed_as_one_argument(
             service_module.os.pathsep
         )[0]
     ).name == "src"
-    assert popen_kwargs[0]["start_new_session"] is (service_module.os.name != "nt")
-    if service_module.os.name != "nt":
-        inherited = popen_kwargs[0]["env"]["TMALL_DESKTOP_LOGIN_SESSION_ID"]
-        assert inherited == str(
-            service_module.current_runtime_identity()["login_session_id"]
-        )
-
-
-def test_macos_managed_desktop_submits_launchd_job(tmp_path, monkeypatch):
-    port = _free_port()
-    commands = []
-    states = []
-    project_root = tmp_path / "plugin-version"
-    workspace_root = tmp_path / "runtime-workspace"
-    launcher = project_root / "scripts" / "run-plugin.py"
-    launcher.parent.mkdir(parents=True)
-    launcher.touch()
-
-    class Completed:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    monkeypatch.setattr(service_module.sys, "platform", "darwin")
-    monkeypatch.setattr(
-        service_module.subprocess,
-        "run",
-        lambda command, **_kwargs: commands.append(command) or Completed(),
-    )
-    monkeypatch.setattr(
-        service_module,
-        "_claim_started_identity",
-        lambda state: states.append(dict(state)) or state.update(
-            {
-                "pid": 4567,
-                "runtime_identity": state["launcher_runtime_identity"],
-            }
-        )
-        is None,
-    )
-    monkeypatch.setattr(service_module, "_session_is_readable", lambda *_args: True)
-
-    started = start_service(
-        tmp_path,
-        port_start=port,
-        port_end=port,
-        startup_timeout=1,
-        managed_desktop=True,
-        project_root=project_root,
-        workspace_root=workspace_root,
-    )
-
-    assert started["healthy"] is True
-    assert started["pid"] == 4567
-    assert started["service_launch_channel"] == "macos_launchd"
-    assert started["service_launch_label"].startswith(
-        f"com.kocotree.tmall-materials.ui.{started['session_id']}."
-    )
-    command = commands[0]
-    assert command[:3] == ["/bin/launchctl", "submit", "-l"]
-    assert "/usr/bin/env" in command
-    assert any(value.startswith("TMALL_DESKTOP_LOGIN_SESSION_ID=") for value in command)
-    assert f"TMALL_PLUGIN_ROOT={project_root.resolve()}" in command
-    assert f"TMALL_WORKSPACE_ROOT={workspace_root.resolve()}" in command
-    assert not any(value.startswith("GITHUB_TOKEN=") for value in command)
-    assert started["project_root"] == str(project_root.resolve())
-    assert started["workspace_root"] == str(workspace_root.resolve())
-    assert states
+    assert popen_kwargs[0]["start_new_session"] is False

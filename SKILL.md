@@ -11,7 +11,7 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 
 ## 前端优先启动与交互路由（每次触发首先执行）
 
-1. 完整读取本文件后先启动或恢复交互页面。Windows 上必须以宿主提供的已授权桌面权限运行 `scripts/start-managed-workbench.ps1`，不能从 Codex 沙箱身份直接启动；启动结果只核对 `launcher_runtime_identity` 与 `runtime_identity` 的 SID 和登录会话相同。`remote_drive_letters` 仅作诊断展示：本机已保存图片源只是配置页历史预填项，不得把其盘符可见性作为工作台启动条件。用户提交配置页时，才检测页面中本次最终填写的图片源。服务显示 `healthy` 但桌面身份不符时，立即停止该精确 session 的服务并用桌面权限恢复，不得让用户反复点击图片重试。真正读取图片时使用项目自带的跨平台一次性素材执行器：用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动请求操作系统桌面会话启动它；用户不运行终端命令。Windows 必须通过同一普通桌面身份启动，以继承本次所选路径需要的映射；macOS/Linux 使用当前登录用户挂载。执行器只按 `source_id + relative_path` 读取本机绑定，处理当前任务后退出，不安装系统服务、不保存 NAS 凭据。只有最终选图提交才触发 Codex handoff。
+1. 完整读取本文件后先启动或恢复交互页面。Windows 上必须以宿主提供的已授权桌面权限运行 `scripts/start-managed-workbench.ps1`，不能从 Codex 沙箱身份直接启动；启动结果只核对 `launcher_runtime_identity` 与 `runtime_identity` 的 SID 和登录会话相同。`remote_drive_letters` 仅作诊断展示：本机已保存图片源只是配置页历史预填项，不得把其盘符可见性作为工作台启动条件。用户提交配置页时，才检测页面中本次最终填写的图片源。服务显示 `healthy` 但桌面身份不符时，立即停止该精确 session 的服务并用桌面权限恢复，不得让用户反复点击图片重试。真正读取图片时使用项目自带的 Windows 一次性素材执行器：用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动请求 Windows 桌面会话启动它；用户不运行终端命令。执行器必须通过同一普通桌面身份启动，以继承本次所选路径需要的映射；只按 `source_id + relative_path` 读取本机绑定，处理当前任务后退出，不安装系统服务、不保存 NAS 凭据。只有最终选图提交才触发 Codex handoff。
 2. 启动成功后，优先用 Codex 内置浏览器打开 JSON 中的精确 `url`。内置浏览器不可用时才传 `-OpenSystemBrowser` 或把 URL 交给用户。浏览器失败不等于服务失败。
    每次在聊天中提醒用户执行任何交互操作前，必须先从本次启动结果或
    `tmall-materials ui-status --runs-root <精确 runs-root> --session <精确 session-id>`
@@ -45,9 +45,7 @@ tmall-materials ui-restart --runs-root <runs-root> --session <session-id>
 tmall-materials ui-stop --runs-root <runs-root> --session <session-id>
 ```
 
-macOS/Linux 新任务使用 `./scripts/start-managed-workbench.sh`；恢复时追加
-`--runs-root "<精确 runs-root>" --session "<session-id>"`。固定脚本必须从当前 Plugin
-版本目录执行，以把真实 Plugin 根目录显式传给用户级运行环境和托管子进程。
+固定脚本必须从当前 Plugin 版本目录执行，以把真实 Plugin 根目录显式传给用户级运行环境和托管子进程。
 
 `tmall-materials interact` 只用于前台调试，不是日常入口。完整原因码、字段路由、聊天降级信封和跨电脑约束见 [frontend-interaction-contract.md](references/frontend-interaction-contract.md)；长命令见 [operations-guide.md](references/operations-guide.md)。
 
@@ -93,7 +91,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 把“运行环境准备”和“阶段 1 业务配置”严格分开：
 
-1. 启动前只检查运行条件：当前 Plugin 目录、用户级可写运行环境，或用于创建环境的 `uv`。不得要求只读 Plugin 安装缓存中预先存在 `.venv`。Windows 使用 `scripts/bootstrap.cmd`，macOS/Linux 使用 `scripts/bootstrap.sh`；脚本在用户数据目录准备 Python 3.11、锁定依赖、虚拟环境和缓存。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
+1. 启动前只检查运行条件：当前 Plugin 目录、用户级可写运行环境，或用于创建环境的 `uv`。不得要求只读 Plugin 安装缓存中预先存在 `.venv`。Windows 使用 `scripts/bootstrap.cmd` 在用户数据目录准备 Python 3.11、锁定依赖、虚拟环境和缓存。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
 2. 不得在配置页启动前通过聊天索取店铺名、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
 3. 日常素材任务先通过 `scripts/start-managed-workbench.ps1` 在实际桌面用户会话创建或恢复时间戳会话；Windows 中 Agent 必须为该固定脚本请求宿主桌面权限，并在启动 JSON 中验证 SID 和登录会话，不能把沙箱用户的同会话进程误当成 Explorer 桌面身份。可见网络盘只用于诊断，不得根据历史本机配置阻止配置页启动。只有已经明确不使用图片源、NAS、映射盘和原生目录窗口时才可使用 `scripts/start-ui.cmd`。`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
 4. 让用户在阶段 1 配置页填写并确认店铺和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
@@ -200,13 +198,11 @@ handoff 与 processing claim。分页采集在每页读取前、完整页 checkp
 最后完整页继续。不得自动操作或绕过滑块，也不得索取或保存登录凭据；仅当 Worker 已
 确认退出时才使用原有恢复入口，不要求用户重新填写业务数据。
 
-日常命令必须通过当前 Plugin 目录中的 `scripts\run-plugin.cmd`（Windows）或
-`./scripts/run-plugin.sh`（macOS/Linux）执行；本文中的 `tmall-materials ...` 仅是
+日常命令必须通过当前 Plugin 目录中的 `scripts\run-plugin.cmd` 执行；本文中的 `tmall-materials ...` 仅是
 CLI 语义简写，不代表用户级环境中安装了一份业务包。启动器使用用户级 `.venv` 的
 Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代码，且不得通过
 `uv run` 触发隐式同步。默认运行根位于 Windows `%LOCALAPPDATA%\tmall-search-materials\runtime`
-或 macOS/Linux `~/.local/state/tmall-search-materials/runtime`，可用
-`TMALL_RUNTIME_ROOT` 覆盖。依赖缓存和环境指纹只由 bootstrap 脚本准备；恢复采集
+，可用 `TMALL_RUNTIME_ROOT` 覆盖。依赖缓存和环境指纹只由 bootstrap 脚本准备；恢复采集
 不得下载或解析依赖，也不得向 Plugin 安装缓存写入环境或运行数据。
 
 只有现有维护链路持久化了可复现的选择器、导航、弹窗、解析、分页或页面状态错误
@@ -230,7 +226,7 @@ Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代
 内部结构化状态，只能由文件夹与选图业务控件自动维护；不得向用户展示原始字段或 JSON
 文本框。隐藏这些技术控件不得改变草稿恢复、自动保存、校验或 handoff 内容。
 
-4. “素材匹配”是同一阶段内的两步流程。`folder_review` 页面展示目录元数据；文件夹列表下方、候选图片上方的“确认文件夹并加载图片”保存决定、创建 `queued` gallery job，并自动启动一次性素材执行器，不经过通用阶段提交处理器、不创建 handoff、不领取 Agent 租约，也不需要在聊天回复“已提交”。Windows 启动必须委托给现有 Explorer shell，不能直接从 UI/Codex 创建继承其令牌的子进程；macOS/Linux 可直接创建脱离页面生命周期的当前用户进程。执行器认领任务后，使用当前电脑 `config/local-paths.json` 中相同 `source_id` 的本机根目录拼接已校验的 `relative_path`，再枚举图片、回填递归素材数、生成预览与候选；业务数据不得依赖盘符、RaiDrive 虚拟 UNC 或 `/Volumes/...` 绝对路径。Windows 的 Y:/Z:、macOS 的 `/Volumes/...` 可以绑定同一 source ID。旧索引可在执行器中用绝对路径做一次兼容识别，新索引和新决定必须使用稳定标识。`folder_review` 和 `gallery_preparing` 时页面底部不得再显示阶段提交按钮。选图页原位置按钮为“确认选图并提交给 Codex”；单图勾选已完成保留原格式的预裁剪并缓存能力，提交按钮只复核缓存身份、重复项、每商品至少 3 张以及共同可行比例，然后创建 `final_material_selection` handoff。Codex 使用 `process-final-material-handoff --runs-root ... --session ...` 校验最终素材包并继续确定性坑位编排，不重新扫描文件夹。采用文件夹不等于采用图片，刷新页面不得自动保存或增加 revision。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；运行中分别显示发现路径、计划检查、已检查、检查失败、内容重复、最终候选和待处理数量，完成后最终候选必须等于已检查减内容重复。结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。旧会话缺少新计数字段时只显示“历史进度口径”，不得从旧 `prepared_count` 猜测最终候选数。
+4. “素材匹配”是同一阶段内的两步流程。`folder_review` 页面展示目录元数据；文件夹列表下方、候选图片上方的“确认文件夹并加载图片”保存决定、创建 `queued` gallery job，并自动启动一次性素材执行器，不经过通用阶段提交处理器、不创建 handoff、不领取 Agent 租约，也不需要在聊天回复“已提交”。启动必须委托给现有 Explorer shell，不能直接从 UI/Codex 创建继承其令牌的子进程。执行器认领任务后，使用当前电脑 `config/local-paths.json` 中相同 `source_id` 的本机根目录拼接已校验的 `relative_path`，再枚举图片、回填递归素材数、生成预览与候选；业务数据不得依赖固定盘符或 RaiDrive 虚拟 UNC 绝对路径。不同电脑的盘符或 UNC 可以绑定同一 source ID。旧索引可在执行器中用绝对路径做一次兼容识别，新索引和新决定必须使用稳定标识。`folder_review` 和 `gallery_preparing` 时页面底部不得再显示阶段提交按钮。选图页原位置按钮为“确认选图并提交给 Codex”；单图勾选已完成保留原格式的预裁剪并缓存能力，提交按钮只复核缓存身份、重复项、每商品至少 3 张以及共同可行比例，然后创建 `final_material_selection` handoff。Codex 使用 `process-final-material-handoff --runs-root ... --session ...` 校验最终素材包并继续确定性坑位编排，不重新扫描文件夹。采用文件夹不等于采用图片，刷新页面不得自动保存或增加 revision。候选上限按商品独立计算为 100 张；发现 1–100 张唯一图片路径时全部进入准备窗口，超过 100 张时先为每个非空采用文件夹分配 1 张，再按各文件夹剩余唯一图片数比例分配余量。若单商品非空文件夹超过 100 个，仍保持 100 张上限，使用确定性分配并明确报告无法完整覆盖的文件夹。每个采用文件夹都保留发现数、基础名额、比例余量、抽样数和零名额原因。系统以当前任务、商品、稳定文件夹身份和策略版本执行任务内稳定伪随机抽样；同一任务输入不变时结果不变，新任务可重新抽样。页面每批最多显示 30 张，超过 30 张时启用“换一批”，最后一批按实际余数显示。只对抽中的最多 100 张读取尺寸、校验、计算 SHA-256 和生成预览；运行中分别显示发现路径、计划检查、已检查、检查失败、内容重复、最终候选和待处理数量，完成后最终候选必须等于已检查减内容重复。结果写入当前任务的 `confirmed-gallery.json`，不得建立全量图片数据库。旧会话缺少新计数字段时只显示“历史进度口径”，不得从旧 `prepared_count` 猜测最终候选数。
    页面计数必须使用三个固定名称：点击前为“文件夹内素材（递归统计）”，点击后为“本轮进入候选检查”和“最终可选素材”；不得再用含义不明的“已准备”混合原始路径数、计划检查数和最终候选数。检查成功数不包含检查失败，最终可选素材等于检查成功减内容重复。
 5. 人工审查并排除错误的完整名称候选、同货号不同名称文件夹，再逐文件选择本次采用素材；采用图片时同步生成本次授权。文件夹自身名称中的完整 SKU 可为 `matched_unlicensed`；历史 `pending` 文件夹按默认采用读取，新提交不得继续保存 `pending`。
 6. 搜推素材实时采集完成后，运行 `tmall-materials inspect-completeness --products <商品表> --promotion-status <promotion-material-status.csv> --output <任务目录>/02-completeness/completeness-matrix.json`。只有“搜推高价值”采集结果中的商品进入第二阶段，商品表只补充名称和货号，不得扩展商品范围。把 JSON 写入当前 revision 的 `result.json.data`，页面展示搜推素材目标/已有/缺失篇数、候选素材状态和后台证据。用户可搜索、筛选、逐项或批量选择商品；提交后从 `02-completeness/input.json.values.selected_product_ids` 读取下阶段商品范围，禁止要求用户直接编辑 JSON。
@@ -267,11 +263,10 @@ Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代
 7. 正式图片上传必须使用项目内 `browser/qianniu_upload.py` 中从 PlaywrightAuto 迁移的千牛搜推流程：精确搜索商品 ID、定位批准的 1-based 空坑位、进入“发图文”跨域表单、把批准的最终图片以 `publish-<SHA前缀>-<随机后缀>.<扩展名>` 短唯一名称上传到素材库、按该名称唯一选中、核对选择数量，再填写已批准标题和正文。正文编辑器须兼容普通 textarea/contenteditable 与 `textarea[data-cangjie-dockey]`。最终按钮优先按千牛发布专用语义 `data-autolog*=publisher_ok_clk` 唯一定位；只有明确“提交发布/发布”文字才可作为兼容入口，禁止按通用“确认/确定”文字点击。发布前保存该商品全部既有 `CopyId_value` 集合；点击一次后重新读取同商品，只有旧集合完整保留且恰好新增一个 ID 才记录成功。千牛会把新素材前插，禁止按原 1-based 位置推断新远端 ID。出现二次确认、点击超时、基线变化或新增 ID 不唯一时进入 `publish_uncertain` 并暂停批次。PlaywrightAuto 目录只作为迁移来源，生产运行不得依赖该外部目录。
 8. 上传中断后运行 `tmall-materials resume`；已有远端证据的任务不会重复上传。使用 `tmall-materials report` 重新生成中文报告。
 
-运行当前 Plugin 的 `scripts\run-plugin.cmd --help`（Windows）或
-`./scripts/run-plugin.sh --help`（macOS/Linux）查看参数。用户级 `.venv` 只安装
+运行当前 Plugin 的 `scripts\run-plugin.cmd --help` 查看参数。用户级 `.venv` 只安装
 Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_search_materials`
 业务包；Plugin 更新后的业务代码和页面资源因此无需再次 bootstrap 即可生效。
-所有命令从本 Plugin 目录执行；首次使用 Windows 运行 `scripts/bootstrap.cmd`，macOS/Linux 运行 `scripts/bootstrap.sh`。启动器支持官方源及显式选择的 HTTPS 镜像、用户级缓存、Python 3.11 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
+所有命令从本 Plugin 目录执行；首次使用运行 `scripts/bootstrap.cmd`。启动器支持官方源及显式选择的 HTTPS 镜像、用户级缓存、Python 3.11 和锁文件一致性检查；只有开发测试才传 `-WithTests`，只有明确切换锁文件来源才传 `-UpdateLock`。
 
 首次使用先按 [operations-guide.md](references/operations-guide.md) 完成安装、CDP 浏览器启动和六阶段命令。所有时间参数必须是带时区的 ISO 8601。
 
@@ -293,7 +288,7 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 
 恢复已有 `session_id` 时，页面必须先读取 `session.json` 状态并直接进入有效的 `current_stage`，同时一次性显示全部阶段的真实状态。只打开、刷新、水合图片决定或构建默认坑位不得标记 dirty、自动保存或增加 revision。草稿保存进行中收到“提交给 Agent”时必须明确显示已排队，并在保存成功后使用最新 revision 继续提交；失败或阶段切换时必须明确暂停或取消，禁止静默丢弃点击。查看已完成阶段时显示锁定原因和“进入当前阶段”，不得重新启用写入。
 
-图片源行提供“选择文件夹”，仅由用户点击后通过已验证桌面身份打开本机原生目录窗口并回填完整路径。Windows 使用单实例 STA 助手及 request ID、ownership token、PID 身份和私有结果通道；macOS 使用单实例、限时的系统 AppleScript `choose folder` 对话框。两端都必须区分选择、取消、启动失败、GUI 不可用、超时和无效返回，并保留原输入及手工填写兜底。Windows 窗口无法证明可见时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper。手工输入继续用于 UNC、远程或无界面环境。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
+图片源行提供“选择文件夹”，仅由用户点击后通过已验证 Windows 桌面身份打开本机原生目录窗口并回填完整路径。选择器使用单实例 STA 助手及 request ID、ownership token、PID 身份和私有结果通道，必须区分选择、取消、启动失败、GUI 不可用、超时和无效返回，并保留原输入及手工填写兜底。窗口无法证明可见时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper。手工输入继续用于 UNC、远程或无界面环境。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给 Agent”。
 
 页面无有效等待租约时显示“在当前聊天输入已提交”。同一聊天已有唯一 session 绑定时，
 该短语只触发幂等状态解析；新聊天或绑定不明确时仍要求粘贴页面的完整恢复指令。
@@ -309,9 +304,9 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 
 - 不得把用户名、桌面绝对路径或某台电脑的盘符写入 Skill 逻辑。启动时按 `--config`、`TMALL_CONFIG_FILE`、用户数据目录 `config/runtime.json`、旧版项目内 `config/local-paths.json` 的顺序读取本机配置；本机配置不得提交到仓库。
 - 未显式配置商品表或规则表时，从程序包的 `src/upload_search_materials/docs/` 分别按 `天猫商品信息表*产品数据表*数据总表.csv` 和 `天猫商品信息表*每月推品规则*Grid View.csv` 查找。仅唯一命中时自动采用；零命中标记 `missing`，多命中标记 `ambiguous`，不得猜测最新文件。
-- 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符、UNC 或 macOS 挂载点只保存到用户数据目录的每机 `config/runtime.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台电脑可把同一 source ID 绑定到不同本机路径，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:` 或相同 `/Volumes` 名称。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。必须至少配置 1 个名称与路径均非空且不重复的来源。
+- 共享图片目录从前端配置页读取，并以稳定 `source_id + label` 引用；实际盘符或 UNC 只保存到用户数据目录的每机 `config/runtime.json`。旧的 `label + path` 配置读取时自动补稳定 source ID；另一台 Windows 电脑可把同一 source ID 绑定到不同本机路径，无需修改项目文件或阶段业务数据。不得扫描盘符或假设所有电脑都映射为 `Y:`、`Z:`。可选保存 canonical UNC 建议和最后验证身份/时间，但不得保存凭据、目录清单或图片内容。必须至少配置 1 个名称与路径均非空且不重复的来源。
 - NAS 原图只能由素材执行器读取。页面通过 `gallery-job.json` 排队并自动请求桌面启动；执行器必须在能访问本机挂载的用户会话中运行，校验 source ID 和相对路径，拒绝绝对路径、盘符、`..` 与目录逃逸，只把任务所需预览和校验元数据写回会话目录。每个按钮任务启动一个一次性进程，任务结束即退出，不注册系统服务。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；挂载不可用返回 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并保留用户决定。手工 PowerShell/shell 启动脚本只用于开发诊断，不得作为日常用户步骤。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限。
-- 公司 NAS 共享定义从 `config/nas-sources.yaml` 读取。状态检测必须只读；未挂载时只有用户在配置页明确点击“连接 NAS”，才可打开 Finder/Explorer 的系统 SMB 连接界面并等待用户自行认证。该辅助动作不等于静默挂载，不得携带、读取或保存凭据。当前共享、允许子目录和诊断命令见 [nas-sources.md](references/nas-sources.md)。
+- 公司 NAS 共享定义从 `config/nas-sources.yaml` 读取。状态检测必须只读；未连接时只有用户在配置页明确点击“连接 NAS”，才可打开 Explorer 的系统 SMB 连接界面并等待用户自行认证。该辅助动作不等于静默挂载，不得携带、读取或保存凭据。当前共享、允许子目录和诊断命令见 [nas-sources.md](references/nas-sources.md)。
 - `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用用户数据目录下的 `runs/`。所有任务继续按时间戳目录隔离，不写入 Plugin 安装缓存。
 - 团队快照根路径优先使用 `TMALL_TEAM_FOLDER_INDEX_ROOT`，其次使用本机配置的 `team_folder_index_root`；NAS 身份使用 `team_folder_index_nas_source_id`。本机物化缓存路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用 `folder_index_root`，默认使用用户数据目录下的 `cache/folder-index/`。两者都不属于任何时间戳任务；任务只保存当前商品候选快照。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。

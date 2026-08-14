@@ -164,7 +164,7 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 - `decision`：`confirmed` 或 `rejected`；未处理项不写入决定数组。
 - `note`：可选人工说明。
 
-最终采用决定可以驱动后续按需图片枚举；保存决定本身不读取图片。`rejected` 只排除其绑定的 `folder_id + product_id`，但必须立即从画廊移除对应候选并同步清理其采用和授权记录，不得推进阶段。素材匹配阶段保存文件夹决定时，页面创建 `status=queued` 的 gallery job，并自动请求操作系统桌面启动一次性执行器。Windows 启动通道为现有 Explorer shell，避免继承 UI/Codex 看不到映射盘的令牌；macOS/Linux 使用当前登录用户。执行器使用每机配置解析 source ID，并在读取前拒绝绝对相对路径、`..` 和目录逃逸。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；不可访问时记录 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并允许页面重试，不得创建 Codex handoff，也不得把文件夹决定误报为 validation failed。
+最终采用决定可以驱动后续按需图片枚举；保存决定本身不读取图片。`rejected` 只排除其绑定的 `folder_id + product_id`，但必须立即从画廊移除对应候选并同步清理其采用和授权记录，不得推进阶段。素材匹配阶段保存文件夹决定时，页面创建 `status=queued` 的 gallery job，并自动请求 Windows 桌面启动一次性执行器。启动通道为现有 Explorer shell，避免继承 UI/Codex 看不到映射盘的令牌。执行器使用每机配置解析 source ID，并在读取前拒绝绝对相对路径、`..` 和目录逃逸。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；不可访问时记录 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并允许页面重试，不得创建 Codex handoff，也不得把文件夹决定误报为 validation failed。
 
 ## Asset Record
 

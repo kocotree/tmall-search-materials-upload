@@ -28,18 +28,12 @@ $quickValidate = Join-Path $env:USERPROFILE ".codex\skills\.system\skill-creator
 uv run python -X utf8 $quickValidate .
 ```
 
-macOS/Linux 使用：
-
-```bash
-./scripts/bootstrap.sh
-```
-
 `uv` 根据 `.python-version` 使用 Python 3.11，并依据 `uv.lock` 在用户数据目录创建或同步独立 `.venv`。该环境只保存 Python 和第三方依赖，不安装 Plugin 自身的 `upload_search_materials` 业务包。所有启动器都用这个 Python 执行当前 Plugin 目录的 `scripts/run-plugin.py`，因此页面、Worker 和素材执行器始终加载同一版本的 `src/`。若本机没有 Python 3.11，bootstrap 会通过 `uv` 安装受管解释器。首次准备需要网络访问；不要向系统 Python、Plugin 安装缓存或 Conda 基础环境直接安装依赖。
 
 环境检查是启动配置页前唯一允许的阻断。用户级依赖环境和当前 Plugin 启动器均就绪时直接启动页面；否则准备 `uv` 并同步依赖。不得以 Plugin 缓存目录中缺少 `.venv` 或缓存目录不可写为失败依据。此时不得要求用户在聊天中提供店铺名、月份或图片根目录，也不得把这些阶段 1 字段与环境安装合并成一个前置问题。
 
-文档中的 `tmall-materials ...` 表示 CLI 子命令。安装后的实际调用入口是 Windows
-`scripts\run-plugin.cmd ...` 或 macOS/Linux `./scripts/run-plugin.sh ...`；`uv run`
+文档中的 `tmall-materials ...` 表示 CLI 子命令。安装后的实际调用入口是
+`scripts\run-plugin.cmd ...`；`uv run`
 只用于开发测试，不用于已安装 Plugin 的日常任务。
 
 如果电脑已有兼容的 Python 3.11 或 3.12，可显式传入路径，避免 `uv` 自动下载解释器：
@@ -48,7 +42,7 @@ macOS/Linux 使用：
 .\scripts\bootstrap.cmd -Python "<python.exe>" -Mirror official -WithTests
 ```
 
-网络受限时可把 `-Mirror` 改为 `tuna`、`aliyun` 或 `tencent`。镜像选择会影响 `uv.lock` 的依赖来源；只有明确切换锁文件来源时才传 `-UpdateLock`，并在提交前复核锁文件差异。公开仓库默认保留 `official`，不在源码或配置中保存镜像凭证。脚本使用用户数据目录中的 runtime、uv-cache 和系统证书。默认位置为 Windows `%LOCALAPPDATA%\tmall-search-materials`，macOS/Linux `~/.local/state/tmall-search-materials`；可分别用 `TMALL_USER_DATA_ROOT` 和 `TMALL_RUNTIME_ROOT` 覆盖。
+网络受限时可把 `-Mirror` 改为 `tuna`、`aliyun` 或 `tencent`。镜像选择会影响 `uv.lock` 的依赖来源；只有明确切换锁文件来源时才传 `-UpdateLock`，并在提交前复核锁文件差异。公开仓库默认保留 `official`，不在源码或配置中保存镜像凭证。脚本使用用户数据目录中的 runtime、uv-cache 和系统证书。默认位置为 `%LOCALAPPDATA%\tmall-search-materials`；可分别用 `TMALL_USER_DATA_ROOT` 和 `TMALL_RUNTIME_ROOT` 覆盖。
 
 ### 1.1 每台电脑只配置一次路径
 
@@ -104,30 +98,14 @@ cd .\upload-search-materials
   -Config ".\config\local-paths.json"
 ```
 
-macOS 使用同一个结构化桌面入口；它把本地 UI 服务提交给当前登录用户的
-`launchd`，因此启动命令返回或 Codex 工具回合结束后服务仍保持可用。job 只监听
-`127.0.0.1`，状态文件保存唯一 label、PID 和 ownership token；`ui-stop` / `ui-restart`
-仍须先通过精确 session 和 ownership 校验：
-
-```bash
-./scripts/start-managed-workbench.sh \
-  --port-start 8765 \
-  --port-end 8795
-```
-
-新任务省略 `--runs-root`，默认使用用户数据目录中的稳定 `runs/`（macOS/Linux 默认为
-`~/.local/state/tmall-search-materials/runs`，Windows 默认为
-`%LOCALAPPDATA%\tmall-search-materials\runs`），不得写入 Plugin 安装目录或版本缓存。
+新任务省略 `--runs-root`，默认使用用户数据目录中的稳定 `runs/`
+（`%LOCALAPPDATA%\tmall-search-materials\runs`），不得写入 Plugin 安装目录或版本缓存。
 恢复已有任务时才传启动结果或恢复指令记录的精确 `--runs-root` 与 `--session`。
 启动器会把当前 Plugin 根目录和运行时工作区显式传给托管子进程；不得依赖
-`launchd`、当前工作目录或 Plugin 缓存软链接推断配置位置。
+当前工作目录或 Plugin 缓存链接推断配置位置。恢复已有任务时增加
+`-Session "<精确 session_id>"`；不得按目录时间猜测会话。
 
-macOS 的托管 job 只继承运行所需的路径、区域设置和代码中显式列出的本机配置变量，
-不按变量名前缀复制宿主环境，也不保存 NAS 凭据、Cookie 或 Token。恢复已有任务时
-增加 `--session "<精确 session_id>"`；不得按目录时间猜测会话。Linux 继续使用普通
-POSIX 脱离进程路径。
-
-用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动启动一次性素材执行器，不需要另开终端。Windows 通过现有 Explorer shell 的普通桌面令牌启动，以继承 RaiDrive/Y:/Z:；macOS/Linux 使用当前登录用户挂载。执行器按 `source_id + relative_path` 绑定当前电脑的根目录，处理任务后立即退出，不安装系统服务。`start-material-executor.ps1` 和 `start-material-executor.sh` 仅用于开发诊断。
+用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动启动一次性素材执行器，不需要另开终端。执行器通过现有 Explorer shell 的普通桌面令牌启动，以继承 RaiDrive、映射盘或 UNC 会话；按 `source_id + relative_path` 绑定当前电脑的根目录，处理任务后立即退出，不安装系统服务。`start-material-executor.ps1` 仅用于开发诊断。
 
 Windows 中由 Codex 启动上述工作台时，必须为固定的
 `start-managed-workbench.ps1` 请求宿主桌面权限。启动返回后核对
@@ -233,7 +211,7 @@ handoff；它们只返回 `SPECIALIZED_PROCESSOR_REQUIRED` 和上述唯一入口
 
 ## 3.2 默认：确认文件夹后按需准备候选
 
-正常的 1–3 商品试跑不建立全量图片索引。用户确认文件夹后，页面把当前 `source_id + relative_path` 决定写入 `input.json`、创建 `queued` gallery job，并自动请求操作系统桌面启动一次性素材执行器。执行器把 source ID 绑定到本机盘符、UNC 或 macOS `/Volumes/...` 根目录后生成任务级候选清单。Windows 不得直接继承 UI/Codex 令牌，而必须委托 Explorer 启动。页面服务和 Codex 都不直接读取 NAS。加载失败时在页面点击“重试加载图片”，页面会自动启动新的 attempt；旧 attempt 保留供审计。
+正常的 1–3 商品试跑不建立全量图片索引。用户确认文件夹后，页面把当前 `source_id + relative_path` 决定写入 `input.json`、创建 `queued` gallery job，并自动请求 Windows 桌面启动一次性素材执行器。执行器把 source ID 绑定到本机盘符或 UNC 根目录后生成任务级候选清单；不得直接继承 UI/Codex 令牌，而必须委托 Explorer 启动。页面服务和 Codex 都不直接读取 NAS。加载失败时在页面点击“重试加载图片”，页面会自动启动新的 attempt；旧 attempt 保留供审计。
 
 用户完成选图并点击“确认选图并提交给 Codex”后，Codex 只处理最终素材交接：
 
@@ -405,9 +383,8 @@ SHA、店铺、attempt、CSV SHA、行数、唯一商品 ID 和最后完成页�
 才用 Playwright 检查真实 DOM；修复现有 selector profile 或 collector、增加回归
 测试，再重跑原 `process-setup`/`supplement`。不要把诊断脚本保留为第二条生产路径。
 
-日常启动和恢复调用当前 Plugin 的 `scripts\run-plugin.cmd` 或
-`./scripts/run-plugin.sh`，不使用 `uv run`。Windows 的 `scripts/bootstrap.cmd` 与
-macOS/Linux 的 `scripts/bootstrap.sh` 只是依赖同步入口，使用用户级 uv-cache 并写入
+日常启动和恢复调用当前 Plugin 的 `scripts\run-plugin.cmd`，不使用 `uv run`。
+`scripts/bootstrap.cmd` 是依赖同步入口，使用用户级 uv-cache 并写入
 或校验环境指纹；业务代码只从当前 Plugin 加载。已有环境的采集恢复不会解析或下载包，
 也不会向 Plugin 安装缓存写入数据。
 
