@@ -63,6 +63,22 @@ def test_normal_workbench_flow_does_not_request_duplicate_host_approval():
     assert "without chat or command approval prompts" in entry_agent
 
 
+def test_normal_workbench_flow_forbids_source_rediscovery_until_diagnostic_error():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    entry = (
+        SKILL_ROOT / "skills" / "upload-search-materials" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    contract = (
+        SKILL_ROOT / "references" / "frontend-interaction-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "正常流程禁止源码研究" in skill
+    assert "handoff_status.handoff_identity" in skill
+    assert "不得搜索或阅读项目源码" in entry
+    assert "不得用 CodeGraph、`rg`、`Get-Content`" in contract
+    assert "agent-diagnostics/current.json" in contract
+
+
 def test_operations_guide_keeps_environment_and_setup_inputs_separate():
     guide = (SKILL_ROOT / "references" / "operations-guide.md").read_text(
         encoding="utf-8"

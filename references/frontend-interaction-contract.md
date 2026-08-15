@@ -25,6 +25,14 @@
 - 首次运行缺少固定桌面入口权限时，只允许一次范围精确的 `SYSTEM_PERMISSION_REQUIRED` 环境准备。新 NAS/新位置访问、认证或映射盘、刷新已有共享索引、源素材写删改、运行环境修复、临时诊断旁路、选择器/代码修改和 `publish_uncertain` 后重新发布，属于需要新增权限的异常路径。
 - 宿主强制策略不可由 Skill 绕过。固定入口被阻止时返回稳定原因码，不得用临时 PowerShell 或连续审批卡绕行。
 
+## 正常流程与源码诊断边界
+
+- stage `status` 和 `agent-wait` 响应必须在 handoff 准备后返回 `handoff_status.handoff_identity`，其中只包含经过服务端复核的 `session_id`、`stage_id`、`revision`、`input_sha256`、`handoff_kind`、`allowed_action`、`transport` 及固定 endpoint。Agent 不再从运行目录或源码推导这些字段。
+- `agent-wait` 的 `create`/`renew` 支持 `wait_seconds=0..30`。它在同一 HTTP 响应内做有界等待；未提交时返回当前租约，已提交时同时返回精确 handoff 身份。正常等待不得再使用多轮 `sleep`、终端状态查询或目录轮询。
+- 工作台与正式处理器健康时，不得用 CodeGraph、`rg`、`Get-Content` 或其他方式搜索/阅读项目源码，不得枚举 Plugin 目录、版本缓存、runs 目录，不得直接读取 `handoff.json`、`input.json`、锁文件或进程文件，也不得重新发现已经在契约中声明的路由和命令。
+- 浏览器宿主不提供同源请求原语时直接记录 `WORKBENCH_AGENT_API_UNAVAILABLE`，按 canonical Skill 使用一次已声明的固定 CLI 降级。禁止依次试探 `fetch`、`window.fetch`、XHR、页面脚本和后端路由；传输降级本身不授权源码研究。
+- 只有固定 API/处理器返回稳定异常原因码，且当前 revision 已生成状态为 `open` 的 `agent-diagnostics/current.json`，才允许研究源码。Agent 先运行 `diagnose-session` 取得失败 phase、processor、证据和原幂等重试入口，再只检查该处理器及其直接调用链。登录、人机验证、等待超时、业务校验退回以及上述 API→CLI 降级不属于源码异常。
+
 ## 采集运行环境与两窗口边界
 
 阶段一页面必须优先承载生产选择器 profile 的路径、验证状态和保存动作，并展示 CDP
@@ -56,7 +64,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 
 未声明的结构化业务字段默认是 `frontend_required`。页面健康且支持字段时，Agent 不得在聊天中索取同一数据。
 
-工作台正常业务动作使用以下同源接口：stage `status`、`agent-wait`，以及 `/api/sessions/<session_id>/agent-actions/{process-setup|process-product-selection|process-final-material-handoff}`。处理动作请求必须携带权威输入的 revision 与 SHA-256；动作集合固定，不能透传 shell、脚本路径或任意参数。Codex 内置浏览器已打开当前工作台时直接执行这些同源请求，不触发终端命令审批。
+工作台正常业务动作使用以下同源接口：stage `status`、`agent-wait`，以及 `/api/sessions/<session_id>/agent-actions/{process-setup|process-product-selection|process-final-material-handoff}`。处理动作请求必须携带 `handoff_status.handoff_identity` 返回的 revision 与 SHA-256；动作集合固定，不能透传 shell、脚本路径或任意参数。Codex 内置浏览器已打开当前工作台且具备请求原语时直接执行这些同源请求，不触发终端命令审批；宿主明确缺少该原语时执行一次固定 CLI 降级，不做能力试探或源码研究。
 
 | 阶段/动作 | 页面组件 | 默认策略 | 允许的聊天降级 |
 |---|---|---|---|
@@ -135,7 +143,8 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 # 等待租约和聊天恢复
 
 - `agent_wait` 是最长 30 秒的在线心跳租约，绑定 session、stage、预期 revision 和
-  独立 `budget_expires_at`；同一 waiter 在 10–15 秒片段间续租同一 wait ID。setup
+  独立 `budget_expires_at`；`create`/`renew` 可用 `wait_seconds=0..30` 在同一响应内
+  有界等待 handoff 并返回 `handoff_identity`。同一 waiter 在片段间续租同一 wait ID。setup
   默认总预算为两分钟。它与 `processing_claim` 分离，不能授权任何业务动作。
 - 页面只在服务端租约有效时显示“Codex 在线”，并把心跳剩余与单调递减的总等待剩余
   分开呈现。正常超时、错误、阶段变化和成功认领必须清理匹配租约。租约过期且 handoff 已

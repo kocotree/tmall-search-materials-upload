@@ -41,6 +41,11 @@ STAGE_STATUSES = frozenset(
 )
 STAGE_TRANSACTION_SCHEMA_VERSION = 1
 PERSISTENCE_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}")
+HANDOFF_AGENT_ACTIONS = {
+    "setup": ("process-setup", "workbench_api"),
+    "completeness": ("process-product-selection", "workbench_api"),
+    "approval": ("process-publish-authorization", "plugin_cli"),
+}
 
 
 class InteractionPathError(ValueError):
@@ -1236,6 +1241,7 @@ class SessionStore:
                 "stage_id": resolved_stage,
                 "revision": state["stages"][resolved_stage]["revision"],
                 "agent_wait": None,
+                "handoff_identity": None,
                 "resume_prompt": None,
             }
         try:
@@ -1249,6 +1255,7 @@ class SessionStore:
                 "stage_id": resolved_stage,
                 "revision": state["stages"][resolved_stage]["revision"],
                 "agent_wait": self.agent_wait(session_id, resolved_stage),
+                "handoff_identity": None,
                 "resume_prompt": None,
             }
         wait = self.agent_wait(session_id, resolved["stage_id"])
@@ -1263,6 +1270,9 @@ class SessionStore:
             wait is None or wait.get("expired")
         ):
             prompt = "Codex 当前未监听；请在当前聊天输入“已提交”继续。"
+        handoff_identity = None
+        if base_status == "ready" and isinstance(resolved.get("handoff"), dict):
+            handoff_identity = self._handoff_action_identity(resolved["handoff"])
         return {
             "status": display_status,
             "base_status": base_status,
@@ -1270,8 +1280,40 @@ class SessionStore:
             "stage_id": resolved["stage_id"],
             "revision": resolved["revision"],
             "agent_wait": wait,
+            "handoff_identity": handoff_identity,
             "resume_prompt": prompt,
         }
+
+    @staticmethod
+    def _handoff_action_identity(handoff: dict[str, Any]) -> dict[str, Any] | None:
+        """Return only the verified identity needed for the next fixed processor."""
+
+        stage_id = str(handoff.get("stage_id", ""))
+        handoff_kind = str(handoff.get("handoff_kind", ""))
+        action_contract = HANDOFF_AGENT_ACTIONS.get(stage_id)
+        if stage_id == "asset_matching" and handoff_kind == "final_material_selection":
+            action_contract = ("process-final-material-handoff", "workbench_api")
+        if stage_id == "approval" and handoff_kind != "publish_authorization":
+            action_contract = None
+        if action_contract is None:
+            return None
+        allowed_action, transport = action_contract
+        identity = {
+            "session_id": str(handoff.get("session_id", "")),
+            "stage_id": stage_id,
+            "revision": int(handoff["revision"]),
+            "input_sha256": str(handoff["input_sha256"]),
+            "handoff_kind": handoff_kind,
+            "allowed_action": allowed_action,
+            "transport": transport,
+        }
+        if transport == "workbench_api":
+            identity["endpoint"] = (
+                f"/api/sessions/{identity['session_id']}/agent-actions/"
+                f"{allowed_action}"
+            )
+            identity["claimant_id"] = "codex-agent"
+        return identity
 
     @staticmethod
     def watch_budget_seconds(stage_id: str) -> int:
@@ -1390,15 +1432,23 @@ class SessionStore:
         return expires.tzinfo is None or expires <= datetime.now(timezone.utc)
 
     def recovery_instruction(self, session_id: str, stage_id: str) -> str:
-        """Describe the durable files an agent must inspect before recovering work."""
+        """Describe the fixed normal path before any exception-only diagnosis."""
 
-        stage_path = self._stage_path(session_id, stage_id)
+        session_path = self._session_path(session_id)
         state = self.load_session(session_id)
         revision = state["stages"][stage_id]["revision"]
         ui_first = (
             "First run the managed UI launcher with this exact runs_root and "
-            "session_id, open the returned current-stage URL, and wait for its "
-            "handoff. Do not ask for store, month, image roots, or other "
+            f"session_id (session_path='{session_path}'), open the returned "
+            "current-stage URL, and wait for its "
+            "handoff through the stage status and agent-wait APIs. Use only "
+            "handoff_status.handoff_identity for revision, input_sha256, and "
+            "allowed_action. Do not inspect project source, search routes, scan "
+            "the Plugin or runs directory, or read handoff/input files while the "
+            "official API and processor remain healthy. Source diagnosis is "
+            "allowed only after an official processor persists a stable error "
+            "reason and the Agent has read diagnose-session. Do not ask for "
+            "store, month, image roots, or other "
             "structured fields in chat while the page is available. Chat "
             "fallback requires an allowed recorded reason code. "
         )
@@ -1412,11 +1462,11 @@ class SessionStore:
                 "Continue upload-search-materials without creating a new session. "
                 f"Use session_id='{session_id}', stage_id='slots_copy', "
                 f"revision={revision}, runs_root='{self._runs_root}'. "
-                f"Read {stage_path / 'review-context.json'} and "
-                f"{stage_path / 'current-slot-plan.json'}. "
-                "Do not wait for, claim, retry, or create a slot-planning Agent "
-                "request. Continue with the deterministic draft or user manual "
-                "edits; only final copywriting may create an Agent request."
+                "Continue through the current workbench page and its declared "
+                "agent-request endpoints. Do not wait for, claim, retry, or "
+                "create a slot-planning Agent request. Continue with the "
+                "deterministic draft or user manual edits; only final "
+                "copywriting may create an Agent request."
             )
         if (
             state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
@@ -1428,11 +1478,10 @@ class SessionStore:
                 "Continue upload-search-materials without creating a new session. "
                 f"Use session_id='{session_id}', stage_id='completeness', "
                 f"revision={revision}, runs_root='{self._runs_root}'. "
-                "Run exactly one specialized entry: "
-                f"tmall-materials process-product-selection --runs-root "
-                f"'{self._runs_root}' --session '{session_id}'. "
-                "Do not run wait-handoff or resume-session first; the specialized "
-                "entry validates and claims the exact handoff itself."
+                "Use handoff_status.handoff_identity and run exactly its "
+                "process-product-selection workbench action. Do not run "
+                "wait-handoff or resume-session first; the specialized action "
+                "validates and claims the exact handoff itself."
             )
         if (
             state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
@@ -1451,11 +1500,10 @@ class SessionStore:
                     "Continue upload-search-materials without creating a new session. "
                     f"Use session_id='{session_id}', stage_id='asset_matching', "
                     f"revision={revision}, runs_root='{self._runs_root}'. "
-                    "Run exactly one specialized entry: "
-                    f"tmall-materials process-final-material-handoff --runs-root "
-                    f"'{self._runs_root}' --session '{session_id}'. "
-                    "Do not run wait-handoff or resume-session first; the specialized "
-                    "entry validates and claims the exact handoff itself."
+                    "Use handoff_status.handoff_identity and run exactly its "
+                    "process-final-material-handoff workbench action. Do not run "
+                    "wait-handoff or resume-session first; the specialized action "
+                    "validates and claims the exact handoff itself."
                 )
         return (
             ui_first
@@ -1463,8 +1511,8 @@ class SessionStore:
             "Continue upload-search-materials without creating a new session. "
             f"Use session_id='{session_id}', stage_id='{stage_id}', revision={revision}, "
             f"runs_root='{self._runs_root}'. "
-            f"Read {stage_path / 'handoff.json'} and verify its input_sha256 against "
-            f"the exact bytes of {stage_path / 'input.json'} before continuing. "
+            "Read the exact stage status and use its verified handoff_identity; "
+            "do not inspect durable files or project source during normal flow. "
             "Do not select another session by recency."
         )
 

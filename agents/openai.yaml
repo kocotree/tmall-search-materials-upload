@@ -1,4 +1,4 @@
 interface:
   display_name: "天猫搜推素材上传"
   short_description: "前端优先交接、可恢复搜推采集、素材审查与安全发布工作流"
-  default_prompt: "Use $upload-search-materials to open the exact managed UI session and process its bounded normal workflow through the workbench same-origin APIs without chat or command approval prompts. Keep business decisions in the workbench, preserve publish gates, and request host approval only for an unexpected path requiring new technical authority."
+  default_prompt: "Use $upload-search-materials to open the exact managed UI session and process its bounded normal workflow through handoff_status.handoff_identity and the declared fixed workbench action without chat or command approval prompts. During healthy normal flow, do not inspect source, scan Plugin or run directories, read raw handoff artifacts, or rediscover routes. Only after a fixed processor records a stable Agent diagnostic may you inspect the failing call path. Keep business decisions in the workbench, preserve publish gates, and request host approval only for an unexpected path requiring new technical authority."

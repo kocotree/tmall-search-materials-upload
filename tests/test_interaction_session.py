@@ -696,7 +696,8 @@ def test_recovery_instruction_names_absolute_session_path_and_stage(tmp_path):
 
     assert str(session.path.resolve()) in instruction
     assert "setup" in instruction
-    assert "handoff.json" in instruction
+    assert "handoff_status.handoff_identity" in instruction
+    assert "handoff.json" not in instruction
     assert "input_sha256" in instruction
 
 

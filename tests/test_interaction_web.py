@@ -190,6 +190,86 @@ def test_agent_wait_api_projects_live_and_expired_recovery_status(
     assert status["handoff_status"]["status"] == "waiting_expired"
 
 
+def test_stage_status_returns_verified_normal_action_without_artifact_reads(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    handoff = store.save_input(
+        session_id,
+        "completeness",
+        {"selected_product_ids": ["886506466908"]},
+    )
+
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/completeness/status"
+    )
+
+    assert status.status_code == 200
+    identity = status.json["handoff_status"]["handoff_identity"]
+    assert identity == {
+        "session_id": session_id,
+        "stage_id": "completeness",
+        "revision": handoff["revision"],
+        "input_sha256": handoff["input_sha256"],
+        "handoff_kind": "",
+        "allowed_action": "process-product-selection",
+        "transport": "workbench_api",
+        "endpoint": (
+            f"/api/sessions/{session_id}/agent-actions/process-product-selection"
+        ),
+        "claimant_id": "codex-agent",
+    }
+
+
+def test_agent_wait_can_return_ready_handoff_identity_in_same_response(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    submitted = {}
+
+    def submit_setup():
+        submitted["handoff"] = store.save_input(
+            session_id,
+            "setup",
+            {"store": "测试店铺", "image_roots": [str(tmp_path)]},
+        )
+
+    delayed_submit = threading.Timer(0.05, submit_setup)
+    delayed_submit.start()
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={
+            "action": "create",
+            "expected_revision": 1,
+            "claimant_id": "codex-agent",
+            "wait_seconds": 1,
+        },
+    )
+    delayed_submit.join(timeout=1)
+
+    assert response.status_code == 200
+    handoff = submitted["handoff"]
+    identity = response.json["handoff_status"]["handoff_identity"]
+    assert identity["revision"] == handoff["revision"]
+    assert identity["input_sha256"] == handoff["input_sha256"]
+    assert identity["allowed_action"] == "process-setup"
+
+
+def test_agent_wait_rejects_unbounded_long_poll(client, session_id):
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={
+            "action": "create",
+            "expected_revision": 1,
+            "wait_seconds": 31,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "wait_seconds" in response.json["field_errors"]
+
+
 def test_submitted_handoff_without_live_wait_shows_chat_recovery_prompt(
     client, session_id
 ):
@@ -2677,7 +2757,8 @@ def test_recovery_returns_session_store_instruction(client, session_id):
     response = client.get(f"/api/sessions/{session_id}/stages/setup/recovery")
 
     assert response.status_code == 200
-    assert "handoff.json" in response.json["instruction"]
+    assert "handoff_status.handoff_identity" in response.json["instruction"]
+    assert "Do not inspect project source" in response.json["instruction"]
 
 
 def test_stage_status_exposes_authoritative_claim_and_expired_recovery(

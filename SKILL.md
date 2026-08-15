@@ -27,6 +27,13 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 5. 只有正常业务路径无法继续且确实需要新增技术权限时，才允许触发宿主审批：首次安装 `uv` 或修复 Plugin 运行环境；访问未配置位置、连接新 NAS、认证或映射网络盘；刷新或再次发布已有共享索引；写入、移动、删除源素材；修改选择器、依赖或代码；使用临时诊断/恢复命令；以及 `publish_uncertain` 后创建新任务并重新发布。登录、验证码和工作台中的商品、文件夹、图片、坑位、文案及上传清单选择仍由对应页面承载，不转成命令审批卡。
 6. 宿主沙箱和管理员策略高于本 Skill，Agent 不得规避或伪装宿主强制审批；但也不得主动把正常工作流包装成需要提权的异常命令。若宿主仍阻止固定入口，应报告一次稳定原因码并停止技术旁路，不得围绕同一业务步骤连续弹卡。
 
+### 正常流程禁止源码研究
+
+1. 工作台健康、阶段状态可读且正式处理器没有返回异常时，Agent 只能按启动结果和 `handoff_status.handoff_identity` 给出的精确 `session_id`、`stage_id`、`revision`、`input_sha256`、`allowed_action` 与 `transport` 继续。不得用 CodeGraph、`rg`、`Get-Content` 或类似方式搜索/阅读项目源码，不得扫描 Plugin 目录、版本缓存或 runs 目录来重新发现入口，也不得直接读取 `handoff.json`、`input.json`、锁文件或进程文件来拼装正常步骤。
+2. `agent-wait` 的 `create`/`renew` 请求可携带 `wait_seconds=0..30`，在同一次有界响应中等待并返回经过服务端验证的 `handoff_identity`。每个 30 秒片段只续租同一个 wait ID；不得改用 `sleep + ui-status`、多轮 `Invoke-RestMethod`、运行目录轮询或源码搜索。
+3. 如果 Codex 当前浏览器宿主没有可用的同源 JSON 请求能力，把该事实归一为 `WORKBENCH_AGENT_API_UNAVAILABLE`，直接使用契约中已声明的等价固定 CLI 一次；这是已知传输降级，不构成源码研究理由。不得逐个试探 `fetch`、`window.fetch`、XHR、页面脚本和路由实现。
+4. 只有正式 API/处理器返回稳定异常原因码，并且与当前 revision 绑定的 `agent-diagnostics/current.json` 已写入 `open` 诊断后，才进入源码研究。必须先运行唯一的 `diagnose-session` 读取 phase、processor、证据和幂等重试入口，再把研究范围限制到该处理器及其直接调用链；修复后仍重跑原固定入口。登录、人机验证、等待超时、业务校验退回和已声明的 API→CLI 传输降级不属于源码异常，不得触发源码扫描。
+
 ## 前端优先启动与交互路由（每次触发首先执行）
 
 1. 完整读取本文件后先启动或恢复交互页面。Windows 上必须通过已在运行环境准备阶段允许的固定 `scripts/start-managed-workbench.ps1` 入口，以普通桌面身份运行，不能从 Codex 沙箱身份直接启动；不得在日常任务中临时扩大该入口的授权范围。启动结果只核对 `launcher_runtime_identity` 与 `runtime_identity` 的 SID 和登录会话相同。`remote_drive_letters` 仅作诊断展示：本机已保存图片源只是配置页历史预填项，不得把其盘符可见性作为工作台启动条件。用户提交配置页时，才检测页面中本次最终填写的图片源。服务显示 `healthy` 但桌面身份不符时，立即停止该精确 session 的服务并用同一固定桌面入口恢复，不得让用户反复点击图片重试。真正读取图片时使用项目自带的 Windows 一次性素材执行器：用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动请求 Windows 桌面会话启动它；用户不运行终端命令，也不接受读取素材的二次命令审批。执行器必须通过同一普通桌面身份启动，以继承本次所选路径需要的映射；只按 `source_id + relative_path` 读取本机绑定，处理当前任务后退出，不安装系统服务、不保存 NAS 凭据。只有最终选图提交才触发 Codex handoff。
@@ -39,7 +46,7 @@ description: Use when starting, configuring, testing, preparing, validating, rev
    若服务不可达，先恢复同一 session 并使用恢复结果中的新 URL；无法恢复时报告服务故障，
    不得在没有有效 URL 时要求用户进行页面操作。
 3. 新任务没有店铺、图片源或 NAS 映射时仍须启动工作台；这些是后续业务字段，不是启动阻断。工作台同时自动打开千牛原生窗口并检查登录：未登录时只显示登录等待页，不展示阶段一业务表单；用户在千牛窗口完成登录后自动进入配置，不要求点击技术验证按钮。
-4. 每一阶段先打开当前页面并等待精确 handoff。结构化配置和人工决定不得先在聊天中索取。工作台健康时通过页面同源的 stage status 与 `agent-wait` API 监听，不运行终端监听命令。
+4. 每一阶段先打开当前页面并等待精确 handoff。结构化配置和人工决定不得先在聊天中索取。工作台健康时通过页面同源的 stage status 与 `agent-wait` API 监听，不运行终端监听命令。状态和等待响应中的 `handoff_status.handoff_identity` 是正常流程取得 revision、输入 SHA 与唯一允许动作的权威入口，不得再读取运行目录或搜索源码补齐这些字段。
    等待以 30 秒片段进行：简单确认最多 5 分钟，商品/文件夹最多
    10 分钟，图片/坑位/裁剪/文案最多 15 分钟，上传任务确认最多 10 分钟。
    有效 `agent_wait` 只让页面显示“Codex 正在监听”，不授予处理、批准或发布权限。
@@ -75,7 +82,7 @@ POST /api/sessions/<session_id>/agent-actions/process-product-selection
 POST /api/sessions/<session_id>/agent-actions/process-final-material-handoff
 ```
 
-三个受控动作的 JSON 必须包含当前 `revision`、`input_sha256` 和固定 `claimant_id=codex-agent`；服务端只接受预定义处理器，并再次验证输入文件哈希。Codex 应通过已打开的工作台页面执行同源请求并读取 JSON 结果。CLI 仅用于工作台 API 不可达后的原因码恢复，不是日常监听与处理入口。
+三个受控动作的 JSON 必须包含当前 `revision`、`input_sha256` 和固定 `claimant_id=codex-agent`；这些字段只从 `handoff_status.handoff_identity` 取得。服务端只接受预定义处理器，并再次验证输入文件哈希。`agent-wait` 允许 `wait_seconds=0..30`，在同一响应中返回准备好的身份。Codex 应通过已打开的工作台页面执行同源请求并读取 JSON 结果。CLI 仅用于工作台 API 不可达后的原因码恢复，不是日常监听与处理入口；降级时直接使用文档已声明的等价入口，不研究源码或路由。
 
 `tmall-materials interact` 只用于前台调试，不是日常入口。完整原因码、字段路由、聊天降级信封和跨电脑约束见 [frontend-interaction-contract.md](references/frontend-interaction-contract.md)；长命令见 [operations-guide.md](references/operations-guide.md)。
 

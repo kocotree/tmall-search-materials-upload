@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 import secrets
+import time
 from typing import Any, Callable
 
 from flask import Flask, jsonify, render_template, request, send_file
@@ -1787,6 +1788,16 @@ def create_app(
     def manage_agent_wait(session_id: str, stage_id: str):
         payload = _json_object()
         action = str(payload.get("action", "create")).strip()
+        wait_seconds_value = payload.get("wait_seconds", 0)
+        if (
+            isinstance(wait_seconds_value, bool)
+            or not isinstance(wait_seconds_value, (int, float))
+            or not 0 <= float(wait_seconds_value) <= 30
+        ):
+            return _validation_error(
+                {"wait_seconds": "must be a number between 0 and 30"}
+            )
+        wait_seconds = float(wait_seconds_value)
         if action == "create":
             expected_revision = payload.get("expected_revision")
             if isinstance(expected_revision, bool) or not isinstance(
@@ -1814,15 +1825,25 @@ def create_app(
                 return _validation_error({"wait_id": "is required"})
             store.clear_agent_wait(session_id, wait_id=wait_id)
             wait = None
+            wait_seconds = 0
         else:
             return _validation_error(
                 {"action": "must be create, renew, or clear"}
             )
+        handoff_status = store.handoff_display_state(session_id, stage_id)
+        deadline = time.monotonic() + wait_seconds
+        while (
+            wait_seconds > 0
+            and handoff_status.get("handoff_identity") is None
+            and handoff_status.get("base_status")
+            in {"draft", "needs_user_input", "blocked"}
+            and time.monotonic() < deadline
+        ):
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+            handoff_status = store.handoff_display_state(session_id, stage_id)
         return jsonify(
             agent_wait=wait,
-            handoff_status=store.handoff_display_state(
-                session_id, stage_id
-            ),
+            handoff_status=handoff_status,
         )
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/chat-fallback")
