@@ -18,7 +18,7 @@ Each publish creates a new snapshot directory. Existing snapshot directories are
 
 Use the snapshot named by `current.json` when it validates. If that pointer or snapshot is invalid, inspect snapshots newest-first and use the newest valid immutable snapshot. Never repair or delete invalid shared data automatically.
 
-On sync, copy validated files into `<folder_index_root>/team-cache`, then materialize `<folder_index_root>/folder-candidates.csv` with absolute paths derived from the current machine's `image_sources`. If the shared root is unavailable, the last validated local cache can be rematerialized and must be reported with origin `local_cache`.
+On sync, copy validated files into `<folder_index_root>/team-cache`. Do not materialize or reuse a global candidate CSV. When the user submits a product selection, match the validated cached folders against that task's product snapshot with the current matcher, derive absolute paths from the current machine's `image_sources`, and write `folder-candidates.csv` only inside that task. If the shared root is unavailable, the last validated local folder cache may be used and must be reported with origin `local_cache`.
 
 ## Concurrency
 

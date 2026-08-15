@@ -77,6 +77,79 @@ def test_create_session_returns_timestamp_id(client):
     assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{2})?", response.json["session_id"])
 
 
+def test_bounded_agent_action_processes_product_selection_inside_workbench(
+    client, session_id, tmp_path, monkeypatch
+):
+    store = SessionStore(tmp_path)
+    handoff = store.save_input(
+        session_id,
+        "completeness",
+        {"selected_product_ids": ["886506466908"]},
+    )
+    calls = []
+
+    def fake_process(store_arg, session_arg, **kwargs):
+        calls.append((store_arg.runs_root, session_arg, kwargs))
+        return {"status": "completed", "candidate_rows": 3}
+
+    monkeypatch.setattr(
+        web_module,
+        "process_product_selection_handoff",
+        fake_process,
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/agent-actions/process-product-selection",
+        json={
+            "revision": handoff["revision"],
+            "input_sha256": handoff["input_sha256"],
+            "claimant_id": "codex-agent",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["result"] == {
+        "status": "completed",
+        "candidate_rows": 3,
+    }
+    assert calls[0][1] == session_id
+    assert calls[0][2]["claimant_id"] == "codex-agent"
+
+
+def test_bounded_agent_action_rejects_stale_identity(
+    client, session_id, tmp_path, monkeypatch
+):
+    store = SessionStore(tmp_path)
+    handoff = store.save_input(
+        session_id,
+        "completeness",
+        {"selected_product_ids": ["886506466908"]},
+    )
+    called = False
+
+    def fake_process(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "completed"}
+
+    monkeypatch.setattr(
+        web_module,
+        "process_product_selection_handoff",
+        fake_process,
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/agent-actions/process-product-selection",
+        json={
+            "revision": handoff["revision"],
+            "input_sha256": "0" * 64,
+        },
+    )
+
+    assert response.status_code == 409
+    assert called is False
+
+
 def test_agent_wait_api_projects_live_and_expired_recovery_status(
     client, session_id, tmp_path
 ):

@@ -20,6 +20,7 @@
 
 - 工作台内的选择与确认是业务授权；Codex 宿主命令审批是新增技术权限授权。正常流程不得把前者重复包装成后者。
 - 已经允许的固定工作台入口启动/恢复、精确 session 状态读取、页面监听和 handoff 等待、商品采集、已配置素材源索引同步、目录元数据读取、候选生成、用户点击后的图片加载、确定性图片处理、dry-run 和状态回写，均直接执行，不在聊天中询问“是否允许”。
+- 工作台健康时，Codex 通过当前页面同源 JSON API 读取状态、维护 `agent_wait`，并调用 handoff 绑定的 `process-setup`、`process-product-selection` 与 `process-final-material-handoff` 动作。动作必须同时校验 session、stage、revision 和 `input_sha256`；不得为同一动作另起终端命令。只有 API 不可达且返回允许降级的稳定原因码时才使用等价 CLI。
 - `copy_draft` 和 `publish_authorization` 已分别绑定 request/session/revision/SHA-256；处理器必须验证绑定后直接执行。上传任务确认页的精确提交已经同时构成批准清单与正式发布授权，不再追加命令确认。
 - 首次运行缺少固定桌面入口权限时，只允许一次范围精确的 `SYSTEM_PERMISSION_REQUIRED` 环境准备。新 NAS/新位置访问、认证或映射盘、刷新已有共享索引、源素材写删改、运行环境修复、临时诊断旁路、选择器/代码修改和 `publish_uncertain` 后重新发布，属于需要新增权限的异常路径。
 - 宿主强制策略不可由 Skill 绕过。固定入口被阻止时返回稳定原因码，不得用临时 PowerShell 或连续审批卡绕行。
@@ -54,6 +55,8 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 - `chat_fallback`：系统级安装、权限、登录协助等无法由业务页面完成的动作。
 
 未声明的结构化业务字段默认是 `frontend_required`。页面健康且支持字段时，Agent 不得在聊天中索取同一数据。
+
+工作台正常业务动作使用以下同源接口：stage `status`、`agent-wait`，以及 `/api/sessions/<session_id>/agent-actions/{process-setup|process-product-selection|process-final-material-handoff}`。处理动作请求必须携带权威输入的 revision 与 SHA-256；动作集合固定，不能透传 shell、脚本路径或任意参数。Codex 内置浏览器已打开当前工作台时直接执行这些同源请求，不触发终端命令审批。
 
 | 阶段/动作 | 页面组件 | 默认策略 | 允许的聊天降级 |
 |---|---|---|---|
@@ -128,6 +131,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 - stop/restart 只有在健康端点返回的 PID 和 ownership token 同时匹配时才管理进程；PID 复用必须拒绝。
 - 浏览器打开结果与服务健康分开记录；浏览器失败不等于服务失败。
 - fresh-context 恢复必须使用精确 runs root、session、stage、revision 和 input SHA，不按目录新旧猜测。
+- 工作台受控动作端点只能暴露预定义处理器，不接受任意命令或参数拼接；候选匹配必须从当前任务商品快照和本机已校验的 `team-cache` 文件夹快照即时生成。
 # 等待租约和聊天恢复
 
 - `agent_wait` 是最长 30 秒的在线心跳租约，绑定 session、stage、预期 revision 和

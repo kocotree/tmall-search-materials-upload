@@ -58,6 +58,7 @@ from ..asset_matching_workflow import (
 from ..deterministic_slot_planning import build_deterministic_slot_plan
 from ..dry_run_workflow import advance_slots_copy_after_submit
 from ..desktop_launcher import inspect_login_browser
+from ..final_material_handoff import process_final_material_handoff
 from ..image_compliance import default_image_policy
 from ..gallery_jobs import (
     create_or_reuse_gallery_job,
@@ -108,6 +109,10 @@ from ..nas_sources import (
 )
 from ..platform_support import AssetSourceUnavailable
 from ..persistence import PersistenceAccessDenied, read_json
+from ..product_selection_handoff import (
+    ProductSelectionProcessingError,
+    process_product_selection_handoff,
+)
 from ..runtime_identity import (
     LocalResourceIdentityMismatch,
     require_local_resource_identity,
@@ -579,12 +584,13 @@ def create_app(
             else store.runs_root.resolve()
         )
         folder_index_root = runtime.folder_index_root
-        folder_index_ready = all(
-            (folder_index_root / name).is_file()
-            for name in (
-                "folder-index.sqlite3",
-                "folder-candidates.csv",
-                "folder-scan-summary.json",
+        cached_sources_root = folder_index_root / "team-cache" / "sources"
+        folder_index_ready = bool(
+            cached_sources_root.is_dir()
+            and any(
+                (source_root / "current.json").is_file()
+                for source_root in cached_sources_root.iterdir()
+                if source_root.is_dir()
             )
         )
         folder_index_status = "ready" if folder_index_ready else "pending"
@@ -719,6 +725,97 @@ def create_app(
                 message=str(error),
             )
         return jsonify(result)
+
+    @app.post(
+        "/api/sessions/<session_id>/agent-actions/<action>"
+    )
+    def process_bounded_agent_action(session_id: str, action: str):
+        """Run one handoff-bound normal action in the desktop service identity."""
+
+        require_desktop_identity()
+        payload = _json_object()
+        stage_by_action = {
+            "process-setup": "setup",
+            "process-product-selection": "completeness",
+            "process-final-material-handoff": "asset_matching",
+        }
+        stage_id = stage_by_action.get(action)
+        if stage_id is None:
+            return _error(
+                "unsupported agent action",
+                404,
+                reason_code="AGENT_ACTION_UNSUPPORTED",
+            )
+        expected_revision = payload.get("revision")
+        expected_sha256 = str(payload.get("input_sha256", "")).strip()
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or not expected_sha256
+        ):
+            return _validation_error(
+                {
+                    "revision": "must be an integer",
+                    "input_sha256": "is required",
+                }
+            )
+        input_document = store.read_optional_stage_document(
+            session_id, stage_id, "input"
+        )
+        if not isinstance(input_document, dict):
+            raise InteractionConflict("AGENT_ACTION_INPUT_REQUIRED")
+        input_path = store._stage_path(session_id, stage_id) / "input.json"
+        actual_input_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+        if (
+            int(input_document.get("revision", -1)) != expected_revision
+            or actual_input_sha256 != expected_sha256
+        ):
+            raise InteractionConflict("AGENT_ACTION_IDENTITY_MISMATCH")
+
+        claimant_id = str(
+            payload.get("claimant_id", "codex-agent")
+        ).strip() or "codex-agent"
+        if action == "process-setup":
+            result = launch_collection_worker(
+                runs_root=store.runs_root,
+                session_id=session_id,
+                runtime=runtime,
+                selectors_path=runtime.selectors_file,
+                cdp_url=runtime.cdp_url,
+                claimant_id=claimant_id,
+                local_resource_identity=expected_runtime_identity,
+            )
+        elif action == "process-product-selection":
+            try:
+                result = process_product_selection_handoff(
+                    store,
+                    session_id,
+                    folder_index_root=runtime.folder_index_root,
+                    claimant_id=claimant_id,
+                    config_path=runtime.config_path,
+                    runtime=runtime,
+                )
+            except ProductSelectionProcessingError as error:
+                return _error(
+                    "product selection processing failed",
+                    409,
+                    reason_code=error.reason_code,
+                    message=str(error),
+                    diagnostic_path=str(error.diagnostic_path),
+                )
+        else:
+            result = process_final_material_handoff(
+                store,
+                session_id,
+                claimant_id=claimant_id,
+            )
+        return jsonify(
+            action=action,
+            stage_id=stage_id,
+            revision=expected_revision,
+            input_sha256=expected_sha256,
+            result=result,
+        )
 
     @app.get("/api/runtime/image-sources")
     def get_runtime_image_sources():

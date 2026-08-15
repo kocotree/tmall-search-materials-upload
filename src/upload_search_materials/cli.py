@@ -2137,13 +2137,9 @@ def _team_folder_index(args) -> int:
         if args.action == "status":
             result = snapshot_status(shared_root=shared_root, local_root=local_root)
         elif args.action == "sync":
-            products_path = Path(args.products) if args.products else runtime.products.path
-            if products_path is None or not products_path.is_file():
-                raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_MISSING")
             result = sync_snapshots(
                 shared_root=shared_root,
                 local_root=local_root,
-                products_path=products_path,
                 image_sources=runtime.image_sources,
                 source_ids=source_ids,
             )

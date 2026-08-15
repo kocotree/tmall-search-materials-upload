@@ -27,11 +27,11 @@ Read [references/protocol.md](references/protocol.md) when diagnosing snapshot v
 
    Never pass, request, log, or store NAS credentials. Do not use a silent low-level mount command.
 
-4. By default, sync the latest valid snapshots into the local cache and rematch them against the current product table:
+4. By default, sync the latest valid folder snapshots into the local cache:
 
    `tmall-materials team-folder-index sync --config config/local-paths.json`
 
-   If NAS is unavailable, this command may use the last verified local snapshot cache. Report that fallback explicitly.
+   If NAS is unavailable, this command may use the last verified local snapshot cache. Report that fallback explicitly. Product matching is not persisted here: each upload task rematches the cached folder metadata against its own current product snapshot and matcher version.
 
 5. Existing valid team snapshots are preferred and never refreshed automatically. If a configured source has no valid shared snapshot, automatically build its directory-only index and publish the first immutable snapshot without requesting a second authorization.
 
@@ -56,5 +56,6 @@ Only enter this flow when the user explicitly asks to update a named source that
 - Publishing uses a short per-source lease and creates a new snapshot plus a current pointer.
 - Shared snapshots contain only `source_id + relative_path` folder metadata, never machine-specific absolute paths.
 - Sync validates schema and SHA-256 before caching or using a snapshot.
+- The reusable cache contains only validated folder snapshots. `folder-candidates.csv` is generated inside the current task and must never be reused by another task or Plugin version.
 - Missing or mismatched local bindings are reported and skipped; never guess a drive letter or mount path.
 - Do not automatically delete old snapshots, scan image contents, upload materials, or change approval boundaries.

@@ -154,7 +154,7 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 及发现/命中/错误计数。`.folder-index.lock` 是带 PID 和 operation ID 的临时单写租约；
 正常退出删除，进程已不存在时下一写入者可回收。二者不进入时间戳任务目录。
 
-共享 `folder-candidates.csv` 输出当前 active 且命中商品的文件夹。当前任务使用 `snapshot-folder-candidates` 按第二阶段 `selected_product_ids` 生成任务内候选快照，不复制 SQLite。候选按文件夹自身名称匹配，不继承父目录命中；`--rematch-only` 只使用本地文件夹记录重新计算匹配。确认文件夹归属前，不读取文件夹中的图片，也不计算图片 SHA-256。
+团队索引长期保存不可变 `folders.csv`，不保存可跨任务复用的商品候选。第二阶段提交后，处理器按 `selected_product_ids`，使用当前任务商品快照、当前匹配器版本和本机已校验的 `team-cache` 即时生成任务内 `folder-candidates.csv`，并记录商品快照 SHA-256 与来源 snapshot ID；不复制 SQLite，也不读取历史全局候选 CSV。候选按文件夹自身名称匹配，不继承父目录命中。确认文件夹归属前，不读取文件夹中的图片，也不计算图片 SHA-256。
 
 `prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、`source_id`、`relative_path`、来源、文件夹名、仅供审计的历史完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数。新任务读取图片只使用 `source_id + relative_path`，不得使用绝对路径作为跨电脑业务标识。文件夹计数由素材执行器在访问本机绑定后回填 `ready + raw_recursive_image_count`，或者回填 `unknown + image_count_reason_code`；未知不得降级成 0。计数只枚举受支持图片路径，不读取图片内容。确定性候选默认 `confirmed`；`match_type=fuzzy_name_candidate` 表示基础名称至少 50% 的最长公共连续字符命中，默认 `rejected`，页面仍只提供采用和排除。历史 `pending` 按采用读取。用户明确提供完整文件夹名时，当前任务可生成 `match_type=exact_folder_query` 的候选；该记录不是别名。
 

@@ -11,16 +11,20 @@ import traceback
 from typing import Any
 
 from .agent_diagnostics import write_exception_diagnostic
-from .folder_index import build_folder_review_data, snapshot_folder_candidates
+from .folder_index import build_folder_review_data
 from .interaction.session import InteractionConflict, SessionStore
 from .nas_sources import load_nas_sources, prepare_nas_source
 from .reporting import read_json
 from .runtime_config import RuntimeConfig
-from .team_folder_index import ensure_missing_snapshots, sync_snapshots
+from .team_folder_index import (
+    ensure_missing_snapshots,
+    materialize_task_folder_candidates,
+    sync_snapshots,
+)
 
 
 PROCESSOR_NAME = "product-selection-to-folder-review"
-PROCESSOR_VERSION = 1
+PROCESSOR_VERSION = 2
 
 
 class ProductSelectionProcessingError(RuntimeError):
@@ -115,7 +119,7 @@ def _recovery_action(reason_code: str) -> str:
         "FOLDER_INDEX_INVALID",
         "FOLDER_INDEX_ENCODING_INVALID",
     }:
-        return "检查共享 folder-candidates.csv 与 folder-scan-summary.json，修复索引后重跑同一入口。"
+        return "检查本机已校验的团队文件夹快照，修复索引后重跑同一入口。"
     return "Codex 读取诊断文件定位失败阶段，修复后对同一 session 重跑同一入口。"
 
 
@@ -124,6 +128,7 @@ def _artifact_state(path: Path) -> dict[str, Any]:
         "path": str(path),
         "exists": path.exists(),
         "is_file": path.is_file(),
+        "is_dir": path.is_dir(),
     }
     if path.is_file():
         try:
@@ -231,8 +236,8 @@ def process_product_selection_handoff(
     selected: list[str] = []
     stage_path = store._stage_path(session_id, "completeness")
     asset_stage_path = store._stage_path(session_id, "asset_matching")
-    shared_candidates = Path(folder_index_root) / "folder-candidates.csv"
-    shared_summary = Path(folder_index_root) / "folder-scan-summary.json"
+    team_cache = Path(folder_index_root) / "team-cache"
+    team_sync_summary = Path(folder_index_root) / "team-sync.json"
     shared_progress = Path(folder_index_root) / "folder-index-progress.json"
     task_candidates = asset_stage_path / "folder-candidates.csv"
     task_summary = asset_stage_path / "folder-scan-summary.json"
@@ -281,10 +286,16 @@ def process_product_selection_handoff(
         selected = _selected_product_ids(input_document)
 
         phase = "sync_team_index"
-        if runtime is not None and runtime.team_folder_index_root is not None:
-            products_snapshot = (
-                store._session_path(session_id) / "inputs" / "products.csv"
+        if runtime is None:
+            raise RuntimeError("TEAM_INDEX_RUNTIME_REQUIRED")
+        products_snapshot = (
+            store._session_path(session_id) / "inputs" / "products.csv"
+        )
+        if not products_snapshot.is_file():
+            raise FileNotFoundError(
+                f"TEAM_INDEX_PRODUCTS_MISSING: {products_snapshot}"
             )
+        if runtime.team_folder_index_root is not None:
             _ensure_team_index_mount(runtime)
             ensure_missing_snapshots(
                 shared_root=runtime.team_folder_index_root,
@@ -295,12 +306,11 @@ def process_product_selection_handoff(
             sync_snapshots(
                 shared_root=runtime.team_folder_index_root,
                 local_root=folder_index_root,
-                products_path=products_snapshot,
                 image_sources=runtime.image_sources,
             )
 
-        phase = "snapshot_candidates"
-        if not shared_candidates.is_file():
+        phase = "match_task_candidates"
+        if not team_cache.is_dir():
             if shared_progress.is_file():
                 progress = read_json(shared_progress)
                 if (
@@ -311,31 +321,37 @@ def process_product_selection_handoff(
                         "FOLDER_INDEX_BUILDING: "
                         f"已发现 {int(progress.get('folders_discovered', 0))} 个文件夹"
                     )
-            raise FileNotFoundError(str(shared_candidates))
+            raise FileNotFoundError(
+                f"TEAM_INDEX_NO_VALID_LOCAL_CACHE: {team_cache}"
+            )
         temp_candidates = asset_stage_path / (
             f".folder-candidates.{attempt_id or 'pending'}.tmp"
         )
-        snapshot = snapshot_folder_candidates(
-            shared_candidates,
-            temp_candidates,
-            selected,
+        snapshot = materialize_task_folder_candidates(
+            local_root=folder_index_root,
+            products_path=products_snapshot,
+            image_sources=runtime.image_sources,
+            selected_product_ids=selected,
+            output_path=temp_candidates,
         )
         os.replace(temp_candidates, task_candidates)
         temp_candidates = None
-        shared_summary_data: dict[str, Any] | None = None
-        if shared_summary.is_file():
-            loaded_summary = read_json(shared_summary)
+        team_sync_data: dict[str, Any] | None = None
+        if team_sync_summary.is_file():
+            loaded_summary = read_json(team_sync_summary)
             if not isinstance(loaded_summary, dict):
                 raise ValueError("FOLDER_INDEX_INVALID: summary must be an object")
-            shared_summary_data = loaded_summary
+            team_sync_data = loaded_summary
         snapshot_document = {
             "schema_version": 1,
             "processor": PROCESSOR_NAME,
             "processor_version": PROCESSOR_VERSION,
             "session_id": session_id,
-            "source_candidates": _artifact_state(shared_candidates),
-            "source_summary": _artifact_state(shared_summary),
-            "shared_scan_summary": shared_summary_data,
+            "team_cache": _artifact_state(team_cache),
+            "team_sync_summary": _artifact_state(team_sync_summary),
+            "team_sync": team_sync_data,
+            "product_snapshot": _artifact_state(products_snapshot),
+            "task_candidates": _artifact_state(task_candidates),
             "selected_product_ids": selected,
             "snapshot": snapshot,
             "created_at": _now_iso(),
@@ -350,9 +366,14 @@ def process_product_selection_handoff(
             "revision": int(handoff["revision"]),
             "input_sha256": str(handoff["input_sha256"]),
             "selected_product_ids": selected,
-            "shared_candidates_sha256": snapshot_document["source_candidates"].get(
+            "task_candidates_sha256": snapshot_document["task_candidates"].get(
                 "sha256"
             ),
+            "product_snapshot_sha256": snapshot.get(
+                "product_snapshot_sha256"
+            ),
+            "matcher_version": snapshot.get("matcher_version"),
+            "source_snapshots": snapshot.get("sources", []),
         }
         store._write_json_atomic(folder_review_path, review_data)
 
@@ -491,9 +512,12 @@ def process_product_selection_handoff(
             "input_sha256": str(handoff["input_sha256"]) if handoff else None,
             "selected_product_ids": selected,
             "artifacts": {
-                "shared_candidates": _artifact_state(shared_candidates),
-                "shared_summary": _artifact_state(shared_summary),
+                "team_cache": _artifact_state(team_cache),
+                "team_sync_summary": _artifact_state(team_sync_summary),
                 "shared_progress": _artifact_state(shared_progress),
+                "products_snapshot": _artifact_state(
+                    store._session_path(session_id) / "inputs" / "products.csv"
+                ),
                 "task_candidates": _artifact_state(task_candidates),
                 "task_summary": _artifact_state(task_summary),
                 "folder_review": _artifact_state(folder_review_path),
@@ -504,7 +528,8 @@ def process_product_selection_handoff(
                 "command": retry_command,
                 "checks": [
                     "核对 session/stage/revision/input_sha256",
-                    "核对共享 folder-candidates.csv 的存在性、编码和表头",
+                    "核对本机 team-cache 中不可变 folders.csv 快照与本机素材源绑定",
+                    "确认候选由当前商品快照和当前匹配器重新生成",
                     "修复后重跑同一入口，不手工拼接 result.json",
                 ],
             },

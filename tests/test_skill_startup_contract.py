@@ -55,7 +55,10 @@ def test_normal_workbench_flow_does_not_request_duplicate_host_approval():
     assert "不得为它们生成命令审批卡" in skill
     assert "读取目录元数据并生成文件夹候选" in skill
     assert "不得再追加聊天确认或命令确认" in skill
+    assert "/agent-actions/process-product-selection" in skill
+    assert "工作台 API 不可达" in skill
     assert "Only unexpected paths that require new technical authority" in entry
+    assert "same-origin JSON APIs" in entry
     assert "without chat or command approval prompts" in root_agent
     assert "without chat or command approval prompts" in entry_agent
 

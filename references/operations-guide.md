@@ -142,7 +142,7 @@ Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入�
 - `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint、分页起点/翻页/末页证据和页面证据。
 - `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
 
-共享文件夹索引数据库、选择器与策略配置不重复复制；任务只保存当前商品的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面只保存 handoff，不直接启动 Playwright；由收到 handoff 的 Agent 执行复制、导出和采集。
+共享文件夹索引数据库、团队 `folders.csv` 快照、选择器与策略配置不重复复制；任务只保存按当前商品快照和匹配器即时生成的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面保存 handoff；Codex 在工作台健康时通过同源受控动作接口启动确定性处理器，工作台 API 不可用时才按稳定原因码回退到等价 CLI。
 
 Agent 只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 `input_sha256` 校验后读取店铺与图片源并继续。用户在聊天中主动说出的值不代替页面提交；页面未提交时保持等待，不提前运行后续动作。
 
@@ -152,7 +152,7 @@ Agent 只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 
 
 ## 3. 文件夹索引优先
 
-每台电脑默认只建立并维护一份共享文件夹级索引，只保存目录名称、完整路径和商品匹配，不打开或哈希图片。首次不存在时执行：
+团队索引只长期保存目录元数据，不打开或哈希图片，也不长期保存商品匹配结果。本机把已校验的不可变 `folders.csv` 快照缓存到 `folder_index_root/team-cache`；每个任务提交商品后再按当前商品表和当前匹配器即时生成候选。首次不存在时执行：
 
 ```powershell
 uv run tmall-materials index-folders `
@@ -163,11 +163,11 @@ uv run tmall-materials index-folders `
   --output "<共享文件夹索引目录>"
 ```
 
-检查共享目录中的 `folder-scan-summary.json` 和 `folder-candidates.csv`。目录新增、删除或改名后使用相同参数和输出目录加 `--refresh`；它会重新遍历目录树发现差异，但在同一 SQLite 中增量更新 active/inactive 状态。只调整名称或货号匹配规则时加 `--rematch-only`，后者只读取本地 SQLite，不重新遍历 NAS。不得因为单次任务等待较久就改用任意历史任务索引；只能使用当前本机配置指向且身份校验通过的共享索引。
+维护端检查原始索引的 `folder-scan-summary.json` 与 SQLite 完整性，并把完整结果发布为不可变团队 `folders.csv` 快照。目录新增、删除或改名后使用相同参数和输出目录加 `--refresh`；它会重新遍历目录树发现差异，但在同一 SQLite 中增量更新 active/inactive 状态。普通上传任务不运行 `--rematch-only`，而是在任务内直接读取缓存文件夹快照重新匹配。不得因为单次任务等待较久就改用任意历史候选 CSV；只能使用当前本机配置指向且身份校验通过的团队快照或最后一次校验通过的 `team-cache`。
 
 运行中读取同目录的 `folder-index-progress.json`：其中包含 `status`、`phase`、
 `source_system`、`current_relative_path`、发现/命中/错误计数、PID、心跳和耗时。
-工作台只有在 SQLite、候选 CSV 与扫描摘要全部存在时才显示“可复用”。同一目录的
+维护端只有在 SQLite 与扫描摘要完整时才允许发布；上传工作台以有效团队快照或本机 `team-cache` 为“可复用”依据，不要求全局候选 CSV。同一目录的
 `.folder-index.lock` 强制单写；`FOLDER_INDEX_BUSY` 表示已有活跃构建，应观察既有进度，
 不得并发启动第二个构建。进程异常退出会保留 `active_scan` 目录队列检查点，使用原参数
 加 `--resume` 精确继续；商品表或 roots 身份变化时拒绝续跑。
@@ -185,7 +185,7 @@ SMB/NAS 目录的 `readdir` 或元数据读取停止响应，该目录记录
 返回非零且摘要为 `complete=false`；不得把部分索引解释为完整结果，应检查摘要中的
 稳定 `source_system + relative_path`，恢复共享后对同一索引运行 `--refresh`。
 
-第二阶段选择商品并正式提交后，Codex 只运行以下唯一入口：
+第二阶段选择商品并正式提交后，Codex 优先调用当前工作台同源受控动作 `process-product-selection`，携带精确 revision 与 `input_sha256`。只有工作台 API 不可用且稳定原因码允许降级时，才运行以下等价 CLI：
 
 ```powershell
 .\.venv\Scripts\tmall-materials.exe process-product-selection `
@@ -193,7 +193,7 @@ SMB/NAS 目录的 `readdir` 或元数据读取停止响应，该目录记录
   --session "<session-id>"
 ```
 
-该入口内部完成精确 handoff 校验与领取、候选快照、文件夹审查数据生成、结果写入和阶段推进。日常流程不得再手工串联 `snapshot-folder-candidates`、`prepare-folder-review` 或直接写 `result.json`。任务目录不保存 `folder-index.sqlite3`。共享索引缺失或损坏时，入口在 `02-completeness/product-selection-diagnostic.json` 写入失败阶段、稳定原因码、异常、输入身份、相关文件状态、traceback 和恢复命令；Codex 修复共享索引后重跑同一入口。共享索引过期时执行 `index-folders --refresh`，而不是新建任务级索引。
+该入口内部完成精确 handoff 校验与领取，从 `team-cache/**/folders.csv` 使用当前任务商品快照和当前匹配器重新生成候选，然后完成文件夹审查数据生成、结果写入和阶段推进。任务摘要绑定商品 SHA-256、匹配器版本和来源 snapshot ID。全局 `folder_index_root/folder-candidates.csv` 即使存在也不会读取。日常流程不得再手工串联 `snapshot-folder-candidates`、`prepare-folder-review` 或直接写 `result.json`。任务目录不保存 `folder-index.sqlite3`。团队快照缺失或损坏时，入口在 `02-completeness/product-selection-diagnostic.json` 写入失败阶段、稳定原因码、异常、输入身份、相关文件状态、traceback 和恢复动作；Codex 修复或同步团队快照后重跑同一入口。共享索引过期时只有在用户明确要求更新指定来源后才执行增量刷新和发布，而不是新建任务级索引。
 
 `resume-session`、`wait-handoff` 和页面“恢复过期处理”不得先领取 completeness
 handoff；它们只返回 `SPECIALIZED_PROCESSOR_REQUIRED` 和上述唯一入口。该入口自己

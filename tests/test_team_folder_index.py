@@ -8,6 +8,7 @@ import pytest
 from upload_search_materials.team_folder_index import (
     TeamFolderIndexError,
     ensure_missing_snapshots,
+    materialize_task_folder_candidates,
     publish_snapshot,
     snapshot_status,
     sync_snapshots,
@@ -210,7 +211,7 @@ def test_status_falls_back_to_newest_valid_immutable_snapshot(tmp_path):
     assert status["sources"][0]["snapshot_id"] == first["snapshot_id"]
 
 
-def test_sync_caches_snapshot_and_rehydrates_local_paths(tmp_path):
+def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path):
     database = tmp_path / "folder-index.sqlite3"
     shared = tmp_path / "shared"
     local = tmp_path / "local"
@@ -228,7 +229,6 @@ def test_sync_caches_snapshot_and_rehydrates_local_paths(tmp_path):
     summary = sync_snapshots(
         shared_root=shared,
         local_root=local,
-        products_path=products,
         image_sources=(
             {
                 "source_id": "source-a",
@@ -239,9 +239,26 @@ def test_sync_caches_snapshot_and_rehydrates_local_paths(tmp_path):
     )
 
     assert summary["complete"] is True
-    assert summary["candidate_rows"] == 1
+    assert summary["folder_rows"] == 1
     assert summary["sources"][0]["origin"] == "shared"
-    with (local / "folder-candidates.csv").open(
+    assert not (local / "folder-candidates.csv").exists()
+    task_candidates = tmp_path / "run" / "folder-candidates.csv"
+    task_summary = materialize_task_folder_candidates(
+        local_root=local,
+        products_path=products,
+        image_sources=(
+            {
+                "source_id": "source-a",
+                "path": str(local_media),
+                "canonical_unc": r"\\nas\media\source-a",
+            },
+        ),
+        selected_product_ids=("1001",),
+        output_path=task_candidates,
+    )
+    assert task_summary["candidate_rows"] == 1
+    assert task_summary["matcher_version"] >= 1
+    with task_candidates.open(
         encoding="utf-8-sig", newline=""
     ) as stream:
         row = next(csv.DictReader(stream))
@@ -261,7 +278,6 @@ def test_sync_caches_snapshot_and_rehydrates_local_paths(tmp_path):
     offline_summary = sync_snapshots(
         shared_root=tmp_path / "unmounted",
         local_root=local,
-        products_path=products,
         image_sources=(
             {
                 "source_id": "source-a",
@@ -291,13 +307,12 @@ def test_requested_sync_blocks_when_local_binding_is_missing(tmp_path):
     summary = sync_snapshots(
         shared_root=shared,
         local_root=tmp_path / "local",
-        products_path=products,
         image_sources=(),
     )
 
     assert summary["complete"] is False
     assert summary["skipped_sources"][0]["reason_code"] == "TEAM_INDEX_LOCAL_BINDING_MISSING"
-    assert summary["candidate_rows"] == 0
+    assert summary["folder_rows"] == 0
 
 
 def test_publish_rejects_missing_canonical_identity(tmp_path):

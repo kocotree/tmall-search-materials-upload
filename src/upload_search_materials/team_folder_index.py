@@ -16,7 +16,7 @@ import uuid
 from typing import Iterable, Mapping, Sequence
 
 from .asset_index import NamedRoot
-from .asset_matching import ProductPathMatcher
+from .asset_matching import PRODUCT_PATH_MATCHER_VERSION, ProductPathMatcher
 from .folder_index import build_folder_index
 from .io_tables import read_product_csv, validate_product_records
 from .persistence import atomic_write_dict_csv, atomic_write_json, read_json
@@ -417,17 +417,11 @@ def sync_snapshots(
     *,
     shared_root: Path,
     local_root: Path,
-    products_path: Path,
     image_sources: Sequence[Mapping[str, str]],
     source_ids: Iterable[str] = (),
 ) -> dict[str, object]:
-    """Cache latest valid snapshots and materialize machine-local candidates."""
+    """Cache the latest valid portable folder snapshots without matching products."""
 
-    products = read_product_csv(Path(products_path))
-    validation = validate_product_records(products)
-    if not products or validation.batch_blocking:
-        raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_INVALID")
-    matcher = ProductPathMatcher.from_products(products, validation)
     bindings = {str(item.get("source_id", "")): item for item in image_sources}
     requested = sorted({_safe_source_id(value) for value in source_ids})
     shared_available = Path(shared_root).is_dir()
@@ -454,9 +448,9 @@ def sync_snapshots(
     if not snapshots:
         raise TeamFolderIndexError("TEAM_INDEX_NO_VALID_SNAPSHOTS")
 
-    candidates = []
     synced = []
     skipped = []
+    folder_rows = 0
     for source_id, snapshot_path, manifest, origin in snapshots:
         binding = bindings.get(source_id)
         if not binding:
@@ -470,49 +464,164 @@ def sync_snapshots(
         if not canonical_source or canonical_source != local_canonical:
             skipped.append({"source_id": source_id, "reason_code": "TEAM_INDEX_CANONICAL_SOURCE_MISMATCH"})
             continue
-        root = Path(str(binding["path"]))
         portable_folders = _read_portable_folders(snapshot_path, source_id)
         if len(portable_folders) != manifest.get("folder_count"):
             raise TeamFolderIndexError("TEAM_INDEX_FOLDER_COUNT_MISMATCH")
-        for folder in portable_folders:
-            relative = Path(*PurePosixPath(folder["relative_path"]).parts)
-            absolute = root / relative
-            for match in matcher.match_folder_name(folder["folder_name"]):
-                candidates.append({
-                    "folder_id": folder["folder_id"],
-                    "source_system": source_id,
-                    "absolute_path": str(absolute),
-                    "relative_path": folder["relative_path"],
-                    "folder_name": folder["folder_name"],
-                    "product_id": match.product_id,
-                    "sku": match.sku,
-                    "product_title": match.product_title,
-                    "match_type": match.match_type,
-                    "match_status": match.match_status,
-                })
+        folder_rows += len(portable_folders)
         synced.append({
             "source_id": source_id,
             "snapshot_id": manifest["snapshot_id"],
             "folder_count": manifest["folder_count"],
             "origin": origin,
         })
-    candidates.sort(key=lambda row: (row["product_id"], row["source_system"], row["relative_path"], row["folder_id"]))
     local_root = Path(local_root)
-    atomic_write_dict_csv(local_root / "folder-candidates.csv", candidates, fieldnames=CANDIDATE_FIELDS)
     summary = {
         "schema_version": 1,
         "complete": not skipped and not errors,
         "mode": "team_snapshot_sync",
         "shared_available": shared_available,
         "synced_at": _utc_now(),
-        "candidate_rows": len(candidates),
+        "folder_rows": folder_rows,
         "sources": synced,
         "skipped_sources": skipped,
         "errors": errors,
     }
-    atomic_write_json(local_root / "folder-scan-summary.json", summary, sort_keys=True)
     atomic_write_json(local_root / "team-sync.json", summary, sort_keys=True)
     return summary
+
+
+def materialize_task_folder_candidates(
+    *,
+    local_root: Path,
+    products_path: Path,
+    image_sources: Sequence[Mapping[str, str]],
+    selected_product_ids: Iterable[str],
+    output_path: Path,
+    source_ids: Iterable[str] = (),
+) -> dict[str, object]:
+    """Match cached folder metadata for one task using the current matcher."""
+
+    products_path = Path(products_path)
+    products = read_product_csv(products_path)
+    validation = validate_product_records(products)
+    if not products or validation.batch_blocking:
+        raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_INVALID")
+    matcher = ProductPathMatcher.from_products(products, validation)
+    selected = sorted(
+        {
+            str(product_id).strip()
+            for product_id in selected_product_ids
+            if str(product_id).strip()
+        }
+    )
+    if not selected:
+        raise TeamFolderIndexError("TEAM_INDEX_SELECTED_PRODUCTS_REQUIRED")
+    selected_set = set(selected)
+
+    cache_root = Path(local_root) / "team-cache"
+    requested_sources = sorted({_safe_source_id(value) for value in source_ids})
+    selected_sources = requested_sources or _source_ids(cache_root)
+    if not selected_sources:
+        raise TeamFolderIndexError("TEAM_INDEX_NO_VALID_LOCAL_CACHE")
+
+    bindings = {str(item.get("source_id", "")): item for item in image_sources}
+    candidates: list[dict[str, str]] = []
+    sources = []
+    skipped = []
+    for source_id in selected_sources:
+        try:
+            snapshot_path, manifest = _snapshot_for_source(cache_root, source_id)
+        except TeamFolderIndexError as error:
+            if requested_sources:
+                raise
+            skipped.append({"source_id": source_id, "reason_code": str(error)})
+            continue
+        binding = bindings.get(source_id)
+        if not binding:
+            skipped.append(
+                {
+                    "source_id": source_id,
+                    "reason_code": "TEAM_INDEX_LOCAL_BINDING_MISSING",
+                }
+            )
+            continue
+        canonical_source = str(manifest.get("canonical_source", "")).casefold().rstrip("\\/")
+        local_canonical = str(binding.get("canonical_unc", "")).casefold().rstrip("\\/")
+        if not local_canonical:
+            skipped.append(
+                {
+                    "source_id": source_id,
+                    "reason_code": "TEAM_INDEX_LOCAL_CANONICAL_SOURCE_MISSING",
+                }
+            )
+            continue
+        if not canonical_source or canonical_source != local_canonical:
+            skipped.append(
+                {
+                    "source_id": source_id,
+                    "reason_code": "TEAM_INDEX_CANONICAL_SOURCE_MISMATCH",
+                }
+            )
+            continue
+
+        root = Path(str(binding["path"]))
+        folders = _read_portable_folders(snapshot_path, source_id)
+        if len(folders) != manifest.get("folder_count"):
+            raise TeamFolderIndexError("TEAM_INDEX_FOLDER_COUNT_MISMATCH")
+        for folder in folders:
+            relative = Path(*PurePosixPath(folder["relative_path"]).parts)
+            absolute = root / relative
+            for match in matcher.match_folder_name(folder["folder_name"]):
+                if match.product_id not in selected_set:
+                    continue
+                candidates.append(
+                    {
+                        "folder_id": folder["folder_id"],
+                        "source_system": source_id,
+                        "absolute_path": str(absolute),
+                        "relative_path": folder["relative_path"],
+                        "folder_name": folder["folder_name"],
+                        "product_id": match.product_id,
+                        "sku": match.sku,
+                        "product_title": match.product_title,
+                        "match_type": match.match_type,
+                        "match_status": match.match_status,
+                    }
+                )
+        sources.append(
+            {
+                "source_id": source_id,
+                "snapshot_id": manifest["snapshot_id"],
+                "folder_count": manifest["folder_count"],
+                "folders_sha256": manifest["files"]["folders.csv"]["sha256"],
+            }
+        )
+
+    if not sources:
+        raise TeamFolderIndexError("TEAM_INDEX_NO_BOUND_LOCAL_SNAPSHOTS")
+    candidates.sort(
+        key=lambda row: (
+            row["product_id"],
+            row["source_system"],
+            row["relative_path"],
+            row["folder_id"],
+        )
+    )
+    output_path = Path(output_path)
+    atomic_write_dict_csv(output_path, candidates, fieldnames=CANDIDATE_FIELDS)
+    matched_products = {row["product_id"] for row in candidates}
+    return {
+        "schema_version": 1,
+        "mode": "task_candidate_materialization",
+        "requested_products": len(selected),
+        "matched_products": len(matched_products),
+        "candidate_rows": len(candidates),
+        "product_snapshot_sha256": _sha256(products_path),
+        "matcher_version": PRODUCT_PATH_MATCHER_VERSION,
+        "sources": sources,
+        "skipped_sources": skipped,
+        "created_at": _utc_now(),
+    }
 
 
 def snapshot_status(*, shared_root: Path, local_root: Path) -> dict[str, object]:
