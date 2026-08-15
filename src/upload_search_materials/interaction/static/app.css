@@ -190,6 +190,32 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .status-badge[data-status="processing"] { color: #274b70; background: #dce9f5; }
 .status-badge[data-status="blocked"], .status-badge[data-status="needs_user_input"] { color: #812d1e; background: #f7ddd8; }
 
+.task-awareness {
+  display: flex;
+  width: calc(100% - clamp(56px, 10vw, 152px));
+  max-width: 1260px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 22px auto 0;
+  padding: 16px 20px;
+  background: #f5f8f6;
+  border: 1px solid rgba(47, 111, 90, .18);
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+}
+.task-awareness[data-phase="processing"],
+.task-awareness[data-phase="queued"] { border-left-color: #4c78a0; }
+.task-awareness[data-phase="attention"],
+.task-awareness[data-phase="offline"] { border-left-color: var(--danger); }
+.task-awareness[data-phase="completed"] { border-left-color: #2f6f5a; background: #eef7f1; }
+.task-awareness-copy { display: grid; min-width: 0; gap: 3px; }
+.task-awareness-kicker { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.task-awareness-copy strong { font-size: 15px; }
+.task-awareness-copy p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.task-awareness-meta { display: grid; flex: 0 0 auto; gap: 5px; color: var(--muted); font-size: 11px; text-align: right; }
+.task-awareness-meta [data-task-auto-shutdown] { color: #74531f; font-weight: 700; }
+
 .stage-stack { width: 100%; max-width: 1260px; margin: 0 auto; padding: 38px clamp(28px, 5vw, 76px) 0; }
 .stage-panel { min-width: 0; max-width: 100%; animation: reveal 260ms cubic-bezier(0.22, 1, 0.36, 1); }
 @keyframes reveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -308,10 +334,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   border: 1px solid;
   border-radius: 11px;
 }
-.source-section-shared {
-  background: #eef7f0;
-  border-color: #c6dfcc;
-}
 .source-section-selected {
   background: #eef4fa;
   border-color: #cbdbea;
@@ -397,64 +419,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .image-source-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .image-source-actions > button { min-width: 0; flex: 1 1 180px; }
 .image-source-feedback { min-height: 15px; }
-.nas-source-catalog {
-  display: grid;
-  min-width: 0;
-  max-width: 100%;
-  gap: 9px;
-}
-.nas-source-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(160px, .7fr);
-  grid-template-areas:
-    "identity state"
-    "actions actions"
-    "directories directories";
-  min-width: 0;
-  max-width: 100%;
-  gap: 9px 14px;
-  align-items: center;
-  padding: 12px;
-  overflow: hidden;
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-}
-.nas-source-identity {
-  grid-area: identity;
-  display: grid;
-  min-width: 0;
-  gap: 4px;
-}
-.nas-source-identity code { overflow-wrap: anywhere; }
-.nas-source-row .image-source-state { grid-area: state; min-width: 0; }
-.nas-source-actions {
-  grid-area: actions;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  gap: 8px;
-}
-.nas-directory-list {
-  grid-area: directories;
-  display: flex;
-  flex-wrap: wrap;
-  min-width: 0;
-  max-width: 100%;
-  gap: 8px;
-}
-.nas-source-actions .secondary-button,
-.nas-directory-list .secondary-button {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.nas-directory-list .secondary-button { flex: 1 1 140px; }
-.nas-directory-list:empty { display: none; }
 .collection-readiness-list { display: grid; gap: 7px; margin-top: 8px; }
 .collection-readiness-item {
   border-radius: 8px;
@@ -955,7 +919,8 @@ summary:focus-visible {
   .stage-stack { padding-right: 28px; padding-left: 28px; }
   .header-meta { gap: 16px; }
   .header-meta div { min-width: 72px; }
-  .offline-panel { margin-right: 28px; margin-left: 28px; }
+  .offline-panel, .task-awareness { margin-right: 28px; margin-left: 28px; }
+  .task-awareness { width: auto; }
   .handoff-bar { gap: 16px; }
   .source-path { grid-template-columns: 1fr; gap: 6px; }
   .asset-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
@@ -980,10 +945,6 @@ summary:focus-visible {
   .field-grid, .setup-business-grid, .setup-status-grid { grid-template-columns: 1fr; }
   .field-wide { grid-column: auto; }
   .setup-status-card-wide { grid-column: auto; }
-  .nas-source-row {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "identity" "state" "actions" "directories";
-  }
   .offline-panel dl { grid-template-columns: 1fr; }
   .handoff-bar { left: 0; grid-template-columns: 1fr auto; }
   .handoff-spacer { height: 150px; }
@@ -996,7 +957,9 @@ summary:focus-visible {
 @media (max-width: 560px) {
   .workspace-header, .stage-stack, .handoff-bar { padding-right: 17px; padding-left: 17px; }
   .stage-stack { padding-top: 25px; }
-  .offline-panel { margin-right: 17px; margin-left: 17px; }
+  .offline-panel, .task-awareness { margin-right: 17px; margin-left: 17px; }
+  .task-awareness { display: grid; }
+  .task-awareness-meta { text-align: left; }
   .stage-heading { display: block; }
   .component-pill { display: inline-block; margin-top: 15px; }
   .module-heading, .form-heading { display: block; }
@@ -1008,7 +971,6 @@ summary:focus-visible {
   .handoff-bar { grid-template-columns: 1fr; }
   .handoff-spacer { height: 210px; }
   .handoff-actions { display: grid; grid-template-columns: 1fr; }
-  .nas-source-actions { grid-template-columns: minmax(0, 1fr); }
   .handoff-actions button { width: 100%; min-width: 0; }
   .asset-product-heading, .asset-safety { align-items: flex-start; flex-direction: column; }
   .asset-safety span { text-align: left; }

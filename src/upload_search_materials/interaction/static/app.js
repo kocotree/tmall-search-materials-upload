@@ -27,6 +27,11 @@
   const lastSubmittedLabel = document.querySelector("[data-last-submitted]");
   const taskDirectoryLabel = document.querySelector("[data-task-directory]");
   const connectionLabel = document.querySelector("[data-connection-label]");
+  const taskAwareness = document.querySelector("[data-task-awareness]");
+  const taskStatusLabel = document.querySelector("[data-task-status-label]");
+  const taskStatusSummary = document.querySelector("[data-task-status-summary]");
+  const taskStageProgress = document.querySelector("[data-task-stage-progress]");
+  const taskAutoShutdown = document.querySelector("[data-task-auto-shutdown]");
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
   const collectionRuntimeConfig = document.querySelector(
     '[data-component="CollectionRuntimeConfig"]',
@@ -348,109 +353,6 @@
     }
   }
 
-  function applyNasSourceStatus(source) {
-    const row = [...document.querySelectorAll("[data-nas-source-row]")]
-      .find((item) => item.dataset.sourceId === String(source.source_id || ""));
-    if (!row) return;
-    const status = source.status || source;
-    const state = row.querySelector("[data-nas-source-state]");
-    state.dataset.status = status.state === "ready" ? "available" : "unavailable";
-    state.dataset.reasonCode = status.reason_code || "";
-    state.textContent = status.message || status.reason_code || "状态未知";
-    row.dataset.mountPath = status.mount_path || "";
-    row.dataset.canonicalUnc = source.canonical_unc || "";
-    row.dataset.subpaths = JSON.stringify(source.subpaths || []);
-    row.querySelector("[data-connect-nas-source]").hidden = status.state === "ready";
-    row.querySelector("[data-use-nas-source]").hidden = status.state !== "ready";
-    row.querySelector("[data-browse-nas-source]").hidden = status.state !== "ready";
-  }
-
-  async function refreshNasSources() {
-    const catalog = document.querySelector("[data-nas-source-catalog]");
-    if (!catalog) return;
-    try {
-      const payload = await fetchJson("/api/runtime/nas-sources");
-      (payload.nas_sources || []).forEach(applyNasSourceStatus);
-    } catch (error) {
-      catalog.querySelectorAll("[data-nas-source-state]").forEach((state) => {
-        state.dataset.status = "unavailable";
-        state.textContent = error.userMessage || error.message;
-      });
-    }
-  }
-
-  async function connectNasSource(row) {
-    const state = row.querySelector("[data-nas-source-state]");
-    state.textContent = "正在打开系统 NAS 连接窗口…";
-    try {
-      const payload = await fetchJson(
-        `/api/runtime/nas-sources/${encodeURIComponent(row.dataset.sourceId)}/connect`,
-        { method: "POST", body: "{}" },
-      );
-      state.textContent = payload.next_action || payload.message;
-      window.setTimeout(refreshNasSources, 1500);
-    } catch (error) {
-      state.dataset.status = "unavailable";
-      state.textContent = error.userMessage || error.message;
-    }
-  }
-
-  function useNasSource(row) {
-    addNasDirectory(row, "");
-  }
-
-  function addNasDirectory(row, relativePath) {
-    const root = row.dataset.mountPath || "";
-    if (!root) return;
-    const separator = root.includes("\\") ? "\\" : "/";
-    const relative = String(relativePath || "").replaceAll("/", separator);
-    const path = relative
-      ? `${root.replace(/[\\/]$/, "")}${separator}${relative}`
-      : root;
-    const unc = row.dataset.canonicalUnc || "";
-    const canonicalUnc = relativePath
-      ? `${unc.replace(/[\\/]$/, "")}\\${String(relativePath).replaceAll("/", "\\")}`
-      : unc;
-    appendImageSource(
-      relativePath ? `${row.dataset.label} · ${relativePath}` : row.dataset.label,
-      path,
-      relativePath ? "" : row.dataset.sourceId,
-      canonicalUnc,
-    );
-    updateImageSourceConfig();
-  }
-
-  async function browseNasSource(row, relativePath = "") {
-    const list = row.querySelector("[data-nas-directory-list]");
-    list.textContent = "正在读取当前一级目录…";
-    try {
-      const query = new URLSearchParams({ relative_path: relativePath });
-      const payload = await fetchJson(
-        `/api/runtime/nas-sources/${encodeURIComponent(row.dataset.sourceId)}/directories?${query}`,
-      );
-      list.replaceChildren();
-      if (relativePath) {
-        const chooseCurrent = document.createElement("button");
-        chooseCurrent.type = "button";
-        chooseCurrent.className = "secondary-button";
-        chooseCurrent.dataset.useNasDirectory = relativePath;
-        chooseCurrent.textContent = `使用当前目录：${relativePath}`;
-        list.appendChild(chooseCurrent);
-      }
-      (payload.directories || []).forEach((directory) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "secondary-button";
-        button.dataset.openNasDirectory = directory.relative_path;
-        button.textContent = directory.name;
-        list.appendChild(button);
-      });
-      if (!list.childElementCount) list.textContent = "当前目录没有可浏览的子目录。";
-    } catch (error) {
-      list.textContent = error.userMessage || error.message;
-    }
-  }
-
   async function pickImageSource(row) {
     const pathInput = row.querySelector('[name="image_roots"]');
     const state = row.querySelector("[data-image-source-state]");
@@ -529,22 +431,6 @@
     });
     imageSourceConfig.querySelector("[data-check-image-sources]").addEventListener("click", checkImageSources);
     imageSourceConfig.querySelector("[data-save-image-sources]").addEventListener("click", saveImageSources);
-    const nasCatalog = document.querySelector("[data-nas-source-catalog]");
-    if (nasCatalog) {
-      nasCatalog.addEventListener("click", (event) => {
-        const row = event.target.closest("[data-nas-source-row]");
-        if (!row) return;
-        if (event.target.closest("[data-connect-nas-source]")) connectNasSource(row);
-        if (event.target.closest("[data-check-nas-source]")) refreshNasSources();
-        if (event.target.closest("[data-use-nas-source]")) useNasSource(row);
-        if (event.target.closest("[data-browse-nas-source]")) browseNasSource(row);
-        const openDirectory = event.target.closest("[data-open-nas-directory]");
-        if (openDirectory) browseNasSource(row, openDirectory.dataset.openNasDirectory);
-        const useDirectory = event.target.closest("[data-use-nas-directory]");
-        if (useDirectory) addNasDirectory(row, useDirectory.dataset.useNasDirectory);
-      });
-      refreshNasSources();
-    }
     updateImageSourceConfig();
   }
 
@@ -896,6 +782,39 @@
       railStatus.dataset.status = item.status;
       railStatus.dataset.revision = String(item.revision);
     });
+  }
+
+  function formatRemainingTime(value) {
+    const seconds = Math.max(0, Number(value || 0));
+    const minutes = Math.floor(seconds / 60);
+    const remainder = Math.floor(seconds % 60);
+    if (minutes) return `${minutes} 分 ${remainder} 秒`;
+    return `${remainder} 秒`;
+  }
+
+  function renderTaskAwareness(taskStatus) {
+    if (!taskAwareness || !taskStatus || typeof taskStatus !== "object") return;
+    taskAwareness.dataset.phase = String(taskStatus.phase || "waiting_user");
+    taskStatusLabel.textContent = taskStatus.status_label || "任务状态已更新";
+    taskStatusSummary.textContent = [taskStatus.summary, taskStatus.next_action]
+      .filter(Boolean)
+      .join(" ");
+    taskStageProgress.textContent =
+      `第 ${Number(taskStatus.current_stage_index || 1)} / `
+      + `${Number(taskStatus.total_stage_count || 1)} 阶段 · `
+      + `${taskStatus.current_stage_title || "当前阶段"}`;
+    const shutdown = taskStatus.auto_shutdown || {};
+    if (shutdown.status === "review_window") {
+      taskAutoShutdown.hidden = false;
+      taskAutoShutdown.textContent =
+        `任务已结束，工作台将在 ${formatRemainingTime(shutdown.remaining_seconds)} 后自动关闭；任务记录会保留。`;
+    } else if (shutdown.status === "closing") {
+      taskAutoShutdown.hidden = false;
+      taskAutoShutdown.textContent = "查看时间已结束，工作台正在自动关闭；任务记录会保留。";
+    } else {
+      taskAutoShutdown.hidden = true;
+      taskAutoShutdown.textContent = "";
+    }
   }
 
   function renderStatus() {
@@ -5357,6 +5276,7 @@
       currentCollectionStatus = payload.collection_status || null;
       currentHandoffStatus = payload.handoff_status || null;
       currentWorkflowDispatch = payload.workflow_dispatch || null;
+      renderTaskAwareness(payload.task_status);
       currentGalleryJob = payload.gallery_job || null;
       currentGalleryProgress = currentGalleryJob?.progress || null;
       isHydrating = true;
@@ -5881,6 +5801,7 @@
       currentCollectionStatus = stageState.collection_status || null;
       currentHandoffStatus = stageState.handoff_status || null;
       currentWorkflowDispatch = stageState.workflow_dispatch || null;
+      renderTaskAwareness(sessionPayload.task_status || stageState.task_status);
       const priorGalleryStatus = currentGalleryJob?.status || null;
       const priorGalleryAttempt = currentGalleryJob?.attempt_id || null;
       if (requestedStageId === "asset_matching") {
@@ -5920,6 +5841,12 @@
     } catch (error) {
       offlinePanel.hidden = false;
       connectionLabel.textContent = "工作台后台状态暂不可用";
+      if (taskAwareness && taskStatusLabel && taskStatusSummary) {
+        taskAwareness.dataset.phase = "offline";
+        taskStatusLabel.textContent = "工作台后台已停止或暂不可用";
+        taskStatusSummary.textContent =
+          "任务记录仍然保留；需要继续查看或处理时，可恢复同一个任务。";
+      }
     }
   }
 
@@ -6028,6 +5955,7 @@
       try {
         const payload = await fetchJson(apiPath());
         applySessionSnapshot(payload.session);
+        renderTaskAwareness(payload.task_status);
         const selected = UiState.selectInitialStage(
           [...stages.keys()],
           payload.session?.current_stage,

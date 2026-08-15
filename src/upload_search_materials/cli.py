@@ -13,9 +13,12 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 from typing import Sequence
 from urllib.parse import urlencode
+
+from werkzeug.serving import make_server
 
 from .agent_handoff import (
     cancel_agent_request,
@@ -1087,10 +1090,12 @@ def _interact(args) -> int:
     else:
         session_id = store.create_session().session_id
 
+    shutdown_event = threading.Event()
     app_kwargs = {
         "runtime_config": runtime,
         "material_executor_launcher": launch_material_executor,
         "managed_session_id": session_id,
+        "shutdown_event": shutdown_event,
     }
     if args.ownership_token:
         app_kwargs["service_identity"] = {
@@ -1098,14 +1103,30 @@ def _interact(args) -> int:
             "runtime_identity": current_runtime_identity(),
         }
     app = create_app(Path(runs_root), **app_kwargs)
+    server = make_server("127.0.0.1", args.port, app, threaded=True)
     query = urlencode({"session_id": session_id})
     print(f"http://127.0.0.1:{args.port}/?{query}", flush=True)
-    app.run(
-        host="127.0.0.1",
-        port=args.port,
-        debug=False,
-        use_reloader=False,
+
+    def stop_server_when_requested() -> None:
+        shutdown_event.wait()
+        server.shutdown()
+
+    shutdown_waiter = threading.Thread(
+        target=stop_server_when_requested,
+        name=f"tmall-workbench-shutdown-{session_id}",
+        daemon=True,
     )
+    shutdown_waiter.start()
+    try:
+        server.serve_forever()
+    finally:
+        lifecycle = app.extensions.get("tmall_workflow_lifecycle")
+        if lifecycle is not None:
+            lifecycle.stop()
+        dispatcher = app.extensions.get("tmall_workflow_dispatcher")
+        if dispatcher is not None:
+            dispatcher.stop()
+        server.server_close()
     return 0
 
 

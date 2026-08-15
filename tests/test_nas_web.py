@@ -47,9 +47,9 @@ def test_nas_status_endpoint_returns_catalog_and_mount_binding(tmp_path, monkeyp
     assert payload["nas_sources"][0]["canonical_unc"] == r"\\192.168.124.85\视觉部"
     page = client.get("/")
     page_source = page.get_data(as_text=True)
-    assert "公司共享盘" in page_source
-    assert 'class="nas-source-row"' in page_source
-    assert "添加整个共享盘" in page_source
+    assert "公司共享盘" not in page_source
+    assert 'data-nas-source-catalog' not in page_source
+    assert "本次图片源" in page_source
 
 
 def test_connect_endpoint_only_launches_after_explicit_post(tmp_path, monkeypatch):
@@ -100,22 +100,19 @@ def test_browse_endpoint_returns_only_requested_directory_level(tmp_path, monkey
     assert calls == [("visual-department", "素材")]
 
 
-def test_nas_ui_starts_from_share_root_and_uses_responsive_actions():
+def test_nas_ui_module_is_removed_from_configuration_page():
     package = Path(__file__).parents[1] / "src" / "upload_search_materials" / "interaction"
     javascript = (package / "static" / "app.js").read_text(encoding="utf-8")
     stylesheet = (package / "static" / "app.css").read_text(encoding="utf-8")
 
-    use_source = javascript.split("function useNasSource(row) {", 1)[1].split("}", 1)[0]
-    assert 'addNasDirectory(row, "");' in use_source
-    assert "subpaths.length" not in use_source
-    assert ".nas-source-row" in stylesheet
-    assert "grid-template-columns: minmax(0, 1fr) minmax(160px, .7fr);" in stylesheet
-    assert ".nas-source-actions {" in stylesheet
-    assert "white-space: nowrap;" in stylesheet
-    assert "max-width: 100%;" in stylesheet
+    assert "refreshNasSources" not in javascript
+    assert "connectNasSource" not in javascript
+    assert "browseNasSource" not in javascript
+    assert "[data-nas-source-row]" not in javascript
+    assert ".nas-source-row" not in stylesheet
 
 
-def test_nas_and_selected_image_sources_have_distinct_section_headings():
+def test_selected_image_sources_are_the_only_configuration_entry():
     template = (
         Path(__file__).parents[1]
         / "src"
@@ -125,8 +122,8 @@ def test_nas_and_selected_image_sources_have_distinct_section_headings():
         / "index.html"
     ).read_text(encoding="utf-8")
 
-    assert 'class="source-section source-section-shared"' in template
-    assert 'id="shared-source-heading">公司共享盘</h4>' in template
-    assert "选中的目录会加入下方“本次图片源”" in template
+    assert "公司共享盘" not in template
+    assert "data-nas-source-catalog" not in template
     assert 'class="source-section source-section-selected"' in template
     assert 'id="selected-source-heading">本次图片源</h4>' in template
+    assert "本机、映射盘或 UNC 文件夹" in template

@@ -63,6 +63,18 @@
         </dl>
       </header>
 
+      <section class="task-awareness" data-task-awareness aria-live="polite">
+        <div class="task-awareness-copy">
+          <span class="task-awareness-kicker">整个任务</span>
+          <strong data-task-status-label>正在读取任务状态</strong>
+          <p data-task-status-summary>页面会持续显示当前进度，需要解释或恢复时可让 Codex 读取同一状态。</p>
+        </div>
+        <div class="task-awareness-meta">
+          <span data-task-stage-progress>正在确认当前阶段</span>
+          <span data-task-auto-shutdown hidden></span>
+        </div>
+      </section>
+
       <div class="stage-stack">
         {% for stage in stages %}
         <section
@@ -226,39 +238,13 @@
                   <span>图片文件夹</span><strong data-image-source-summary>{% if image_sources %}已预填 {{ image_sources|length }} 个常用来源{% else %}本次尚未选择{% endif %}</strong>
                   <p class="section-instruction">按顺序操作：选择文件夹 → 确认来源名称 → 根据需要保存为常用图片源。提交时系统会自动检测。</p>
                   <p>可以直接粘贴本机能打开的文件夹路径，也可以点击“选择文件夹”。</p>
-                  {% if nas_sources %}
-                  <section class="source-section source-section-shared" aria-labelledby="shared-source-heading">
-                    <div class="source-section-heading">
-                      <div>
-                        <span class="source-section-kicker">共享入口</span>
-                        <h4 id="shared-source-heading">公司共享盘</h4>
-                      </div>
-                      <p>在这里连接并浏览公司共享目录；选中的目录会加入下方“本次图片源”。</p>
-                    </div>
-                    <div class="nas-source-catalog" data-nas-source-catalog>
-                      {% for source in nas_sources %}
-                      <div class="nas-source-row" data-nas-source-row data-source-id="{{ source.source_id }}" data-label="{{ source.label }}">
-                        <div class="nas-source-identity"><strong>{{ source.label }}</strong><code class="technical-only" aria-hidden="true">{{ source.host }}/{{ source.share }}</code></div>
-                        <span class="image-source-state" data-nas-source-state>尚未检测</span>
-                        <div class="nas-source-actions">
-                          <button class="secondary-button" type="button" data-check-nas-source>刷新状态</button>
-                          <button class="secondary-button" type="button" data-connect-nas-source>连接共享盘</button>
-                          <button class="secondary-button" type="button" data-use-nas-source hidden>添加整个共享盘</button>
-                          <button class="secondary-button" type="button" data-browse-nas-source hidden>选择业务目录</button>
-                        </div>
-                        <div class="nas-directory-list" data-nas-directory-list></div>
-                      </div>
-                      {% endfor %}
-                    </div>
-                  </section>
-                  {% endif %}
                   <section class="source-section source-section-selected" aria-labelledby="selected-source-heading">
                     <div class="source-section-heading">
                       <div>
                         <span class="source-section-kicker">本次使用</span>
                         <h4 id="selected-source-heading">本次图片源</h4>
                       </div>
-                      <p>这里列出本次任务实际保存和检测的图片文件夹，也可以直接添加本机目录。</p>
+                      <p>直接添加本机、映射盘或 UNC 文件夹；点击“选择文件夹”时可从 Y 盘、Z 盘等已挂载位置选择。</p>
                     </div>
                     <div class="image-source-list" data-image-source-list>
                       {% for source in image_sources %}
@@ -286,7 +272,7 @@
                       {% endfor %}
                     </div>
                     <div class="image-source-actions">
-                      <button class="secondary-button" type="button" data-add-image-source>添加另一个图片源</button>
+                      <button class="secondary-button" type="button" data-add-image-source>添加图片源</button>
                       <button class="secondary-button" type="button" data-check-image-sources hidden aria-hidden="true">检测路径</button>
                       <button class="secondary-button" type="button" data-save-image-sources>保存为常用图片源</button>
                     </div>

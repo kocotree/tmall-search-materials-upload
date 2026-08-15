@@ -113,7 +113,10 @@ def test_managed_service_starts_reuses_reports_and_stops(tmp_path):
         )
         assert repeated["reused"] is True
         assert repeated["pid"] == started["pid"]
-        assert status_service(tmp_path, started["session_id"])["status"] == "healthy"
+        reported = status_service(tmp_path, started["session_id"])
+        assert reported["status"] == "healthy"
+        assert reported["task_status"]["phase"] == "waiting_user"
+        assert reported["task_status"]["current_stage_id"] == "setup"
     finally:
         stopped = stop_service(tmp_path, started["session_id"])
     assert stopped["stopped"] is True

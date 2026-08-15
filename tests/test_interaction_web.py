@@ -817,11 +817,12 @@ def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(clien
     assert 'data-component="ImageSourceConfig"' in html
     assert "已预填 3 个常用来源" in html
     assert "提交时系统会自动检测" in html
-    assert "添加另一个图片源" in html
+    assert "添加图片源" in html
     assert "检测路径" in html
     assert "保存为常用图片源" in html
     assert 'class="source-section source-section-selected"' in html
     assert 'id="selected-source-heading">本次图片源</h4>' in html
+    assert "公司共享盘" not in html
     assert 'class="image-source-row-actions"' in html
     assert html.count('name="image_source_labels"') >= 3
 
@@ -840,7 +841,7 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
 
     assert response.status_code == 200
     assert "本次尚未选择" in html
-    assert "添加另一个图片源" in html
+    assert "添加图片源" in html
     assert html.count('name="image_roots"') >= 1
 
 
@@ -1118,6 +1119,9 @@ def test_every_interactive_field_has_named_control(client):
 def test_page_explains_workbench_offline_recovery_without_exposing_task_path(client):
     html = client.get("/").get_data(as_text=True)
 
+    assert 'data-task-awareness' in html
+    assert "整个任务" in html
+    assert "页面会持续显示当前进度" in html
     assert "工作台后台未连接" in html
     assert "复制异常诊断说明" in html
     assert "当前任务目录" in html
@@ -1399,8 +1403,8 @@ def test_compact_styles_keep_result_tables_scrollable_above_fixed_handoff(client
     assert "--control-height: 44px" in stylesheet
     assert ".image-source-row-actions" in stylesheet
     assert ".image-source-config { grid-column: 1 / -1;" in stylesheet
-    assert ".source-section-shared" in stylesheet
-    assert "background: #eef7f0;" in stylesheet
+    assert ".source-section-shared" not in stylesheet
+    assert ".task-awareness" in stylesheet
     assert ".source-section-selected" in stylesheet
     assert "background: #eef4fa;" in stylesheet
     assert ".source-section-heading" in stylesheet
@@ -1408,11 +1412,7 @@ def test_compact_styles_keep_result_tables_scrollable_above_fixed_handoff(client
     assert "container: image-source-list / inline-size;" in stylesheet
     assert "@container image-source-list (max-width: 760px)" in stylesheet
     assert "@container image-source-list (max-width: 520px)" in stylesheet
-    assert ".nas-source-actions" in stylesheet
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in stylesheet
-    assert '"identity state"' in stylesheet
-    assert 'grid-template-areas: "identity" "state" "actions" "directories";' in stylesheet
-    assert ".nas-source-actions { grid-template-columns: minmax(0, 1fr); }" in stylesheet
+    assert ".nas-source-actions" not in stylesheet
     assert 'grid-template-areas: "name" "path" "actions" "state"' in stylesheet
     assert ".handoff-actions button { width: 100%; min-width: 0; }" in stylesheet
 

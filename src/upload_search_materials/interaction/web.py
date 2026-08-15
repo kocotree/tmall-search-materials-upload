@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 import secrets
+import threading
 import time
 from typing import Any, Callable
 
@@ -121,6 +122,10 @@ from ..runtime_identity import (
 from ..decision_modes import get_decision_boundary
 from .folder_picker import FolderPickerError, choose_directory
 from .fallback import safety_context
+from .lifecycle import (
+    DEFAULT_COMPLETION_GRACE_SECONDS,
+    WorkflowCompletionMonitor,
+)
 from .session import (
     AGENT_WAIT_SEGMENT_SECONDS,
     InteractionConflict,
@@ -212,6 +217,9 @@ def create_app(
         Callable[[RuntimeConfig, str], dict[str, Any]] | None
     ) = None,
     managed_session_id: str | None = None,
+    shutdown_event: threading.Event | None = None,
+    completion_grace_seconds: float = DEFAULT_COMPLETION_GRACE_SECONDS,
+    lifecycle_poll_seconds: float = 2.0,
 ) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
@@ -222,6 +230,7 @@ def create_app(
         (service_identity or {}).get("runtime_identity")
     )
     workflow_dispatcher: WorkflowDispatcher | None = None
+    workflow_lifecycle: WorkflowCompletionMonitor | None = None
 
     def notify_workflow_dispatcher(session_id: str) -> None:
         if (
@@ -250,6 +259,35 @@ def create_app(
             "reason_code": "",
             "updated_at": None,
         }
+
+    def workflow_lifecycle_status(session_id: str) -> dict[str, Any]:
+        if (
+            workflow_lifecycle is not None
+            and managed_session_id == session_id
+        ):
+            return workflow_lifecycle.public_status()
+        return {
+            "enabled": False,
+            "status": "disabled",
+            "grace_seconds": int(completion_grace_seconds),
+            "remaining_seconds": None,
+            "scheduled_at": None,
+            "shutdown_at": None,
+            "shutdown_requested_at": None,
+            "terminal_summary": "",
+        }
+
+    def workflow_task_status(
+        session_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return _workflow_task_status(
+            store,
+            session_id,
+            state,
+            workflow_dispatch=workflow_dispatch_status(session_id),
+            lifecycle=workflow_lifecycle_status(session_id),
+        )
 
     def configured_nas_sources():
         if runtime.nas_sources_file is None:
@@ -660,7 +698,6 @@ def create_app(
             stage_registry=stage_registry,
             session_id=session_id,
             image_sources=runtime.image_sources,
-            nas_sources=tuple(configured_nas_sources().values()),
             runs_root=str(store.runs_root.resolve()),
             task_directory=str(task_directory),
             static_asset_version=static_asset_version,
@@ -722,6 +759,7 @@ def create_app(
             session_id=session_id,
             current_stage=state["current_stage"],
             revision=state["stages"][state["current_stage"]]["revision"],
+            task_status=workflow_task_status(session_id, state),
         )
 
     @app.post(
@@ -1362,7 +1400,8 @@ def create_app(
     def get_session(session_id: str):
         state = store.load_session(session_id)
         return jsonify(
-            session=_project_upload_results_session(store, session_id, state)
+            session=_project_upload_results_session(store, session_id, state),
+            task_status=workflow_task_status(session_id, state),
         )
 
     @app.errorhandler(Exception)
@@ -1470,6 +1509,7 @@ def create_app(
                 session_id, stage_id
             ),
             "workflow_dispatch": workflow_dispatch_status(session_id),
+            "task_status": workflow_task_status(session_id, state),
         }
         if stage_id == "setup":
             authoritative = get_collection_status(
@@ -2941,6 +2981,7 @@ def create_app(
             session_id, stage_id
         )
         payload["workflow_dispatch"] = workflow_dispatch_status(session_id)
+        payload["task_status"] = workflow_task_status(session_id, state)
         claim = store.processing_claim(session_id, stage_id)
         if claim is not None:
             payload["processing_claim"] = claim
@@ -4494,6 +4535,20 @@ def create_app(
         workflow_dispatcher.start()
         app.extensions["tmall_workflow_dispatcher"] = workflow_dispatcher
 
+    if shutdown_event is not None and managed_session_id:
+        workflow_lifecycle = WorkflowCompletionMonitor(
+            lambda: _completed_upload_snapshot(
+                store,
+                managed_session_id,
+                store.load_session(managed_session_id),
+            ),
+            shutdown_event.set,
+            grace_seconds=completion_grace_seconds,
+            poll_seconds=lifecycle_poll_seconds,
+        )
+        workflow_lifecycle.start()
+        app.extensions["tmall_workflow_lifecycle"] = workflow_lifecycle
+
     return app
 
 
@@ -4840,13 +4895,11 @@ def _current_result(
     return context
 
 
-def _upload_results_result(
+def _completed_approval_result(
     store: SessionStore,
     session_id: str,
     state: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Project the authoritative approval output into a product-level result."""
-
     approval_state = state["stages"]["approval"]
     if approval_state.get("status") != "completed":
         return None
@@ -4862,13 +4915,54 @@ def _upload_results_result(
     approval_data = approval.get("data")
     if not isinstance(approval_data, dict):
         return None
+    tasks = approval_data.get("tasks")
+    if not isinstance(tasks, list):
+        return None
+    if not any(
+        isinstance(item, dict) and str(item.get("task_id", "")).strip()
+        for item in tasks
+    ):
+        return None
+    return approval
+
+
+def _completed_upload_snapshot(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    approval = _completed_approval_result(store, session_id, state)
+    if approval is None:
+        return None
+    approval_data = approval["data"]
+    task_count = sum(
+        isinstance(item, dict) and bool(str(item.get("task_id", "")).strip())
+        for item in approval_data.get("tasks", [])
+    )
+    return {
+        "session_id": session_id,
+        "completed_at": approval.get("completed_at") or approval.get("created_at"),
+        "summary": str(approval.get("summary") or "上传任务已结束"),
+        "task_count": task_count,
+    }
+
+
+def _upload_results_result(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project the authoritative approval output into a product-level result."""
+
+    approval = _completed_approval_result(store, session_id, state)
+    if approval is None:
+        return None
+    approval_data = approval["data"]
     task_results = [
         item
         for item in approval_data.get("tasks", [])
         if isinstance(item, dict) and str(item.get("task_id", "")).strip()
     ]
-    if not task_results:
-        return None
 
     session_path = store._session_path(session_id)
     manifest_entries: list[dict[str, Any]] = []
@@ -5042,6 +5136,123 @@ def _project_upload_results_session(
     if state.get("current_stage") in {"approval", "results"}:
         projected["current_stage"] = "results"
     return projected
+
+
+def _workflow_task_status(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+    *,
+    workflow_dispatch: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one business-facing status shared by the page and Codex."""
+
+    projected = _project_upload_results_session(store, session_id, state)
+    upload_result = _upload_results_result(store, session_id, state)
+    current_stage_id = str(projected.get("current_stage") or "setup")
+    stage = get_stage(current_stage_id)
+    stage_state = projected["stages"].get(current_stage_id, {})
+    stage_status = str(stage_state.get("status") or "draft")
+    visible_stages = [item for item in STAGES if item.visible]
+    if current_stage_id not in {item.id for item in visible_stages}:
+        visible_stages.append(stage)
+    stage_position = next(
+        (
+            index
+            for index, item in enumerate(visible_stages, start=1)
+            if item.id == current_stage_id
+        ),
+        1,
+    )
+    completed_stage_count = sum(
+        str(projected["stages"].get(item.id, {}).get("status", ""))
+        == "completed"
+        for item in visible_stages
+    )
+    dispatch_status = str(workflow_dispatch.get("status") or "")
+    terminal = upload_result is not None
+    progress: dict[str, Any] = {
+        "completed_stage_count": completed_stage_count,
+        "total_stage_count": len(visible_stages),
+    }
+
+    if terminal:
+        phase = "completed"
+        status_label = "任务已结束"
+        summary = str(upload_result.get("summary") or "上传任务已结束")
+        next_action = "可在工作台查看上传结果；任务记录会继续保留。"
+    elif dispatch_status == "failed" or stage_status == "blocked":
+        phase = "attention"
+        status_label = "需要处理"
+        summary = f"{stage.title}未能继续，页面已保留本次进度。"
+        next_action = "请按当前页面的业务提示处理；技术异常可交给 Codex 分析。"
+    elif stage_status == "processing" or dispatch_status in {"queued", "running"}:
+        phase = "processing"
+        status_label = "后台处理中"
+        next_action = "无需在聊天中确认，完成后页面会自动刷新。"
+        if current_stage_id == "setup":
+            try:
+                collection = get_collection_status(store.runs_root, session_id)
+            except (InteractionConflict, OSError, TypeError, ValueError):
+                collection = {}
+            worker = collection.get("worker") if isinstance(collection, dict) else None
+            if isinstance(worker, dict):
+                progress.update(
+                    {
+                        "current_page": worker.get("current_page"),
+                        "last_completed_page": worker.get("last_completed_page"),
+                        "row_count": worker.get("row_count"),
+                        "worker_phase": worker.get("phase"),
+                    }
+                )
+                if worker.get("last_completed_page") is not None:
+                    summary = (
+                        "正在全量采集搜推高价值商品：已完成第 "
+                        f"{worker['last_completed_page']} 页，已保存 "
+                        f"{int(worker.get('row_count') or 0)} 条记录。"
+                    )
+                else:
+                    summary = "正在启动搜推高价值全量采集，首个分页结果尚未保存。"
+            else:
+                summary = "配置已接收，正在准备搜推高价值全量采集。"
+        elif current_stage_id == "approval":
+            summary = "正在上传已明确授权的任务，结果会逐项保存。"
+        else:
+            summary = f"正在处理{stage.title}，完成后会自动进入下一阶段。"
+    elif stage_status == "ready_for_agent":
+        phase = "queued"
+        status_label = "已提交"
+        summary = f"{stage.title}已提交，工作台后台正在领取任务。"
+        next_action = "无需重复提交，页面会自动刷新。"
+    elif stage_status in {"needs_user_input", "draft"}:
+        phase = "waiting_user"
+        status_label = "等待你的操作"
+        summary = f"当前进行到{stage.title}。"
+        next_action = "请在当前页面完成选择或确认。"
+    else:
+        phase = "transitioning"
+        status_label = "正在进入下一步"
+        summary = f"{stage.title}已经完成，正在准备下一阶段。"
+        next_action = "页面会自动刷新。"
+
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "phase": phase,
+        "status_label": status_label,
+        "summary": summary,
+        "next_action": next_action,
+        "current_stage_id": current_stage_id,
+        "current_stage_title": stage.title,
+        "current_stage_index": stage_position,
+        "total_stage_count": len(visible_stages),
+        "stage_status": stage_status,
+        "terminal": terminal,
+        "progress": progress,
+        "auto_shutdown": dict(lifecycle),
+        "updated_at": projected.get("updated_at"),
+    }
 
 
 def _completeness_selection_errors(

@@ -33,6 +33,14 @@
 - 浏览器宿主不提供同源请求原语不影响后台业务处理；页面通过现有状态轮询显示后台结果，Codex 只需提供工作台链接。禁止依次试探 `fetch`、`window.fetch`、XHR、页面脚本和后端路由；传输问题本身不授权源码研究。
 - 只有固定 API/处理器返回稳定异常原因码，且当前 revision 已生成状态为 `open` 的 `agent-diagnostics/current.json`，才允许研究源码。Agent 先运行 `diagnose-session` 取得失败 phase、processor、证据和原幂等重试入口，再只检查该处理器及其直接调用链。登录、人机验证、等待超时、业务校验退回以及上述 API→CLI 降级不属于源码异常。
 
+## 任务持续感知与服务生命周期
+
+- 页面和 Codex 使用同一份业务投影 `task_status`。它至少包含当前阶段、阶段序号、业务摘要、下一步动作、阶段进度、是否为整个任务终态，以及自动关闭状态；不得把底层命令、PID、SHA、租约或内部 reason code 当成面向用户的任务说明。
+- 页面每 2 秒从既有 session/stage 状态接口刷新 `task_status`，承担持续可见的实时状态。`ui-status` 返回相同投影，Codex 只在启动、恢复、用户追问或稳定异常时按需读取并解释，不建立聊天侧循环监听或终端轮询。
+- “搜推高价值”全量采集完成只是中间进度。只有“上传任务确认”阶段已经完成并持久化逐任务上传结果，`task_status.terminal` 才为 `true`。
+- 整个任务终态出现后，受管工作台进入 10 分钟结果查看窗口，页面显示倒计时；到期只自动关闭当前 Python 服务，不删除 session、上传结果、审计记录或其他任务文件。重新恢复已完成 session 时重新提供一段 10 分钟查看窗口。
+- 配置、采集、商品选择、候选生成、选图、坑位编排、文案或 dry-run 任一中间阶段都不得启动关闭倒计时。工作台异常退出也不得伪装成“任务已结束”。
+
 ## 采集运行环境与两窗口边界
 
 阶段一页面必须优先承载生产选择器 profile 的路径、验证状态和保存动作，并展示 CDP
@@ -64,7 +72,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 
 未声明的结构化业务字段默认是 `frontend_required`。页面健康且支持字段时，Agent 不得在聊天中索取同一数据。
 
-工作台正常业务动作使用以下同源接口：stage `status`、`agent-wait`，以及 `/api/sessions/<session_id>/agent-actions/{process-setup|process-product-selection|process-final-material-handoff}`。处理动作请求必须携带 `handoff_status.handoff_identity` 返回的 revision 与 SHA-256；动作集合固定，不能透传 shell、脚本路径或任意参数。Codex 内置浏览器已打开当前工作台且具备请求原语时直接执行这些同源请求，不触发终端命令审批；宿主明确缺少该原语时执行一次固定 CLI 降级，不做能力试探或源码研究。
+工作台正常业务动作使用 stage `status`、session 状态以及 `/api/sessions/<session_id>/agent-actions/{process-setup|process-product-selection|process-final-material-handoff}` 等固定同源接口。处理动作请求必须携带 `handoff_status.handoff_identity` 返回的 revision 与 SHA-256；动作集合固定，不能透传 shell、脚本路径或任意参数。`agent-wait` 只保留历史兼容和诊断，不参与正常业务流程。Codex 内置浏览器已打开当前工作台且具备请求原语时直接执行这些同源请求，不触发终端命令审批；宿主明确缺少该原语时执行一次固定 CLI 降级，不做能力试探或源码研究。
 
 | 阶段/动作 | 页面组件 | 默认策略 | 允许的聊天降级 |
 |---|---|---|---|
@@ -82,6 +90,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 
 ## 图片源检测与原生目录窗口
 
+- 配置页只保留“本次图片源”，不展示独立“公司共享盘”、共享状态、连接或浏览模块。用户直接选择或粘贴本机目录、已映射的 Y/Z 盘或 UNC 路径。
 - 图片源检测对每行返回 `status`、`available`、`path_kind`、`reason_code`、
   `message`、`next_action`、`checked_at` 和可选
   `portable_path_suggestion`；旧前端仍可读取 `status=available|unavailable`。

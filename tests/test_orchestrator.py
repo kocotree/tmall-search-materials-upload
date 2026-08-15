@@ -47,10 +47,40 @@ class BrowserSentinel:
 
 class InteractionAppSentinel:
     def __init__(self):
-        self.run_calls = []
+        self.extensions = {}
 
-    def run(self, **kwargs):
-        self.run_calls.append(kwargs)
+
+class InteractionServerSentinel:
+    def __init__(self, host, port, app):
+        self.host = host
+        self.port = port
+        self.app = app
+        self.serve_calls = 0
+        self.shutdown_calls = 0
+        self.close_calls = 0
+
+    def serve_forever(self):
+        self.serve_calls += 1
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+    def server_close(self):
+        self.close_calls += 1
+
+
+def mock_interact_server(monkeypatch, app):
+    servers = []
+
+    def create_server(host, port, passed_app, *, threaded):
+        assert passed_app is app
+        assert threaded is True
+        server = InteractionServerSentinel(host, port, passed_app)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(cli_module, "make_server", create_server)
+    return servers
 
 
 def test_interaction_commands_are_exposed_with_registry_stage_choices():
@@ -147,6 +177,7 @@ def test_inspect_completeness_cli_writes_stage_two_contract(tmp_path):
 
 def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, capsys):
     app = InteractionAppSentinel()
+    servers = mock_interact_server(monkeypatch, app)
     calls = {"create": 0, "load": []}
 
     class FakeStore:
@@ -172,9 +203,10 @@ def test_interact_creates_one_session_and_serves_its_url(tmp_path, monkeypatch, 
 
     assert code == 0
     assert calls == {"create": 1, "load": []}
-    assert app.run_calls == [
-        {"host": "127.0.0.1", "port": 9123, "debug": False, "use_reloader": False}
-    ]
+    assert len(servers) == 1
+    assert (servers[0].host, servers[0].port) == ("127.0.0.1", 9123)
+    assert servers[0].serve_calls == 1
+    assert servers[0].close_calls == 1
     assert "http://127.0.0.1:9123/?session_id=20260722_101112" in capsys.readouterr().out
 
 
@@ -182,6 +214,7 @@ def test_interact_resumes_explicit_session_without_creating_another(
     tmp_path, monkeypatch, capsys
 ):
     app = InteractionAppSentinel()
+    servers = mock_interact_server(monkeypatch, app)
     calls = {"create": 0, "load": []}
 
     class FakeStore:
@@ -214,6 +247,7 @@ def test_interact_resumes_explicit_session_without_creating_another(
 
     assert code == 0
     assert calls == {"create": 0, "load": ["20260722_101112"]}
+    assert servers[0].serve_calls == 1
     assert "session_id=20260722_101112" in capsys.readouterr().out
 
 
@@ -224,6 +258,7 @@ def test_interact_uses_environment_only_when_runs_root_is_absent(
     explicit_root = tmp_path / "explicit"
     roots = []
     app = InteractionAppSentinel()
+    servers = mock_interact_server(monkeypatch, app)
 
     class FakeStore:
         def __init__(self, runs_root):
@@ -245,6 +280,7 @@ def test_interact_uses_environment_only_when_runs_root_is_absent(
     assert main(["interact", "--runs-root", str(explicit_root)]) == 0
 
     assert roots == [environment_root, explicit_root]
+    assert [server.serve_calls for server in servers] == [1, 1]
 
 
 def test_interact_rejects_occupied_port_before_creating_session(
@@ -269,6 +305,7 @@ def test_interact_rejects_occupied_port_before_creating_session(
 def test_interact_defaults_to_runtime_project_runs_root(tmp_path, monkeypatch):
     roots = []
     app = InteractionAppSentinel()
+    servers = mock_interact_server(monkeypatch, app)
     runtime = SimpleNamespace(runs_root=tmp_path / "runs")
 
     class FakeStore:
@@ -290,6 +327,7 @@ def test_interact_defaults_to_runtime_project_runs_root(tmp_path, monkeypatch):
 
     assert main(["interact"]) == 0
     assert roots == [tmp_path / "runs"]
+    assert servers[0].serve_calls == 1
 
 
 def test_wait_handoff_prints_validated_submission(tmp_path, capsys):

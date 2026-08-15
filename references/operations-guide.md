@@ -46,7 +46,7 @@ uv run python -X utf8 $quickValidate .
 
 ### 1.1 每台电脑只配置一次路径
 
-首次启动后可直接在任务配置页新增、删除和检测图片源，并点击“保存为本机配置”。页面支持 1–50 个“来源名称 + 根路径”。保存时每个来源使用稳定 `source_id + label`，实际盘符或 UNC 是当前电脑的本机绑定；旧的 `label + path` 文件读取时自动补 source ID。另一台电脑可把同一 source ID 绑定到不同盘符或 UNC，无需修改项目文件。页面默认写入用户数据目录的 `config/runtime.json`；`config/local-paths.example.json` 仅用于了解字段，不应复制回 Plugin 安装目录。配置不得保存 NAS 凭据、目录清单或图片内容。
+首次启动后可直接在任务配置页的“本次图片源”新增、删除和检测图片源，并点击“保存为本机配置”。配置页不再显示独立“公司共享盘”模块；用户从 Windows 原生目录窗口选择已经挂载的 Y 盘、Z 盘等目录，或直接粘贴 UNC 路径。页面支持 1–50 个“来源名称 + 根路径”。保存时每个来源使用稳定 `source_id + label`，实际盘符或 UNC 是当前电脑的本机绑定；旧的 `label + path` 文件读取时自动补 source ID。另一台电脑可把同一 source ID 绑定到不同盘符或 UNC，无需修改项目文件。页面默认写入用户数据目录的 `config/runtime.json`；`config/local-paths.example.json` 仅用于了解字段，不应复制回 Plugin 安装目录。配置不得保存 NAS 凭据、目录清单或图片内容。
 
 每个图片源行的“选择文件夹”由用户点击后启动独立的 Windows STA 助手并打开原生目录选择窗口，只回填已验证的绝对目录，不扫描图片。助手依次记录 `started`、`window_visible`、`selected/cancelled`；窗口无法在可见性期限内证明已显示时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper，保留原输入并继续允许手工输入。取消、窗口忙碌、选择超时、无桌面会话、启动失败或返回无效路径同样不会清空输入。UNC 或无界面环境可直接粘贴路径。
 
@@ -484,7 +484,9 @@ uv run --project .\upload-search-materials --locked tmall-materials ui-stop --ru
 
 正常流程由托管工作台的单 session 后台调度器处理：提交事务先持久化 handoff 再立即通知队列；服务启动先检查积压，空闲时每 2 秒轻量恢复扫描。唯一处理器根据验证后的 `handoff_identity` 原子领取，旧 `listen-handoff`、`agent_wait` 和 `wait-handoff` 只保留兼容与诊断，不得由 Codex 在正常任务中调用。当前流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。“上传任务确认”页保存输入并生成 `publish_authorization` handoff，HTTP 请求线程不直接写千牛；后台调度器取得身份后只调用 `process-publish-authorization`。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
-页面以 `workflow_dispatch` 显示后台已就绪、排队、处理中、完成或异常。Codex 任务结束不影响仍在运行的工作台后台；若工作台服务停止，使用原 `runs_root + session_id` 恢复服务即可自动扫描持久积压，不需要用户在聊天回复“已提交”。
+页面把阶段状态、`workflow_dispatch` 和处理结果统一投影为 `task_status`，每 2 秒显示整个任务当前阶段、业务进度、下一步动作以及已就绪、排队、处理中、完成或异常。`ui-status` 返回同一 `task_status`，因此 Codex 在启动、恢复、用户询问或异常时可以准确说明状态，但不通过终端命令持续轮询。Codex 对话结束不影响仍在运行的工作台后台；若工作台服务意外停止，使用原 `runs_root + session_id` 恢复服务即可自动扫描持久积压，不需要用户在聊天回复“已提交”。
+
+只有“上传任务确认”阶段完成并写入逐任务上传结果时，整个任务才结束。此时工作台保留 10 分钟供用户查看结果并显示倒计时，随后自动关闭 Python 服务；session 目录、结果和审计记录继续保留。仅完成全量采集、商品选择、素材匹配、选图、坑位编排、文案或 dry-run 时都不能关闭。恢复一个已经完成的精确 session 会重新提供 10 分钟查看窗口。
 
 ### 9.1 前端不可用时的受控聊天保底
 

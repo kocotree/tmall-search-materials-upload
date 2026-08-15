@@ -180,10 +180,16 @@ def _claim_started_identity(state: dict[str, Any]) -> bool:
     return True
 
 
-def _session_is_readable(state: dict[str, Any], session_id: str) -> bool:
-    health = _url_json(
+def _session_health(
+    state: dict[str, Any], session_id: str
+) -> dict[str, Any] | None:
+    return _url_json(
         f"http://127.0.0.1:{state.get('port')}/api/health/sessions/{session_id}"
     )
+
+
+def _session_is_readable(state: dict[str, Any], session_id: str) -> bool:
+    health = _session_health(state, session_id)
     return bool(
         health
         and health.get("healthy") is True
@@ -238,7 +244,13 @@ def status_service(runs_root: Path, session_id: str) -> dict[str, Any]:
             "healthy": False,
         }
     healthy = _healthy_identity(state)
-    readable = healthy and _session_is_readable(state, session_id)
+    session_health = _session_health(state, session_id) if healthy else None
+    readable = bool(
+        session_health
+        and session_health.get("healthy") is True
+        and session_health.get("session_id") == session_id
+        and session_health.get("readable") is True
+    )
     state = {
         **state,
         "status": "healthy" if healthy and readable else "unreachable",
@@ -246,6 +258,14 @@ def status_service(runs_root: Path, session_id: str) -> dict[str, Any]:
         "session_readable": readable,
         "checked_at": _now(),
     }
+    if (
+        readable
+        and session_health is not None
+        and isinstance(session_health.get("task_status"), dict)
+    ):
+        state["task_status"] = session_health["task_status"]
+    else:
+        state.pop("task_status", None)
     _write_json_atomic(_state_path(store, session_id), state)
     return _result(state)
 
