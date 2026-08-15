@@ -192,7 +192,7 @@
 
 - `HANDOFF_SEGMENT_TIMEOUT`: 30 秒等待片段正常结束；可在阶段总预算内继续等待。
 - `SPECIALIZED_PROCESSOR_REQUIRED`: 当前阶段由专用处理器拥有领取权；通用
-  `resume-session`、`wait-handoff` 或页面恢复不得创建租约，按返回的唯一处理入口继续。
+  `resume-session` 和页面恢复只返回验证身份；`listen-handoff` 可维护咨询性在线租约，但三者都不得提前领取，必须按返回的唯一处理入口继续。旧兼容 `wait-handoff` 不用于该阶段。
 - `HANDOFF_STAGE_CHANGED` / `HANDOFF_SESSION_CHANGED`: 等待身份已变化，重新读取精确
   session 当前阶段。
 - `AGENT_WAIT_STALE` / `AGENT_WAIT_IDENTITY_MISMATCH`: 不得续租旧等待者，重新注册。

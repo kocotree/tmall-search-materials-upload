@@ -724,7 +724,8 @@ def test_completeness_recovery_instruction_names_only_specialized_entry(
     instruction = store.recovery_instruction(session_id, "completeness")
 
     assert "process-product-selection" in instruction
-    assert "Do not run wait-handoff or resume-session first" in instruction
+    assert "backlog-first agent-wait action=listen" in instruction
+    assert "Do not use legacy wait-handoff or resume-session to claim first" in instruction
 
 
 def test_wait_handoff_refuses_to_claim_completeness(tmp_path, capsys):

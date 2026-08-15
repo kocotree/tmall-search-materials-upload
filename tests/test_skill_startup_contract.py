@@ -79,6 +79,25 @@ def test_normal_workbench_flow_forbids_source_rediscovery_until_diagnostic_error
     assert "agent-diagnostics/current.json" in contract
 
 
+def test_every_agent_stage_uses_backlog_first_bounded_listener_and_ack_recovery():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    entry = (
+        SKILL_ROOT / "skills" / "upload-search-materials" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    guide = (SKILL_ROOT / "references" / "operations-guide.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "每个需要 Agent 处理的阶段都必须至少调用一次" in skill
+    assert "先检查持久化 handoff" in skill
+    assert "wait_seconds=0..15" in skill
+    assert "在线租约固定最长 30 秒" in skill
+    assert "不得创建或领取 handoff" in skill
+    assert "every Agent-bound stage must call" in entry
+    assert "listen-handoff --segment-seconds 15" in entry
+    assert "tmall-materials listen-handoff" in guide
+
+
 def test_operations_guide_keeps_environment_and_setup_inputs_separate():
     guide = (SKILL_ROOT / "references" / "operations-guide.md").read_text(
         encoding="utf-8"

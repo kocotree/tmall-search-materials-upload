@@ -256,6 +256,57 @@ def test_agent_wait_can_return_ready_handoff_identity_in_same_response(
     assert identity["allowed_action"] == "process-setup"
 
 
+def test_listen_action_returns_handoff_submitted_before_listener_without_revision(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    handoff = store.save_input(
+        session_id,
+        "setup",
+        {"store": "测试店铺", "image_roots": [str(tmp_path)]},
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={
+            "action": "listen",
+            "claimant_id": "codex-agent",
+            "wait_seconds": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["status"] == "handoff_ready"
+    assert response.json["segment_seconds"] == 0
+    assert response.json["lease_seconds"] == 30
+    identity = response.json["handoff_status"]["handoff_identity"]
+    assert identity["revision"] == handoff["revision"]
+    assert identity["input_sha256"] == handoff["input_sha256"]
+    assert store.processing_claim(session_id, "setup") is None
+
+
+def test_default_agent_wait_action_is_bounded_listener(client, session_id):
+    first = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={"wait_seconds": 0},
+    )
+    second = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={"wait_seconds": 0},
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json["status"] == second.json["status"] == "waiting"
+    assert (
+        first.json["agent_wait"]["wait_id"]
+        == second.json["agent_wait"]["wait_id"]
+    )
+    assert (
+        first.json["agent_wait"]["started_at"]
+        == second.json["agent_wait"]["started_at"]
+    )
+
+
 def test_agent_wait_rejects_unbounded_long_poll(client, session_id):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/agent-wait",
@@ -268,6 +319,16 @@ def test_agent_wait_rejects_unbounded_long_poll(client, session_id):
 
     assert response.status_code == 422
     assert "wait_seconds" in response.json["field_errors"]
+
+    listen = client.post(
+        f"/api/sessions/{session_id}/stages/setup/agent-wait",
+        json={
+            "action": "listen",
+            "wait_seconds": 15.1,
+        },
+    )
+    assert listen.status_code == 422
+    assert "wait_seconds" in listen.json["field_errors"]
 
 
 def test_submitted_handoff_without_live_wait_shows_chat_recovery_prompt(

@@ -297,11 +297,12 @@ Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
   "expected_revision": 12,
   "started_at": "ISO-8601",
   "heartbeat_at": "ISO-8601",
-  "expires_at": "ISO-8601"
+  "expires_at": "ISO-8601",
+  "budget_expires_at": "ISO-8601"
 }
 ```
 
-它只用于 UI 提示。处理排他权仍只来自 `processing_claim`。
+它只用于 UI 提示。正常 `listen` 每次最多等待 15 秒并续租同一 wait ID，`expires_at` 最长为当前心跳后 30 秒；`budget_expires_at` 是整个阶段监听窗口，续租不得重置。处理排他权仍只来自 `processing_claim`。handoff 独立持久化，不随 wait 超时或清理而删除。
 
 ## Agent-only 异常信封
 

@@ -103,6 +103,7 @@ from .io_tables import (
     validate_product_records,
 )
 from .interaction.session import (
+    AGENT_WAIT_SEGMENT_SECONDS,
     InteractionConflict,
     InteractionPathError,
     SessionStore,
@@ -1281,6 +1282,99 @@ def _wait_handoff(args) -> int:
         store.clear_agent_wait(args.session, wait_id=wait["wait_id"])
 
 
+def _listen_handoff(args) -> int:
+    """Wait for a verified handoff identity without claiming it."""
+
+    segment_limit = float(args.segment_seconds)
+    if not 0 <= segment_limit <= AGENT_WAIT_SEGMENT_SECONDS:
+        print(
+            json.dumps(
+                {
+                    "status": "invalid",
+                    "reason_code": "AGENT_WAIT_SEGMENT_INVALID",
+                    "message": (
+                        "segment-seconds must be between 0 and "
+                        f"{AGENT_WAIT_SEGMENT_SECONDS}"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    store = SessionStore(Path(args.runs_root))
+    timeout = (
+        args.timeout
+        if args.timeout is not None
+        else store.watch_budget_seconds(args.stage)
+    )
+    total_seconds = max(0.0, float(timeout))
+    deadline = time.monotonic() + total_seconds
+    wait_id = ""
+    first_check = True
+    try:
+        while first_check or time.monotonic() < deadline:
+            first_check = False
+            remaining = max(0.0, deadline - time.monotonic())
+            segment_seconds = min(
+                remaining,
+                segment_limit,
+            )
+            result = store.listen_for_handoff(
+                args.session,
+                args.stage,
+                claimant_id=args.claimant,
+                wait_seconds=segment_seconds,
+                budget_seconds=total_seconds,
+            )
+            wait = result.get("agent_wait")
+            if isinstance(wait, dict):
+                wait_id = str(wait.get("wait_id", ""))
+            identity = result["handoff_status"].get("handoff_identity")
+            if identity is not None:
+                print(json.dumps(result, ensure_ascii=False))
+                return 0
+            if segment_limit == 0:
+                break
+            if result["status"] == "budget_expired" or remaining <= 0:
+                break
+        status = store.handoff_display_state(args.session, args.stage)
+        print(
+            json.dumps(
+                {
+                    "status": "timeout",
+                    "reason_code": "HANDOFF_BUDGET_TIMEOUT",
+                    "handoff_status": status,
+                    "resume_prompt": (
+                        "监听已结束；工作台提交后，请在当前聊天输入“已提交”继续。"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except InteractionConflict as error:
+        print(
+            json.dumps(
+                {"status": "changed", "reason_code": str(error)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 3
+    finally:
+        if wait_id:
+            identity = store.handoff_display_state(
+                args.session, args.stage
+            ).get("handoff_identity")
+            if identity is None:
+                try:
+                    store.clear_agent_wait(args.session, wait_id=wait_id)
+                except InteractionConflict:
+                    pass
+
+
 def _process_confirmed_gallery(args) -> int:
     """Claim a folder-review handoff and publish its task-local image gallery."""
 
@@ -1711,48 +1805,45 @@ def _resume_session(args) -> int:
                 "status": authoritative["status"],
                 "collection_status": authoritative,
             }
-    if (
-        resolved["stage_id"] in {"completeness", "asset_matching"}
-        and resolved["status"]
-        in {"ready", "recoverable", "needs_user_input", "blocked"}
-    ):
-        specialized = _specialized_processor_payload(
-            resolved["stage_id"],
-            runs_root=args.runs_root,
-            session_id=args.session,
-            claimant_id=args.claimant,
-        )
-        if specialized is not None:
-            resolved = {**resolved, **specialized}
-            print(json.dumps(resolved, ensure_ascii=False))
-            return 0
     if resolved["status"] in {
         "ready",
         "recoverable",
         "needs_user_input",
         "blocked",
     }:
-        handoff = store.wait_for_handoff(
-            args.session,
-            resolved["stage_id"],
-            timeout_seconds=0.5,
-            claimant_id=args.claimant,
-            reclaim_expired=resolved["status"] == "recoverable",
-            resume_needs_user_input=(
-                resolved["status"] == "needs_user_input"
-            ),
-            resume_blocked=resolved["status"] == "blocked",
+        handoff_status = store.handoff_display_state(
+            args.session, resolved["stage_id"]
+        )
+        identity = store.durable_handoff_identity(
+            args.session, resolved["stage_id"]
         )
         resolved = {
-            "status": "processing",
-            "session_id": args.session,
-            "stage_id": resolved["stage_id"],
-            "revision": handoff["revision"],
-            "handoff": handoff,
-            "processing_claim": store.processing_claim(
-                args.session, resolved["stage_id"]
+            **resolved,
+            "claim_deferred": True,
+            "handoff_status": handoff_status,
+            "handoff_identity": identity,
+            "next_action": (
+                "Run exactly the processor named by handoff_identity; "
+                "the 已提交 acknowledgement does not claim or authorize it."
+                if isinstance(identity, dict)
+                else (
+                    "The durable handoff is ready, but it has no current fixed "
+                    "processor. Do not claim it from the 已提交 acknowledgement."
+                )
             ),
         }
+        if isinstance(identity, dict):
+            resolved["processor"] = identity["allowed_action"]
+            specialized = _specialized_processor_payload(
+                resolved["stage_id"],
+                runs_root=args.runs_root,
+                session_id=args.session,
+                claimant_id=args.claimant,
+            )
+            if specialized is not None:
+                resolved = {**resolved, **specialized}
+        print(json.dumps(resolved, ensure_ascii=False))
+        return 0
     print(json.dumps(resolved, ensure_ascii=False))
     return 0 if resolved["status"] != "draft" else 2
 
@@ -2575,6 +2666,26 @@ def build_parser() -> argparse.ArgumentParser:
     wait_handoff.add_argument("--segment-seconds", type=float, default=15)
     wait_handoff.add_argument("--claimant", default="codex-agent")
 
+    listen_handoff = subparsers.add_parser(
+        "listen-handoff",
+        help=(
+            "Return an existing handoff or listen in bounded 15-second "
+            "segments without claiming it"
+        ),
+    )
+    listen_handoff.add_argument("--runs-root", required=True)
+    listen_handoff.add_argument("--session", required=True)
+    listen_handoff.add_argument(
+        "--stage", choices=[stage.id for stage in STAGES], required=True
+    )
+    listen_handoff.add_argument("--timeout", type=float)
+    listen_handoff.add_argument(
+        "--segment-seconds",
+        type=float,
+        default=AGENT_WAIT_SEGMENT_SECONDS,
+    )
+    listen_handoff.add_argument("--claimant", default="codex-agent")
+
     resume_session = subparsers.add_parser(
         "resume-session",
         help="Resolve one explicitly bound session after an 已提交 acknowledgement",
@@ -3218,6 +3329,8 @@ def main(argv: Sequence[str] | None = None, *, page=None, page_factory=None) -> 
         return 0
     if args.command == "wait-handoff":
         return _wait_handoff(args)
+    if args.command == "listen-handoff":
+        return _listen_handoff(args)
     if args.command == "resume-session":
         return _resume_session(args)
     if args.command == "claim-agent-request":

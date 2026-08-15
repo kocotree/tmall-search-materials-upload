@@ -46,6 +46,8 @@ HANDOFF_AGENT_ACTIONS = {
     "completeness": ("process-product-selection", "workbench_api"),
     "approval": ("process-publish-authorization", "plugin_cli"),
 }
+AGENT_WAIT_LEASE_SECONDS = 30
+AGENT_WAIT_SEGMENT_SECONDS = 15
 
 
 class InteractionPathError(ValueError):
@@ -885,7 +887,7 @@ class SessionStore:
         *,
         expected_revision: int,
         claimant_id: str = "codex-agent",
-        lease_seconds: int = 30,
+        lease_seconds: int = AGENT_WAIT_LEASE_SECONDS,
         budget_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Create an advisory wait lease without granting processing rights."""
@@ -938,7 +940,10 @@ class SessionStore:
                     min(
                         now
                         + timedelta(
-                            seconds=min(30, max(1, int(lease_seconds)))
+                            seconds=min(
+                                AGENT_WAIT_LEASE_SECONDS,
+                                max(1, int(lease_seconds)),
+                            )
                         ),
                         budget_expires_at,
                     )
@@ -972,7 +977,10 @@ class SessionStore:
                     min(
                         now
                         + timedelta(
-                            seconds=min(30, max(1, int(lease_seconds)))
+                            seconds=min(
+                                AGENT_WAIT_LEASE_SECONDS,
+                                max(1, int(lease_seconds)),
+                            )
                         ),
                         budget_expires_at,
                     )
@@ -996,7 +1004,7 @@ class SessionStore:
         session_id: str,
         wait_id: str,
         *,
-        lease_seconds: int = 30,
+        lease_seconds: int = AGENT_WAIT_LEASE_SECONDS,
     ) -> dict[str, Any]:
         with self._session_lock(session_id):
             state = self.load_session(session_id)
@@ -1040,13 +1048,118 @@ class SessionStore:
                 min(
                     now
                     + timedelta(
-                        seconds=min(30, max(1, int(lease_seconds)))
+                        seconds=min(
+                            AGENT_WAIT_LEASE_SECONDS,
+                            max(1, int(lease_seconds)),
+                        )
                     ),
                     budget_expires_at,
                 )
             )
             self._write_session_state(session_id, state)
             return dict(wait)
+
+    def listen_for_handoff(
+        self,
+        session_id: str,
+        stage_id: str,
+        *,
+        claimant_id: str = "codex-agent",
+        wait_seconds: float = AGENT_WAIT_SEGMENT_SECONDS,
+        expected_revision: int | None = None,
+        budget_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Return an existing handoff or wait one bounded segment for it.
+
+        The advisory wait is created or renewed before durable handoff state is
+        inspected.  A submission that predates this call is therefore returned
+        immediately, while a later submission is discovered during the same
+        bounded request.  This method never claims processing authority.
+        """
+
+        if (
+            isinstance(wait_seconds, bool)
+            or not isinstance(wait_seconds, (int, float))
+            or not 0 <= float(wait_seconds) <= AGENT_WAIT_SEGMENT_SECONDS
+        ):
+            raise InteractionConflict("AGENT_WAIT_SEGMENT_INVALID")
+        state = self.load_session(session_id)
+        if state.get("current_stage") != stage_id:
+            raise InteractionConflict("AGENT_WAIT_STAGE_MISMATCH")
+        stage_state = state["stages"][stage_id]
+        current_revision = int(stage_state["revision"])
+        resolved_revision = (
+            current_revision
+            if stage_state["status"]
+            in {"ready_for_agent", "processing", "completed"}
+            else current_revision + 1
+        )
+        if (
+            expected_revision is not None
+            and int(expected_revision) != resolved_revision
+        ):
+            raise InteractionConflict("AGENT_WAIT_REVISION_MISMATCH")
+        wait = self.create_agent_wait(
+            session_id,
+            stage_id,
+            expected_revision=resolved_revision,
+            claimant_id=claimant_id,
+            lease_seconds=AGENT_WAIT_LEASE_SECONDS,
+            budget_seconds=budget_seconds,
+        )
+        deadline = time.monotonic() + float(wait_seconds)
+        handoff_status = self.handoff_display_state(session_id, stage_id)
+        while (
+            wait_seconds > 0
+            and handoff_status.get("handoff_identity") is None
+            and handoff_status.get("base_status")
+            in {"draft", "needs_user_input", "blocked"}
+            and time.monotonic() < deadline
+        ):
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+            handoff_status = self.handoff_display_state(session_id, stage_id)
+
+        if handoff_status.get("handoff_identity") is not None:
+            current_wait = self.agent_wait(session_id, stage_id)
+            if current_wait is not None and current_wait.get("budget_expired"):
+                self.clear_agent_wait(session_id, wait_id=wait["wait_id"])
+                wait = None
+                handoff_status = self.handoff_display_state(session_id, stage_id)
+            listen_status = "handoff_ready"
+        elif handoff_status.get("base_status") not in {
+            "draft",
+            "needs_user_input",
+            "blocked",
+        }:
+            try:
+                self.clear_agent_wait(session_id, wait_id=wait["wait_id"])
+            except InteractionConflict:
+                pass
+            wait = None
+            handoff_status = self.handoff_display_state(session_id, stage_id)
+            listen_status = "stage_changed"
+        else:
+            current_wait = self.agent_wait(session_id, stage_id)
+            if current_wait is not None and current_wait.get("budget_expired"):
+                self.clear_agent_wait(session_id, wait_id=wait["wait_id"])
+                wait = None
+                handoff_status = self.handoff_display_state(session_id, stage_id)
+                listen_status = "budget_expired"
+            else:
+                wait = self.renew_agent_wait(
+                    session_id,
+                    wait["wait_id"],
+                    lease_seconds=AGENT_WAIT_LEASE_SECONDS,
+                )
+                handoff_status = self.handoff_display_state(session_id, stage_id)
+                listen_status = "waiting"
+        return {
+            "status": listen_status,
+            "agent_wait": wait,
+            "handoff_status": handoff_status,
+            "segment_seconds": float(wait_seconds),
+            "lease_seconds": AGENT_WAIT_LEASE_SECONDS,
+        }
 
     def agent_wait(
         self, session_id: str, stage_id: str | None = None
@@ -1061,11 +1174,13 @@ class SessionStore:
         budget_expires_at = datetime.fromisoformat(
             wait.get("budget_expires_at", wait["expires_at"])
         )
+        now = datetime.now(timezone.utc)
+        budget_expired = budget_expires_at <= now
         budget_remaining = max(
             0,
             int(
                 (
-                    budget_expires_at - datetime.now(timezone.utc)
+                    budget_expires_at - now
                 ).total_seconds()
             ),
         )
@@ -1076,7 +1191,7 @@ class SessionStore:
                 int(
                     (
                         datetime.fromisoformat(wait["expires_at"])
-                        - datetime.now(timezone.utc)
+                        - now
                     ).total_seconds()
                 ),
             )
@@ -1084,7 +1199,7 @@ class SessionStore:
             **wait,
             "expired": expired,
             "remaining_seconds": remaining,
-            "budget_expired": budget_remaining <= 0,
+            "budget_expired": budget_expired,
             "budget_remaining_seconds": budget_remaining,
         }
 
@@ -1284,14 +1399,39 @@ class SessionStore:
             "resume_prompt": prompt,
         }
 
+    def durable_handoff_identity(
+        self, session_id: str, stage_id: str
+    ) -> dict[str, Any] | None:
+        """Return a validated current handoff identity without claiming it."""
+
+        state = self.load_session(session_id)
+        if state.get("current_stage") != stage_id:
+            raise InteractionConflict("HANDOFF_STAGE_CHANGED")
+        handoff = self.read_optional_stage_document(
+            session_id, stage_id, "handoff"
+        )
+        if handoff is None:
+            return None
+        stage_path = self._stage_path(session_id, stage_id)
+        self._validate_handoff(session_id, stage_id, stage_path, handoff)
+        current_revision = int(state["stages"][stage_id]["revision"])
+        if int(handoff["revision"]) != current_revision:
+            raise InteractionConflict("HANDOFF_REVISION_CHANGED")
+        return self._handoff_action_identity(handoff)
+
     @staticmethod
-    def _handoff_action_identity(handoff: dict[str, Any]) -> dict[str, Any] | None:
+    def _handoff_action_identity(
+        handoff: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Return only the verified identity needed for the next fixed processor."""
 
         stage_id = str(handoff.get("stage_id", ""))
         handoff_kind = str(handoff.get("handoff_kind", ""))
         action_contract = HANDOFF_AGENT_ACTIONS.get(stage_id)
-        if stage_id == "asset_matching" and handoff_kind == "final_material_selection":
+        if (
+            stage_id == "asset_matching"
+            and handoff_kind == "final_material_selection"
+        ):
             action_contract = ("process-final-material-handoff", "workbench_api")
         if stage_id == "approval" and handoff_kind != "publish_authorization":
             action_contract = None
@@ -1478,10 +1618,12 @@ class SessionStore:
                 "Continue upload-search-materials without creating a new session. "
                 f"Use session_id='{session_id}', stage_id='completeness', "
                 f"revision={revision}, runs_root='{self._runs_root}'. "
-                "Use handoff_status.handoff_identity and run exactly its "
-                "process-product-selection workbench action. Do not run "
-                "wait-handoff or resume-session first; the specialized action "
-                "validates and claims the exact handoff itself."
+                "Obtain handoff_status.handoff_identity through the mandatory "
+                "backlog-first agent-wait action=listen (or the fixed "
+                "listen-handoff fallback), then run exactly its "
+                "process-product-selection workbench action. Do not use legacy "
+                "wait-handoff or resume-session to claim first; the specialized "
+                "action validates and claims the exact handoff itself."
             )
         if (
             state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
@@ -1500,10 +1642,12 @@ class SessionStore:
                     "Continue upload-search-materials without creating a new session. "
                     f"Use session_id='{session_id}', stage_id='asset_matching', "
                     f"revision={revision}, runs_root='{self._runs_root}'. "
-                    "Use handoff_status.handoff_identity and run exactly its "
-                    "process-final-material-handoff workbench action. Do not run "
-                    "wait-handoff or resume-session first; the specialized action "
-                    "validates and claims the exact handoff itself."
+                    "Obtain handoff_status.handoff_identity through the mandatory "
+                    "backlog-first agent-wait action=listen (or the fixed "
+                    "listen-handoff fallback), then run exactly its "
+                    "process-final-material-handoff workbench action. Do not use "
+                    "legacy wait-handoff or resume-session to claim first; the "
+                    "specialized action validates and claims the exact handoff itself."
                 )
         return (
             ui_first

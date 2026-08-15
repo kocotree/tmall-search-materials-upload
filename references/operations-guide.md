@@ -195,7 +195,7 @@ SMB/NAS 目录的 `readdir` 或元数据读取停止响应，该目录记录
 
 该入口内部完成精确 handoff 校验与领取，从 `team-cache/**/folders.csv` 使用当前任务商品快照和当前匹配器重新生成候选，然后完成文件夹审查数据生成、结果写入和阶段推进。任务摘要绑定商品 SHA-256、匹配器版本和来源 snapshot ID。全局 `folder_index_root/folder-candidates.csv` 即使存在也不会读取。日常流程不得再手工串联 `snapshot-folder-candidates`、`prepare-folder-review` 或直接写 `result.json`。任务目录不保存 `folder-index.sqlite3`。团队快照缺失或损坏时，入口在 `02-completeness/product-selection-diagnostic.json` 写入失败阶段、稳定原因码、异常、输入身份、相关文件状态、traceback 和恢复动作；Codex 修复或同步团队快照后重跑同一入口。共享索引过期时只有在用户明确要求更新指定来源后才执行增量刷新和发布，而不是新建任务级索引。
 
-`resume-session`、`wait-handoff` 和页面“恢复过期处理”不得先领取 completeness
+`resume-session`、`listen-handoff`、旧兼容 `wait-handoff` 和页面“恢复过期处理”不得先领取 completeness
 handoff；它们只返回 `SPECIALIZED_PROCESSOR_REQUIRED` 和上述唯一入口。该入口自己
 负责首次领取、过期租约回收以及 blocked 后恢复，避免同一交接被通用恢复流程和专用
 处理器重复领取。
@@ -439,7 +439,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 ## 9. 精确批准、发布与恢复
 
-页面授权被 `resume-session` 领取后，从 Skill 目录运行唯一生产入口：
+页面授权形成持久化 handoff 后，Agent 从其验证身份确定唯一生产入口并在 Skill 目录运行；`resume-session` 只恢复该身份，不负责领取或授权：
 
 ```powershell
 .\.venv\Scripts\python.exe -m upload_search_materials.cli process-publish-authorization --runs-root "<runs-root>" --session "<session-id>"
@@ -455,7 +455,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 ```powershell
 .\scripts\start-ui.cmd
-uv run --project .\upload-search-materials --locked tmall-materials wait-handoff --runs-root .\runs --session 20260721_143025 --stage asset_matching
+uv run --project .\upload-search-materials --locked tmall-materials listen-handoff --runs-root .\runs --session 20260721_143025 --stage asset_matching --segment-seconds 15
 ```
 
 服务状态、恢复和停止：
@@ -482,7 +482,7 @@ Agent 按以下顺序处理每一阶段：
 10. 写入与同一组四个值绑定的 `result.json`。
 11. 停止，或明确进入下一阶段。
 
-`wait-handoff` 使用最长 30 秒的心跳租约，以 10–15 秒片段续租同一 `wait_id`；setup 默认总预算为 2 分钟。页面分别显示在线心跳与总等待剩余。命令只返回已验证的当前 handoff，并领取该阶段为 `processing`；正常预算超时、错误、阶段变化或成功认领都会清理自己拥有的 wait，异常退出才依赖自然过期。当前流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。“上传任务确认”页只保存输入并生成 `publish_authorization` handoff，不在页面服务进程中写千牛；Agent 领取后只调用 `process-publish-authorization`。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
+正常流程使用 `listen-handoff`：每个需要 Agent 处理的阶段至少执行一次，先返回已存在的 handoff，再以最长 15 秒片段等待未来 handoff；每个片段续租同一最长 30 秒的 `agent_wait`，setup 默认总预算为 2 分钟。页面分别显示在线心跳与总等待剩余。监听只返回已验证的 `handoff_identity`，不领取 `processing`；唯一处理器随后根据该身份原子领取。旧 `wait-handoff` 只保留兼容。正常预算超时、错误或阶段变化会清理自己拥有的 wait，异常退出才依赖自然过期。当前流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。“上传任务确认”页只保存输入并生成 `publish_authorization` handoff，不在页面服务进程中写千牛；Agent 取得身份后只调用 `process-publish-authorization`。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
 若页面没有 Agent 心跳，或原 Codex 任务已结束，请用户把页面显示的恢复指令完整粘贴到新建或当前 Codex 任务。页面不会在后台继续执行 Agent，也无法唤醒已结束的任务。
 
@@ -586,10 +586,10 @@ mode 和现有草稿。AI 超时、取消、无效或过期时不清空草稿，
 在精确 session 的人工阶段使用 15 秒等待片段：
 
 ```powershell
-tmall-materials wait-handoff --runs-root "<runs-root>" --session "<session-id>" --stage "<stage-id>" --segment-seconds 15
+tmall-materials listen-handoff --runs-root "<runs-root>" --session "<session-id>" --stage "<stage-id>" --segment-seconds 15
 ```
 
-页面正式提交后，当前片段会校验并认领 handoff。命令在一个等待回合内续租同一最长
+无论页面在命令之前还是之后正式提交，当前片段都会返回相同的验证 handoff 身份，但不会提前认领。命令在一个等待回合内续租同一最长
 30 秒的 `agent_wait`，不重置 `started_at` 或总预算。setup 默认总预算为 2 分钟；
 复杂人工阶段可使用更长配置值。正常总预算结束会清理 wait 并返回聊天恢复提示，批准和
 生产确认超时永远不会形成授权。
@@ -601,7 +601,7 @@ tmall-materials resume-session --runs-root "<runs-root>" --session "<session-id>
 ```
 
 必须显式提供已绑定的 session；不得按 runs 目录时间猜测。命令只解析
-completed/processing/recoverable/ready/blocked/draft 并在身份匹配时认领，不会批准、
+completed/processing/recoverable/ready/blocked/draft；ready 时返回 `handoff_identity` 和唯一处理器但不领取，不会批准、
 上传或发布。
 
 采集 attempt 的私有写入位于

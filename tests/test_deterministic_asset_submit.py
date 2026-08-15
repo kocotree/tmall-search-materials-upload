@@ -154,7 +154,8 @@ def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
         session_id, "asset_matching"
     )
     assert "process-final-material-handoff" in recovery_instruction
-    assert "Do not run wait-handoff or resume-session first" in recovery_instruction
+    assert "backlog-first agent-wait action=listen" in recovery_instruction
+    assert "Do not use legacy wait-handoff or resume-session to claim first" in recovery_instruction
 
     wait_code = main(
         [

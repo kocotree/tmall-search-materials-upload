@@ -28,7 +28,7 @@
 ## 正常流程与源码诊断边界
 
 - stage `status` 和 `agent-wait` 响应必须在 handoff 准备后返回 `handoff_status.handoff_identity`，其中只包含经过服务端复核的 `session_id`、`stage_id`、`revision`、`input_sha256`、`handoff_kind`、`allowed_action`、`transport` 及固定 endpoint。Agent 不再从运行目录或源码推导这些字段。
-- `agent-wait` 的 `create`/`renew` 支持 `wait_seconds=0..30`。它在同一 HTTP 响应内做有界等待；未提交时返回当前租约，已提交时同时返回精确 handoff 身份。正常等待不得再使用多轮 `sleep`、终端状态查询或目录轮询。
+- 每个需要 Agent 处理的阶段必须至少调用一次 `agent-wait action=listen`，不能因为页面已经提交而跳过。`listen` 不要求调用方猜测 `expected_revision`：服务端先检查持久 handoff，再以 `wait_seconds=0..15` 做有界长轮询；已提交时立即返回，随后提交时在同一 HTTP 响应中返回精确 handoff 身份。每个片段同时续租同一个最长 30 秒的在线租约。正常等待不得再使用多轮 `sleep`、终端状态查询或目录轮询。
 - 工作台与正式处理器健康时，不得用 CodeGraph、`rg`、`Get-Content` 或其他方式搜索/阅读项目源码，不得枚举 Plugin 目录、版本缓存、runs 目录，不得直接读取 `handoff.json`、`input.json`、锁文件或进程文件，也不得重新发现已经在契约中声明的路由和命令。
 - 浏览器宿主不提供同源请求原语时直接记录 `WORKBENCH_AGENT_API_UNAVAILABLE`，按 canonical Skill 使用一次已声明的固定 CLI 降级。禁止依次试探 `fetch`、`window.fetch`、XHR、页面脚本和后端路由；传输降级本身不授权源码研究。
 - 只有固定 API/处理器返回稳定异常原因码，且当前 revision 已生成状态为 `open` 的 `agent-diagnostics/current.json`，才允许研究源码。Agent 先运行 `diagnose-session` 取得失败 phase、processor、证据和原幂等重试入口，再只检查该处理器及其直接调用链。登录、人机验证、等待超时、业务校验退回以及上述 API→CLI 降级不属于源码异常。
@@ -143,12 +143,12 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 # 等待租约和聊天恢复
 
 - `agent_wait` 是最长 30 秒的在线心跳租约，绑定 session、stage、预期 revision 和
-  独立 `budget_expires_at`；`create`/`renew` 可用 `wait_seconds=0..30` 在同一响应内
-  有界等待 handoff 并返回 `handoff_identity`。同一 waiter 在片段间续租同一 wait ID。setup
+  独立 `budget_expires_at`；正常入口 `action=listen` 使用最长 15 秒片段，在同一响应内
+  先取积压、再有界等待 handoff 并返回 `handoff_identity`。同一 waiter 在片段间续租同一 wait ID。setup
   默认总预算为两分钟。它与 `processing_claim` 分离，不能授权任何业务动作。
 - 页面只在服务端租约有效时显示“Codex 在线”，并把心跳剩余与单调递减的总等待剩余
   分开呈现。正常超时、错误、阶段变化和成功认领必须清理匹配租约。租约过期且 handoff 已
   ready 时，显示“在当前聊天输入已提交”。
-- 当前聊天必须先唯一绑定精确 session。“已提交”只调用权威恢复解析器；draft 不生成
-  handoff，processing 返回原进度，completed 复用原结果，身份不一致 fail closed。
+- 当前聊天必须先唯一绑定精确 session。“已提交”只调用权威恢复解析器并返回持久 handoff 的验证身份；draft 不生成
+  handoff，ready 不提前领取，processing 返回原进度，completed 复用原结果，身份不一致 fail closed。
 - 新聊天、上下文丢失或多 session 歧义时必须使用页面的完整恢复指令。

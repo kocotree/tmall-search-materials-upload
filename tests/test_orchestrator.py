@@ -66,6 +66,14 @@ def test_interaction_commands_are_exposed_with_registry_stage_choices():
             "--stage", "setup",
         ]
     )
+    listen = parser.parse_args(
+        [
+            "listen-handoff",
+            "--runs-root", "runs",
+            "--session", "20260721_143025",
+            "--stage", "setup",
+        ]
+    )
     wait_parser = next(
         action.choices["wait-handoff"]
         for action in parser._actions
@@ -80,6 +88,9 @@ def test_interaction_commands_are_exposed_with_registry_stage_choices():
     assert desktop.project_root is None
     assert wait.command == "wait-handoff"
     assert wait.timeout is None
+    assert listen.command == "listen-handoff"
+    assert listen.timeout is None
+    assert listen.segment_seconds == 15
     assert tuple(stage_action.choices) == tuple(stage.id for stage in STAGES)
 
 
@@ -355,6 +366,97 @@ def test_wait_handoff_timeout_clears_owned_advisory_lease(tmp_path, capsys):
     assert store.agent_wait(session.session_id, "setup") is None
 
 
+def test_listen_handoff_returns_existing_identity_without_claiming(tmp_path, capsys):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+
+    code = main(
+        [
+            "listen-handoff",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--stage", "setup",
+            "--timeout", "1",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    identity = payload["handoff_status"]["handoff_identity"]
+    assert code == 0
+    assert payload["status"] == "handoff_ready"
+    assert identity["revision"] == handoff["revision"]
+    assert identity["input_sha256"] == handoff["input_sha256"]
+    assert identity["allowed_action"] == "process-setup"
+    assert store.processing_claim(session.session_id, "setup") is None
+
+
+def test_listen_handoff_rejects_segment_longer_than_fifteen_seconds(
+    tmp_path, capsys
+):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+
+    code = main(
+        [
+            "listen-handoff",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--stage", "setup",
+            "--segment-seconds", "15.1",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().err)
+    assert code == 2
+    assert payload["reason_code"] == "AGENT_WAIT_SEGMENT_INVALID"
+    assert store.agent_wait(session.session_id, "setup") is None
+
+
+def test_listen_timeout_then_submitted_ack_recovers_same_handoff(tmp_path, capsys):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+
+    timeout_code = main(
+        [
+            "listen-handoff",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--stage", "setup",
+            "--timeout", "0",
+        ]
+    )
+    timeout = json.loads(capsys.readouterr().err)
+    assert timeout_code == 2
+    assert timeout["reason_code"] == "HANDOFF_BUDGET_TIMEOUT"
+    assert store.agent_wait(session.session_id, "setup") is None
+
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+    resume_code = main(
+        [
+            "resume-session",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--ack", "已提交",
+        ]
+    )
+    resumed = json.loads(capsys.readouterr().out)
+
+    assert resume_code == 0
+    assert resumed["status"] == "ready"
+    assert resumed["claim_deferred"] is True
+    assert resumed["handoff_identity"]["revision"] == handoff["revision"]
+    assert (
+        resumed["handoff_identity"]["input_sha256"]
+        == handoff["input_sha256"]
+    )
+    assert store.processing_claim(session.session_id, "setup") is None
+
+
 def test_resume_session_requires_explicit_binding_and_ack_is_not_authority(
     tmp_path, capsys
 ):
@@ -378,7 +480,7 @@ def test_resume_session_requires_explicit_binding_and_ack_is_not_authority(
     assert state["processing_claim"] is None
 
 
-def test_duplicate_resume_session_reuses_processing_claim(tmp_path, capsys):
+def test_duplicate_resume_session_reuses_verified_handoff_identity(tmp_path, capsys):
     store = InteractionSessionStore(tmp_path)
     session = store.create_session()
     store.save_input(session.session_id, "setup", {"store": "测试店铺"})
@@ -394,15 +496,51 @@ def test_duplicate_resume_session_reuses_processing_claim(tmp_path, capsys):
     assert main(command) == 0
     second = json.loads(capsys.readouterr().out)
 
-    assert first["status"] == second["status"] == "processing"
-    assert (
-        first["processing_claim"]["claim_id"]
-        == second["processing_claim"]["claim_id"]
+    assert first["status"] == second["status"] == "ready"
+    assert first["claim_deferred"] is second["claim_deferred"] is True
+    assert first["handoff_identity"] == second["handoff_identity"]
+    assert store.processing_claim(session.session_id, "setup") is None
+
+
+def test_resume_blocked_setup_returns_identity_without_reclaiming(tmp_path, capsys):
+    store = InteractionSessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
     )
-    assert (
-        first["processing_claim"]["attempt_id"]
-        == second["processing_claim"]["attempt_id"]
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0,
+        claimant_id="processor",
     )
+    claim = store.processing_claim(session.session_id, "setup")
+    store.write_result(
+        session.session_id,
+        "setup",
+        handoff["revision"],
+        handoff["input_sha256"],
+        status="blocked",
+        summary="retry required",
+        claim_id=claim["claim_id"],
+        attempt_id=claim["attempt_id"],
+    )
+
+    code = main(
+        [
+            "resume-session",
+            "--runs-root", str(tmp_path),
+            "--session", session.session_id,
+            "--ack", "已提交",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "blocked"
+    assert payload["claim_deferred"] is True
+    assert payload["handoff_identity"]["allowed_action"] == "process-setup"
+    assert store.processing_claim(session.session_id, "setup") is None
 
 
 def test_resume_ack_never_turns_production_confirmation_into_authority(
@@ -435,8 +573,13 @@ def test_resume_ack_never_turns_production_confirmation_into_authority(
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert payload["status"] == "processing"
+    assert payload["status"] == "ready"
+    assert payload["claim_deferred"] is True
     assert payload["handoff"] == handoff
+    assert payload["handoff_identity"] is None
+    assert store.processing_claim(
+        session.session_id, "production_confirmation"
+    ) is None
     assert (
         store._stage_path(session.session_id, "production_confirmation")
         / "input.json"

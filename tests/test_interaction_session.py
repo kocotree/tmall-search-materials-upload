@@ -213,6 +213,123 @@ def test_same_waiter_reuses_id_and_second_waiter_is_rejected(tmp_path):
         )
 
 
+def test_listen_returns_handoff_submitted_before_wait_without_claiming(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id, "setup", {"store": "测试店铺"}
+    )
+
+    result = store.listen_for_handoff(
+        session.session_id,
+        "setup",
+        claimant_id="codex-agent",
+        wait_seconds=0,
+    )
+
+    identity = result["handoff_status"]["handoff_identity"]
+    assert result["status"] == "handoff_ready"
+    assert identity["revision"] == handoff["revision"]
+    assert identity["input_sha256"] == handoff["input_sha256"]
+    assert identity["allowed_action"] == "process-setup"
+    assert store.processing_claim(session.session_id, "setup") is None
+
+
+def test_listen_discovers_handoff_submitted_during_bounded_wait(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    submitted = {}
+
+    def submit():
+        submitted["handoff"] = store.save_input(
+            session.session_id, "setup", {"store": "测试店铺"}
+        )
+
+    timer = threading.Timer(0.05, submit)
+    timer.start()
+    result = store.listen_for_handoff(
+        session.session_id,
+        "setup",
+        claimant_id="codex-agent",
+        wait_seconds=0.5,
+    )
+    timer.join(timeout=1)
+
+    identity = result["handoff_status"]["handoff_identity"]
+    assert result["status"] == "handoff_ready"
+    assert identity["input_sha256"] == submitted["handoff"]["input_sha256"]
+    assert store.processing_claim(session.session_id, "setup") is None
+
+
+def test_listen_renews_same_wait_and_budget_expiry_clears_it(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    first = store.listen_for_handoff(
+        session.session_id,
+        "setup",
+        wait_seconds=0,
+        budget_seconds=30,
+    )
+    second = store.listen_for_handoff(
+        session.session_id,
+        "setup",
+        wait_seconds=0,
+        budget_seconds=30,
+    )
+
+    assert first["status"] == second["status"] == "waiting"
+    assert first["agent_wait"]["wait_id"] == second["agent_wait"]["wait_id"]
+    assert first["agent_wait"]["started_at"] == second["agent_wait"]["started_at"]
+
+    store.clear_agent_wait(
+        session.session_id, wait_id=second["agent_wait"]["wait_id"]
+    )
+    expired = store.listen_for_handoff(
+        session.session_id,
+        "setup",
+        wait_seconds=0,
+        budget_seconds=0,
+    )
+    assert expired["status"] == "budget_expired"
+    assert store.agent_wait(session.session_id, "setup") is None
+
+
+def test_listen_rejects_segments_longer_than_fifteen_seconds(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+
+    with pytest.raises(InteractionConflict, match="AGENT_WAIT_SEGMENT_INVALID"):
+        store.listen_for_handoff(
+            session.session_id,
+            "setup",
+            wait_seconds=15.1,
+        )
+
+
+def test_listen_clears_advisory_wait_when_stage_is_already_processing(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    store.save_input(session.session_id, "setup", {"store": "测试店铺"})
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0,
+        claimant_id="processor",
+    )
+
+    result = store.listen_for_handoff(
+        session.session_id,
+        "setup",
+        wait_seconds=0,
+    )
+
+    assert result["status"] == "stage_changed"
+    assert result["agent_wait"] is None
+    assert result["handoff_status"]["base_status"] == "processing"
+    assert store.agent_wait(session.session_id, "setup") is None
+
+
 def test_recovery_resolver_precedence_and_draft_are_side_effect_free(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create_session()

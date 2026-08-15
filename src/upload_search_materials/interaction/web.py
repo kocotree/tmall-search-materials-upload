@@ -121,7 +121,12 @@ from ..runtime_identity import (
 from ..decision_modes import get_decision_boundary
 from .folder_picker import FolderPickerError, choose_directory
 from .fallback import safety_context
-from .session import InteractionConflict, InteractionPathError, SessionStore
+from .session import (
+    AGENT_WAIT_SEGMENT_SECONDS,
+    InteractionConflict,
+    InteractionPathError,
+    SessionStore,
+)
 from .stages import (
     FALLBACK_REASON_CODES,
     STAGES,
@@ -1787,17 +1792,47 @@ def create_app(
     )
     def manage_agent_wait(session_id: str, stage_id: str):
         payload = _json_object()
-        action = str(payload.get("action", "create")).strip()
-        wait_seconds_value = payload.get("wait_seconds", 0)
+        action = str(payload.get("action", "listen")).strip()
+        wait_seconds_value = payload.get(
+            "wait_seconds",
+            AGENT_WAIT_SEGMENT_SECONDS if action == "listen" else 0,
+        )
+        maximum_wait_seconds = (
+            AGENT_WAIT_SEGMENT_SECONDS if action == "listen" else 30
+        )
         if (
             isinstance(wait_seconds_value, bool)
             or not isinstance(wait_seconds_value, (int, float))
-            or not 0 <= float(wait_seconds_value) <= 30
+            or not 0 <= float(wait_seconds_value) <= maximum_wait_seconds
         ):
             return _validation_error(
-                {"wait_seconds": "must be a number between 0 and 30"}
+                {
+                    "wait_seconds": (
+                        "must be a number between 0 and "
+                        f"{maximum_wait_seconds}"
+                    )
+                }
             )
         wait_seconds = float(wait_seconds_value)
+        if action == "listen":
+            expected_revision = payload.get("expected_revision")
+            if expected_revision is not None and (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+            ):
+                return _validation_error(
+                    {"expected_revision": "must be an integer when supplied"}
+                )
+            result = store.listen_for_handoff(
+                session_id,
+                stage_id,
+                claimant_id=str(
+                    payload.get("claimant_id", "codex-agent")
+                ),
+                wait_seconds=wait_seconds,
+                expected_revision=expected_revision,
+            )
+            return jsonify(**result)
         if action == "create":
             expected_revision = payload.get("expected_revision")
             if isinstance(expected_revision, bool) or not isinstance(
@@ -1828,7 +1863,7 @@ def create_app(
             wait_seconds = 0
         else:
             return _validation_error(
-                {"action": "must be create, renew, or clear"}
+                {"action": "must be listen, create, renew, or clear"}
             )
         handoff_status = store.handoff_display_state(session_id, stage_id)
         deadline = time.monotonic() + wait_seconds
