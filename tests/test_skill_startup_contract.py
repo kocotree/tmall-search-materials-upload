@@ -55,10 +55,10 @@ def test_normal_workbench_flow_does_not_request_duplicate_host_approval():
     assert "不得为它们生成命令审批卡" in skill
     assert "读取目录元数据并生成文件夹候选" in skill
     assert "不得再追加聊天确认或命令确认" in skill
-    assert "/agent-actions/process-product-selection" in skill
-    assert "工作台 API 不可达" in skill
+    assert "工作台后台按持久化 handoff" in skill
+    assert "服务重启后扫描当前精确 session" in skill
     assert "Only unexpected paths that require new technical authority" in entry
-    assert "same-origin JSON APIs" in entry
+    assert "single-session background dispatcher" in entry
     assert "without chat or command approval prompts" in root_agent
     assert "without chat or command approval prompts" in entry_agent
 
@@ -73,13 +73,13 @@ def test_normal_workbench_flow_forbids_source_rediscovery_until_diagnostic_error
     ).read_text(encoding="utf-8")
 
     assert "正常流程禁止源码研究" in skill
-    assert "handoff_status.handoff_identity" in skill
-    assert "不得搜索或阅读项目源码" in entry
+    assert "持久化 `handoff_identity`" in skill
+    assert "Do not search or read project source" in entry
     assert "不得用 CodeGraph、`rg`、`Get-Content`" in contract
     assert "agent-diagnostics/current.json" in contract
 
 
-def test_every_agent_stage_uses_backlog_first_bounded_listener_and_ack_recovery():
+def test_normal_stages_use_workbench_dispatcher_without_agent_listener():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     entry = (
         SKILL_ROOT / "skills" / "upload-search-materials" / "SKILL.md"
@@ -88,14 +88,13 @@ def test_every_agent_stage_uses_backlog_first_bounded_listener_and_ack_recovery(
         encoding="utf-8"
     )
 
-    assert "每个需要 Agent 处理的阶段都必须至少调用一次" in skill
-    assert "先检查持久化 handoff" in skill
-    assert "wait_seconds=0..15" in skill
-    assert "在线租约固定最长 30 秒" in skill
-    assert "不得创建或领取 handoff" in skill
-    assert "every Agent-bound stage must call" in entry
-    assert "listen-handoff --segment-seconds 15" in entry
-    assert "tmall-materials listen-handoff" in guide
+    assert "托管工作台为当前精确 session 启动单一后台调度器" in skill
+    assert "服务启动时先扫描" in skill
+    assert "不建立 `agent_wait`" in skill
+    assert "不得要求用户在聊天输入“已提交”" in skill
+    assert "Codex must not call `agent-wait`" in entry
+    assert "Submission is atomically persisted" in entry
+    assert "正常流程由托管工作台的单 session 后台调度器处理" in guide
 
 
 def test_operations_guide_keeps_environment_and_setup_inputs_separate():

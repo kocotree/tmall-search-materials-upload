@@ -19,18 +19,18 @@
 ## 正常业务流的审批路由
 
 - 工作台内的选择与确认是业务授权；Codex 宿主命令审批是新增技术权限授权。正常流程不得把前者重复包装成后者。
-- 已经允许的固定工作台入口启动/恢复、精确 session 状态读取、页面监听和 handoff 等待、商品采集、已配置素材源索引同步、目录元数据读取、候选生成、用户点击后的图片加载、确定性图片处理、dry-run 和状态回写，均直接执行，不在聊天中询问“是否允许”。
-- 工作台健康时，Codex 通过当前页面同源 JSON API 读取状态、维护 `agent_wait`，并调用 handoff 绑定的 `process-setup`、`process-product-selection` 与 `process-final-material-handoff` 动作。动作必须同时校验 session、stage、revision 和 `input_sha256`；不得为同一动作另起终端命令。只有 API 不可达且返回允许降级的稳定原因码时才使用等价 CLI。
+- 已经允许的固定工作台入口启动/恢复、精确 session 状态读取、后台 handoff 调度、商品采集、已配置素材源索引同步、目录元数据读取、候选生成、用户点击后的图片加载、确定性图片处理、dry-run 和状态回写，均直接执行，不在聊天中询问“是否允许”。
+- 工作台健康时，同一受管服务内的后台调度器从持久化 handoff 或绑定请求中取得精确身份，并调用 `process-setup`、`process-product-selection`、`process-final-material-handoff`、`process-copy-request` 与 `process-publish-authorization`。动作必须同时校验 session、stage/request、revision 和 SHA-256；Codex 不维护 `agent_wait`、不轮询领取，也不为同一动作另起终端命令。
 - `copy_draft` 和 `publish_authorization` 已分别绑定 request/session/revision/SHA-256；处理器必须验证绑定后直接执行。上传任务确认页的精确提交已经同时构成批准清单与正式发布授权，不再追加命令确认。
 - 首次运行缺少固定桌面入口权限时，只允许一次范围精确的 `SYSTEM_PERMISSION_REQUIRED` 环境准备。新 NAS/新位置访问、认证或映射盘、刷新已有共享索引、源素材写删改、运行环境修复、临时诊断旁路、选择器/代码修改和 `publish_uncertain` 后重新发布，属于需要新增权限的异常路径。
 - 宿主强制策略不可由 Skill 绕过。固定入口被阻止时返回稳定原因码，不得用临时 PowerShell 或连续审批卡绕行。
 
 ## 正常流程与源码诊断边界
 
-- stage `status` 和 `agent-wait` 响应必须在 handoff 准备后返回 `handoff_status.handoff_identity`，其中只包含经过服务端复核的 `session_id`、`stage_id`、`revision`、`input_sha256`、`handoff_kind`、`allowed_action`、`transport` 及固定 endpoint。Agent 不再从运行目录或源码推导这些字段。
-- 每个需要 Agent 处理的阶段必须至少调用一次 `agent-wait action=listen`，不能因为页面已经提交而跳过。`listen` 不要求调用方猜测 `expected_revision`：服务端先检查持久 handoff，再以 `wait_seconds=0..15` 做有界长轮询；已提交时立即返回，随后提交时在同一 HTTP 响应中返回精确 handoff 身份。每个片段同时续租同一个最长 30 秒的在线租约。正常等待不得再使用多轮 `sleep`、终端状态查询或目录轮询。
+- stage `status` 在 handoff 准备后返回 `handoff_status.handoff_identity`，其中只包含经过服务端复核的 `session_id`、`stage_id`、`revision`、`input_sha256`、`handoff_kind`、`allowed_action`、`transport` 及固定 endpoint。后台调度器只接受该身份，Codex 不再从运行目录或源码推导这些字段。
+- 正式提交事务必须先原子保存 input、revision 和 handoff，再通知单 session 后台队列。调度器在服务启动时先扫描积压，随后由提交事件立即唤醒，并以 2 秒周期扫描作为丢失通知或进程恢复的兜底；因此提交发生在启动前或启动后都不会丢失。正常流程不得使用 `agent-wait`、`listen-handoff`、多轮 `sleep`、终端状态查询或目录轮询。
 - 工作台与正式处理器健康时，不得用 CodeGraph、`rg`、`Get-Content` 或其他方式搜索/阅读项目源码，不得枚举 Plugin 目录、版本缓存、runs 目录，不得直接读取 `handoff.json`、`input.json`、锁文件或进程文件，也不得重新发现已经在契约中声明的路由和命令。
-- 浏览器宿主不提供同源请求原语时直接记录 `WORKBENCH_AGENT_API_UNAVAILABLE`，按 canonical Skill 使用一次已声明的固定 CLI 降级。禁止依次试探 `fetch`、`window.fetch`、XHR、页面脚本和后端路由；传输降级本身不授权源码研究。
+- 浏览器宿主不提供同源请求原语不影响后台业务处理；页面通过现有状态轮询显示后台结果，Codex 只需提供工作台链接。禁止依次试探 `fetch`、`window.fetch`、XHR、页面脚本和后端路由；传输问题本身不授权源码研究。
 - 只有固定 API/处理器返回稳定异常原因码，且当前 revision 已生成状态为 `open` 的 `agent-diagnostics/current.json`，才允许研究源码。Agent 先运行 `diagnose-session` 取得失败 phase、processor、证据和原幂等重试入口，再只检查该处理器及其直接调用链。登录、人机验证、等待超时、业务校验退回以及上述 API→CLI 降级不属于源码异常。
 
 ## 采集运行环境与两窗口边界
@@ -88,7 +88,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 - 检测只读取目录元数据，最多并发检查 8 个来源，并对单项和整批设置边界；不得列举
   目录、读取图片、创建标记文件、映射共享或请求凭据。
 - 映射盘的 UNC 建议必须由用户点击后采用。检测、选择或显示建议都不得自动执行
-  “保存为本机配置”或“提交给 Agent”。
+  “保存为本机配置”或“提交给工作台”。
 - “选择文件夹”只在用户点击后调用 Windows 原生 STA 助手。同一服务只允许一个活动
   窗口；取消及任何失败都保留原输入，页面继续允许粘贴本机或 UNC 路径。
 - 原生助手稳定结果包括 `FOLDER_PICKER_SELECTED`、`FOLDER_PICKER_CANCELLED`、
@@ -140,15 +140,9 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 - 浏览器打开结果与服务健康分开记录；浏览器失败不等于服务失败。
 - fresh-context 恢复必须使用精确 runs root、session、stage、revision 和 input SHA，不按目录新旧猜测。
 - 工作台受控动作端点只能暴露预定义处理器，不接受任意命令或参数拼接；候选匹配必须从当前任务商品快照和本机已校验的 `team-cache` 文件夹快照即时生成。
-# 等待租约和聊天恢复
+# 后台调度和服务恢复
 
-- `agent_wait` 是最长 30 秒的在线心跳租约，绑定 session、stage、预期 revision 和
-  独立 `budget_expires_at`；正常入口 `action=listen` 使用最长 15 秒片段，在同一响应内
-  先取积压、再有界等待 handoff 并返回 `handoff_identity`。同一 waiter 在片段间续租同一 wait ID。setup
-  默认总预算为两分钟。它与 `processing_claim` 分离，不能授权任何业务动作。
-- 页面只在服务端租约有效时显示“Codex 在线”，并把心跳剩余与单调递减的总等待剩余
-  分开呈现。正常超时、错误、阶段变化和成功认领必须清理匹配租约。租约过期且 handoff 已
-  ready 时，显示“在当前聊天输入已提交”。
-- 当前聊天必须先唯一绑定精确 session。“已提交”只调用权威恢复解析器并返回持久 handoff 的验证身份；draft 不生成
-  handoff，ready 不提前领取，processing 返回原进度，completed 复用原结果，身份不一致 fail closed。
-- 新聊天、上下文丢失或多 session 歧义时必须使用页面的完整恢复指令。
+- 每个托管工作台只为启动时绑定的精确 session 创建一个后台调度器。调度器维护内存队列，提交事务完成后立即通知；每 2 秒的轻量扫描只用于恢复漏失通知、服务重启和租约过期的 processing claim。
+- 页面读取 `workflow_dispatch` 并显示“后台已就绪、已排队、处理中、完成、异常”。旧 `agent_wait` 数据只供历史兼容和诊断，不得用于显示“Codex 在线”或决定正常流程是否继续。
+- 工作台服务停止时不会有后台执行；重新用同一 `runs_root + session_id` 启动后，恢复扫描必须先处理持久积压。用户无需在聊天输入“已提交”，聊天也不构成领取或业务授权。
+- draft 不生成 handoff；ready 由调度器原子领取，processing 仅在合法续作或租约过期时恢复，completed 复用原结果，身份不一致 fail closed。

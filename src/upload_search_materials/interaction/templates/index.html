@@ -84,7 +84,7 @@
           {% if stage.id == "completeness" %}
           <section class="result-module" data-component="InspectionMatrix">
             <div class="module-heading"><div><p class="eyebrow">PROMOTION MATERIAL MATRIX</p><h3>搜推素材完整度</h3></div><span>目标 / 已有 / 缺失 / 证据</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>Agent 返回真实巡检结果后，这里会展示完整度与缺口。</p></div></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>工作台后台返回真实巡检结果后，这里会展示完整度与缺口。</p></div></div>
           </section>
           {% elif stage.id == "asset_matching" %}
           <section class="result-module" data-component="AssetMatchGallery">
@@ -92,7 +92,7 @@
             <div class="match-legend" aria-label="匹配标签">
               <span>商品 ID 命中</span><span>SKU 命中</span><span class="is-pending">完整商品名称命中 · 待确认</span>
             </div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>Agent 会先返回候选文件夹；确认归属后才读取图片候选。</p></div></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>工作台后台会先返回候选文件夹；确认归属后才读取图片候选。</p></div></div>
           </section>
           {% elif stage.id == "image_review" %}
           <section class="result-module" data-component="CropDecision">
@@ -111,7 +111,7 @@
           {% elif stage.id == "dry_run" %}
           <section class="result-module" data-component="DryRunSummary">
             <div class="module-heading"><div><p class="eyebrow">DRY-RUN</p><h3>全量审查摘要</h3></div><span>任务 / 阻塞 / 证据</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>不预填数量；真实任务汇总会随 Agent 结果更新。</p></div></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>不预填数量；真实任务汇总会随工作台结果更新。</p></div></div>
           </section>
           {% elif stage.id == "approval" %}
           <section class="result-module" data-component="ApprovalChecklist">
@@ -149,7 +149,7 @@
             <ol class="operation-steps" aria-label="本页操作步骤">
               <li><span>1</span><div><strong>确认店铺</strong><p>核对系统识别的店铺名称，并勾选确认。</p></div></li>
               <li><span>2</span><div><strong>选择图片文件夹</strong><p>添加本次要检索的业务文件夹，名称保持清晰且不重复。</p></div></li>
-              <li><span>3</span><div><strong>提交处理</strong><p>确认页面没有红色提示后，点击底部“提交给 Agent”。</p></div></li>
+              <li><span>3</span><div><strong>提交处理</strong><p>确认页面没有红色提示后，点击底部“提交给工作台”。</p></div></li>
             </ol>
             <div class="setup-business-grid">
               <div class="field" data-field="store">
@@ -426,14 +426,14 @@
       </div>
 
       <section class="offline-panel" data-offline-panel aria-live="polite">
-        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong data-connection-label>Agent 未连接</strong></div>
-        <p>如果页面提示需要继续处理，请复制下方说明并粘贴回发起任务的 Codex 对话。页面中的草稿不会丢失。</p>
+        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong data-connection-label>工作台后台未连接</strong></div>
+        <p>工作台后台暂时不可用。页面中的草稿和已提交交接不会丢失；恢复服务后会继续处理。只有异常持续存在时才需要复制诊断说明并交给 Codex。</p>
         <dl>
           <div class="technical-only" aria-hidden="true"><dt>当前任务目录</dt><dd data-task-directory>{{ runs_root }}{{ '\\' if session_id else '' }}{{ session_id }}</dd></div>
           <div><dt>当前阶段</dt><dd data-current-stage-label>{{ stages[0].title }}</dd></div>
           <div><dt>最近一次提交时间</dt><dd data-last-submitted>尚未提交</dd></div>
         </dl>
-        <button type="button" class="secondary-button" data-copy-recovery disabled>复制继续处理说明</button>
+        <button type="button" class="secondary-button" data-copy-recovery disabled>复制异常诊断说明</button>
       </section>
 
       <div class="handoff-spacer" aria-hidden="true"></div>
@@ -442,12 +442,12 @@
           <span class="connection-dot" aria-hidden="true"></span>
           <div><small>交接状态</small><strong data-handoff-status>编辑中</strong></div>
         </div>
-        <p class="action-message" data-action-message aria-live="polite">填写完成后可保存草稿，或提交给 Agent。</p>
+        <p class="action-message" data-action-message aria-live="polite">填写完成后可保存草稿，或提交给工作台后台处理。</p>
         <div class="handoff-actions">
           <button type="button" class="secondary-button" data-withdraw-submission hidden>撤回提交并修改</button>
-          <button type="button" class="secondary-button" data-save-draft title="仅保存到当前任务，不通知 Agent">保存草稿</button>
+          <button type="button" class="secondary-button" data-save-draft title="仅保存到当前任务，不触发后台处理">保存草稿</button>
           <span class="submit-validation-hint" data-setup-image-source-incomplete role="status" aria-live="polite" hidden></span>
-          <button type="button" class="primary-button" data-submit-stage>提交给 Agent</button>
+          <button type="button" class="primary-button" data-submit-stage>提交给工作台</button>
         </div>
       </footer>
     </main>

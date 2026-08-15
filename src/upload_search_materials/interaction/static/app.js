@@ -67,6 +67,7 @@
   let currentProcessingClaim = null;
   let currentCollectionStatus = null;
   let currentHandoffStatus = null;
+  let currentWorkflowDispatch = null;
   let currentGalleryProgress = null;
   let currentGalleryJob = null;
   let isHydrating = false;
@@ -923,15 +924,15 @@
       && assetStep === "image_selection"
       && !["ready_for_agent", "processing", "completed"].includes(status)
     )
-      ? "确认选图并提交给 Codex"
+      ? "确认选图并提交给工作台"
       : ["needs_user_input", "blocked"].includes(status)
         && !initialCompletenessReview
       ? "补充后重新提交"
       : status === "ready_for_agent"
-        ? "已提交，等待 Agent"
+        ? "已提交，等待工作台处理"
         : status === "processing"
-          ? "Agent 处理中"
-          : "提交给 Agent";
+          ? "工作台处理中"
+          : "提交给工作台";
     const lockedByServer = !uiState.dirty
       && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
     const approvalHasSelectedTasks = currentStageId !== "approval" || String(
@@ -964,8 +965,8 @@
     if (lockedByServer) {
       const reason = {
         completed: "该阶段已完成，不能再次保存或提交。",
-        ready_for_agent: "该阶段已提交，正在等待 Agent 接收。",
-        processing: "Agent 正在处理该阶段，当前输入已锁定。",
+        ready_for_agent: "该阶段已提交，工作台后台正在排队处理。",
+        processing: "工作台后台正在处理该阶段，当前输入已锁定。",
       }[uiState.serverStatus] || "该阶段当前不可编辑。";
       actionMessage.textContent = goCurrentStageButton.hidden
         ? reason
@@ -1054,13 +1055,16 @@
     const specializedRecovery = ["completeness", "asset_matching"].includes(
       currentStageId,
     );
+    const dispatcherOwnsRecovery = currentWorkflowDispatch?.online === true;
     recoverProcessingButton.hidden = !(
-      !specializedRecovery
+      !dispatcherOwnsRecovery
+      && !specializedRecovery
       && processing
       && (currentProcessingClaim?.expired || recoverable)
     );
     recoverProcessingButton.disabled = !(
-      !specializedRecovery
+      !dispatcherOwnsRecovery
+      && !specializedRecovery
       && processing
       && (currentProcessingClaim?.expired || recoverable)
     );
@@ -1126,23 +1130,23 @@
     }
     if (!currentProcessingClaim) {
       actionMessage.textContent =
-        "该阶段处于处理中，但没有有效租约；请刷新状态或使用恢复指令让 Agent 检查任务。";
+        "该阶段处于处理中，但没有有效租约；工作台后台会校验并恢复原任务。";
       return;
     }
     if (currentProcessingClaim.expired) {
       if (specializedRecovery) {
         actionMessage.textContent =
-          "商品选择已经保留，Agent 将通过唯一处理入口继续，无需在页面恢复租约。";
+          "商品选择已经保留，工作台后台将通过唯一处理入口继续。";
         return;
       }
       actionMessage.textContent =
-        `Agent ${currentProcessingClaim.claimant_id || "未知"} 的处理租约已于 ` +
+        `工作台后台的处理租约已于 ` +
         `${formatClaimTime(currentProcessingClaim.lease_expires_at)} 过期；` +
         "可以恢复原任务并从已验证断点继续。";
       return;
     }
     actionMessage.textContent =
-      `Agent ${currentProcessingClaim.claimant_id || "未知"} 正在处理，租约有效至 ` +
+      `工作台后台正在处理，租约有效至 ` +
       `${formatClaimTime(currentProcessingClaim.lease_expires_at)}；当前输入保持锁定。`;
   }
 
@@ -1156,13 +1160,41 @@
     return { key, value: persistenceRequestIds.get(key) };
   }
 
-  function renderHandoffStatus(display) {
+  function renderHandoffStatus(display, workflowDispatch = currentWorkflowDispatch) {
     currentHandoffStatus = display && typeof display === "object" ? display : null;
     if (!currentHandoffStatus || uiState.serverStatus === "processing") return;
+    if (workflowDispatch?.online === true) {
+      if (
+        workflowDispatch.stage_id === currentStageId
+        && workflowDispatch.status === "queued"
+      ) {
+        actionMessage.textContent = "提交已持久化，工作台后台已接收并正在排队。";
+        return;
+      }
+      if (
+        workflowDispatch.stage_id === currentStageId
+        && workflowDispatch.status === "running"
+      ) {
+        actionMessage.textContent = "工作台后台正在处理本阶段，页面会自动刷新结果。";
+        return;
+      }
+      if (
+        workflowDispatch.stage_id === currentStageId
+        && workflowDispatch.status === "failed"
+      ) {
+        actionMessage.textContent =
+          "工作台后台未能完成本阶段，诊断信息已保留；请按页面提示处理异常。";
+        return;
+      }
+      if (currentHandoffStatus.base_status === "ready") {
+        actionMessage.textContent = "工作台后台已接收提交，正在准备处理。";
+        return;
+      }
+    }
     const wait = currentHandoffStatus.agent_wait;
     if (currentHandoffStatus.status === "waiting" && wait) {
       actionMessage.textContent =
-        `Agent 正在监听（心跳租约约 ${Math.max(0, Number(wait.remaining_seconds || 0))} 秒）；` +
+        `兼容监听已连接（心跳租约约 ${Math.max(0, Number(wait.remaining_seconds || 0))} 秒）；` +
         `本轮最长等待还剩约 ${Math.max(0, Number(wait.budget_remaining_seconds || 0))} 秒。` +
         `表单仍可正常编辑。`;
       return;
@@ -1173,6 +1205,7 @@
   }
 
   async function recoverExpiredProcessing() {
+    if (currentWorkflowDispatch?.online === true) return;
     if (
       !currentProcessingClaim?.expired
       && currentCollectionStatus?.status !== "recoverable"
@@ -1295,7 +1328,7 @@
       content.appendChild(summary);
       return;
     }
-    heading.textContent = result.summary || "Agent 已返回结果";
+    heading.textContent = result.summary || "工作台已返回结果";
     summary.appendChild(heading);
     if (Array.isArray(result.evidence) && result.evidence.length) {
       const evidence = document.createElement("ul");
@@ -2237,7 +2270,7 @@
         element(
           "p",
           "asset-selection-summary",
-          "这是本机固定操作，只读取已采用文件夹并生成候选图片，不会触发 Codex handoff。",
+          "这是本机固定操作，只读取已采用文件夹并生成候选图片，不会创建阶段交接。",
         ),
         localButton,
       );
@@ -4400,7 +4433,7 @@
         writeJsonListControl("copy_edits", merged, { notify: true });
         copyStatus.textContent = drafts.length === assignments.length
           ? "千牛文案已载入；请核对依据、风险并逐坑确认。"
-          : `Codex 已回填 ${drafts.length}/${assignments.length} 个坑位，正在继续处理。`;
+          : `工作台后台已回填 ${drafts.length}/${assignments.length} 个坑位，正在继续处理。`;
         renderCopyEditor(processed, requestId);
       };
       const pollCopyRequest = async (requestId) => {
@@ -4437,8 +4470,8 @@
           }
           copyButton.disabled = true;
           copyStatus.textContent = requestState === "processing"
-            ? `Codex 正在复用千牛文案流程：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
-            : "图片已确认，正在等待 Codex 获取千牛文案。";
+            ? `工作台后台正在复用千牛文案流程：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
+            : "图片已确认，工作台后台正在获取千牛文案。";
           window.setTimeout(() => pollCopyRequest(requestId), 1500);
         } catch (error) {
           if (!copyVersions.isConnected) return;
@@ -4461,7 +4494,7 @@
               }),
             },
           );
-          copyStatus.textContent = "新版本已提交给 Codex。";
+          copyStatus.textContent = "新版本已提交给工作台后台。";
           pollCopyRequest(copyRequest.request_id);
         } catch (error) {
           copyStatus.textContent = error.userMessage || error.message;
@@ -4675,7 +4708,7 @@
           },
         );
         processedOutputs = processed;
-        processStatus.textContent = `图片处理完成：${processed.slots?.length || 0} 个坑位；文案任务已交给 Codex。`;
+        processStatus.textContent = `图片处理完成：${processed.slots?.length || 0} 个坑位；文案任务已交给工作台后台。`;
         renderProcessedPreview(processed);
         renderCopyEditor(
           processed,
@@ -5323,6 +5356,7 @@
       currentProcessingClaim = payload.processing_claim || null;
       currentCollectionStatus = payload.collection_status || null;
       currentHandoffStatus = payload.handoff_status || null;
+      currentWorkflowDispatch = payload.workflow_dispatch || null;
       currentGalleryJob = payload.gallery_job || null;
       currentGalleryProgress = currentGalleryJob?.progress || null;
       isHydrating = true;
@@ -5344,7 +5378,7 @@
         }
       }
       renderStatus();
-      renderHandoffStatus(currentHandoffStatus);
+      renderHandoffStatus(currentHandoffStatus, currentWorkflowDispatch);
       renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       renderSubmission();
       if (
@@ -5432,7 +5466,7 @@
       renderSubmission();
       renderStageResult(stages.get("asset_matching").component);
       actionMessage.textContent =
-        "文件夹决定已保存，本机正在加载候选图片；不会触发 Codex handoff。";
+        "文件夹决定已保存，本机正在加载候选图片；不会创建阶段交接。";
     } catch (error) {
       const fieldErrors = error.payload?.field_errors;
       if (fieldErrors) showFieldErrors(form, fieldErrors);
@@ -5508,7 +5542,7 @@
       && !(await checkImageSources())
     ) {
       actionMessage.textContent =
-        "图片源检测未通过；请修改本次配置后再提交，尚未通知 Codex。";
+        "图片源检测未通过；请修改本次配置后再提交，工作台尚未接收。";
       persistenceInFlight = false;
       return;
     }
@@ -5655,9 +5689,12 @@
               : "自动 dry-run 发现阻塞项，正在进入处理页面。"
             : "当前阶段已完成，可直接进入下一阶段检查。"
           : requestedStageId === "approval"
-            ? "发布授权已提交；Codex 接收后将自动上传所选任务。"
-            : "交接已持久化，正在等待 Agent 接收。";
-        if (payload.status !== "completed") {
+            ? "发布授权已提交；工作台后台将自动上传所选任务。"
+            : "交接已持久化，工作台后台已接收并正在排队。";
+        if (
+          payload.status !== "completed"
+          && currentWorkflowDispatch?.online !== true
+        ) {
           await loadRecoveryInstruction(requestedStageId);
         } else if (payload.next_stage && stages.has(payload.next_stage)) {
           sessionCurrentStageId = payload.next_stage;
@@ -5687,7 +5724,7 @@
         }
         actionMessage.textContent = automatic
           ? `草稿已自动保存 · ${new Date().toLocaleTimeString()}`
-          : "草稿已保存；不会创建 Agent 交接。";
+          : "草稿已保存；不会触发工作台后台处理。";
       }
       revisionLabel.textContent = String(revision);
       persistenceRequestIds.delete(persistenceIdentity.key);
@@ -5727,12 +5764,12 @@
       const waitStillLive = currentHandoffStatus?.agent_wait
         && !currentHandoffStatus.agent_wait.expired;
       const suffix = waitStillLive
-        ? "；Agent 仍在等待，但本次提交尚未成功"
+        ? "；兼容监听仍在线，但本次提交尚未成功"
         : "";
       actionMessage.textContent = pausedSubmission
         ? `保存失败，排队的提交已暂停：${error.userMessage || error.message}${suffix}`
         : mode === "submit"
-          ? `尚未提交，未通知 Codex：${error.userMessage || error.message}${suffix}`
+          ? `尚未提交，工作台未接收：${error.userMessage || error.message}${suffix}`
           : `${error.userMessage || error.message}${suffix}`;
       uiState = UiState.markDirty(uiState);
       renderStatus();
@@ -5763,7 +5800,7 @@
   async function withdrawSubmission() {
     if (!sessionId || uiState.serverStatus !== "ready_for_agent") return;
     withdrawButton.disabled = true;
-    actionMessage.textContent = "正在撤回尚未被 Agent 认领的提交…";
+    actionMessage.textContent = "正在撤回尚未被工作台后台领取的提交…";
     try {
       await fetchJson(apiPath(`/stages/${currentStageId}/withdraw`), {
         method: "POST",
@@ -5843,6 +5880,7 @@
       currentProcessingClaim = stageState.processing_claim || null;
       currentCollectionStatus = stageState.collection_status || null;
       currentHandoffStatus = stageState.handoff_status || null;
+      currentWorkflowDispatch = stageState.workflow_dispatch || null;
       const priorGalleryStatus = currentGalleryJob?.status || null;
       const priorGalleryAttempt = currentGalleryJob?.attempt_id || null;
       if (requestedStageId === "asset_matching") {
@@ -5852,6 +5890,7 @@
       const connection = UiState.connectionView(uiState, Date.now(), {
         agentWait: currentHandoffStatus?.agent_wait || null,
         processingClaim: currentProcessingClaim,
+        workflowDispatch: currentWorkflowDispatch,
       });
       connectionLabel.textContent = connection.connectionLabel;
       offlinePanel.hidden = !connection.offline;
@@ -5864,7 +5903,7 @@
         renderStatus();
         await loadStage();
       } else {
-        renderHandoffStatus(currentHandoffStatus);
+        renderHandoffStatus(currentHandoffStatus, currentWorkflowDispatch);
         renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
         if (currentGalleryJob?.status === "queued") {
           actionMessage.textContent =
@@ -5880,7 +5919,7 @@
       }
     } catch (error) {
       offlinePanel.hidden = false;
-      connectionLabel.textContent = "Agent 状态暂不可用";
+      connectionLabel.textContent = "工作台后台状态暂不可用";
     }
   }
 
@@ -5893,6 +5932,7 @@
     uiState = UiState.switchStage(uiState, stageId);
     currentProcessingClaim = null;
     currentHandoffStatus = null;
+    currentWorkflowDispatch = null;
     currentGalleryJob = null;
     currentGalleryProgress = null;
     recoverProcessingButton.hidden = true;
@@ -5912,7 +5952,7 @@
     const stage = stages.get(stageId);
     titleLabel.textContent = stage.title;
     currentStageLabel.textContent = stage.title;
-    actionMessage.textContent = "填写完成后可保存草稿，或提交给 Agent。";
+    actionMessage.textContent = "填写完成后可保存草稿，或提交给工作台后台处理。";
     renderStatus();
     renderSubmission();
     renderStageResult(stage.component);

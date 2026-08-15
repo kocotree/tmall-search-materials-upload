@@ -1090,6 +1090,7 @@ def _interact(args) -> int:
     app_kwargs = {
         "runtime_config": runtime,
         "material_executor_launcher": launch_material_executor,
+        "managed_session_id": session_id,
     }
     if args.ownership_token:
         app_kwargs["service_identity"] = {
@@ -1591,14 +1592,33 @@ def _process_gallery_job(args) -> int:
 
 def _process_publish_authorization(args, page, page_factory=None) -> int:
     store = SessionStore(Path(args.runs_root))
+    claimant_id = str(
+        getattr(args, "claimant_id", "workbench-dispatcher")
+    )
     try:
         state = store.load_session(args.session)
+        approval_state = state["stages"]["approval"]
+        current_claim = store.processing_claim(args.session, "approval")
+        if approval_state["status"] == "ready_for_agent" or (
+            approval_state["status"] == "processing"
+            and isinstance(current_claim, dict)
+            and current_claim.get("expired") is True
+        ):
+            store.wait_for_handoff(
+                args.session,
+                "approval",
+                timeout_seconds=0.5,
+                claimant_id=claimant_id,
+                reclaim_expired=True,
+            )
+            state = store.load_session(args.session)
         claim = state.get("processing_claim")
         if (
             state.get("current_stage") != "approval"
             or state["stages"]["approval"]["status"] != "processing"
             or not isinstance(claim, dict)
             or claim.get("stage_id") != "approval"
+            or claim.get("claimant_id") != claimant_id
         ):
             raise InteractionConflict("PUBLISH_AUTHORIZATION_NOT_CLAIMED")
         prepared = prepare_publish_run_from_authorization(store, args.session)
@@ -1616,6 +1636,40 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
             phase="prepare_publish",
             error=error,
         )
+        try:
+            failed_state = store.load_session(args.session)
+            failed_claim = failed_state.get("processing_claim")
+            if (
+                failed_state.get("current_stage") == "approval"
+                and failed_state["stages"]["approval"]["status"]
+                == "processing"
+                and isinstance(failed_claim, dict)
+                and failed_claim.get("stage_id") == "approval"
+                and failed_claim.get("claimant_id") == claimant_id
+            ):
+                store.write_result(
+                    args.session,
+                    "approval",
+                    int(failed_claim["revision"]),
+                    str(failed_claim["input_sha256"]),
+                    status="blocked",
+                    summary="上传任务处理前检查未通过",
+                    blocking_reasons=[diagnostic["reason_code"]],
+                    evidence=[
+                        str(
+                            store._session_path(args.session)
+                            / "agent-diagnostics"
+                            / "current.json"
+                        )
+                    ],
+                    next_action="按工作台页面提示处理异常后重新提交。",
+                    claim_id=str(failed_claim.get("claim_id", "")) or None,
+                    attempt_id=(
+                        str(failed_claim.get("attempt_id", "")) or None
+                    ),
+                )
+        except (InteractionConflict, OSError, TypeError, ValueError):
+            pass
         print(
             json.dumps(
                 {
@@ -2413,6 +2467,9 @@ def build_parser() -> argparse.ArgumentParser:
     process_authorization.add_argument("--config", metavar="JSON")
     process_authorization.add_argument("--selectors", metavar="YAML")
     process_authorization.add_argument("--cdp-url")
+    process_authorization.add_argument(
+        "--claimant-id", default="workbench-dispatcher"
+    )
 
     publish = subparsers.add_parser("publish", help="Publish an immutable approved manifest")
     publish.add_argument("--run-dir", required=True)

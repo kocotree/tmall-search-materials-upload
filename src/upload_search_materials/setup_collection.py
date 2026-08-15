@@ -1244,7 +1244,7 @@ def process_setup_collection(
             "summary": result["summary"],
             "blocking_reasons": [],
             "evidence": result["evidence"],
-            "next_action": "选择商品并提交给 Agent",
+            "next_action": "选择商品并提交给工作台",
             "created_at": _now_iso(),
             "data": matrix,
         },

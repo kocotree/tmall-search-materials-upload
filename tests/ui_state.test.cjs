@@ -60,7 +60,7 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
-test("a live processing claim reports that the Agent is processing", () => {
+test("a live processing claim reports that the workbench is processing", () => {
   assert.equal(typeof UiState.connectionView, "function");
   let state = UiState.createState("asset_matching");
   state = UiState.receiveStage(state, {
@@ -81,8 +81,22 @@ test("a live processing claim reports that the Agent is processing", () => {
     },
   );
   assert.equal(view.offline, false);
-  assert.equal(view.statusLabel, "Agent 处理中");
-  assert.equal(view.connectionLabel, "Agent 正在处理");
+  assert.equal(view.statusLabel, "工作台处理中");
+  assert.equal(view.connectionLabel, "工作台后台正在处理");
+});
+
+test("an online dispatcher keeps normal workflow connected without agent wait", () => {
+  let state = UiState.createState("setup");
+  state = UiState.receiveStage(state, {
+    stageId: "setup",
+    status: "ready_for_agent",
+  });
+  const view = UiState.connectionView(state, Date.now(), {
+    workflowDispatch: { online: true, status: "queued" },
+  });
+  assert.equal(view.offline, false);
+  assert.equal(view.statusLabel, "工作台处理中");
+  assert.equal(view.connectionLabel, "工作台后台正在处理");
 });
 
 test("a live wait reports listening even when the old heartbeat is stale", () => {
@@ -105,7 +119,7 @@ test("a live wait reports listening even when the old heartbeat is stale", () =>
     },
   );
   assert.equal(view.offline, false);
-  assert.equal(view.connectionLabel, "Agent 正在监听");
+  assert.equal(view.connectionLabel, "兼容监听已连接");
 });
 
 test("expired leases report disconnected regardless of an old heartbeat", () => {
@@ -128,7 +142,7 @@ test("expired leases report disconnected regardless of an old heartbeat", () => 
     },
   );
   assert.equal(view.offline, true);
-  assert.equal(view.connectionLabel, "Agent 未连接");
+  assert.equal(view.connectionLabel, "工作台后台未连接");
 });
 
 test("selection preflight weights expensive formats and large images", () => {

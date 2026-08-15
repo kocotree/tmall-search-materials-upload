@@ -1384,7 +1384,7 @@ class SessionStore:
         if base_status == "ready" and (
             wait is None or wait.get("expired")
         ):
-            prompt = "Codex 当前未监听；请在当前聊天输入“已提交”继续。"
+            prompt = "工作台后台已接收提交，正在排队处理；页面会自动刷新进度。"
         handoff_identity = None
         if base_status == "ready" and isinstance(resolved.get("handoff"), dict):
             handoff_identity = self._handoff_action_identity(resolved["handoff"])
@@ -1580,10 +1580,13 @@ class SessionStore:
         ui_first = (
             "First run the managed UI launcher with this exact runs_root and "
             f"session_id (session_path='{session_path}'), open the returned "
-            "current-stage URL, and wait for its "
-            "handoff through the stage status and agent-wait APIs. Use only "
-            "handoff_status.handoff_identity for revision, input_sha256, and "
-            "allowed_action. Do not inspect project source, search routes, scan "
+            "current-stage URL, and verify that workflow_dispatch is online. "
+            "The workbench dispatcher scans the persisted backlog before it "
+            "waits for new submissions and invokes only the handoff-bound fixed "
+            "processor. Do not call agent-wait, listen-handoff, "
+            "wait-agent-request, a stage processor, or a terminal polling loop. "
+            "Do not ask the user to type 已提交. Do not inspect project source, "
+            "search routes, scan "
             "the Plugin or runs directory, or read handoff/input files while the "
             "official API and processor remain healthy. Source diagnosis is "
             "allowed only after an official processor persists a stable error "
@@ -1602,8 +1605,8 @@ class SessionStore:
                 "Continue upload-search-materials without creating a new session. "
                 f"Use session_id='{session_id}', stage_id='slots_copy', "
                 f"revision={revision}, runs_root='{self._runs_root}'. "
-                "Continue through the current workbench page and its declared "
-                "agent-request endpoints. Do not wait for, claim, retry, or "
+                "Continue through the current workbench page; its dispatcher "
+                "recovers pending copy requests automatically. Do not wait for, claim, retry, or "
                 "create a slot-planning Agent request. Continue with the "
                 "deterministic draft or user manual edits; only final "
                 "copywriting may create an Agent request."
@@ -1618,12 +1621,10 @@ class SessionStore:
                 "Continue upload-search-materials without creating a new session. "
                 f"Use session_id='{session_id}', stage_id='completeness', "
                 f"revision={revision}, runs_root='{self._runs_root}'. "
-                "Obtain handoff_status.handoff_identity through the mandatory "
-                "backlog-first agent-wait action=listen (or the fixed "
-                "listen-handoff fallback), then run exactly its "
-                "process-product-selection workbench action. Do not use legacy "
-                "wait-handoff or resume-session to claim first; the specialized "
-                "action validates and claims the exact handoff itself."
+                "The workbench dispatcher must route the persisted handoff only "
+                "to process-product-selection. Codex must not call legacy "
+                "wait-handoff, listen-handoff, resume-session, or the specialized "
+                "processor; startup recovery validates and claims the exact handoff."
             )
         if (
             state.get("workflow_profile") == CURRENT_WORKFLOW_PROFILE
@@ -1642,12 +1643,10 @@ class SessionStore:
                     "Continue upload-search-materials without creating a new session. "
                     f"Use session_id='{session_id}', stage_id='asset_matching', "
                     f"revision={revision}, runs_root='{self._runs_root}'. "
-                    "Obtain handoff_status.handoff_identity through the mandatory "
-                    "backlog-first agent-wait action=listen (or the fixed "
-                    "listen-handoff fallback), then run exactly its "
-                    "process-final-material-handoff workbench action. Do not use "
-                    "legacy wait-handoff or resume-session to claim first; the "
-                    "specialized action validates and claims the exact handoff itself."
+                    "The workbench dispatcher must route the persisted handoff only "
+                    "to process-final-material-handoff. Codex must not call legacy "
+                    "wait-handoff, listen-handoff, resume-session, or the specialized "
+                    "processor; startup recovery validates and claims the exact handoff."
                 )
         return (
             ui_first
@@ -1655,7 +1654,7 @@ class SessionStore:
             "Continue upload-search-materials without creating a new session. "
             f"Use session_id='{session_id}', stage_id='{stage_id}', revision={revision}, "
             f"runs_root='{self._runs_root}'. "
-            "Read the exact stage status and use its verified handoff_identity; "
+            "Let the workbench dispatcher recover the verified handoff_identity; "
             "do not inspect durable files or project source during normal flow. "
             "Do not select another session by recency."
         )

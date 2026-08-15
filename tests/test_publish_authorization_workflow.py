@@ -5,6 +5,7 @@ from pathlib import Path
 from upload_search_materials.dry_run_workflow import (
     prepare_publish_run_from_authorization,
 )
+from upload_search_materials.cli import build_parser
 from upload_search_materials.state_store import StateStore
 
 
@@ -33,6 +34,20 @@ def write_json(path: Path, value) -> None:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_publish_authorization_processor_defaults_to_workbench_dispatcher():
+    args = build_parser().parse_args(
+        [
+            "process-publish-authorization",
+            "--runs-root",
+            "runs",
+            "--session",
+            "20260815_120000",
+        ]
+    )
+
+    assert args.claimant_id == "workbench-dispatcher"
 
 
 def test_publish_bridge_is_idempotent_and_does_not_reset_attempted_state(tmp_path):

@@ -8,8 +8,8 @@
   const userActionStatuses = new Set(["needs_user_input", "blocked"]);
   const statusLabels = {
     draft: "编辑中",
-    ready_for_agent: "已提交，等待 Agent",
-    processing: "Agent 处理中",
+    ready_for_agent: "已提交，等待工作台处理",
+    processing: "工作台处理中",
     needs_user_input: "补充后重新提交",
     blocked: "补充后重新提交",
     completed: "已完成",
@@ -80,6 +80,7 @@
   }
 
   function connectionView(state, now, presence = {}) {
+    const workflowDispatch = presence.workflowDispatch || presence.workflow_dispatch;
     const waitIsLive = leaseIsLive(
       presence.agentWait || presence.agent_wait,
       now,
@@ -96,20 +97,34 @@
       return {
         offline: false,
         statusLabel: statusLabels.processing,
-        connectionLabel: "Agent 正在处理",
+        connectionLabel: "工作台后台正在处理",
+      };
+    }
+    if (workflowDispatch?.online === true) {
+      const dispatching = ["queued", "running"].includes(
+        String(workflowDispatch.status || ""),
+      );
+      return {
+        offline: false,
+        statusLabel: dispatching
+          ? statusLabels.processing
+          : statusLabels[state.serverStatus] || statusLabels.draft,
+        connectionLabel: dispatching
+          ? "工作台后台正在处理"
+          : "工作台后台已就绪",
       };
     }
     if (waitIsLive) {
       return {
         offline: false,
         statusLabel: statusLabels[state.serverStatus] || statusLabels.draft,
-        connectionLabel: "Agent 正在监听",
+        connectionLabel: "兼容监听已连接",
       };
     }
     return {
       offline: true,
       statusLabel: statusLabels[state.serverStatus] || statusLabels.draft,
-      connectionLabel: "Agent 未连接",
+      connectionLabel: "工作台后台未连接",
     };
   }
 

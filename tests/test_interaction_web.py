@@ -331,7 +331,7 @@ def test_agent_wait_rejects_unbounded_long_poll(client, session_id):
     assert "wait_seconds" in listen.json["field_errors"]
 
 
-def test_submitted_handoff_without_live_wait_shows_chat_recovery_prompt(
+def test_submitted_handoff_without_live_wait_shows_workbench_queue_prompt(
     client, session_id
 ):
     response = client.post(
@@ -346,7 +346,7 @@ def test_submitted_handoff_without_live_wait_shows_chat_recovery_prompt(
         f"/api/sessions/{session_id}/stages/production_confirmation"
     ).json
     assert stage["handoff_status"]["base_status"] == "ready"
-    assert "当前聊天输入“已提交”" in stage["handoff_status"]["resume_prompt"]
+    assert "工作台后台已接收提交" in stage["handoff_status"]["resume_prompt"]
 
 
 def test_root_renders_nine_stage_left_rail(client):
@@ -1115,11 +1115,11 @@ def test_every_interactive_field_has_named_control(client):
             assert f'name="{field.name}"' in html
 
 
-def test_page_explains_codex_offline_recovery_without_exposing_task_path(client):
+def test_page_explains_workbench_offline_recovery_without_exposing_task_path(client):
     html = client.get("/").get_data(as_text=True)
 
-    assert "Agent 未连接" in html
-    assert "复制继续处理说明" in html
+    assert "工作台后台未连接" in html
+    assert "复制异常诊断说明" in html
     assert "当前任务目录" in html
     assert 'class="technical-only" aria-hidden="true"><dt>当前任务目录' in html
     assert "当前阶段" in html
@@ -1281,12 +1281,12 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "initialCompletenessReview" in javascript
 
     assert "编辑中" in javascript
-    assert "已提交，等待 Agent" in javascript
-    assert "Agent 处理中" in javascript
+    assert "已提交，等待工作台处理" in javascript
+    assert "工作台处理中" in javascript
     assert "补充后重新提交" in javascript
-    assert "Agent 正在监听" in javascript
-    assert "Agent 正在处理" in javascript
-    assert "Agent 未连接" in javascript
+    assert "兼容监听已连接" in javascript
+    assert "工作台后台正在处理" in javascript
+    assert "工作台后台未连接" in javascript
     assert "maxConcurrent: 6" in javascript
     assert "maxWeight: 8" in javascript
     assert "排队中，可取消采用" in javascript
@@ -2701,7 +2701,7 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "let isHydrating = false" in source
     assert "if (isHydrating) return;" in source
     assert "确认文件夹并加载图片" in source
-    assert "确认选图并提交给 Codex" in source
+    assert "确认选图并提交给工作台" in source
     assert "第 1 步：筛选文件夹" in source
     assert "第 2 步：选择图片" in source
     assert '["pending", "待确认"]' not in source
@@ -2741,7 +2741,7 @@ def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():
     assert "requestedStageId" not in function_body
     assert "/stages/asset_matching/folder-image-counts" in source
     assert "本机固定操作" in source
-    assert "不会触发 Codex handoff" in source
+    assert "不会创建阶段交接" in source
     assert "本机正在加载图片" in source
     assert "历史进度口径" in source
 
@@ -2818,7 +2818,8 @@ def test_recovery_returns_session_store_instruction(client, session_id):
     response = client.get(f"/api/sessions/{session_id}/stages/setup/recovery")
 
     assert response.status_code == 200
-    assert "handoff_status.handoff_identity" in response.json["instruction"]
+    assert "workflow_dispatch is online" in response.json["instruction"]
+    assert "workbench dispatcher" in response.json["instruction"]
     assert "Do not inspect project source" in response.json["instruction"]
 
 
@@ -2938,7 +2939,8 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert "/recover-processing" in source
     assert "处理租约已于" in source
     assert 'currentStageId === "completeness"' in source
-    assert "无需在页面恢复租约" in source
+    assert "dispatcherOwnsRecovery" in source
+    assert "currentWorkflowDispatch?.online === true" in source
 
 
 def test_approval_submit_uses_one_click_authorization(

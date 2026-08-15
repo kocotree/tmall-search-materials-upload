@@ -127,6 +127,7 @@ from .session import (
     InteractionPathError,
     SessionStore,
 )
+from .workflow_dispatcher import WorkflowDispatcher, WorkflowProcessor
 from .stages import (
     FALLBACK_REASON_CODES,
     STAGES,
@@ -210,6 +211,7 @@ def create_app(
     material_executor_launcher: (
         Callable[[RuntimeConfig, str], dict[str, Any]] | None
     ) = None,
+    managed_session_id: str | None = None,
 ) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
@@ -219,6 +221,35 @@ def create_app(
     expected_runtime_identity = (
         (service_identity or {}).get("runtime_identity")
     )
+    workflow_dispatcher: WorkflowDispatcher | None = None
+
+    def notify_workflow_dispatcher(session_id: str) -> None:
+        if (
+            workflow_dispatcher is not None
+            and workflow_dispatcher.session_id == session_id
+        ):
+            try:
+                workflow_dispatcher.notify()
+            except (InteractionConflict, OSError, TypeError, ValueError):
+                # The handoff/request is already durable. The dispatcher's
+                # periodic recovery scan will pick it up if this wake-up races
+                # a transient status or filesystem update.
+                pass
+
+    def workflow_dispatch_status(session_id: str) -> dict[str, Any]:
+        if (
+            workflow_dispatcher is not None
+            and workflow_dispatcher.session_id == session_id
+        ):
+            return workflow_dispatcher.public_status()
+        return {
+            "online": False,
+            "status": "unmanaged",
+            "stage_id": "",
+            "action": "",
+            "reason_code": "",
+            "updated_at": None,
+        }
 
     def configured_nas_sources():
         if runtime.nas_sources_file is None:
@@ -675,6 +706,11 @@ def create_app(
             pid=os.getpid(),
             ownership_token=str(identity.get("ownership_token", "")),
             runtime_identity=identity.get("runtime_identity"),
+            workflow_dispatcher=(
+                workflow_dispatcher.public_status()
+                if workflow_dispatcher is not None
+                else {"online": False, "status": "unmanaged"}
+            ),
         )
 
     @app.get("/api/health/sessions/<session_id>")
@@ -1433,6 +1469,7 @@ def create_app(
             "stage_transaction": store.stage_transaction_status(
                 session_id, stage_id
             ),
+            "workflow_dispatch": workflow_dispatch_status(session_id),
         }
         if stage_id == "setup":
             authoritative = get_collection_status(
@@ -2839,6 +2876,7 @@ def create_app(
                     final_material_identity_sha256
                 ),
             )
+            notify_workflow_dispatcher(session_id)
             return jsonify(
                 revision=handoff["revision"],
                 input_sha256=handoff["input_sha256"],
@@ -2869,6 +2907,8 @@ def create_app(
                     "warnings": document["warnings"],
                 },
             ), 202
+        if stage_id in {"setup", "completeness", "approval"}:
+            notify_workflow_dispatcher(session_id)
         return jsonify(
             revision=handoff["revision"],
             input_sha256=handoff["input_sha256"],
@@ -2900,6 +2940,7 @@ def create_app(
         payload["stage_transaction"] = store.stage_transaction_status(
             session_id, stage_id
         )
+        payload["workflow_dispatch"] = workflow_dispatch_status(session_id)
         claim = store.processing_claim(session_id, stage_id)
         if claim is not None:
             payload["processing_claim"] = claim
@@ -3439,6 +3480,7 @@ def create_app(
                     regenerate=False,
                     board_data=data,
                 )
+                notify_workflow_dispatcher(session_id)
             except (
                 AgentRequestError,
                 InteractionConflict,
@@ -3537,6 +3579,7 @@ def create_app(
                 regenerate=False,
                 board_data=data,
             )
+            notify_workflow_dispatcher(session_id)
             processed["copy_request_id"] = copy_request["request_id"]
             processed["copy_request_status"] = copy_request["status"]
             store._write_json_atomic(processed_path, processed)
@@ -4297,6 +4340,7 @@ def create_app(
                 regenerate=payload.get("regenerate") is True,
                 board_data=board_data,
             )
+            notify_workflow_dispatcher(session_id)
         except (
             AgentRequestError,
             InteractionConflict,
@@ -4436,6 +4480,19 @@ def create_app(
                 actor="user",
             )
         return jsonify(document)
+
+    if service_identity is not None and managed_session_id:
+        workflow_dispatcher = WorkflowDispatcher(
+            store,
+            managed_session_id,
+            WorkflowProcessor(
+                store,
+                runtime,
+                local_resource_identity=expected_runtime_identity,
+            ),
+        )
+        workflow_dispatcher.start()
+        app.extensions["tmall_workflow_dispatcher"] = workflow_dispatcher
 
     return app
 

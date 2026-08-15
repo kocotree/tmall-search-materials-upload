@@ -282,7 +282,7 @@ def create_agent_request(
     if not selected and kind != "copy_draft":
         raise AgentRequestError(
             "AGENT_CANDIDATES_EMPTY",
-            "当前没有可提交给 Agent 的候选图片",
+            "当前没有可提交给工作台的候选图片",
             allowed_actions=("retry_ai", "use_manual"),
         )
     request_id = (

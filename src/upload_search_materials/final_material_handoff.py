@@ -157,7 +157,7 @@ def process_final_material_handoff(
         context_revision=int(context["revision"]),
         workflow_state="plan_review",
         confirmed=False,
-        actor="codex",
+        actor="workbench",
     )
     state = store.load_session(session_id)
     state["current_stage"] = "slots_copy"

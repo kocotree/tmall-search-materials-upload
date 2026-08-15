@@ -281,7 +281,7 @@ Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
 - 坑位必须包含主题、数量理由、3–9 张唯一有序图片、逐图角色/理由/新增信息、未采用原因和预计裁剪压缩数。
 - `crop-preflight.json` 绑定已确认的 `plan_revision`、`plan_sha256`、完整裁剪/压缩参数、逐图输出身份、检查数量、`minimum_size_bytes=204800` 和通过时间。只有该绑定与当前计划及页面参数完全一致时，图片完成按钮才可用；任何坑位、顺序、比例、裁剪框或压缩参数变化都会使其失效。
 - `processed-outputs.json` 同时保存计划 SHA 和包含裁剪参数的 processing SHA；输出逐图保存源/输出 SHA、宽高、大小、比例和顺序。它只可由仍然有效的 `crop-preflight.json` 转换得到，完成时复核任务内实际文件，不重复读取共享盘原图或重新裁剪。
-- `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；`request_context.authorization` 固定记录 `status=granted`、授权来源、session/stage/revision、最终输出 SHA、各坑位首图身份、允许动作清单、`requires_chat_confirmation=false`、`publish_allowed=false` 及整个授权信封的 SHA-256。请求创建后状态为 `pending_agent`，由 Codex 的唯一 `process-copy-request` 入口领取；处理器必须在打开浏览器前复核授权信封与当前不可变输出，旧版请求仅在最终输出指纹仍精确一致时补齐限定授权。`progress.json` 保存 `pending|processing|completed|failed`、总坑位数、已完成数、当前 `slot_id`、逐坑已完成草稿及最后错误；正式 `response.json` 只在全部坑位完成后写入，并逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
+- `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；`request_context.authorization` 固定记录 `status=granted`、授权来源、session/stage/revision、最终输出 SHA、各坑位首图身份、允许动作清单、`requires_chat_confirmation=false`、`publish_allowed=false` 及整个授权信封的 SHA-256。请求创建后状态为 `pending_agent`（保留该 schema 枚举以兼容历史数据），由工作台后台调度器通过唯一 `process-copy-request` 入口领取；处理器必须在打开浏览器前复核授权信封与当前不可变输出，旧版请求仅在最终输出指纹仍精确一致时补齐限定授权。`progress.json` 保存 `pending|processing|completed|failed`、总坑位数、已完成数、当前 `slot_id`、逐坑已完成草稿及最后错误；正式 `response.json` 只在全部坑位完成后写入，并逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
 图片分析缓存键由源 SHA-256、`codex-agent-handoff`、模型标识和 schema 版本共同确定。
 # Agent wait envelope
 
@@ -302,7 +302,7 @@ Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
 }
 ```
 
-它只用于 UI 提示。正常 `listen` 每次最多等待 15 秒并续租同一 wait ID，`expires_at` 最长为当前心跳后 30 秒；`budget_expires_at` 是整个阶段监听窗口，续租不得重置。处理排他权仍只来自 `processing_claim`。handoff 独立持久化，不随 wait 超时或清理而删除。
+它只用于历史兼容 UI 和诊断，不属于新任务正常调度。兼容 `listen` 每次最多等待 15 秒并续租同一 wait ID，`expires_at` 最长为当前心跳后 30 秒；`budget_expires_at` 是整个兼容监听窗口，续租不得重置。处理排他权仍只来自 `processing_claim`。handoff 独立持久化，不随 wait 超时或清理而删除；新任务由工作台后台队列与恢复扫描取得该 claim。
 
 ## Agent-only 异常信封
 

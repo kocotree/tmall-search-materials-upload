@@ -136,19 +136,19 @@ cd .\upload-search-materials
 
 图片源检测可保留 canonical UNC 作为当前电脑的回退建议。映射盘缺失时仅在已配置该 UNC 的情况下做有界元数据检测；系统不会自动映射网络盘、请求密码或绕过 Windows/NAS 权限。
 
-Agent 接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
+工作台后台接收 setup handoff 后，在当前 `runs/<session_id>/` 中创建输入快照和自动采集目录：
 
 - `inputs/`：复制商品表、规则表并生成输入清单与 SHA-256。
 - `collected/promotion/`：保存 `promotion-material-status.csv`、checkpoint、分页起点/翻页/末页证据和页面证据。
 - `folder-review/`、`assets/`、`dry-run/`、`approval/`、`results/`：只保存当前任务的候选、决定和结果。
 
-共享文件夹索引数据库、团队 `folders.csv` 快照、选择器与策略配置不重复复制；任务只保存按当前商品快照和匹配器即时生成的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面保存 handoff；Codex 在工作台健康时通过同源受控动作接口启动确定性处理器，工作台 API 不可用时才按稳定原因码回退到等价 CLI。
+共享文件夹索引数据库、团队 `folders.csv` 快照、选择器与策略配置不重复复制；任务只保存按当前商品快照和匹配器即时生成的 `folder-candidates.csv`、审查数据和用户决定。NAS 原图只读且不复制。页面保存 handoff；工作台后台在同一受管服务中启动确定性处理器，Codex 不在正常流程中领取或运行等价 CLI。
 
-Agent 只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 `input_sha256` 校验后读取店铺与图片源并继续。用户在聊天中主动说出的值不代替页面提交；页面未提交时保持等待，不提前运行后续动作。
+后台调度器只能在 setup handoff 通过 `session_id`、`stage_id`、`revision` 和 `input_sha256` 校验后读取店铺与图片源并继续。用户在聊天中主动说出的值不代替页面提交；页面未提交时保持等待，不提前运行后续动作。
 
-编辑时页面停止输入约 1 秒会自动保存草稿。草稿只写当前任务，不通知 Agent；“保存为本机配置”只更新当前电脑默认图片源；“提交给 Agent”才生成可认领 handoff。提交后表单冻结。Agent 尚未认领时可撤回；进入处理中后不可撤回或覆盖。阶段目录的 `revisions/<revision>/` 保留输入和正式 handoff 快照。
+编辑时页面停止输入约 1 秒会自动保存草稿。草稿只写当前任务，不通知工作台后台；“保存为本机配置”只更新当前电脑默认图片源；“提交给工作台”才生成可认领 handoff。提交后表单冻结。后台调度器尚未认领时可撤回；进入处理中后不可撤回或覆盖。阶段目录的 `revisions/<revision>/` 保留输入和正式 handoff 快照。
 
-恢复历史任务时只需使用原 `session_id` 打开页面。页面应直接进入 `session.current_stage`，并在首次显示时同步全部阶段状态；如果停留在已完成阶段，保存和提交会保持锁定并提供“进入当前阶段”。仅打开或刷新页面不会产生新 revision。若用户在自动保存进行时点击“提交给 Agent”，页面显示提交已排队，保存成功后再提交最新值；保存失败会保留编辑内容并暂停提交，切换阶段会取消旧阶段的排队操作。
+恢复历史任务时只需使用原 `session_id` 打开页面。页面应直接进入 `session.current_stage`，并在首次显示时同步全部阶段状态；如果停留在已完成阶段，保存和提交会保持锁定并提供“进入当前阶段”。仅打开或刷新页面不会产生新 revision。若用户在自动保存进行时点击“提交给工作台”，页面显示提交已排队，保存成功后再提交最新值；保存失败会保留编辑内容并暂停提交，切换阶段会取消旧阶段的排队操作。
 
 ## 3. 文件夹索引优先
 
@@ -185,7 +185,7 @@ SMB/NAS 目录的 `readdir` 或元数据读取停止响应，该目录记录
 返回非零且摘要为 `complete=false`；不得把部分索引解释为完整结果，应检查摘要中的
 稳定 `source_system + relative_path`，恢复共享后对同一索引运行 `--refresh`。
 
-第二阶段选择商品并正式提交后，Codex 优先调用当前工作台同源受控动作 `process-product-selection`，携带精确 revision 与 `input_sha256`。只有工作台 API 不可用且稳定原因码允许降级时，才运行以下等价 CLI：
+第二阶段选择商品并正式提交后，工作台后台调度器自动调用 `process-product-selection`，携带精确 revision 与 `input_sha256`。以下等价 CLI 只供历史兼容和稳定异常诊断：
 
 ```powershell
 .\.venv\Scripts\tmall-materials.exe process-product-selection `
@@ -208,7 +208,7 @@ handoff；它们只返回 `SPECIALIZED_PROCESSOR_REQUIRED` 和上述唯一入口
 
 上述唯一入口同时把候选转换成素材匹配页面可读取的数据；这里不再运行第二条命令。
 
-入口自动把 `folder-review.json` 写入素材匹配阶段的 `review-context.json.data`，并设置 `workflow_step=folder_review`。页面先展示目录元数据，再由独立本机请求异步回填每个文件夹的原始递归素材数；计数期间显示“素材数统计中”，不可访问时显示“素材数未知”，计数过程不打开、解码或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。“确认文件夹并加载图片”必须放在文件夹列表下方、候选图片上方，是独立的本机固定操作；点击后直接调用本地 `prepare-gallery` API 保存二态决定并启动 gallery job，不经过通用阶段提交处理器。这一步不创建 handoff、不等待 Codex，也不需要回复“已提交”。文件夹审查和加载中隐藏页面底部提交按钮；进入选图后才显示原位置的“确认选图并提交给 Codex”。仅加载或刷新页面不得写草稿。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。历史任务需要一次性精确文件夹查询时仍可单独使用 `prepare-folder-review --exact-folder`，但它不得成为新任务的正常阶段推进路径。
+入口自动把 `folder-review.json` 写入素材匹配阶段的 `review-context.json.data`，并设置 `workflow_step=folder_review`。页面先展示目录元数据，再由独立本机请求异步回填每个文件夹的原始递归素材数；计数期间显示“素材数统计中”，不可访问时显示“素材数未知”，计数过程不打开、解码或哈希图片。页面只提供“采用 / 排除该文件夹”：商品 ID、完整货号和完整基础名称候选默认采用；50% 连续名称粗略候选默认排除。“确认文件夹并加载图片”必须放在文件夹列表下方、候选图片上方，是独立的本机固定操作；点击后直接调用本地 `prepare-gallery` API 保存二态决定并启动 gallery job，不经过通用阶段提交处理器。这一步不创建 handoff、不等待 Codex，也不需要回复“已提交”。文件夹审查和加载中隐藏页面底部提交按钮；进入选图后才显示原位置的“确认选图并提交给工作台”。仅加载或刷新页面不得写草稿。素材匹配返回 `needs_user_input`/`blocked` 时必须保留 `review-context.json`。历史任务需要一次性精确文件夹查询时仍可单独使用 `prepare-folder-review --exact-folder`，但它不得成为新任务的正常阶段推进路径。
 
 只有最终采用的文件夹可进入按需图片枚举，`rejected` 不得读取。候选优先来自商品 ID、完整货号或去除末尾“（主）/（副）”后的基础名称；最长公共连续部分覆盖基础名称至少 50% 且不少于 5 个字符时，可作为默认排除的粗略候选展示。用户仍应核对同货号异名、主副链接和历史目录，并排除错误来源。
 
@@ -220,7 +220,7 @@ handoff；它们只返回 `SPECIALIZED_PROCESSOR_REQUIRED` 和上述唯一入口
 
 正常的 1–3 商品试跑不建立全量图片索引。用户确认文件夹后，页面把当前 `source_id + relative_path` 决定写入 `input.json`、创建 `queued` gallery job，并自动请求 Windows 桌面启动一次性素材执行器。执行器把 source ID 绑定到本机盘符或 UNC 根目录后生成任务级候选清单；不得直接继承 UI/Codex 令牌，而必须委托 Explorer 启动。页面服务和 Codex 都不直接读取 NAS。加载失败时在页面点击“重试加载图片”，页面会自动启动新的 attempt；旧 attempt 保留供审计。
 
-用户完成选图并点击“确认选图并提交给 Codex”后，Codex 只处理最终素材交接：
+用户完成选图并点击“确认选图并提交给工作台”后，后台调度器只调用最终素材正式处理器：
 
 ```powershell
 uv run tmall-materials process-final-material-handoff `
@@ -439,7 +439,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 ## 9. 精确批准、发布与恢复
 
-页面授权形成持久化 handoff 后，Agent 从其验证身份确定唯一生产入口并在 Skill 目录运行；`resume-session` 只恢复该身份，不负责领取或授权：
+页面授权形成持久化 handoff 后，工作台后台调度器从其验证身份调用唯一生产入口；`resume-session` 只供历史兼容和诊断，不负责领取或授权：
 
 ```powershell
 .\.venv\Scripts\python.exe -m upload_search_materials.cli process-publish-authorization --runs-root "<runs-root>" --session "<session-id>"
@@ -451,7 +451,7 @@ uv run tmall-materials run --mode dry-run --month <1-12> --store "<店铺名>" -
 
 ## 10. 交互式任务执行
 
-新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。在项目根目录运行：
+新任务使用以时间戳命名的独立会话目录；恢复旧任务时必须指定原 `session_id`，不得默认选择最新目录。日常使用固定 `scripts/start-managed-workbench.ps1`；下列前台 UI 与监听命令只供开发诊断和旧版本兼容：
 
 ```powershell
 .\scripts\start-ui.cmd
@@ -468,12 +468,12 @@ uv run --project .\upload-search-materials --locked tmall-materials ui-stop --ru
 
 `.ui-service.json` 和 `logs/` 位于精确 session 目录。stop/restart 只管理健康端点返回 PID 和 ownership token 同时匹配的服务；端口被未知进程占用时选择 `8765–8795` 中的下一端口，不结束未知进程。
 
-Agent 按以下顺序处理每一阶段：
+工作台后台按以下顺序处理每一阶段：
 
 1. 解析精确 `session_id`。
 2. 仅对新任务创建时间戳隔离目录。
 3. 启动仅监听 `localhost` 的 UI。
-4. 等待精确当前阶段的 handoff。
+4. 在启动恢复扫描或提交通知中取得精确当前阶段的 handoff。
 5. 对照 `input.json` 验证 `session_id`、`stage_id`、`revision` 和 `input_sha256`。
 6. 读取 `<stage>/decision-modes/<decision_id>.json`；不存在时按 [decision-boundaries.md](decision-boundaries.md) 使用 Skill 默认模式。
 7. `manual/manual_only` 等待用户；`rules` 运行确定性规则；只有 `agent_assisted` 才发现和领取 AI 请求。
@@ -482,9 +482,9 @@ Agent 按以下顺序处理每一阶段：
 10. 写入与同一组四个值绑定的 `result.json`。
 11. 停止，或明确进入下一阶段。
 
-正常流程使用 `listen-handoff`：每个需要 Agent 处理的阶段至少执行一次，先返回已存在的 handoff，再以最长 15 秒片段等待未来 handoff；每个片段续租同一最长 30 秒的 `agent_wait`，setup 默认总预算为 2 分钟。页面分别显示在线心跳与总等待剩余。监听只返回已验证的 `handoff_identity`，不领取 `processing`；唯一处理器随后根据该身份原子领取。旧 `wait-handoff` 只保留兼容。正常预算超时、错误或阶段变化会清理自己拥有的 wait，异常退出才依赖自然过期。当前流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。“上传任务确认”页只保存输入并生成 `publish_authorization` handoff，不在页面服务进程中写千牛；Agent 取得身份后只调用 `process-publish-authorization`。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
+正常流程由托管工作台的单 session 后台调度器处理：提交事务先持久化 handoff 再立即通知队列；服务启动先检查积压，空闲时每 2 秒轻量恢复扫描。唯一处理器根据验证后的 `handoff_identity` 原子领取，旧 `listen-handoff`、`agent_wait` 和 `wait-handoff` 只保留兼容与诊断，不得由 Codex 在正常任务中调用。当前流程中，第二阶段自动排除五类商品并直接交给第三阶段素材匹配；旧任务的历史编号目录仍可读取。“上传任务确认”页保存输入并生成 `publish_authorization` handoff，HTTP 请求线程不直接写千牛；后台调度器取得身份后只调用 `process-publish-authorization`。素材变化会使旧批准失效，页面上的旧提交不授权发布新内容。
 
-若页面没有 Agent 心跳，或原 Codex 任务已结束，请用户把页面显示的恢复指令完整粘贴到新建或当前 Codex 任务。页面不会在后台继续执行 Agent，也无法唤醒已结束的任务。
+页面以 `workflow_dispatch` 显示后台已就绪、排队、处理中、完成或异常。Codex 任务结束不影响仍在运行的工作台后台；若工作台服务停止，使用原 `runs_root + session_id` 恢复服务即可自动扫描持久积压，不需要用户在聊天回复“已提交”。
 
 ### 9.1 前端不可用时的受控聊天保底
 
@@ -500,7 +500,7 @@ uv run --project .\upload-search-materials --locked tmall-materials chat-fallbac
 默认只保存草稿；`--mode submit` 必须通过完整必填字段、revision 和安全校验才生成 handoff。页面恢复后应检查带“Codex 对话保底”来源的值。空店铺、空月份、空图片源、NAS 不可访问和未登录都不是 UI 失败。
 # 第四、第五阶段操作
 
-第三阶段已提交并由 Agent 写入 `completed` 结果后：
+第三阶段已提交并由工作台后台写入 `completed` 结果后：
 
 ```powershell
 uv run tmall-materials prepare-image-review `
@@ -519,9 +519,9 @@ uv run tmall-materials prepare-slot-board `
   --session <session_id>
 ```
 
-第五阶段分为三个递进子页面。第一页上方按商品分页展示第四阶段候选，下方展示唯一当前坑位草稿；默认由确定性规则生成坑位草稿，人工负责审核和调整。点击“确认坑位并进入图片裁剪”只锁定每坑 3–9 张、有序图片和唯一比例，不生成派生图。第二页按坑位显示原图尺寸、原始大小、目标比例、裁剪方式和压缩确认；用户先点击“裁剪预校验”，本地确定性处理器只对当前坑位图片生成并复核实际输出。未通过、未执行或之后修改任何图片/顺序/比例/裁剪/压缩参数时，“完成图片处理并进入文案生成”保持禁用。完成按钮只锁定已经通过的输出并自动创建 `copy_draft` 请求，同时对本次请求授予限定权限：逐坑上传首张已验证成品图、调用千牛内置 AI、读取文案并退出未发布表单。Agent 收到该请求后不得在聊天中再次索取“同意”或其他授权；该权限不包含填充、确认、正式上传或发布，且任一绑定图片或 SHA 变化都会使旧授权失效。第三页轮询 Codex 处理进度并逐坑回填千牛标题和描述，逐坑人工确认后只能进入 dry-run，不会触发阶段 07/08 或真实上传。
+第五阶段分为三个递进子页面。第一页上方按商品分页展示第四阶段候选，下方展示唯一当前坑位草稿；默认由确定性规则生成坑位草稿，人工负责审核和调整。点击“确认坑位并进入图片裁剪”只锁定每坑 3–9 张、有序图片和唯一比例，不生成派生图。第二页按坑位显示原图尺寸、原始大小、目标比例、裁剪方式和压缩确认；用户先点击“裁剪预校验”，本地确定性处理器只对当前坑位图片生成并复核实际输出。未通过、未执行或之后修改任何图片/顺序/比例/裁剪/压缩参数时，“完成图片处理并进入文案生成”保持禁用。完成按钮只锁定已经通过的输出并自动创建 `copy_draft` 请求，同时对本次请求授予限定权限：逐坑上传首张已验证成品图、调用千牛内置 AI、读取文案并退出未发布表单。工作台后台收到该请求后直接调用固定处理器，不在聊天中再次索取“同意”或其他授权；该权限不包含填充、确认、正式上传或发布，且任一绑定图片或 SHA 变化都会使旧授权失效。第三页轮询工作台后台处理进度并逐坑回填千牛标题和描述，逐坑人工确认后只能进入 dry-run，不会触发阶段 07/08 或真实上传。
 
-可选的 Codex 建议必须由用户点击“提交给 Agent 生成建议”创建。页面不会自动唤醒 Codex；复制页面恢复提示词到当前 Codex 任务，或由 Agent 执行：
+历史版本的可选 Agent 建议命令仅供旧会话兼容和开发诊断；新任务的 `copy_draft` 由工作台后台自动领取，不需要执行下列命令：
 
 ```powershell
 uv run tmall-materials list-agent-requests --runs-root <runs目录> --session <session_id>
@@ -577,30 +577,28 @@ mode 和现有草稿。AI 超时、取消、无效或过期时不清空草稿，
 - 坑位确认前不生成派生图片。处理页使用 `3:4 / 1:1` 比例按钮与可拖动、可缩放、
   锁定比例的可视化裁剪框；页面不要求用户输入归一化坐标。单图裁剪变化只使该图
   输出与所属坑位文案失效，其他坑位文案保持有效。
-- 图片完成按钮自动创建绑定 session、计划 revision、最终输出 SHA-256、坑位与首图清单的 `copy_draft` 限定授权请求；不得在聊天中追加“同意上传种子图”等二次确认。Codex 从 Skill 目录运行
-  `tmall-materials process-copy-request --runs-root <runs-root> --session <session-id> --request <request-id>`；
-  该入口逐坑复用 `browser/qianniu_copy.py` 并写入 `progress.json`，不得在 UI 服务中同步运行
-  Playwright，也不得另写一套浏览器脚本。文案确认之前不得提交第五阶段。
-# 有界等待与“已提交”恢复
+- 图片完成按钮自动创建绑定 session、计划 revision、最终输出 SHA-256、坑位与首图清单的 `copy_draft` 限定授权请求；不得在聊天中追加“同意上传种子图”等二次确认。工作台后台调度器调用
+  `process-copy-request`；该入口逐坑复用 `browser/qianniu_copy.py` 并写入 `progress.json`，不得在 HTTP 请求线程中同步运行 Playwright，也不得另写一套浏览器脚本。文案确认之前不得提交第五阶段。
+# 后台恢复与旧监听兼容
 
-在精确 session 的人工阶段使用 15 秒等待片段：
+新任务不运行监听命令。以下 15 秒等待片段只用于旧版本兼容或开发诊断：
 
 ```powershell
 tmall-materials listen-handoff --runs-root "<runs-root>" --session "<session-id>" --stage "<stage-id>" --segment-seconds 15
 ```
 
-无论页面在命令之前还是之后正式提交，当前片段都会返回相同的验证 handoff 身份，但不会提前认领。命令在一个等待回合内续租同一最长
+兼容命令无论页面在命令之前还是之后正式提交，都会返回相同的验证 handoff 身份，但不会提前认领。命令在一个等待回合内续租同一最长
 30 秒的 `agent_wait`，不重置 `started_at` 或总预算。setup 默认总预算为 2 分钟；
 复杂人工阶段可使用更长配置值。正常总预算结束会清理 wait 并返回聊天恢复提示，批准和
 生产确认超时永远不会形成授权。
 
-Codex 等待已结束时，在原聊天收到“已提交”后运行：
+旧会话诊断时可显式解析持久化状态：
 
 ```powershell
 tmall-materials resume-session --runs-root "<runs-root>" --session "<session-id>" --ack "已提交"
 ```
 
-必须显式提供已绑定的 session；不得按 runs 目录时间猜测。命令只解析
+必须显式提供已绑定的 session；不得按 runs 目录时间猜测。该命令不属于新任务恢复路径，只解析
 completed/processing/recoverable/ready/blocked/draft；ready 时返回 `handoff_identity` 和唯一处理器但不领取，不会批准、
 上传或发布。
 
