@@ -39,6 +39,27 @@ def test_first_shared_snapshot_does_not_require_second_verbal_authorization():
     assert "without requesting a second verbal authorization" in index_skill
 
 
+def test_normal_workbench_flow_does_not_request_duplicate_host_approval():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    entry = (
+        SKILL_ROOT / "skills" / "upload-search-materials" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    root_agent = (SKILL_ROOT / "agents" / "openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    entry_agent = (
+        SKILL_ROOT / "skills" / "upload-search-materials" / "agents" / "openai.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "正常业务流与宿主审批边界" in skill
+    assert "不得为它们生成命令审批卡" in skill
+    assert "读取目录元数据并生成文件夹候选" in skill
+    assert "不得再追加聊天确认或命令确认" in skill
+    assert "Only unexpected paths that require new technical authority" in entry
+    assert "without chat or command approval prompts" in root_agent
+    assert "without chat or command approval prompts" in entry_agent
+
+
 def test_operations_guide_keeps_environment_and_setup_inputs_separate():
     guide = (SKILL_ROOT / "references" / "operations-guide.md").read_text(
         encoding="utf-8"
@@ -47,3 +68,4 @@ def test_operations_guide_keeps_environment_and_setup_inputs_separate():
     assert "环境检查是启动配置页前唯一允许的阻断" in guide
     assert "不得要求用户在聊天中提供店铺名、月份或图片根目录" in guide
     assert "缺少这些业务值不得阻止页面启动" in guide
+    assert "不得在每个任务或阶段再次请求批准" in guide

@@ -158,6 +158,8 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 `prepare-folder-review` 生成的 `folder-review.json` 使用 `review_type=folder_ownership` 和 `safety_status=folders_only`。`folder_candidates` 每项包含 `folder_id`、商品 ID/标题/货号、`source_id`、`relative_path`、来源、文件夹名、仅供审计的历史完整路径、匹配类型、匹配状态以及当前决定；`folder_products` 提供逐商品候选数。新任务读取图片只使用 `source_id + relative_path`，不得使用绝对路径作为跨电脑业务标识。文件夹计数由素材执行器在访问本机绑定后回填 `ready + raw_recursive_image_count`，或者回填 `unknown + image_count_reason_code`；未知不得降级成 0。计数只枚举受支持图片路径，不读取图片内容。确定性候选默认 `confirmed`；`match_type=fuzzy_name_candidate` 表示基础名称至少 50% 的最长公共连续字符命中，默认 `rejected`，页面仍只提供采用和排除。历史 `pending` 按采用读取。用户明确提供完整文件夹名时，当前任务可生成 `match_type=exact_folder_query` 的候选；该记录不是别名。
 
+组合商品标题按 `/`、`／`、`、` 或 `|` 拆分后只保留完整字面片段，不生成拼接名称。`match_type=split_name_candidate` 表示文件夹名完整包含不少于 5 字的拆分片段，默认 `confirmed`；`match_type=short_split_name_candidate` 表示完整包含 3–4 字拆分片段，默认 `rejected`；少于 3 字的片段不参与匹配。50% 粗略候选继续基于未拆分基础名称计算。
+
 用户决定写入同一时间戳会话的 `input.json.values.folder_decisions`。每项必须包含：
 
 - `folder_id`、`product_id`、`source_id`、`relative_path`，用于跨电脑绑定明确目录和商品；`source_system` 与 `folder_path` 只作为兼容或审计字段。

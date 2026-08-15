@@ -1721,7 +1721,9 @@
       exact_product_id: "0",
       exact_sku: "1",
       name_candidate: "2",
-      fuzzy_name_candidate: "3",
+      split_name_candidate: "3",
+      short_split_name_candidate: "4",
+      fuzzy_name_candidate: "5",
     };
     return [
       matchRank[candidate.match_type] || "9",
@@ -2050,7 +2052,7 @@
       element(
         "span",
         "",
-        "精确候选默认采用；50% 粗略候选默认排除。采用文件夹只会加载候选图片，不会自动采用其中图片。",
+        "精确候选和不少于 5 字的完整名称片段默认采用；3–4 字短片段与 50% 粗略候选默认排除。采用文件夹只会加载候选图片，不会自动采用其中图片。",
       ),
     );
     review.appendChild(safety);
@@ -2140,6 +2142,10 @@
               ? "货号命中"
               : candidate.match_type === "exact_folder_query"
                 ? "本次精确文件夹查询"
+                : candidate.match_type === "split_name_candidate"
+                  ? "完整名称片段命中"
+                  : candidate.match_type === "short_split_name_candidate"
+                    ? "短名称片段候选"
                 : candidate.match_type === "fuzzy_name_candidate"
                   ? "50% 连续名称候选"
                   : "名称候选",
@@ -2174,6 +2180,10 @@
             ? "货号命中；如不属于本商品请排除"
             : candidate.match_type === "exact_folder_query"
               ? "用户指定的完整文件夹名；仅本次任务有效"
+              : candidate.match_type === "split_name_candidate"
+                ? "文件夹包含商品名中以 / 分隔的完整片段；默认采用，可手动排除"
+                : candidate.match_type === "short_split_name_candidate"
+                  ? "文件夹包含 3–4 字完整片段；默认排除，确认属于本商品后再采用"
               : candidate.match_type === "fuzzy_name_candidate"
                 ? "粗略名称命中；默认排除，确认属于本商品后再采用"
                 : "名称精确命中；默认采用，可手动排除",

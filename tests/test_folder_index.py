@@ -842,6 +842,24 @@ def test_folder_review_defaults_fuzzy_candidates_to_rejected(tmp_path):
     assert confirmed_data["folder_candidates"][0]["decision"] == "confirmed"
 
 
+def test_folder_review_defaults_long_split_to_confirmed_and_short_split_to_rejected(
+    tmp_path,
+):
+    candidates = tmp_path / "folder-candidates.csv"
+    candidates.write_text(
+        "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
+        "F-1,model,Y:/soft,soft,分龄成长软软镜,886506466908,KQ25029,分龄成长软软镜/稳稳镜/酷酷镜,split_name_candidate,needs_manual_confirmation\n"
+        "F-2,model,Y:/stable,stable,分龄成长稳稳镜,886506466908,KQ25029,分龄成长软软镜/稳稳镜/酷酷镜,short_split_name_candidate,needs_manual_confirmation\n",
+        encoding="utf-8-sig",
+    )
+
+    data = build_folder_review_data(candidates)
+
+    assert [
+        item["decision"] for item in data["folder_candidates"]
+    ] == ["confirmed", "rejected"]
+
+
 def test_prepare_folder_review_cli_writes_ui_payload(tmp_path):
     candidates = tmp_path / "folder-candidates.csv"
     candidates.write_text(

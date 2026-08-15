@@ -40,6 +40,19 @@ def test_normalize_match_text_applies_the_required_canonicalization():
     assert normalize("  ＫＫ树 花 仙-子—帽_+· ") == "花仙子帽"
 
 
+def test_split_product_title_fragments_does_not_infer_combined_names():
+    split = asset_matching().split_product_title_fragments
+
+    assert split("分龄成长软软镜/稳稳镜/酷酷镜") == (
+        "分龄成长软软镜",
+        "稳稳镜",
+        "酷酷镜",
+    )
+    assert "分龄成长稳稳镜" not in split(
+        "分龄成长软软镜/稳稳镜/酷酷镜"
+    )
+
+
 def test_folder_matching_removes_main_sub_listing_suffixes():
     matcher = matcher_for(
         [product("1041562508689", sku="KQ26121", title="小萌侠分区防晒泳衣（主）")]
@@ -79,6 +92,43 @@ def test_folder_fuzzy_matching_rejects_short_shared_fragments():
     )
 
     assert matcher.match_folder_name("分龄成长太阳镜") == ()
+
+
+def test_slash_title_fragments_match_literally_with_short_fragments_separate():
+    matcher = matcher_for(
+        [
+            product(
+                "886506466908",
+                sku="KQ25029",
+                title="分龄成长软软镜/稳稳镜/酷酷镜",
+                source_row=2,
+            ),
+            product(
+                "887243232283",
+                sku="KQ25029",
+                title="分龄成长软软镜",
+                source_row=3,
+            ),
+        ]
+    )
+
+    assert [
+        (item.product_id, item.match_type)
+        for item in matcher.match_folder_name("达人+分龄成长软软镜")
+    ] == [
+        ("886506466908", "split_name_candidate"),
+        ("887243232283", "name_candidate"),
+    ]
+    assert [
+        (item.product_id, item.match_type)
+        for item in matcher.match_folder_name("达人+分龄成长稳稳镜")
+    ] == [("886506466908", "short_split_name_candidate")]
+    assert [
+        (item.product_id, item.match_type)
+        for item in matcher.match_folder_name("达人+分龄成长酷酷镜")
+    ] == [("886506466908", "short_split_name_candidate")]
+    assert matcher.match_folder_name("分龄成长太阳镜") == ()
+    assert matcher.match_folder_name("分龄成长镜") == ()
 
 
 def test_exact_product_id_component_wins_over_sku_and_name_components():

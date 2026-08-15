@@ -14,11 +14,14 @@ from .models import ProductRecord
 
 
 _SEPARATORS = re.compile(r"[\s\-—_+·]+")
+_TITLE_VARIANT_SEPARATORS = re.compile(r"[/／、|]+")
 _BRAND_PREFIX = "kk树"
 _BUSINESS_ROLE_SUFFIX = re.compile(r"(?:\((?:主|副)\))+$")
 _MIN_FUZZY_TITLE_LENGTH = 6
 _MIN_FUZZY_COMMON_LENGTH = 5
 _FUZZY_CONTIGUOUS_COVERAGE = 0.50
+_MIN_SPLIT_TITLE_FRAGMENT_LENGTH = 3
+_MIN_DEFAULT_CONFIRMED_SPLIT_FRAGMENT_LENGTH = 5
 
 
 def normalize_match_text(value: str) -> str:
@@ -34,6 +37,20 @@ def normalize_product_title(value: str) -> str:
     """Remove non-material main/sub listing markers from a product title."""
 
     return _BUSINESS_ROLE_SUFFIX.sub("", normalize_match_text(value))
+
+
+def split_product_title_fragments(value: str) -> tuple[str, ...]:
+    """Return literal slash-separated title fragments without inferring names."""
+
+    normalized = normalize_product_title(value)
+    fragments = tuple(
+        dict.fromkeys(
+            fragment
+            for fragment in _TITLE_VARIANT_SEPARATORS.split(normalized)
+            if len(fragment) >= _MIN_SPLIT_TITLE_FRAGMENT_LENGTH
+        )
+    )
+    return fragments if len(fragments) > 1 else ()
 
 
 def longest_common_substring_length(left: str, right: str) -> int:
@@ -156,6 +173,8 @@ class ProductPathMatcher:
 
         normalized_folder = normalize_match_text(folder_name)
         strong_matches = []
+        split_matches = []
+        short_split_matches = []
         fuzzy_matches = []
         for product in self._products:
             base_title = normalize_product_title(product.title)
@@ -164,6 +183,20 @@ class ProductPathMatcher:
 
             if base_title in normalized_folder:
                 strong_matches.append(product)
+                continue
+
+            contained_fragments = [
+                fragment
+                for fragment in split_product_title_fragments(product.title)
+                if fragment in normalized_folder
+            ]
+            if contained_fragments:
+                if max(map(len, contained_fragments)) >= (
+                    _MIN_DEFAULT_CONFIRMED_SPLIT_FRAGMENT_LENGTH
+                ):
+                    split_matches.append(product)
+                else:
+                    short_split_matches.append(product)
                 continue
 
             common_length = longest_common_substring_length(
@@ -182,6 +215,21 @@ class ProductPathMatcher:
                 match_type="name_candidate",
                 match_status="needs_manual_confirmation",
                 reason_codes=("NORMALIZED_NAME_CONTAINED",),
+            ),
+            *self._build_matches(
+                split_matches,
+                match_type="split_name_candidate",
+                match_status="needs_manual_confirmation",
+                reason_codes=("SPLIT_TITLE_FRAGMENT_CONTAINED",),
+            ),
+            *self._build_matches(
+                short_split_matches,
+                match_type="short_split_name_candidate",
+                match_status="needs_manual_confirmation",
+                reason_codes=(
+                    "SPLIT_TITLE_FRAGMENT_CONTAINED",
+                    "SHORT_SPLIT_TITLE_FRAGMENT",
+                ),
             ),
             *self._build_matches(
                 fuzzy_matches,

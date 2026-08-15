@@ -1265,6 +1265,8 @@ def build_folder_review_data(
             "exact_product_id",
             "exact_sku",
             "name_candidate",
+            "split_name_candidate",
+            "short_split_name_candidate",
             "fuzzy_name_candidate",
         } and not is_exact_query:
             # Ignore legacy alias rows from an older shared index snapshot.
@@ -1276,7 +1278,11 @@ def build_folder_review_data(
         saved_decision = str(decision.get("decision", "")).strip()
         default_decision = (
             "rejected"
-            if match_type == "fuzzy_name_candidate" and not is_exact_query
+            if match_type in {
+                "fuzzy_name_candidate",
+                "short_split_name_candidate",
+            }
+            and not is_exact_query
             else "confirmed"
         )
         row: dict[str, object] = {

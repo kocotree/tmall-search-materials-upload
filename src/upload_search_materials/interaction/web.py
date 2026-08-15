@@ -4373,7 +4373,8 @@ def _normalize_stage_values(
             return submitted
         if (
             str(item.get("decision", "")) == "rejected"
-            or str(item.get("match_type", "")) == "fuzzy_name_candidate"
+            or str(item.get("match_type", ""))
+            in {"fuzzy_name_candidate", "short_split_name_candidate"}
         ):
             return "rejected"
         return "confirmed"

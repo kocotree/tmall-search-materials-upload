@@ -9,9 +9,26 @@ description: Use when starting, configuring, testing, preparing, validating, rev
 - 部门：运营中心-天猫部
 - 作者：虾米
 
+## 正常业务流与宿主审批边界（每次触发均适用）
+
+1. 必须区分两类确认：工作台中的业务确认用于记录用户的业务决定与生产授权；Codex 宿主的命令审批卡用于越出既有技术权限边界。二者不得互相替代，也不得因为后台准备执行正常步骤而在聊天中重复询问用户“是否允许”。
+2. 用户启动本 Skill、提交当前工作台阶段或点击对应业务按钮后，下列动作属于已授权的确定性正常流程，Agent 必须直接通过固定工作台入口、状态 API 或正式处理器执行，不得为它们生成命令审批卡、Approval request、confirmation boundary 或自然语言二次授权：
+   - 启动后读取或刷新精确 session 的 URL、健康状态、当前阶段、revision、处理进度和结果；
+   - 注册、续租和结束 `agent_wait`，运行 `wait-handoff`、`ui-status` 或当前 session 的幂等恢复；
+   - 处理已验证的 setup handoff，采集“搜推高价值”全部分页，保存 checkpoint，并生成商品选择数据；
+   - 同步和读取已配置素材源的现有文件夹索引；缺少有效共享快照时发布第一份不可变快照；读取目录元数据并生成文件夹候选；
+   - 用户在工作台确认文件夹并点击加载或重试后，排队并启动一次性素材执行器，读取被采用文件夹的任务所需原图、生成预览和预检结果；
+   - 根据已提交的工作台决定执行确定性坑位编排、裁剪预校验、图片输出、dry-run 和状态回写；
+   - 处理已绑定 revision、请求 ID 和 SHA-256 的 `copy_draft`；
+   - 用户在“上传任务确认”页提交精确任务后，运行唯一的 `process-publish-authorization` 入口完成复核和发布。该页面提交已经是生产授权，不得再追加聊天确认或命令确认。
+3. 正常流程只能调用本 Skill 已声明的固定脚本、CLI 子命令、localhost 工作台 API 和一次性桌面执行器。不得为了同一动作改用临时 PowerShell、拼接 shell、手工改 JSON、访问无关目录或扩大命令前缀；这些旁路既不属于既有授权，也更容易触发宿主审批。
+4. Windows 桌面身份只在运行环境准备阶段建立。日常任务应复用已经允许的固定 `scripts/start-managed-workbench.ps1` 入口及其托管服务，不得对每次状态读取、页面监听、NAS 元数据读取或候选生成再次申请桌面权限。当前电脑尚未具备固定启动权限时，只能把它作为一次性 `SYSTEM_PERMISSION_REQUIRED` 环境准备处理，并把申请范围限定到该固定入口；完成后立即返回工作台流程。
+5. 只有正常业务路径无法继续且确实需要新增技术权限时，才允许触发宿主审批：首次安装 `uv` 或修复 Plugin 运行环境；访问未配置位置、连接新 NAS、认证或映射网络盘；刷新或再次发布已有共享索引；写入、移动、删除源素材；修改选择器、依赖或代码；使用临时诊断/恢复命令；以及 `publish_uncertain` 后创建新任务并重新发布。登录、验证码和工作台中的商品、文件夹、图片、坑位、文案及上传清单选择仍由对应页面承载，不转成命令审批卡。
+6. 宿主沙箱和管理员策略高于本 Skill，Agent 不得规避或伪装宿主强制审批；但也不得主动把正常工作流包装成需要提权的异常命令。若宿主仍阻止固定入口，应报告一次稳定原因码并停止技术旁路，不得围绕同一业务步骤连续弹卡。
+
 ## 前端优先启动与交互路由（每次触发首先执行）
 
-1. 完整读取本文件后先启动或恢复交互页面。Windows 上必须以宿主提供的已授权桌面权限运行 `scripts/start-managed-workbench.ps1`，不能从 Codex 沙箱身份直接启动；启动结果只核对 `launcher_runtime_identity` 与 `runtime_identity` 的 SID 和登录会话相同。`remote_drive_letters` 仅作诊断展示：本机已保存图片源只是配置页历史预填项，不得把其盘符可见性作为工作台启动条件。用户提交配置页时，才检测页面中本次最终填写的图片源。服务显示 `healthy` 但桌面身份不符时，立即停止该精确 session 的服务并用桌面权限恢复，不得让用户反复点击图片重试。真正读取图片时使用项目自带的 Windows 一次性素材执行器：用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动请求 Windows 桌面会话启动它；用户不运行终端命令。执行器必须通过同一普通桌面身份启动，以继承本次所选路径需要的映射；只按 `source_id + relative_path` 读取本机绑定，处理当前任务后退出，不安装系统服务、不保存 NAS 凭据。只有最终选图提交才触发 Codex handoff。
+1. 完整读取本文件后先启动或恢复交互页面。Windows 上必须通过已在运行环境准备阶段允许的固定 `scripts/start-managed-workbench.ps1` 入口，以普通桌面身份运行，不能从 Codex 沙箱身份直接启动；不得在日常任务中临时扩大该入口的授权范围。启动结果只核对 `launcher_runtime_identity` 与 `runtime_identity` 的 SID 和登录会话相同。`remote_drive_letters` 仅作诊断展示：本机已保存图片源只是配置页历史预填项，不得把其盘符可见性作为工作台启动条件。用户提交配置页时，才检测页面中本次最终填写的图片源。服务显示 `healthy` 但桌面身份不符时，立即停止该精确 session 的服务并用同一固定桌面入口恢复，不得让用户反复点击图片重试。真正读取图片时使用项目自带的 Windows 一次性素材执行器：用户点击“确认文件夹并加载图片”或“重试加载图片”后，页面自动请求 Windows 桌面会话启动它；用户不运行终端命令，也不接受读取素材的二次命令审批。执行器必须通过同一普通桌面身份启动，以继承本次所选路径需要的映射；只按 `source_id + relative_path` 读取本机绑定，处理当前任务后退出，不安装系统服务、不保存 NAS 凭据。只有最终选图提交才触发 Codex handoff。
 2. 启动成功后，优先用 Codex 内置浏览器打开 JSON 中的精确 `url`。内置浏览器不可用时才传 `-OpenSystemBrowser` 或把 URL 交给用户。浏览器失败不等于服务失败。
    每次在聊天中提醒用户执行任何交互操作前，必须先从本次启动结果或
    `tmall-materials ui-status --runs-root <精确 runs-root> --session <精确 session-id>`
@@ -93,7 +110,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 
 1. 启动前只检查运行条件：当前 Plugin 目录、用户级可写运行环境，或用于创建环境的 `uv`。不得要求只读 Plugin 安装缓存中预先存在 `.venv`。Windows 使用 `scripts/bootstrap.cmd` 在用户数据目录准备 Python 3.11、锁定依赖、虚拟环境和缓存。若必须安装 `uv`，只请求安装权限；安装完成后继续启动配置页。
 2. 不得在配置页启动前通过聊天索取店铺名、图片源名称或图片根目录，也不得把缺少这些值报告为启动阻断。
-3. 日常素材任务先通过 `scripts/start-managed-workbench.ps1` 在实际桌面用户会话创建或恢复时间戳会话；Windows 中 Agent 必须为该固定脚本请求宿主桌面权限，并在启动 JSON 中验证 SID 和登录会话，不能把沙箱用户的同会话进程误当成 Explorer 桌面身份。可见网络盘只用于诊断，不得根据历史本机配置阻止配置页启动。只有已经明确不使用图片源、NAS、映射盘和原生目录窗口时才可使用 `scripts/start-ui.cmd`。`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
+3. 日常素材任务先通过已经允许的固定 `scripts/start-managed-workbench.ps1` 在实际桌面用户会话创建或恢复时间戳会话；Agent 直接调用该入口，不得先在聊天中请求批准，也不得为后续 `ui-status`、`wait-handoff` 或处理器命令重复请求宿主桌面权限。只有当前电脑尚未完成运行环境准备、宿主明确阻止固定入口时，才以 `SYSTEM_PERMISSION_REQUIRED` 发起一次范围精确的环境权限申请。启动 JSON 必须验证 SID 和登录会话，不能把沙箱用户的同会话进程误当成 Explorer 桌面身份。可见网络盘只用于诊断，不得根据历史本机配置阻止配置页启动。只有已经明确不使用图片源、NAS、映射盘和原生目录窗口时才可使用 `scripts/start-ui.cmd`。`tmall-materials interact` 只保留为前台调试入口。即使尚未配置店铺或图片源，交互页面也必须正常打开。
 4. 让用户在阶段 1 配置页填写并确认店铺和一个或多个图片源；只从当前会话经过校验的 setup `input.json`/`handoff.json` 读取这些值。
 5. setup handoff 尚未提交时，只等待页面提交或提供恢复指令；不得自行采集、索引、dry-run、上传或发布。
 6. 技术前置检查不得作为阶段一的用户操作。工作台启动后自动启动或恢复 CDP Chrome，并在显示业务配置表单前轮询登录状态；未登录、扫码、短信、验证码或风控时只显示简洁等待页并把官方千牛窗口置前，登录成功后自动展示配置页。用户不点击“验证当前页面”“验证选择器”“启动浏览器”或“检测路径”。setup 提交只保存店铺、图片源等业务决定并创建 handoff；生产选择器、当前 DOM、CDP、官方素材中心、目标店铺和路径均由处理器自动复核。缺少或失效时写入 `agent-diagnostics/current.json`，Codex 使用 `diagnose-session` 读取完整异常并重跑同一幂等入口；不得把 reason code、DOM、CDP、SHA 或修复命令暴露给业务用户。缺少本机生产选择器时只能创建 `production=false` 候选并基于真实 DOM 修复验证，禁止复制示例后直接标为生产。
@@ -220,6 +237,7 @@ Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代
 1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
 2. 文件夹索引由同一 Plugin 内的 `$maintain-team-folder-index` 管理。商品选择处理器在读取候选前必须执行共享快照同步：若固定 NAS 未挂载，自动打开系统 SMB 连接流程；系统认证完成且挂载身份验证通过后继续，固定索引子目录不存在时可在已验证挂载内创建。优先校验并使用 NAS 固定目录中的最新有效不可变快照，再把可移植的 `source_id + relative_path` 按当前电脑图片源绑定重新物化到 `folder_index_root`。当前配置的素材源没有有效共享快照时，自动只读遍历该素材源的目录元数据、建立本机目录索引并发布第一份不可变快照，无需再次索取授权。已有有效共享快照时不得启动 `index-folders`、生成新快照或刷新 NAS；只有用户明确要求更新某个已有索引的素材源时，才可按 `$maintain-team-folder-index` 契约运行 `--refresh-source SOURCE` 或 `--refresh-prefix SOURCE=RELATIVE_PATH`，确认完整后显式 `publish`。NAS 连接失败时允许使用最后一次校验通过的本机 `team-cache`，并在扫描摘要中明确记录 `origin=local_cache`；快照哈希、canonical source 或本机绑定不一致时必须阻断。不得扩大刷新范围、修改其他机器快照或自动删除历史版本。只调整商品表、名称或货号时由同步流程在本机重新匹配，不重扫 NAS。
 3. 第二阶段商品选择正式提交后，Codex 只运行一次 `process-product-selection --runs-root <runs-root> --session <session-id>`。该唯一入口必须校验并领取精确 completeness handoff，在内部从共享 `folder-candidates.csv` 仅提取所选商品，原子生成任务级候选 CSV、扫描摘要和 `folder-review.json`，写回 completeness 完成结果与 asset-matching review context，并推进到素材匹配；禁止再由 Codex 手工串联 `snapshot-folder-candidates`、`prepare-folder-review`、`result.json` 或阶段状态。任务目录不得包含 `folder-index.sqlite3`。入口必须幂等：已完成的同一 revision/SHA 只补齐或返回既有转换，不重复生成 revision。异常时必须在 `02-completeness/product-selection-diagnostic.json` 写入失败 phase、稳定 reason code、异常类型与消息、session/stage/revision/input SHA、相关文件存在性/大小/SHA、traceback 和同一入口恢复命令；能安全绑定当前 handoff 时把 completeness 写成 `blocked` 并清除 processing claim。Codex 读取该诊断、修复索引或处理器后，只能重跑同一入口，不得手工拼接半成品。该入口只读文件夹索引，不枚举或读取 NAS 图片。文件夹匹配优先使用商品 ID、完整货号和规范化商品基础名称；匹配基础名称时忽略末尾的“（主）/（副）”。除此之外，可将与基础名称具有至少 50% 最长公共连续字符、且公共连续部分不少于 5 个字符的文件夹作为粗略候选，但不得据此自动确认归属。若用户明确给出完整文件夹名，可用 `prepare-folder-review --exact-folder PRODUCT_ID=FOLDER_NAME` 做当前任务的一次性精确查询；不得把该查询写入别名表或自动复用于其他任务。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；ID、货号和完整基础名称候选默认“采用”，粗略候选默认“排除”，用户筛选后再读取采用文件夹中的图片；决定写入当前时间戳会话的 `folder_decisions`。
+   基础名称包含 `/`、`／`、`、` 或 `|` 时，只拆成去重后的字面片段并分别检查文件夹名是否完整包含该片段，禁止拼接公共前缀、补词或推导组合名称。少于 3 个字符的片段忽略；5 个字符及以上的完整片段候选默认采用，3–4 个字符的完整短片段候选默认排除。原有 50% 粗略候选仍按未拆分基础名称计算，且继续默认排除。
 专用 handoff 必须只有一个领取者：`resume-session`、`wait-handoff` 和页面恢复接口遇到 completeness 时只返回 `process-product-selection`，遇到 `handoff_kind=final_material_selection` 时只返回 `process-final-material-handoff`，均不得提前领取或续租。首次完整度审查尚无正式提交记录时按钮显示“提交给 Agent”；只有已提交结果被退回补充时才显示“补充后重新提交”。
 
 `source_types`、`folder_decisions`、`license_decisions` 和 `asset_decisions` 是素材匹配页
@@ -247,6 +265,8 @@ Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代
 推广素材状态采集和文件夹归属审查完成后，默认使用 `tmall-materials prepare-confirmed-gallery` 将当前 `input.json` 的采用文件夹与 `promotion-material-status.csv` 合并为任务级候选 JSON。采用文件夹只授权生成候选，不自动采用其中图片。第三阶段不计算“必须选择的图片总数”，用户可从每商品最多 100 张候选中人工采用任意数量；提交时每个商品必须至少有 3 张预检通过且源 SHA-256 唯一的图片，后台缺失篇数只作为上下文。第五阶段按 `K=min(后台缺失坑位, floor(有效唯一采用图片数/3))` 创建坑位，最多使用 `min(有效唯一采用图片数,K*9)` 张图片，并为每个坑位安排 3–9 张、统一为 3:4 或 1:1 的图片；超出容量的采用图片进入未使用候选池，本次任务不要求填满后台全部空坑位。超过 100 张时执行覆盖优先、剩余名额按比例分配的任务内稳定伪随机抽样。只有显式离线审计场景才使用 `prepare-gallery` 从 `asset-index.sqlite3` 生成候选。
 
 首次进入“素材匹配”阶段时沿用任务配置的图片根目录，由本地页面服务从本机共享文件夹索引生成当前商品候选。`source_types` 固定规范化为 `["image"]`，不要求用户填写。页面先执行文件夹归属审查，只提供“采用 / 排除该文件夹”二态决定并保存到 `folder_decisions`：确定性候选默认采用，50% 连续名称粗略候选默认排除，用户确认后才能采用；全部排除时不得加载图片。排除文件夹必须立即从同商品画廊移除其候选，并同步取消来自该文件夹的已选素材与本次授权；重新采用未被本轮画廊准备的文件夹时必须重新加载图片，不恢复旧选择。过滤后必须重新计算候选数、30 张分页、页码和换批按钮。保存文件夹决定时只校验 `image_roots` 为非空路径列表；随后由页面服务启动的本地 Worker 在相同 Windows 身份下检查实时可访问性。不可访问或身份变化时写入稳定 gallery-job 错误并提供“重试加载图片”，不得创建 Codex handoff。画廊必须绑定 `session_id/stage_id/prepared_from_revision/prepared_from_input_sha256/folder_decisions_sha256/prepared_folder_keys`；陈旧或跨任务画廊不得用于最终提交。`needs_user_input`/`blocked` 的素材匹配结果必须保存为只读 `review-context.json`。页面展示缩略图、来源、匹配方式和单一“采用”选择；勾选“采用”表示当前采用意图，预裁剪通过后才确认该图片可用于本次发布并同时写入 `asset_decisions` 和对应的 `license_decisions`。取消采用必须立即撤销当前意图和既有决定，不能等待后台图片处理结束；后端必须按最终文件夹决定再次过滤并规范化授权记录。新图片候选必须携带稳定 `folder_id` 和 `folder_path`；历史候选缺少 `folder_id` 时按最长规范化父路径关联，无法关联时保留并标记。候选准备时把最长边不超过 640 像素的 JPEG 预览写入当前任务 `03-asset-matching/preview-cache/`，页面不得直接传输共享盘原图；旧任务缺少预览时按需生成。预览使用短时私有缓存，选择图片时不得重建整组图片卡片。
+
+组合标题的完整字面片段属于确定性名称候选：不少于 5 字时默认采用；3–4 字时标记为短名称片段候选并默认排除。文件夹名完整包含商品基础名称时仍按名称候选处理；不得从拆分片段生成任何新的组合名称。
 
 本地重复使用 SHA-256 排除，同一任务内同一图片不得跨商品重复选择。只有提供后台已有图片指纹时才可声称远端去重完成；后台仅提供素材 ID 而没有图片指纹时，页面必须显示“远端去重未完成”，最终上传前继续保持人工核对门禁。完整名称候选在文件夹归属确认前不可选择，逐文件授权未确认的候选也不可选择。
 
@@ -315,6 +335,7 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 - 同一个 `asset-index.sqlite3` 同一时刻只能由一个 Agent 或进程运行 new、`--resume` 或 `--refresh`；禁止并发索引同一数据库。
 - 同一素材源发布共享快照时必须取得短时跨机器发布租约；每次发布只创建新快照并原子更新 current pointer，不覆盖其他机器已发布的快照。普通上传任务可自动发布缺失的第一份有效快照，无需再次索取口头授权；已有有效快照时只同步和读取，不获得刷新或再次发布权限。
 - 文件夹索引是默认入口：只保存目录元数据，不读取、哈希或统计所有图片。确定性候选默认采用，粗略候选默认排除；用户完成文件夹筛选后，才按需读取采用文件夹中的图片。
+- 组合商品标题只按 `/`、`／`、`、` 或 `|` 拆分字面片段；不少于 5 字的完整片段候选默认采用，3–4 字的完整短片段候选默认排除，少于 3 字忽略。禁止拼接或补全片段。
 - 文件夹决定必须绑定 `folder_id + product_id + source_system + folder_path`；排除文件夹时必须同步移除其候选、采用和授权决定，后端提交边界再次检查一致性。
 - 索引时只读声明的原始图片 roots，不修改、移动或删除源文件；视频不进入本阶段。
 - 不调用未公开的天猫内部 API，不绕过登录、验证码、扫码、短信、风控或权限。

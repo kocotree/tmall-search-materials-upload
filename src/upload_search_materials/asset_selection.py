@@ -20,6 +20,9 @@ MATCH_RANK = {
     "exact_product_id": 0,
     "exact_sku": 1,
     "name_candidate": 2,
+    "split_name_candidate": 3,
+    "short_split_name_candidate": 4,
+    "fuzzy_name_candidate": 5,
 }
 CONFIRMED_MATCH_STATUSES = {
     "matched_unlicensed",

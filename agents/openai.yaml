@@ -1,4 +1,4 @@
 interface:
   display_name: "天猫搜推素材上传"
   short_description: "前端优先交接、可恢复搜推采集、素材审查与安全发布工作流"
-  default_prompt: "Use $upload-search-materials to open the exact managed UI session, wait with a bounded lease, and use chat only to recover an interrupted submission without weakening approval gates."
+  default_prompt: "Use $upload-search-materials to open the exact managed UI session and process its bounded normal workflow without chat or command approval prompts. Keep business decisions in the workbench, preserve publish gates, and request host approval only for an unexpected path requiring new technical authority."

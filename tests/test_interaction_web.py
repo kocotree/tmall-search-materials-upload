@@ -1987,6 +1987,20 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
                         "source_system": "nas",
                         "match_type": "fuzzy_name_candidate",
                     },
+                    {
+                        "folder_id": "split-long",
+                        "folder_path": str(tmp_path / "split-long"),
+                        "product_id": "P1",
+                        "source_system": "nas",
+                        "match_type": "split_name_candidate",
+                    },
+                    {
+                        "folder_id": "split-short",
+                        "folder_path": str(tmp_path / "split-short"),
+                        "product_id": "P1",
+                        "source_system": "nas",
+                        "match_type": "short_split_name_candidate",
+                    },
                 ],
             },
         },
@@ -2011,7 +2025,7 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
     assert persisted["values"]["source_types"] == ["image"]
     assert [
         item["decision"] for item in persisted["values"]["folder_decisions"]
-    ] == ["confirmed", "rejected"]
+    ] == ["confirmed", "rejected", "confirmed", "rejected"]
     assert persisted["values"].get("asset_decisions", []) == []
     stage_path = tmp_path / session_id / "03-asset-matching"
     assert not (stage_path / "handoff.json").exists()
@@ -2460,7 +2474,9 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         "folder_decisions",
         "排除该文件夹",
         "请先筛选候选文件夹",
-        "50% 粗略候选默认排除",
+        "3–4 字短片段与 50% 粗略候选默认排除",
+        "完整名称片段命中",
+        "短名称片段候选",
         "folder-decision-changed",
         "pruneSelectedCandidates",
         "历史候选未关联文件夹",
