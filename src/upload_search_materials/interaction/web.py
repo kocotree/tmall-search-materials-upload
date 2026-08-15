@@ -1739,6 +1739,17 @@ def create_app(
                 "asset matching does not accept selection preflight"
             )
         data = current_asset_gallery(session_id, state)
+        gallery_job = read_gallery_job(store, session_id)
+        if (
+            infer_workflow_step(data) != IMAGE_SELECTION
+            or (
+                isinstance(gallery_job, dict)
+                and gallery_job.get("status") in {"queued", "running"}
+            )
+        ):
+            raise InteractionConflict(
+                "候选图片仍在准备，全部完成后才能采用"
+            )
         candidate = next(
             (
                 dict(item)
@@ -2356,6 +2367,17 @@ def create_app(
                     field_errors["decisions"] = str(error)
         selected_asset_bundle = None
         asset_validation_feedback = None
+        if not field_errors and stage_id == "asset_matching":
+            active_gallery_job = read_gallery_job(store, session_id)
+            if isinstance(active_gallery_job, dict):
+                if asset_matching_step != IMAGE_SELECTION:
+                    field_errors["asset_decisions"] = (
+                        "请先确认文件夹并等待候选图片全部准备完成"
+                    )
+                elif active_gallery_job.get("status") in {"queued", "running"}:
+                    field_errors["asset_decisions"] = (
+                        "候选图片仍在准备，请等待全部完成后再选择并提交"
+                    )
         if (
             not field_errors
             and stage_id == "asset_matching"

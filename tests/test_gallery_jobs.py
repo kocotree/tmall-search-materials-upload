@@ -187,6 +187,69 @@ def test_gallery_job_success_publishes_review_without_handoff(
     assert completed["progress"]["final_candidate_count"] == 1
 
 
+def test_gallery_job_publishes_progressive_batch_before_final_result(
+    tmp_path, monkeypatch
+):
+    store, session_id, stage_path, decisions, committed = (
+        _local_gallery_session(tmp_path)
+    )
+    monkeypatch.setattr(gallery_module, "read_product_csv", lambda path: [])
+
+    def progressive_builder(*args, **kwargs):
+        partial = {
+            "requirements": [{"product_id": "P1"}],
+            "asset_candidates": [{"asset_id": "A1", "product_id": "P1"}],
+            "scan_summary": {
+                "discovered_images": 2,
+                "discovered_path_count": 2,
+                "planned_inspection_count": 2,
+                "inspected_count": 1,
+                "inspection_failure_count": 0,
+                "content_duplicate_count": 0,
+                "final_candidate_count": 1,
+                "pending_count": 1,
+                "per_product": [],
+            },
+            "gallery_complete": False,
+        }
+        kwargs["batch_callback"](partial)
+        return {
+            **partial,
+            "asset_candidates": [
+                {"asset_id": "A1", "product_id": "P1"},
+                {"asset_id": "A2", "product_id": "P1"},
+            ],
+            "scan_summary": {
+                **partial["scan_summary"],
+                "inspected_count": 2,
+                "final_candidate_count": 2,
+                "pending_count": 0,
+            },
+            "gallery_complete": True,
+        }
+
+    monkeypatch.setattr(
+        gallery_module,
+        "build_confirmed_folder_gallery",
+        progressive_builder,
+    )
+    job, _ = create_or_reuse_gallery_job(
+        store, session_id, committed, decisions
+    )
+
+    completed = process_gallery_job(
+        store, session_id, job["job_id"], job["attempt_id"]
+    )
+
+    partial = store._read_json(
+        stage_path / "partial-gallery.json", "partial-gallery"
+    )
+    assert partial["workflow_step"] == "gallery_preparing"
+    assert partial["asset_candidates"][0]["asset_id"] == "A1"
+    assert completed["progress"]["available_candidate_count"] == 2
+    assert completed["progress"]["published_batch_count"] == 1
+
+
 def test_stale_gallery_attempt_cannot_publish(tmp_path, monkeypatch):
     store, session_id, stage_path, decisions, committed = (
         _local_gallery_session(tmp_path)

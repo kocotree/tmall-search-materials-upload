@@ -178,6 +178,10 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 素材匹配阶段使用 `workflow_step` 区分同一阶段内的两步：目录审查为 `folder_review`，本地 Worker 生成图片期间为 `gallery_preparing`，可选图结果为 `image_selection`。文件夹确认使用 `local_action` 事务更新 revision，但不生成 `handoff.json`。`gallery-job.json` 绑定 session/stage、revision/input SHA-256、文件夹决定 SHA-256、商品边界、候选策略、图片策略和本地资源身份；每次执行保留在 `gallery-attempts/<attempt_id>/`。图片画廊还包含 `gallery_identity`：`session_id`、`stage_id`、`prepared_from_revision`、`prepared_from_input_sha256`、`folder_decisions_sha256`、`prepared_folder_keys`。勾选单张图片时的双比例预裁剪结果写入 `selection-preflight-cache.json`，条目以 `asset_id` 索引，并绑定源 SHA-256、图片策略 SHA-256 和算法版本；算法版本 2 表示单次读取/解码后完成双比例编码探测。前端队列另维护 `queued|running|completed|cancelled|failed`、当前采用意图、意图版本和任务权重；该瞬时状态不进入 handoff，只有预裁剪通过且仍为最新采用意图时才写入正式图片决定。该文件是可失效重建的任务内缓存，不是 handoff。最终选图提交只接受当前任务且当前采用文件夹为已准备范围子集的画廊；重新采用未准备文件夹会使画廊失效。最终校验成功后写入 `selected-asset-preflight.json`、`final-material-package.json` 和唯一的 `handoff_kind=final_material_selection` 交接。
 
+gallery Worker 按每商品 30 张窗口处理：窗口内使用最多 8 个线程、总权重不超过 12 的并发执行器，同一原图只读取、哈希和解码一次，预览直接复用该解码结果；异步完成项按原抽样序号合并，保证重复内容的保留归属不受线程完成顺序影响。每个窗口完成后把只读结果写入 `partial-gallery.json`，并通过 `gallery-job.json.progress.available_candidate_count/published_batch_count` 触发前端渐进刷新；此时仍为 `gallery_preparing`，不能采用、预裁剪或提交。最终窗口完成后才发布 `confirmed-gallery.json` 并切换为 `image_selection`。
+
+`gallery-checkpoint.json` 是当前时间戳任务专用的可重建断点，绑定 gallery identity。每条完成项保存源路径、大小、mtime、完整 SHA-256、检查结果和任务预览路径；同任务重试只在身份、大小、mtime 与预览文件均匹配时复用。身份或源事实变化会重新读取，损坏文件会被安全重建。该文件、`partial-gallery.json` 和 `preview-cache/` 均不得提升为用户级或跨任务缓存。
+
 素材匹配阶段的 `result.json.data` 包含：
 
 - `requirements`：逐商品 `product_id`、`product_title`、后台 `missing_materials`、本阶段实际 `candidate_count`、`slot_image_min=3`、`slot_image_max=9` 和 `slot_planning_stage=slots_copy`。第三阶段不得生成 `required_images`，因为后台缺失篇数不等于本次必须创建的篇数。

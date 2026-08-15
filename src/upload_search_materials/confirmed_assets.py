@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import asdict, dataclass
 import hashlib
+import json
+import os
 from pathlib import Path
 import random
 from typing import Any, Callable, Iterable, Mapping, Sequence
+import uuid
 
 from .asset_selection import build_gallery_data
-from .assets import IMAGE_EXTENSIONS, build_image_preview, inspect_asset
+from .assets import IMAGE_EXTENSIONS, build_loaded_image_preview
+from .image_compliance import default_image_policy, load_image_preflight_source
 from .models import ProductRecord
 
 
 CANDIDATE_STRATEGY_ID = "proportional_task_sample"
 CANDIDATE_STRATEGY_VERSION = 2
 COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
+GALLERY_CHECKPOINT_SCHEMA_VERSION = 1
+GALLERY_MAX_WORKERS = 8
+GALLERY_MAX_WEIGHT = 12
 
 
 @dataclass(frozen=True)
@@ -69,14 +77,25 @@ def _folder_rank(decision: Mapping[str, Any]) -> tuple[int, str, int, str]:
 
 
 def _iter_images(folder: Path) -> list[Path]:
-    return sorted(
-        (
-            path
-            for path in folder.rglob("*")
-            if path.is_file() and path.suffix.casefold() in IMAGE_EXTENSIONS
-        ),
-        key=lambda path: str(path).casefold(),
-    )
+    """Enumerate image paths with one metadata pass and no directory resolves."""
+
+    images: list[Path] = []
+    pending = [Path(folder)]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    elif (
+                        Path(entry.name).suffix.casefold() in IMAGE_EXTENSIONS
+                        and entry.is_file(follow_symlinks=False)
+                    ):
+                        images.append(Path(entry.path))
+                except OSError:
+                    raise
+    return sorted(images, key=lambda path: str(path).casefold())
 
 
 def _proportional_allocations(
@@ -174,6 +193,349 @@ def _decision_folder_id(decision: Mapping[str, Any]) -> str:
     ).hexdigest()[:24]
 
 
+@dataclass(frozen=True)
+class _InspectionOutcome:
+    record: _GalleryRecord
+    checkpoint_key: str
+    checkpoint_entry: dict[str, Any]
+    checkpoint_hit: bool = False
+
+
+def _checkpoint_key(
+    product_id: str,
+    decision: Mapping[str, Any],
+    path: Path,
+) -> str:
+    return hashlib.sha256(
+        (
+            f"{product_id}\0{decision.get('source_system', '')}\0"
+            f"{os.path.abspath(path)}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _record_from_checkpoint(payload: Mapping[str, Any]) -> _GalleryRecord:
+    values = dict(payload)
+    values["file_reason_codes"] = tuple(values.get("file_reason_codes", ()))
+    values["match_reason_codes"] = tuple(
+        values.get("match_reason_codes", ())
+    )
+    return _GalleryRecord(**values)
+
+
+def _read_task_checkpoint(
+    checkpoint_path: Path | None,
+    identity_sha256: str,
+) -> dict[str, Any]:
+    empty = {
+        "schema_version": GALLERY_CHECKPOINT_SCHEMA_VERSION,
+        "identity_sha256": identity_sha256,
+        "entries": {},
+    }
+    if checkpoint_path is None or not checkpoint_path.is_file():
+        return empty
+    try:
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return empty
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version")
+        != GALLERY_CHECKPOINT_SCHEMA_VERSION
+        or document.get("identity_sha256") != identity_sha256
+        or not isinstance(document.get("entries"), dict)
+    ):
+        return empty
+    return document
+
+
+def _write_task_checkpoint(
+    checkpoint_path: Path | None,
+    document: Mapping[str, Any],
+) -> None:
+    if checkpoint_path is None:
+        return
+    target = Path(checkpoint_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _inspection_weight(path: Path) -> int:
+    """Estimate memory/codec pressure without reading the source payload."""
+
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        return 1
+    extension = path.suffix.casefold()
+    weight = 2 if extension in {".png", ".gif", ".bmp", ".heic"} else 1
+    if size_bytes >= 16 * 1024 * 1024:
+        weight = max(weight, 4)
+    elif size_bytes >= 8 * 1024 * 1024:
+        weight = max(weight, 3)
+    elif size_bytes >= 4 * 1024 * 1024:
+        weight = max(weight, 2)
+    return weight
+
+
+def _inspect_candidate_once(
+    decision: Mapping[str, Any],
+    path: Path,
+    product: ProductRecord,
+    *,
+    preview_dir: Path | None,
+    checkpoint_entries: Mapping[str, Any],
+) -> _InspectionOutcome:
+    product_id = str(product.product_id)
+    source = Path(path)
+    stat = source.stat()
+    key = _checkpoint_key(product_id, decision, source)
+    cached = checkpoint_entries.get(key)
+    if isinstance(cached, dict):
+        record_payload = cached.get("record")
+        if (
+            int(cached.get("size_bytes", -1)) == int(stat.st_size)
+            and int(cached.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
+            and isinstance(record_payload, dict)
+        ):
+            record = _record_from_checkpoint(record_payload)
+            preview_ready = not (
+                preview_dir is not None
+                and record.validation_status == "valid"
+                and record.sha256
+            ) or Path(record.preview_path).is_file()
+            if preview_ready:
+                return _InspectionOutcome(
+                    record=record,
+                    checkpoint_key=key,
+                    checkpoint_entry=dict(cached),
+                    checkpoint_hit=True,
+                )
+
+    inspection, decoded, _, _ = load_image_preflight_source(
+        source,
+        policy=default_image_policy(),
+    )
+    if "size_bytes" not in inspection:
+        raise OSError(f"image source is not readable: {source}")
+    reasons = tuple(
+        "ASSET_UNREADABLE" if reason == "SOURCE_UNREADABLE" else str(reason)
+        for reason in inspection.get("reason_codes", [])
+    )
+    fingerprint = str(inspection.get("sha256", ""))
+    validation_status = "blocked" if reasons else "valid"
+    preview_path = ""
+    try:
+        if (
+            preview_dir is not None
+            and validation_status == "valid"
+            and fingerprint
+            and decoded is not None
+        ):
+            preview_path = str(
+                build_loaded_image_preview(
+                    decoded,
+                    Path(preview_dir) / f"{fingerprint[:16]}.jpg",
+                )
+            )
+    finally:
+        if decoded is not None:
+            decoded.close()
+
+    folder_path = str(decision["folder_path"])
+    record = _GalleryRecord(
+        folder_id=_decision_folder_id(decision),
+        folder_path=folder_path,
+        source_system=str(
+            decision.get("source_system", "confirmed_folder")
+        ),
+        candidate_directory=folder_path,
+        relative_path=str(source.relative_to(Path(folder_path))),
+        absolute_path=str(source.resolve()),
+        preview_path=preview_path,
+        sha256=fingerprint,
+        width=(
+            int(inspection["width"])
+            if inspection.get("width") is not None
+            else None
+        ),
+        height=(
+            int(inspection["height"])
+            if inspection.get("height") is not None
+            else None
+        ),
+        size_bytes=int(inspection["size_bytes"]),
+        validation_status=validation_status,
+        file_reason_codes=reasons,
+        product_id=product_id,
+        sku=str(product.sku),
+        product_title=str(product.title),
+        match_type="name_candidate",
+        match_status="confirmed",
+        match_reason_codes=("CONFIRMED_FOLDER_BINDING",),
+    )
+    checkpoint_entry = {
+        "size_bytes": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "record": asdict(record),
+    }
+    return _InspectionOutcome(
+        record=record,
+        checkpoint_key=key,
+        checkpoint_entry=checkpoint_entry,
+    )
+
+
+def _run_weighted_window(
+    items: Sequence[tuple[int, Mapping[str, Any], Path]],
+    worker: Callable[[Mapping[str, Any], Path], _InspectionOutcome],
+    *,
+    completion_callback: Callable[
+        [int, _InspectionOutcome | Exception], None
+    ] | None = None,
+    max_workers: int = GALLERY_MAX_WORKERS,
+    max_weight: int = GALLERY_MAX_WEIGHT,
+) -> list[_InspectionOutcome | Exception]:
+    """Run a bounded window concurrently and return results in input order."""
+
+    pending = list(items)
+    active: dict[Future[_InspectionOutcome], tuple[int, int]] = {}
+    results: dict[int, _InspectionOutcome | Exception] = {}
+    active_weight = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while pending or active:
+            submitted = False
+            while pending and len(active) < max_workers:
+                index, decision, path = pending[0]
+                weight = min(_inspection_weight(path), max_weight)
+                if active and active_weight + weight > max_weight:
+                    break
+                pending.pop(0)
+                future = executor.submit(worker, decision, path)
+                active[future] = (index, weight)
+                active_weight += weight
+                submitted = True
+            if not active:
+                continue
+            if submitted and pending and active_weight < max_weight:
+                continue
+            completed, _ = wait(active, return_when=FIRST_COMPLETED)
+            for future in completed:
+                index, weight = active.pop(future)
+                active_weight -= weight
+                try:
+                    results[index] = future.result()
+                except Exception as error:  # merged deterministically below
+                    results[index] = error
+                if completion_callback is not None:
+                    completion_callback(index, results[index])
+    return [results[index] for index, _, _ in items]
+
+
+def _build_gallery_document(
+    records: Sequence[_GalleryRecord],
+    status_rows: Sequence[Mapping[str, Any]],
+    *,
+    confirmed_by_product: Mapping[str, Sequence[Mapping[str, Any]]],
+    products_by_id: Mapping[str, ProductRecord],
+    candidate_limit: int,
+    page_size: int,
+    sampling_seed: str,
+    discovered: int,
+    planned_inspections: int,
+    inspected: int,
+    inspection_failures: int,
+    content_duplicates: int,
+    final_candidates: int,
+    per_product: Sequence[Mapping[str, Any]],
+    gallery_complete: bool,
+) -> dict[str, Any]:
+    data = build_gallery_data(records, status_rows)
+    data["requirements"] = [
+        item
+        for item in data["requirements"]
+        if str(item.get("product_id", "")) in confirmed_by_product
+    ]
+    requirement_products = {
+        str(item.get("product_id", ""))
+        for item in data["requirements"]
+        if isinstance(item, dict)
+    }
+    for product_id in sorted(set(confirmed_by_product) - requirement_products):
+        product = products_by_id[product_id]
+        data["requirements"].append(
+            {
+                "product_id": product_id,
+                "sku": str(product.sku),
+                "product_title": str(product.title),
+                "missing_materials": 0,
+            }
+        )
+    data["candidate_strategy"] = CANDIDATE_STRATEGY_ID
+    data["candidate_strategy_version"] = CANDIDATE_STRATEGY_VERSION
+    data["candidate_limit"] = candidate_limit
+    data["page_size"] = page_size
+    data["sampling_seed"] = sampling_seed
+    data["gallery_complete"] = gallery_complete
+    data["sampling_identity_sha256"] = hashlib.sha256(
+        (
+            f"{CANDIDATE_STRATEGY_ID}\0"
+            f"{CANDIDATE_STRATEGY_VERSION}\0{sampling_seed}"
+        ).encode("utf-8")
+    ).hexdigest()
+    candidate_count_by_product: dict[str, int] = {}
+    for candidate in data["asset_candidates"]:
+        product_id = str(candidate.get("product_id", ""))
+        candidate_count_by_product[product_id] = (
+            candidate_count_by_product.get(product_id, 0) + 1
+        )
+    for requirement in data["requirements"]:
+        requirement["candidate_count"] = candidate_count_by_product.get(
+            str(requirement.get("product_id", "")), 0
+        )
+    data["scan_summary"] = {
+        "confirmed_folder_count": sum(
+            len(value) for value in confirmed_by_product.values()
+        ),
+        "discovered_images": discovered,
+        "inspected_candidates": inspected,
+        "inspection_failures": inspection_failures,
+        "discovered_path_count": discovered,
+        "planned_inspection_count": planned_inspections,
+        "inspected_count": inspected,
+        "inspection_failure_count": inspection_failures,
+        "content_duplicate_count": content_duplicates,
+        "final_candidate_count": final_candidates,
+        "pending_count": max(
+            planned_inspections - inspected - inspection_failures,
+            0,
+        ),
+        "per_product": [dict(item) for item in per_product],
+    }
+    reason_codes = list(data.get("reason_codes", []))
+    if any(
+        not bool(item.get("complete_folder_coverage", True))
+        for item in per_product
+    ) and COVERAGE_LIMIT_REASON not in reason_codes:
+        reason_codes.append(COVERAGE_LIMIT_REASON)
+    data["reason_codes"] = reason_codes
+    return data
+
+
 def build_confirmed_folder_gallery(
     products: Sequence[ProductRecord],
     status_rows: Iterable[Mapping[str, Any]],
@@ -184,8 +546,11 @@ def build_confirmed_folder_gallery(
     sampling_seed: str = "stable",
     preview_dir: Path | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    batch_callback: Callable[[dict[str, Any]], None] | None = None,
+    checkpoint_path: Path | None = None,
+    checkpoint_identity_sha256: str = "",
 ) -> dict[str, Any]:
-    """Build a proportional, task-stable sample from confirmed folders."""
+    """Build a proportional sample with task-local resume and batch publish."""
 
     if not 1 <= candidate_limit <= 100:
         raise ValueError("candidate_limit must be between 1 and 100")
@@ -193,6 +558,11 @@ def build_confirmed_folder_gallery(
         raise ValueError("page_size must be positive")
     products_by_id = {str(product.product_id): product for product in products}
     status_rows = list(status_rows)
+    checkpoint = _read_task_checkpoint(
+        checkpoint_path,
+        checkpoint_identity_sha256,
+    )
+    checkpoint_entries = checkpoint["entries"]
 
     confirmed_by_product: dict[str, list[dict[str, Any]]] = {}
     for source in decisions:
@@ -257,7 +627,9 @@ def build_confirmed_folder_gallery(
             discovered_paths = _iter_images(folder)
             unique_paths = []
             for path in discovered_paths:
-                key = str(path.resolve()).casefold()
+                key = os.path.normcase(
+                    os.path.abspath(os.fspath(path))
+                ).casefold()
                 if key in seen_paths:
                     continue
                 seen_paths.add(key)
@@ -353,141 +725,7 @@ def build_confirmed_folder_gallery(
         }
         for item in per_folder:
             item["final_candidate_count"] = 0
-        for decision, path in selected:
-            try:
-                inspected_asset = inspect_asset(
-                    path,
-                    product_id,
-                    "confirmed",
-                    source_system=str(
-                        decision.get("source_system", "confirmed_folder")
-                    ),
-                    sku=str(product.sku),
-                )
-            except Exception:
-                inspection_failures += 1
-                product_failures += 1
-                if progress_callback is not None:
-                    progress_callback(
-                        {
-                            "current_product": product_id,
-                            "current_folder": str(
-                                decision["folder_path"]
-                            ),
-                            "discovered_count": discovered,
-                            "prepared_count": inspected,
-                            "discovered_path_count": discovered,
-                            "planned_inspection_count": (
-                                planned_inspections
-                            ),
-                            "inspected_count": inspected,
-                            "inspection_failure_count": (
-                                inspection_failures
-                            ),
-                            "content_duplicate_count": (
-                                content_duplicates
-                            ),
-                            "final_candidate_count": final_candidates,
-                            "pending_count": max(
-                                planned_inspections
-                                - inspected
-                                - inspection_failures,
-                                0,
-                            ),
-                        }
-                    )
-                continue
-            inspected += 1
-            product_inspected += 1
-            fingerprint = str(inspected_asset.sha256 or "")
-            duplicate = bool(
-                fingerprint and fingerprint in seen_product_sha256
-            )
-            if fingerprint:
-                seen_product_sha256.add(fingerprint)
-            if duplicate:
-                content_duplicates += 1
-                product_duplicates += 1
-            else:
-                final_candidates += 1
-                product_final_candidates += 1
-                folder_summary = folder_summary_by_id.get(
-                    _decision_folder_id(decision)
-                )
-                if folder_summary is not None:
-                    folder_summary["final_candidate_count"] = (
-                        int(
-                            folder_summary.get(
-                                "final_candidate_count", 0
-                            )
-                        )
-                        + 1
-                    )
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "current_product": product_id,
-                        "current_folder": str(decision["folder_path"]),
-                        "discovered_count": discovered,
-                        "prepared_count": inspected,
-                        "discovered_path_count": discovered,
-                        "planned_inspection_count": planned_inspections,
-                        "inspected_count": inspected,
-                        "inspection_failure_count": inspection_failures,
-                        "content_duplicate_count": content_duplicates,
-                        "final_candidate_count": final_candidates,
-                        "pending_count": max(
-                            planned_inspections
-                            - inspected
-                            - inspection_failures,
-                            0,
-                        ),
-                    }
-                )
-            if duplicate:
-                continue
-            if inspected_asset.validation_status == "valid":
-                valid += 1
-            folder_path = str(decision["folder_path"])
-            preview_path = ""
-            if (
-                preview_dir is not None
-                and inspected_asset.validation_status == "valid"
-                and inspected_asset.asset_id
-            ):
-                preview_path = str(
-                    build_image_preview(
-                        path,
-                        Path(preview_dir) / f"{inspected_asset.asset_id}.jpg",
-                    )
-                )
-            records.append(
-                _GalleryRecord(
-                    folder_id=_decision_folder_id(decision),
-                    folder_path=folder_path,
-                    source_system=str(
-                        decision.get("source_system", "confirmed_folder")
-                    ),
-                    candidate_directory=folder_path,
-                    relative_path=str(path.relative_to(Path(folder_path))),
-                    absolute_path=str(path.resolve()),
-                    preview_path=preview_path,
-                    sha256=inspected_asset.sha256,
-                    width=inspected_asset.width,
-                    height=inspected_asset.height,
-                    size_bytes=inspected_asset.size_bytes,
-                    validation_status=inspected_asset.validation_status,
-                    file_reason_codes=tuple(inspected_asset.reason_codes),
-                    product_id=product_id,
-                    sku=str(product.sku),
-                    product_title=str(product.title),
-                    match_type="name_candidate",
-                    match_status="confirmed",
-                    match_reason_codes=("CONFIRMED_FOLDER_BINDING",),
-                )
-            )
-        per_product.append(
-            {
+        product_summary = {
                 "product_id": product_id,
                 "confirmed_folders": len(folder_decisions),
                 "nonempty_folders": nonempty_folder_count,
@@ -508,83 +746,161 @@ def build_confirmed_folder_gallery(
                     else [COVERAGE_LIMIT_REASON]
                 ),
                 "folder_allocations": per_folder,
-            }
-        )
+        }
 
-    data = build_gallery_data(
+        def emit_progress(current_folder: str | None = None) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "current_product": product_id,
+                    "current_folder": current_folder,
+                    "discovered_count": discovered,
+                    "prepared_count": inspected,
+                    "discovered_path_count": discovered,
+                    "planned_inspection_count": planned_inspections,
+                    "inspected_count": inspected,
+                    "inspection_failure_count": inspection_failures,
+                    "content_duplicate_count": content_duplicates,
+                    "final_candidate_count": final_candidates,
+                    "available_candidate_count": len(records),
+                    "pending_count": max(
+                        planned_inspections
+                        - inspected
+                        - inspection_failures,
+                        0,
+                    ),
+                }
+            )
+
+        def worker(
+            decision: Mapping[str, Any], path: Path
+        ) -> _InspectionOutcome:
+            return _inspect_candidate_once(
+                decision,
+                path,
+                product,
+                preview_dir=preview_dir,
+                checkpoint_entries=checkpoint_entries,
+            )
+
+        indexed_selected = [
+            (index, decision, path)
+            for index, (decision, path) in enumerate(selected)
+        ]
+
+        def checkpoint_completion(
+            _index: int,
+            result: _InspectionOutcome | Exception,
+        ) -> None:
+            if isinstance(result, _InspectionOutcome):
+                checkpoint_entries[result.checkpoint_key] = (
+                    result.checkpoint_entry
+                )
+                _write_task_checkpoint(checkpoint_path, checkpoint)
+            emit_progress()
+
+        for start in range(0, len(indexed_selected), page_size):
+            window = indexed_selected[start : start + page_size]
+            results = _run_weighted_window(
+                window,
+                worker,
+                completion_callback=checkpoint_completion,
+            )
+            for (_, decision, _), result in zip(
+                window,
+                results,
+                strict=True,
+            ):
+                if isinstance(result, Exception):
+                    inspection_failures += 1
+                    product_failures += 1
+                    emit_progress(str(decision["folder_path"]))
+                    continue
+                inspected += 1
+                product_inspected += 1
+                inspected_asset = result.record
+                fingerprint = str(inspected_asset.sha256 or "")
+                duplicate = bool(
+                    fingerprint and fingerprint in seen_product_sha256
+                )
+                if fingerprint:
+                    seen_product_sha256.add(fingerprint)
+                if duplicate:
+                    content_duplicates += 1
+                    product_duplicates += 1
+                else:
+                    final_candidates += 1
+                    product_final_candidates += 1
+                    if inspected_asset.validation_status == "valid":
+                        valid += 1
+                    records.append(inspected_asset)
+                    folder_summary = folder_summary_by_id.get(
+                        inspected_asset.folder_id
+                    )
+                    if folder_summary is not None:
+                        folder_summary["final_candidate_count"] = (
+                            int(
+                                folder_summary.get(
+                                    "final_candidate_count", 0
+                                )
+                            )
+                            + 1
+                        )
+                emit_progress(str(decision["folder_path"]))
+
+            product_summary.update(
+                {
+                    "inspected_count": product_inspected,
+                    "inspection_failure_count": product_failures,
+                    "content_duplicate_count": product_duplicates,
+                    "final_candidate_count": product_final_candidates,
+                    "valid_candidates": valid,
+                }
+            )
+            if batch_callback is not None:
+                batch_callback(
+                    _build_gallery_document(
+                        records,
+                        status_rows,
+                        confirmed_by_product=confirmed_by_product,
+                        products_by_id=products_by_id,
+                        candidate_limit=candidate_limit,
+                        page_size=page_size,
+                        sampling_seed=sampling_seed,
+                        discovered=discovered,
+                        planned_inspections=planned_inspections,
+                        inspected=inspected,
+                        inspection_failures=inspection_failures,
+                        content_duplicates=content_duplicates,
+                        final_candidates=final_candidates,
+                        per_product=[*per_product, product_summary],
+                        gallery_complete=False,
+                    )
+                )
+        per_product.append(product_summary)
+
+    data = _build_gallery_document(
         records,
         status_rows,
+        confirmed_by_product=confirmed_by_product,
+        products_by_id=products_by_id,
+        candidate_limit=candidate_limit,
+        page_size=page_size,
+        sampling_seed=sampling_seed,
+        discovered=discovered,
+        planned_inspections=planned_inspections,
+        inspected=inspected,
+        inspection_failures=inspection_failures,
+        content_duplicates=content_duplicates,
+        final_candidates=final_candidates,
+        per_product=per_product,
+        gallery_complete=True,
     )
-    data["requirements"] = [
-        item
-        for item in data["requirements"]
-        if str(item.get("product_id", "")) in confirmed_by_product
-    ]
-    requirement_products = {
-        str(item.get("product_id", ""))
-        for item in data["requirements"]
-        if isinstance(item, dict)
-    }
-    for product_id in sorted(set(confirmed_by_product) - requirement_products):
-        product = products_by_id[product_id]
-        data["requirements"].append(
-            {
-                "product_id": product_id,
-                "sku": str(product.sku),
-                "product_title": str(product.title),
-                "missing_materials": 0,
-            }
-        )
-    data["candidate_strategy"] = CANDIDATE_STRATEGY_ID
-    data["candidate_strategy_version"] = CANDIDATE_STRATEGY_VERSION
-    data["candidate_limit"] = candidate_limit
-    data["page_size"] = page_size
-    data["sampling_seed"] = sampling_seed
-    data["sampling_identity_sha256"] = hashlib.sha256(
-        (
-            f"{CANDIDATE_STRATEGY_ID}\0"
-            f"{CANDIDATE_STRATEGY_VERSION}\0{sampling_seed}"
-        ).encode("utf-8")
-    ).hexdigest()
-    candidate_count_by_product: dict[str, int] = {}
-    for candidate in data["asset_candidates"]:
-        product_id = str(candidate.get("product_id", ""))
-        candidate_count_by_product[product_id] = (
-            candidate_count_by_product.get(product_id, 0) + 1
-        )
-    for requirement in data["requirements"]:
-        requirement["candidate_count"] = candidate_count_by_product.get(
-            str(requirement.get("product_id", "")), 0
-        )
-    data["scan_summary"] = {
-        "confirmed_folder_count": sum(
-            len(value) for value in confirmed_by_product.values()
-        ),
-        "discovered_images": discovered,
-        "inspected_candidates": inspected,
-        "inspection_failures": inspection_failures,
-        "discovered_path_count": discovered,
-        "planned_inspection_count": planned_inspections,
-        "inspected_count": inspected,
-        "inspection_failure_count": inspection_failures,
-        "content_duplicate_count": content_duplicates,
-        "final_candidate_count": final_candidates,
-        "pending_count": max(
-            planned_inspections - inspected - inspection_failures,
-            0,
-        ),
-        "per_product": per_product,
-    }
     if inspected != final_candidates + content_duplicates:
         raise ValueError("gallery candidate count invariant failed")
     if planned_inspections != inspected + inspection_failures:
         raise ValueError("gallery inspection count invariant failed")
     if len(data.get("asset_candidates", [])) != final_candidates:
         raise ValueError("gallery final candidate count invariant failed")
-    reason_codes = list(data.get("reason_codes", []))
-    if any(
-        not item["complete_folder_coverage"] for item in per_product
-    ) and COVERAGE_LIMIT_REASON not in reason_codes:
-        reason_codes.append(COVERAGE_LIMIT_REASON)
-    data["reason_codes"] = reason_codes
     return data

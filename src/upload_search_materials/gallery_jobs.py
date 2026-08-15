@@ -367,6 +367,8 @@ def create_or_reuse_gallery_job(
                 "inspection_failure_count": 0,
                 "content_duplicate_count": 0,
                 "final_candidate_count": 0,
+                "available_candidate_count": 0,
+                "published_batch_count": 0,
                 "pending_count": 0,
             },
             "reason_code": "",
@@ -720,6 +722,86 @@ def process_gallery_job(
             )
         with status_path.open("r", encoding="utf-8-sig", newline="") as stream:
             status_rows = list(csv.DictReader(stream))
+        prior = store.read_optional_stage_document(
+            session_id, "asset_matching", "review-context"
+        )
+        prior_data = (
+            prior.get("data")
+            if isinstance(prior, dict) and isinstance(prior.get("data"), dict)
+            else {}
+        )
+        base_folder_candidates = [
+            dict(item)
+            for item in prior_data.get("folder_candidates", [])
+            if isinstance(item, dict)
+        ]
+
+        def decorate_gallery_data(
+            source: dict[str, Any], workflow_step: str
+        ) -> dict[str, Any]:
+            data = dict(source)
+            data.setdefault("schema_version", 1)
+            folder_candidates = [
+                dict(item) for item in base_folder_candidates
+            ]
+            allocation_by_folder: dict[
+                tuple[str, str], dict[str, Any]
+            ] = {}
+            for product_summary in data.get("scan_summary", {}).get(
+                "per_product", []
+            ):
+                if not isinstance(product_summary, dict):
+                    continue
+                product_id = str(product_summary.get("product_id", ""))
+                for allocation in product_summary.get(
+                    "folder_allocations", []
+                ):
+                    if isinstance(allocation, dict):
+                        allocation_by_folder[
+                            (
+                                product_id,
+                                str(allocation.get("folder_id", "")),
+                            )
+                        ] = allocation
+            for candidate in folder_candidates:
+                allocation = allocation_by_folder.get(
+                    (
+                        str(candidate.get("product_id", "")),
+                        str(candidate.get("folder_id", "")),
+                    )
+                )
+                if allocation is None:
+                    continue
+                candidate.update(
+                    {
+                        "image_count_status": "ready",
+                        "raw_recursive_image_count": int(
+                            allocation.get("raw_discovered_images", 0)
+                        ),
+                        "gallery_unique_path_count": int(
+                            allocation.get("discovered_images", 0)
+                        ),
+                        "gallery_sampled_inspection_count": int(
+                            allocation.get("sampled_images", 0)
+                        ),
+                        "gallery_final_candidate_count": int(
+                            allocation.get("final_candidate_count", 0)
+                        ),
+                        "image_count_reason_code": str(
+                            allocation.get("zero_allocation_reason", "")
+                        ),
+                    }
+                )
+            data["folder_candidates"] = folder_candidates
+            data["workflow_step"] = workflow_step
+            data["gallery_identity"] = build_gallery_identity(
+                session_id=session_id,
+                revision=int(job["identity"]["revision"]),
+                input_sha256=str(job["identity"]["input_sha256"]),
+                folder_decisions=submitted_decisions,
+            )
+            data["gallery_job_id"] = job_id
+            return data
 
         def update_progress(progress: dict[str, Any]) -> None:
             with store._session_lock(session_id):
@@ -733,6 +815,7 @@ def process_gallery_job(
                     raise InteractionConflict(GALLERY_IDENTITY_STALE)
                 now = _now()
                 active["progress"] = {
+                    **dict(active.get("progress") or {}),
                     "workflow_step": "gallery_preparing",
                     **progress,
                 }
@@ -741,6 +824,65 @@ def process_gallery_job(
                 active["lease_expires_at"] = _iso(
                     now + timedelta(seconds=GALLERY_JOB_LEASE_SECONDS)
                 )
+                store._write_json_atomic(
+                    gallery_job_path(store, session_id), active
+                )
+                store._write_json_atomic(
+                    attempt_dir / "progress.json", active
+                )
+
+        def publish_progressive_batch(partial: dict[str, Any]) -> None:
+            data = decorate_gallery_data(partial, "gallery_preparing")
+            candidate_count = len(data.get("asset_candidates", []))
+            with store._session_lock(session_id):
+                active = read_gallery_job(store, session_id)
+                current_input_sha = hashlib.sha256(
+                    input_path.read_bytes()
+                ).hexdigest()
+                if (
+                    active is None
+                    or active.get("job_id") != job_id
+                    or active.get("attempt_id") != attempt_id
+                    or active.get("status") != "running"
+                    or current_input_sha != job["identity"]["input_sha256"]
+                ):
+                    raise InteractionConflict(GALLERY_IDENTITY_STALE)
+                store._write_json_atomic(
+                    stage_path / "partial-gallery.json", data
+                )
+                review = {
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "stage_id": "asset_matching",
+                    "revision": int(job["identity"]["revision"]),
+                    "status": "needs_user_input",
+                    "summary": (
+                        f"首批候选已显示，当前可预览 {candidate_count} 张；"
+                        "其余图片仍在准备"
+                    ),
+                    "blocking_reasons": [],
+                    "evidence": [str(stage_path / "partial-gallery.json")],
+                    "next_action": "可先浏览候选，全部完成后再选择图片",
+                    "created_at": _iso(),
+                    "data": data,
+                }
+                store.write_review_context(
+                    session_id, "asset_matching", review
+                )
+                active_progress = dict(active.get("progress") or {})
+                active_progress.update(
+                    {
+                        "workflow_step": "gallery_preparing",
+                        "available_candidate_count": candidate_count,
+                        "published_batch_count": int(
+                            active_progress.get("published_batch_count", 0)
+                        )
+                        + 1,
+                    }
+                )
+                active["progress"] = active_progress
+                active["heartbeat_at"] = _iso()
+                active["updated_at"] = _iso()
                 store._write_json_atomic(
                     gallery_job_path(store, session_id), active
                 )
@@ -757,79 +899,13 @@ def process_gallery_job(
             sampling_seed=session_id,
             preview_dir=stage_path / "preview-cache",
             progress_callback=update_progress,
+            batch_callback=publish_progressive_batch,
+            checkpoint_path=stage_path / "gallery-checkpoint.json",
+            checkpoint_identity_sha256=str(
+                job["identity"]["identity_sha256"]
+            ),
         )
-        prior = store.read_optional_stage_document(
-            session_id, "asset_matching", "review-context"
-        )
-        prior_data = (
-            prior.get("data")
-            if isinstance(prior, dict) and isinstance(prior.get("data"), dict)
-            else {}
-        )
-        folder_candidates = [
-            dict(item)
-            for item in prior_data.get("folder_candidates", [])
-            if isinstance(item, dict)
-        ]
-        allocation_by_folder: dict[
-            tuple[str, str], dict[str, Any]
-        ] = {}
-        for product_summary in data.get("scan_summary", {}).get(
-            "per_product", []
-        ):
-            if not isinstance(product_summary, dict):
-                continue
-            product_id = str(
-                product_summary.get("product_id", "")
-            )
-            for allocation in product_summary.get(
-                "folder_allocations", []
-            ):
-                if isinstance(allocation, dict):
-                    allocation_by_folder[
-                        (
-                            product_id,
-                            str(allocation.get("folder_id", "")),
-                        )
-                    ] = allocation
-        for candidate in folder_candidates:
-            allocation = allocation_by_folder.get(
-                (
-                    str(candidate.get("product_id", "")),
-                    str(candidate.get("folder_id", "")),
-                )
-            )
-            if allocation is None:
-                continue
-            candidate.update(
-                {
-                    "image_count_status": "ready",
-                    "raw_recursive_image_count": int(
-                        allocation.get("raw_discovered_images", 0)
-                    ),
-                    "gallery_unique_path_count": int(
-                        allocation.get("discovered_images", 0)
-                    ),
-                    "gallery_sampled_inspection_count": int(
-                        allocation.get("sampled_images", 0)
-                    ),
-                    "gallery_final_candidate_count": int(
-                        allocation.get("final_candidate_count", 0)
-                    ),
-                    "image_count_reason_code": str(
-                        allocation.get("zero_allocation_reason", "")
-                    ),
-                }
-            )
-        data["folder_candidates"] = folder_candidates
-        data["workflow_step"] = IMAGE_SELECTION
-        data["gallery_identity"] = build_gallery_identity(
-            session_id=session_id,
-            revision=int(job["identity"]["revision"]),
-            input_sha256=str(job["identity"]["input_sha256"]),
-            folder_decisions=submitted_decisions,
-        )
-        data["gallery_job_id"] = job_id
+        data = decorate_gallery_data(data, IMAGE_SELECTION)
         with store._session_lock(session_id):
             current = read_gallery_job(store, session_id)
             current_input_sha = hashlib.sha256(input_path.read_bytes()).hexdigest()
@@ -868,6 +944,11 @@ def process_gallery_job(
             current["updated_at"] = _iso()
             current["heartbeat_at"] = _iso()
             current["lease_expires_at"] = None
+            published_batch_count = int(
+                (current.get("progress") or {}).get(
+                    "published_batch_count", 0
+                )
+            )
             current["progress"] = {
                 "workflow_step": IMAGE_SELECTION,
                 "current_product": None,
@@ -904,6 +985,10 @@ def process_gallery_job(
                 "final_candidate_count": len(
                     data.get("asset_candidates", [])
                 ),
+                "available_candidate_count": len(
+                    data.get("asset_candidates", [])
+                ),
+                "published_batch_count": published_batch_count,
                 "pending_count": 0,
             }
             current["result"] = {

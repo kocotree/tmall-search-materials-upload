@@ -2297,6 +2297,79 @@ def test_asset_matching_folder_counts_wait_for_material_executor(
     ]
 
 
+def test_asset_matching_cannot_submit_while_gallery_job_is_queued(
+    client, session_id, tmp_path
+):
+    folder = tmp_path / "queued-folder"
+    folder.mkdir()
+    store = SessionStore(tmp_path)
+    store.write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [{
+                    "folder_id": "F1",
+                    "folder_path": str(folder),
+                    "product_id": "P1",
+                    "source_system": "nas",
+                    "match_type": "exact_product_id",
+                }],
+            },
+        },
+    )
+    prepared = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
+        json={
+            "revision": 0,
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "folder_decisions": [{
+                    "folder_id": "F1",
+                    "folder_path": str(folder),
+                    "product_id": "P1",
+                    "source_system": "nas",
+                    "decision": "confirmed",
+                }],
+            },
+        },
+    )
+    assert prepared.status_code == 202
+
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "revision": prepared.json["revision"],
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "folder_decisions": [{
+                    "folder_id": "F1",
+                    "folder_path": str(folder),
+                    "product_id": "P1",
+                    "source_system": "nas",
+                    "decision": "confirmed",
+                }],
+                "asset_decisions": [],
+                "license_decisions": [],
+            },
+        },
+    )
+
+    assert submitted.status_code in {409, 422}, submitted.json
+    if submitted.status_code == 422:
+        assert "仍在准备" in submitted.json["field_errors"]["asset_decisions"]
+
+
 def test_asset_matching_rejects_all_folders_before_handoff(
     client, session_id, tmp_path
 ):
@@ -2695,6 +2768,9 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         "pruneSelectedCandidates",
         "历史候选未关联文件夹",
         "preservesReviewContext",
+        "候选仍在加载，完成后可采用",
+        "首批候选已就绪",
+        "已渐进展示",
     ):
         assert expected in source
 
@@ -2723,6 +2799,8 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "确认归属并记录别名" not in source
     assert 'candidate?.match_type !== "confirmed_alias"' in source
     assert "loadFolderImageCounts" in source
+    assert "published_batch_count" in source
+    assert "const galleryComplete" in source
 
 
 def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():

@@ -1,11 +1,16 @@
 from pathlib import Path
+import threading
+import time
 
 from PIL import Image
+import upload_search_materials.image_compliance as image_compliance
 
 from upload_search_materials.confirmed_assets import (
     CANDIDATE_STRATEGY_VERSION,
     COVERAGE_LIMIT_REASON,
     _allocation_breakdown,
+    _iter_images,
+    _run_weighted_window,
     _proportional_allocations,
     _sample_paths,
     build_confirmed_folder_gallery,
@@ -53,6 +58,26 @@ def test_path_sampling_is_independent_of_input_enumeration_order(tmp_path):
 
     assert first == second
     assert first != other_task
+
+
+def test_image_enumeration_uses_scandir_without_pathlib_rglob(
+    tmp_path, monkeypatch
+):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    _image(tmp_path / "a.png", (1, 2, 3))
+    _image(nested / "b.jpg", (4, 5, 6))
+    (nested / "ignore.txt").write_text("not an image", encoding="utf-8")
+
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("rglob must not be used")
+        ),
+    )
+
+    assert [path.name for path in _iter_images(tmp_path)] == ["a.png", "b.jpg"]
 
 
 def test_confirmed_gallery_samples_proportionally_across_folders(tmp_path):
@@ -432,3 +457,188 @@ def test_extract_folder_decisions_accepts_submitted_stage_input():
     assert extract_folder_decisions(
         {"values": {"folder_decisions": [{"decision": "confirmed"}]}}
     ) == [{"decision": "confirmed"}]
+
+
+def test_confirmed_gallery_reads_and_decodes_each_source_once(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    source = folder / "single.png"
+    _image(source, (10, 20, 30))
+    source_reads = 0
+    image_opens = 0
+    original_read_bytes = Path.read_bytes
+    original_open = image_compliance.Image.open
+
+    def counted_read_bytes(path):
+        nonlocal source_reads
+        if path == source:
+            source_reads += 1
+        return original_read_bytes(path)
+
+    def counted_open(*args, **kwargs):
+        nonlocal image_opens
+        image_opens += 1
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    monkeypatch.setattr(image_compliance.Image, "open", counted_open)
+
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        preview_dir=tmp_path / "previews",
+    )
+
+    assert source_reads == 1
+    assert image_opens == 1
+    assert Path(data["asset_candidates"][0]["preview_path"]).is_file()
+
+
+def test_confirmed_gallery_publishes_first_thirty_then_remainder(tmp_path):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    for index in range(35):
+        _image(folder / f"{index:02}.png", (index, index * 2, index * 3))
+    published = []
+
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        candidate_limit=35,
+        page_size=30,
+        batch_callback=lambda partial: published.append(partial),
+    )
+
+    assert [len(item["asset_candidates"]) for item in published] == [30, 35]
+    assert all(item["gallery_complete"] is False for item in published)
+    assert data["gallery_complete"] is True
+
+
+def test_confirmed_gallery_resume_reuses_task_checkpoint_and_previews(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    for index in range(3):
+        _image(folder / f"{index}.png", (index * 10, 20, 30))
+    calls = 0
+    original_loader = image_compliance.load_image_preflight_source
+
+    def counted_loader(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_loader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets.load_image_preflight_source",
+        counted_loader,
+    )
+    kwargs = {
+        "candidate_limit": 3,
+        "preview_dir": tmp_path / "previews",
+        "checkpoint_path": tmp_path / "gallery-checkpoint.json",
+        "checkpoint_identity_sha256": "same-task-input",
+    }
+    args = (
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+    )
+
+    first = build_confirmed_folder_gallery(*args, **kwargs)
+    first_calls = calls
+    second = build_confirmed_folder_gallery(*args, **kwargs)
+
+    assert first_calls == 3
+    assert calls == first_calls
+    assert first["asset_candidates"] == second["asset_candidates"]
+
+
+def test_weighted_completion_order_does_not_change_duplicate_owner(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    first = folder / "a.png"
+    duplicate = folder / "z.png"
+    _image(first, (1, 2, 3))
+    duplicate.write_bytes(first.read_bytes())
+    original_loader = image_compliance.load_image_preflight_source
+
+    def delayed_loader(path, **kwargs):
+        if Path(path).name == "a.png":
+            time.sleep(0.03)
+        return original_loader(path, **kwargs)
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets.load_image_preflight_source",
+        delayed_loader,
+    )
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        sampling_seed="deterministic-merge",
+    )
+
+    assert data["scan_summary"]["content_duplicate_count"] == 1
+    assert len(data["asset_candidates"]) == 1
+
+
+def test_weighted_window_respects_budget_and_returns_input_order(
+    tmp_path, monkeypatch
+):
+    paths = [tmp_path / f"{index}.png" for index in range(4)]
+    weights = {"0.png": 3, "1.png": 3, "2.png": 2, "3.png": 1}
+    active_weight = 0
+    highest_weight = 0
+    lock = threading.Lock()
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets._inspection_weight",
+        lambda path: weights[path.name],
+    )
+
+    def worker(_decision, path):
+        nonlocal active_weight, highest_weight
+        with lock:
+            active_weight += weights[path.name]
+            highest_weight = max(highest_weight, active_weight)
+        time.sleep(0.01 * (4 - int(path.stem)))
+        with lock:
+            active_weight -= weights[path.name]
+        return path.name
+
+    results = _run_weighted_window(
+        [(index, {}, path) for index, path in enumerate(paths)],
+        worker,
+        max_workers=4,
+        max_weight=5,
+    )
+
+    assert highest_weight <= 5
+    assert results == [path.name for path in paths]

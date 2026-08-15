@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+import uuid
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 import yaml
@@ -172,22 +173,47 @@ def build_image_preview(
 
     source = Path(source_path).resolve()
     output = Path(output_path).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.tmp")
-    try:
-        with Image.open(source) as image:
-            preview = ImageOps.exif_transpose(image).convert("RGB")
-            preview.thumbnail(max_size, Image.Resampling.LANCZOS)
-            preview.save(
-                temporary,
-                format="JPEG",
-                quality=82,
-                optimize=True,
+    with Image.open(source) as image:
+        decoded = ImageOps.exif_transpose(image)
+        decoded.load()
+        try:
+            return build_loaded_image_preview(
+                decoded,
+                output,
+                max_size=max_size,
             )
+        finally:
+            decoded.close()
+
+
+def build_loaded_image_preview(
+    decoded: Image.Image,
+    output_path: Path,
+    *,
+    max_size: tuple[int, int] = (640, 640),
+) -> Path:
+    """Encode a task-local preview from an already decoded source image."""
+
+    output = Path(output_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(
+        f".{output.name}.{uuid.uuid4().hex}.tmp"
+    )
+    preview = decoded.convert("RGB")
+    try:
+        preview.thumbnail(max_size, Image.Resampling.LANCZOS)
+        preview.save(
+            temporary,
+            format="JPEG",
+            quality=82,
+            optimize=True,
+        )
         temporary.replace(output)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+    finally:
+        preview.close()
     return output
 
 

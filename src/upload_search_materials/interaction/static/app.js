@@ -935,6 +935,7 @@
     const failures = Number(progress.inspection_failure_count || 0);
     const duplicates = Number(progress.content_duplicate_count || 0);
     const inspected = Number(progress.inspected_count || 0);
+    const available = Number(progress.available_candidate_count || 0);
     return (
       `本机正在加载图片：发现 `
       + `${Number(progress.discovered_path_count || 0)} 张，本轮进入候选检查 `
@@ -944,6 +945,7 @@
       + `，检查成功 ${inspected} 张`
       + `${failures ? `，检查失败 ${failures} 张` : ""}`
       + `${duplicates ? `，内容重复 ${duplicates} 张` : ""}。`
+      + `${available ? ` 已渐进展示 ${available} 张候选。` : ""}`
     );
   }
 
@@ -2216,8 +2218,11 @@
 
   function renderAssetMatchGallery(view) {
     if (view.mode === "empty") return;
-    void hydrateSelectionPreflights();
     const data = view.result?.data;
+    const galleryComplete = inferAssetMatchingStep(data, uiState.serverStatus)
+      === "image_selection"
+      && !["queued", "running"].includes(currentGalleryJob?.status);
+    if (galleryComplete) void hydrateSelectionPreflights();
     const folderCandidates = Array.isArray(data?.folder_candidates)
       ? data.folder_candidates.filter(
         (candidate) => candidate?.match_type !== "confirmed_alias",
@@ -2252,7 +2257,9 @@
       const heading = element(
         "strong",
         "",
-        `已按实际扫描结果展示 ${requirements.length} 个商品、${candidates.length} 张候选图片。`,
+        galleryComplete
+          ? `已按实际扫描结果展示 ${requirements.length} 个商品、${candidates.length} 张候选图片。`
+          : `首批候选已就绪：当前展示 ${requirements.length} 个商品、${candidates.length} 张图片，其余仍在准备。`,
       );
       const action = element("section");
       action.append(
@@ -2260,7 +2267,9 @@
         element(
           "p",
           "",
-          "选择本次采用的图片；采用即确认该图片可用于本次发布，每次勾选都会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，提交将按每坑 3–9 张自动生成坑位草稿。",
+          galleryComplete
+            ? "选择本次采用的图片；采用即确认该图片可用于本次发布，每次勾选都会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，提交将按每坑 3–9 张自动生成坑位草稿。"
+            : "可以先浏览已完成的候选。全部图片准备完成后，系统会自动开放采用和提交。",
         ),
       );
       resultSummary.replaceChildren(heading, action);
@@ -2492,7 +2501,7 @@
           const selectionCheck = selectionPreflightFor(assetId);
           const selectionJob = selectionPreflightScheduler.get(assetId);
           const checking = ["queued", "running"].includes(selectionJob?.state);
-          const selectable = candidateIsSelectable(candidate)
+          const selectable = galleryComplete && candidateIsSelectable(candidate)
             && !hashesUsedElsewhere.has(String(candidate.sha256 || ""))
             && selectionCheck?.status !== "blocked";
           const card = element("article", "asset-card");
@@ -2540,6 +2549,11 @@
           select.disabled = !selectable;
           selectLabel.append(select, document.createTextNode("采用"));
           controls.append(selectLabel);
+          if (!galleryComplete) {
+            controls.appendChild(
+              element("span", "asset-warning", "候选仍在加载，完成后可采用"),
+            );
+          }
           const selectionFeedback = element("span", "asset-selection-check");
           controls.appendChild(selectionFeedback);
           if (candidate.match_status === "needs_manual_confirmation") {
@@ -5170,7 +5184,7 @@
           element(
             "strong",
             "",
-            step === "image_selection" ? "第 2 步：选择图片" : "第 1 步：筛选文件夹",
+            step === "folder_review" ? "第 1 步：筛选文件夹" : "第 2 步：选择图片",
           ),
           element(
             "span",
@@ -5185,10 +5199,8 @@
         content.prepend(indicator);
       }
       renderFolderOwnershipReview(view);
-      if (
-        inferAssetMatchingStep(view.result?.data, uiState.serverStatus)
-        === "image_selection"
-      ) {
+      if (Array.isArray(view.result?.data?.asset_candidates)
+        && view.result.data.asset_candidates.length) {
         renderAssetMatchGallery(view);
       }
     }
@@ -5804,6 +5816,12 @@
       renderTaskAwareness(sessionPayload.task_status || stageState.task_status);
       const priorGalleryStatus = currentGalleryJob?.status || null;
       const priorGalleryAttempt = currentGalleryJob?.attempt_id || null;
+      const priorAvailableCandidates = Number(
+        currentGalleryJob?.progress?.available_candidate_count || 0,
+      );
+      const priorPublishedBatches = Number(
+        currentGalleryJob?.progress?.published_batch_count || 0,
+      );
       if (requestedStageId === "asset_matching") {
         currentGalleryJob = galleryPayload?.gallery_job || null;
         currentGalleryProgress = currentGalleryJob?.progress || null;
@@ -5819,6 +5837,12 @@
         && (
           priorGalleryStatus !== (currentGalleryJob?.status || null)
           || priorGalleryAttempt !== (currentGalleryJob?.attempt_id || null)
+          || priorAvailableCandidates !== Number(
+            currentGalleryJob?.progress?.available_candidate_count || 0,
+          )
+          || priorPublishedBatches !== Number(
+            currentGalleryJob?.progress?.published_batch_count || 0,
+          )
         );
       if (stageChanged || galleryChanged) {
         renderStatus();
