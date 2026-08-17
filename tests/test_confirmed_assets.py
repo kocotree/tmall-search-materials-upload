@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 import threading
 import time
 
@@ -10,11 +11,14 @@ from upload_search_materials.confirmed_assets import (
     CANDIDATE_STRATEGY_VERSION,
     COVERAGE_LIMIT_REASON,
     NO_SIZE_ELIGIBLE_IMAGES,
+    PREFERRED_MAX_SIZE_BYTES,
+    PREFERRED_MIN_SIZE_BYTES,
     _allocation_breakdown,
     _iter_images,
     _run_concurrent_window,
     _proportional_allocations,
     _sample_paths,
+    _tiered_allocation_breakdown,
     build_confirmed_folder_gallery,
     extract_folder_decisions,
 )
@@ -54,6 +58,30 @@ def test_more_than_one_hundred_folders_is_deterministic_but_not_fully_covered():
         allocation <= capacity
         for allocation, capacity in zip(first[0], [1] * 101, strict=True)
     )
+
+
+def test_tiered_allocation_preserves_coverage_before_using_preferred_pool():
+    allocation = _tiered_allocation_breakdown(
+        [4, 0],
+        [0, 0],
+        [2, 1],
+        4,
+    )
+
+    assert allocation["allocations"] == [3, 1]
+    assert allocation["coverage_allocations"] == [1, 1]
+    assert allocation["preferred_allocations"] == [3, 0]
+    assert allocation["fallback_below_allocations"] == [0, 0]
+    assert allocation["fallback_above_allocations"] == [0, 1]
+
+
+def test_tiered_allocation_fills_small_fallback_before_large_fallback():
+    allocation = _tiered_allocation_breakdown([1], [2], [3], 4)
+
+    assert allocation["preferred_allocations"] == [1]
+    assert allocation["fallback_below_allocations"] == [2]
+    assert allocation["fallback_above_allocations"] == [1]
+    assert allocation["allocations"] == [4]
 
 
 def test_path_sampling_is_independent_of_input_enumeration_order(tmp_path):
@@ -123,6 +151,7 @@ def test_confirmed_gallery_samples_proportionally_across_folders(tmp_path):
 
     assert data["candidate_strategy"] == "proportional_task_sample"
     assert data["candidate_strategy_version"] == CANDIDATE_STRATEGY_VERSION
+    assert CANDIDATE_STRATEGY_VERSION == 4
     assert len(data["sampling_identity_sha256"]) == 64
     assert data["requirements"][0]["candidate_count"] == 10
     assert "required_images" not in data["requirements"][0]
@@ -783,6 +812,10 @@ def test_confirmed_gallery_filters_size_before_read_and_fills_from_eligible_pool
     assert summary["size_filtered_count"] == 2
     assert summary["size_below_minimum_count"] == 1
     assert summary["size_exceeded_count"] == 1
+    assert summary["preferred_size_count"] == 0
+    assert summary["fallback_below_preferred_count"] == 5
+    assert summary["fallback_above_preferred_count"] == 0
+    assert summary["fallback_below_preferred_sampled_count"] == 5
     assert summary["planned_inspection_count"] == 5
     assert len(data["asset_candidates"]) == 5
     allocations = {
@@ -792,6 +825,99 @@ def test_confirmed_gallery_filters_size_before_read_and_fills_from_eligible_pool
     assert allocations["FILTERED"]["zero_allocation_reason"] == (
         NO_SIZE_ELIGIBLE_IMAGES
     )
+
+
+def test_confirmed_gallery_uses_large_fallback_only_for_folder_coverage(
+    tmp_path, monkeypatch
+):
+    preferred_folder = tmp_path / "preferred"
+    fallback_only_folder = tmp_path / "fallback-only"
+    preferred_folder.mkdir()
+    fallback_only_folder.mkdir()
+    preferred_paths = []
+    unused_large_paths = []
+    for index in range(4):
+        path = preferred_folder / f"preferred-{index}.png"
+        _image(path, (index * 20, index * 30, index * 40))
+        preferred_paths.append(path)
+    for index in range(2):
+        path = preferred_folder / f"large-{index}.png"
+        _image(path, (100 + index, 110 + index, 120 + index))
+        unused_large_paths.append(path)
+    coverage_fallback = fallback_only_folder / "coverage-large.png"
+    _image(coverage_fallback, (200, 210, 220))
+
+    reported_sizes = {
+        **{path: PREFERRED_MIN_SIZE_BYTES for path in preferred_paths},
+        **{
+            path: PREFERRED_MAX_SIZE_BYTES + 1
+            for path in [*unused_large_paths, coverage_fallback]
+        },
+    }
+    original_stat = Path.stat
+    original_read_bytes = Path.read_bytes
+
+    def reported_stat(path, *args, **kwargs):
+        real = original_stat(path, *args, **kwargs)
+        size = reported_sizes.get(Path(path))
+        if size is None:
+            return real
+        return SimpleNamespace(st_size=size, st_mtime_ns=real.st_mtime_ns)
+
+    def reject_unneeded_large_reads(path):
+        if Path(path) in unused_large_paths:
+            raise AssertionError("unneeded large fallback must not be read")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "stat", reported_stat)
+    monkeypatch.setattr(Path, "read_bytes", reject_unneeded_large_reads)
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [
+            {
+                "decision": "confirmed",
+                "folder_id": "PREFERRED",
+                "folder_path": str(preferred_folder),
+                "product_id": "123",
+                "source_system": "model",
+            },
+            {
+                "decision": "confirmed",
+                "folder_id": "FALLBACK_ONLY",
+                "folder_path": str(fallback_only_folder),
+                "product_id": "123",
+                "source_system": "model",
+            },
+        ],
+        candidate_limit=4,
+        sampling_seed="tiered-coverage",
+    )
+
+    summary = data["scan_summary"]
+    assert summary["preferred_size_count"] == 4
+    assert summary["fallback_above_preferred_count"] == 3
+    assert summary["preferred_sampled_count"] == 3
+    assert summary["fallback_above_preferred_sampled_count"] == 1
+    assert summary["fallback_sampled_count"] == 1
+    allocations = {
+        item["folder_id"]: item
+        for item in summary["per_product"][0]["folder_allocations"]
+    }
+    assert allocations["PREFERRED"]["preferred_allocation"] == 3
+    assert allocations["PREFERRED"]["fallback_allocation"] == 0
+    assert allocations["FALLBACK_ONLY"][
+        "fallback_above_preferred_allocation"
+    ] == 1
+    assert summary["per_product"][0]["complete_folder_coverage"] is True
+    assert data["candidate_size_preference"] == {
+        "hard_min_size_bytes": 200 * 1024,
+        "hard_max_size_bytes": 20 * 1024 * 1024,
+        "preferred_min_size_bytes": PREFERRED_MIN_SIZE_BYTES,
+        "preferred_max_size_bytes": PREFERRED_MAX_SIZE_BYTES,
+        "fallback_order": ["below_preferred", "above_preferred"],
+        "preserve_folder_coverage": True,
+    }
 
 
 def test_confirmed_gallery_stats_each_selected_source_once(

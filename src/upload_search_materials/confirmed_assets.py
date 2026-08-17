@@ -20,9 +20,11 @@ from .models import ProductRecord
 
 
 CANDIDATE_STRATEGY_ID = "proportional_task_sample"
-CANDIDATE_STRATEGY_VERSION = 3
+CANDIDATE_STRATEGY_VERSION = 4
 COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
 NO_SIZE_ELIGIBLE_IMAGES = "NO_SIZE_ELIGIBLE_IMAGES"
+PREFERRED_MIN_SIZE_BYTES = 500 * 1024
+PREFERRED_MAX_SIZE_BYTES = 15 * 1024 * 1024
 GALLERY_CHECKPOINT_SCHEMA_VERSION = 1
 GALLERY_MAX_WORKERS = 8
 GALLERY_PROGRESSIVE_PUBLISH_SIZE = 10
@@ -228,34 +230,146 @@ def _allocation_breakdown(
         remaining = target
         capacities = list(counts)
 
+    added = _bounded_proportional_allocations(capacities, remaining)
+    for index, value in enumerate(added):
+        allocations[index] += value
+        proportional_allocations[index] += value
+    return allocations, base_allocations, proportional_allocations
+
+
+def _bounded_proportional_allocations(
+    capacities: Sequence[int],
+    target: int,
+) -> list[int]:
+    """Fill a bounded target proportionally without adding coverage slots."""
+
+    remaining_capacities = [max(int(value), 0) for value in capacities]
+    allocations = [0] * len(remaining_capacities)
+    remaining = min(max(int(target), 0), sum(remaining_capacities))
     while remaining:
-        capacity_total = sum(capacities)
+        capacity_total = sum(remaining_capacities)
         if capacity_total <= 0:
             break
-        exact = [remaining * capacity / capacity_total for capacity in capacities]
-        added = [min(int(value), capacities[index]) for index, value in enumerate(exact)]
+        exact = [
+            remaining * capacity / capacity_total
+            for capacity in remaining_capacities
+        ]
+        added = [
+            min(int(value), remaining_capacities[index])
+            for index, value in enumerate(exact)
+        ]
         added_total = sum(added)
         if added_total:
             for index, value in enumerate(added):
                 allocations[index] += value
-                proportional_allocations[index] += value
-                capacities[index] -= value
+                remaining_capacities[index] -= value
             remaining -= added_total
             continue
         ranked = sorted(
             (
-                (exact[index] - int(exact[index]), capacities[index], -index, index)
-                for index in range(len(capacities))
-                if capacities[index] > 0
+                (
+                    exact[index] - int(exact[index]),
+                    remaining_capacities[index],
+                    -index,
+                    index,
+                )
+                for index in range(len(remaining_capacities))
+                if remaining_capacities[index] > 0
             ),
             reverse=True,
         )
         for _, _, _, index in ranked[:remaining]:
             allocations[index] += 1
-            proportional_allocations[index] += 1
-            capacities[index] -= 1
+            remaining_capacities[index] -= 1
         remaining = 0
-    return allocations, base_allocations, proportional_allocations
+    return allocations
+
+
+def _tiered_allocation_breakdown(
+    preferred_counts: Sequence[int],
+    fallback_below_counts: Sequence[int],
+    fallback_above_counts: Sequence[int],
+    target: int,
+) -> dict[str, list[int]]:
+    """Allocate coverage first, then preferred, small fallback, and large fallback."""
+
+    lengths = {
+        len(preferred_counts),
+        len(fallback_below_counts),
+        len(fallback_above_counts),
+    }
+    if len(lengths) != 1:
+        raise ValueError("candidate tier counts must have equal lengths")
+    preferred = [max(int(value), 0) for value in preferred_counts]
+    fallback_below = [max(int(value), 0) for value in fallback_below_counts]
+    fallback_above = [max(int(value), 0) for value in fallback_above_counts]
+    hard_eligible = [
+        preferred_count + below_count + above_count
+        for preferred_count, below_count, above_count in zip(
+            preferred,
+            fallback_below,
+            fallback_above,
+            strict=True,
+        )
+    ]
+    bounded_target = min(max(int(target), 0), sum(hard_eligible))
+    coverage = [0] * len(hard_eligible)
+    proportional = [0] * len(hard_eligible)
+    preferred_allocations = [0] * len(hard_eligible)
+    fallback_below_allocations = [0] * len(hard_eligible)
+    fallback_above_allocations = [0] * len(hard_eligible)
+
+    nonempty = [
+        index for index, count in enumerate(hard_eligible) if count > 0
+    ]
+    coverage_indices = nonempty[:bounded_target]
+    for index in coverage_indices:
+        coverage[index] = 1
+        if preferred[index] > 0:
+            preferred_allocations[index] = 1
+        elif fallback_below[index] > 0:
+            fallback_below_allocations[index] = 1
+        else:
+            fallback_above_allocations[index] = 1
+
+    remaining = bounded_target - len(coverage_indices)
+    tier_specs = (
+        (preferred, preferred_allocations),
+        (fallback_below, fallback_below_allocations),
+        (fallback_above, fallback_above_allocations),
+    )
+    for counts, allocations in tier_specs:
+        if remaining <= 0:
+            break
+        capacities = [
+            max(count - allocation, 0)
+            for count, allocation in zip(counts, allocations, strict=True)
+        ]
+        added = _bounded_proportional_allocations(capacities, remaining)
+        for index, value in enumerate(added):
+            allocations[index] += value
+            proportional[index] += value
+        remaining -= sum(added)
+
+    allocations = [
+        preferred_count + below_count + above_count
+        for preferred_count, below_count, above_count in zip(
+            preferred_allocations,
+            fallback_below_allocations,
+            fallback_above_allocations,
+            strict=True,
+        )
+    ]
+    if sum(allocations) != bounded_target:
+        raise ValueError("tiered candidate allocation did not fill its target")
+    return {
+        "allocations": allocations,
+        "coverage_allocations": coverage,
+        "proportional_allocations": proportional,
+        "preferred_allocations": preferred_allocations,
+        "fallback_below_allocations": fallback_below_allocations,
+        "fallback_above_allocations": fallback_above_allocations,
+    }
 
 
 def _sample_paths(
@@ -614,6 +728,17 @@ def _build_gallery_document(
     data["page_size"] = page_size
     data["sampling_seed"] = sampling_seed
     data["gallery_complete"] = gallery_complete
+    image_policy = default_image_policy()
+    data["candidate_size_preference"] = {
+        "hard_min_size_bytes": int(image_policy["min_size_kb"]) * 1024,
+        "hard_max_size_bytes": (
+            int(image_policy["max_size_mb"]) * 1024 * 1024
+        ),
+        "preferred_min_size_bytes": PREFERRED_MIN_SIZE_BYTES,
+        "preferred_max_size_bytes": PREFERRED_MAX_SIZE_BYTES,
+        "fallback_order": ["below_preferred", "above_preferred"],
+        "preserve_folder_coverage": True,
+    }
     data["sampling_identity_sha256"] = hashlib.sha256(
         (
             f"{CANDIDATE_STRATEGY_ID}\0"
@@ -630,6 +755,18 @@ def _build_gallery_document(
         requirement["candidate_count"] = candidate_count_by_product.get(
             str(requirement.get("product_id", "")), 0
         )
+    tier_totals = {
+        key: sum(int(item.get(key, 0) or 0) for item in per_product)
+        for key in (
+            "preferred_size_count",
+            "fallback_below_preferred_count",
+            "fallback_above_preferred_count",
+            "preferred_sampled_count",
+            "fallback_below_preferred_sampled_count",
+            "fallback_above_preferred_sampled_count",
+            "fallback_sampled_count",
+        )
+    }
     data["scan_summary"] = {
         "confirmed_folder_count": sum(
             len(value) for value in confirmed_by_product.values()
@@ -642,6 +779,7 @@ def _build_gallery_document(
         "size_below_minimum_count": size_below_minimum,
         "size_exceeded_count": size_exceeded,
         "source_stat_failure_count": source_stat_failures,
+        **tier_totals,
         "inspected_candidates": inspected,
         "inspection_failures": inspection_failures,
         "discovered_path_count": discovered,
@@ -684,7 +822,7 @@ def build_confirmed_folder_gallery(
     checkpoint_path: Path | None = None,
     checkpoint_identity_sha256: str = "",
 ) -> dict[str, Any]:
-    """Build a proportional sample with task-local resume and batch publish."""
+    """Build a coverage-first tiered sample with task-local batch resume."""
 
     if not 1 <= candidate_limit <= 100:
         raise ValueError("candidate_limit must be between 1 and 100")
@@ -850,11 +988,19 @@ def build_confirmed_folder_gallery(
             str, tuple[os.stat_result | None, OSError | None]
         ] = {}
         filter_stats_by_folder: dict[str, dict[str, int]] = {}
-        eligible_candidates_by_folder: list[
-            tuple[dict[str, Any], list[Path], int]
+        tiered_candidates_by_folder: list[
+            tuple[
+                dict[str, Any],
+                list[Path],
+                list[Path],
+                list[Path],
+                int,
+            ]
         ] = []
         for decision, paths, raw_discovered_count in candidates_by_folder:
-            eligible_paths: list[Path] = []
+            preferred_paths: list[Path] = []
+            fallback_below_paths: list[Path] = []
+            fallback_above_paths: list[Path] = []
             folder_below_minimum = 0
             folder_size_exceeded = 0
             folder_stat_failures = 0
@@ -884,32 +1030,87 @@ def build_confirmed_folder_gallery(
                     folder_below_minimum += 1
                 elif int(source_stat.st_size) > maximum_size_bytes:
                     folder_size_exceeded += 1
+                elif int(source_stat.st_size) < PREFERRED_MIN_SIZE_BYTES:
+                    fallback_below_paths.append(path)
+                elif int(source_stat.st_size) > PREFERRED_MAX_SIZE_BYTES:
+                    fallback_above_paths.append(path)
                 else:
-                    eligible_paths.append(path)
+                    preferred_paths.append(path)
             folder_id = _decision_folder_id(decision)
+            folder_size_eligible = (
+                len(preferred_paths)
+                + len(fallback_below_paths)
+                + len(fallback_above_paths)
+            )
             filter_stats_by_folder[folder_id] = {
                 "unique_discovered_images": len(paths),
-                "size_eligible_images": len(eligible_paths),
+                "size_eligible_images": folder_size_eligible,
+                "preferred_size_images": len(preferred_paths),
+                "fallback_below_preferred_images": len(
+                    fallback_below_paths
+                ),
+                "fallback_above_preferred_images": len(
+                    fallback_above_paths
+                ),
                 "size_below_minimum_images": folder_below_minimum,
                 "size_exceeded_images": folder_size_exceeded,
                 "source_stat_failure_images": folder_stat_failures,
             }
-            size_eligible += len(eligible_paths)
+            size_eligible += folder_size_eligible
             size_below_minimum += folder_below_minimum
             size_exceeded += folder_size_exceeded
             source_stat_failures += folder_stat_failures
-            eligible_candidates_by_folder.append(
-                (decision, eligible_paths, raw_discovered_count)
+            tiered_candidates_by_folder.append(
+                (
+                    decision,
+                    preferred_paths,
+                    fallback_below_paths,
+                    fallback_above_paths,
+                    raw_discovered_count,
+                )
             )
-        candidates_by_folder = eligible_candidates_by_folder
-
-        counts = [len(paths) for _, paths, _ in candidates_by_folder]
+        preferred_counts = [
+            len(preferred_paths)
+            for _, preferred_paths, _, _, _ in tiered_candidates_by_folder
+        ]
+        fallback_below_counts = [
+            len(fallback_below_paths)
+            for _, _, fallback_below_paths, _, _ in tiered_candidates_by_folder
+        ]
+        fallback_above_counts = [
+            len(fallback_above_paths)
+            for _, _, _, fallback_above_paths, _ in tiered_candidates_by_folder
+        ]
+        counts = [
+            preferred_count + below_count + above_count
+            for preferred_count, below_count, above_count in zip(
+                preferred_counts,
+                fallback_below_counts,
+                fallback_above_counts,
+                strict=True,
+            )
+        ]
         sample_size = min(candidate_limit, sum(counts))
-        (
-            allocations,
-            base_allocations,
-            proportional_allocations,
-        ) = _allocation_breakdown(counts, sample_size)
+        allocation_breakdown = _tiered_allocation_breakdown(
+            preferred_counts,
+            fallback_below_counts,
+            fallback_above_counts,
+            sample_size,
+        )
+        allocations = allocation_breakdown["allocations"]
+        base_allocations = allocation_breakdown["coverage_allocations"]
+        proportional_allocations = allocation_breakdown[
+            "proportional_allocations"
+        ]
+        preferred_allocations = allocation_breakdown[
+            "preferred_allocations"
+        ]
+        fallback_below_allocations = allocation_breakdown[
+            "fallback_below_allocations"
+        ]
+        fallback_above_allocations = allocation_breakdown[
+            "fallback_above_allocations"
+        ]
         nonempty_folder_count = sum(count > 0 for count in counts)
         represented_folder_count = sum(
             allocation > 0 for allocation in allocations
@@ -922,15 +1123,27 @@ def build_confirmed_folder_gallery(
         selected: list[tuple[dict[str, Any], Path]] = []
         per_folder = []
         for (
-            (decision, paths, raw_discovered_count),
+            (
+                decision,
+                preferred_paths,
+                fallback_below_paths,
+                fallback_above_paths,
+                raw_discovered_count,
+            ),
             allocation,
             base_allocation,
             proportional_allocation,
+            preferred_allocation,
+            fallback_below_allocation,
+            fallback_above_allocation,
         ) in zip(
-            candidates_by_folder,
+            tiered_candidates_by_folder,
             allocations,
             base_allocations,
             proportional_allocations,
+            preferred_allocations,
+            fallback_below_allocations,
+            fallback_above_allocations,
             strict=True,
         ):
             folder_path = str(decision["folder_path"])
@@ -942,7 +1155,26 @@ def build_confirmed_folder_gallery(
                     f"{sampling_seed}\0{product_id}\0{folder_id}"
                 ).encode("utf-8")
             ).hexdigest()
-            sampled_paths = _sample_paths(paths, allocation, seed=folder_seed)
+            sampled_preferred = _sample_paths(
+                preferred_paths,
+                preferred_allocation,
+                seed=f"{folder_seed}\0preferred",
+            )
+            sampled_fallback_below = _sample_paths(
+                fallback_below_paths,
+                fallback_below_allocation,
+                seed=f"{folder_seed}\0fallback-below",
+            )
+            sampled_fallback_above = _sample_paths(
+                fallback_above_paths,
+                fallback_above_allocation,
+                seed=f"{folder_seed}\0fallback-above",
+            )
+            sampled_paths = [
+                *sampled_preferred,
+                *sampled_fallback_below,
+                *sampled_fallback_above,
+            ]
             selected.extend((decision, path) for path in sampled_paths)
             filter_stats = filter_stats_by_folder[folder_id]
             zero_allocation_reason = ""
@@ -952,7 +1184,7 @@ def build_confirmed_folder_gallery(
                     if raw_discovered_count == 0
                     else "FULLY_OVERLAPPED_FOLDER"
                 )
-            elif not paths:
+            elif filter_stats["size_eligible_images"] == 0:
                 zero_allocation_reason = NO_SIZE_ELIGIBLE_IMAGES
             elif allocation == 0:
                 zero_allocation_reason = COVERAGE_LIMIT_REASON
@@ -970,6 +1202,15 @@ def build_confirmed_folder_gallery(
                     "size_eligible_images": filter_stats[
                         "size_eligible_images"
                     ],
+                    "preferred_size_images": filter_stats[
+                        "preferred_size_images"
+                    ],
+                    "fallback_below_preferred_images": filter_stats[
+                        "fallback_below_preferred_images"
+                    ],
+                    "fallback_above_preferred_images": filter_stats[
+                        "fallback_above_preferred_images"
+                    ],
                     "size_below_minimum_images": filter_stats[
                         "size_below_minimum_images"
                     ],
@@ -981,6 +1222,17 @@ def build_confirmed_folder_gallery(
                     ],
                     "base_allocation": base_allocation,
                     "proportional_allocation": proportional_allocation,
+                    "preferred_allocation": preferred_allocation,
+                    "fallback_below_preferred_allocation": (
+                        fallback_below_allocation
+                    ),
+                    "fallback_above_preferred_allocation": (
+                        fallback_above_allocation
+                    ),
+                    "fallback_allocation": (
+                        fallback_below_allocation
+                        + fallback_above_allocation
+                    ),
                     "sampled_images": len(sampled_paths),
                     "zero_allocation_reason": zero_allocation_reason,
                 }
@@ -1016,6 +1268,24 @@ def build_confirmed_folder_gallery(
             "discovered_images": product_discovered,
             "size_eligible_count": sum(counts),
             "size_filtered_count": product_discovered - sum(counts),
+            "preferred_size_count": sum(preferred_counts),
+            "fallback_below_preferred_count": sum(
+                fallback_below_counts
+            ),
+            "fallback_above_preferred_count": sum(
+                fallback_above_counts
+            ),
+            "preferred_sampled_count": sum(preferred_allocations),
+            "fallback_below_preferred_sampled_count": sum(
+                fallback_below_allocations
+            ),
+            "fallback_above_preferred_sampled_count": sum(
+                fallback_above_allocations
+            ),
+            "fallback_sampled_count": (
+                sum(fallback_below_allocations)
+                + sum(fallback_above_allocations)
+            ),
             "prepared_candidates": len(selected),
             "planned_inspection_count": len(selected),
             "inspected_count": product_inspected,

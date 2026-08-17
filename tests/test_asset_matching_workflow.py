@@ -157,9 +157,14 @@ def test_maintained_processor_publishes_revision_bound_gallery(tmp_path):
     folder = tmp_path / "nas-folder"
     folder.mkdir()
     for index in range(3):
+        image_path = folder / f"{index}.jpg"
         Image.new("RGB", (1440, 1920), (index * 30, 10, 20)).save(
-            folder / f"{index}.jpg"
+            image_path
         )
+        with image_path.open("ab") as stream:
+            stream.write(
+                b"\0" * max(200 * 1024 - image_path.stat().st_size, 0)
+            )
     store.write_review_context(
         session_id,
         "asset_matching",
