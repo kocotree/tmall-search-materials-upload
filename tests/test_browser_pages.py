@@ -1225,6 +1225,7 @@ def test_high_value_scan_stops_if_random_action_does_not_restore_page():
                 "status": "skipped",
                 "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
                 "page_state_restored": False,
+                "detail": "url_matches=true;product_order_matches=false",
             },
             random_interval_picker=lambda: 1,
         )

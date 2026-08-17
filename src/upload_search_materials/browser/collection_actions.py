@@ -19,6 +19,12 @@ from .qianniu_copy import (
 RandomSource = random.Random | random.SystemRandom
 HumanCheckWaiter = Callable[[Any, str], None]
 
+PAGE_RESTORE_TIMEOUT_MS = 30_000
+PAGE_RESTORE_POLL_INTERVAL_MS = 250
+PAGE_RESTORE_STABLE_SAMPLES = 3
+PAGE_RESTORE_CLOSE_RETRY_MS = 2_000
+PAGE_RESTORE_GO_BACK_TIMEOUT_MS = 15_000
+
 
 def _row_product_id(row: Any) -> str:
     try:
@@ -250,27 +256,66 @@ def _restore_current_page(
     product_ids_before: tuple[str, ...],
     url_before: str,
     opened_scope: Any | None,
-) -> bool:
+) -> dict[str, Any]:
     _close_opened_action(page, opened_scope)
 
     if str(getattr(page, "url", "")) != url_before:
         try:
-            page.go_back(wait_until="domcontentloaded", timeout=5_000)
+            page.go_back(
+                wait_until="domcontentloaded",
+                timeout=PAGE_RESTORE_GO_BACK_TIMEOUT_MS,
+            )
         except Exception:
             pass
 
-    for _ in range(20):
+    stable_samples = 0
+    waited_ms = 0
+    poll_count = max(
+        1,
+        PAGE_RESTORE_TIMEOUT_MS // PAGE_RESTORE_POLL_INTERVAL_MS,
+    )
+    last_state: dict[str, Any] = {}
+    for poll_index in range(poll_count + 1):
+        observed_product_ids = _ordered_product_ids(page, rows_selector)
+        last_state = {
+            "url_matches": str(getattr(page, "url", "")) == url_before,
+            "product_order_matches": observed_product_ids == product_ids_before,
+            "publish_frame_visible": _publish_frame_visible(page),
+            "expected_product_count": len(product_ids_before),
+            "observed_product_count": len(observed_product_ids),
+        }
+        all_restored = (
+            last_state["url_matches"]
+            and last_state["product_order_matches"]
+            and not last_state["publish_frame_visible"]
+        )
+        stable_samples = stable_samples + 1 if all_restored else 0
+        if stable_samples >= PAGE_RESTORE_STABLE_SAMPLES:
+            return {
+                "restored": True,
+                "elapsed_ms": waited_ms,
+                "stable_samples": stable_samples,
+                **last_state,
+            }
+        if poll_index >= poll_count:
+            break
         if (
-            str(getattr(page, "url", "")) == url_before
-            and _ordered_product_ids(page, rows_selector) == product_ids_before
-            and not _publish_frame_visible(page)
+            poll_index > 0
+            and waited_ms % PAGE_RESTORE_CLOSE_RETRY_MS == 0
+            and last_state["publish_frame_visible"]
         ):
-            return True
+            _close_opened_action(page, opened_scope)
         try:
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(PAGE_RESTORE_POLL_INTERVAL_MS)
+            waited_ms += PAGE_RESTORE_POLL_INTERVAL_MS
         except Exception:
             break
-    return False
+    return {
+        "restored": False,
+        "elapsed_ms": waited_ms,
+        "stable_samples": stable_samples,
+        **last_state,
+    }
 
 
 def perform_random_collection_action(
@@ -295,7 +340,10 @@ def perform_random_collection_action(
         return {"status": "skipped", "reason_code": "RANDOM_ACTION_NO_CURRENT_ROW"}
 
     product_ids_before = tuple(_row_product_id(row) for row in rows)
-    candidates: list[tuple[str, Any, str, int]] = []
+    candidates_by_action: dict[str, list[tuple[Any, str, int]]] = {
+        "view_filled_slot": [],
+        "open_empty_image_text": [],
+    }
     for row in rows:
         product_id = _row_product_id(row)
         try:
@@ -304,19 +352,25 @@ def perform_random_collection_action(
         except QianniuCopyError:
             continue
         empty_set = set(empty_positions)
-        candidates.extend(
-            ("view_filled_slot", row, product_id, position)
+        candidates_by_action["view_filled_slot"].extend(
+            (row, product_id, position)
             for position in range(1, slots.count() + 1)
             if position not in empty_set
         )
-        candidates.extend(
-            ("open_empty_image_text", row, product_id, position)
+        candidates_by_action["open_empty_image_text"].extend(
+            (row, product_id, position)
             for position in empty_positions
         )
-    if not candidates:
+    available_actions = [
+        action
+        for action in ("view_filled_slot", "open_empty_image_text")
+        if candidates_by_action[action]
+    ]
+    if not available_actions:
         return {"status": "skipped", "reason_code": "RANDOM_ACTION_NO_SLOT"}
 
-    action, row, product_id, position = source.choice(candidates)
+    action = source.choice(available_actions)
+    row, product_id, position = source.choice(candidates_by_action[action])
     pages_before = _context_pages(page)
     url_before = str(getattr(page, "url", ""))
     opened_scope = None
@@ -362,16 +416,28 @@ def perform_random_collection_action(
     finally:
         _close_new_pages(page, pages_before)
         if action_started:
-            restored = _restore_current_page(
+            restore = _restore_current_page(
                 page,
                 rows_selector=selector,
                 product_ids_before=product_ids_before,
                 url_before=url_before,
                 opened_scope=opened_scope,
             )
-            if restored:
+            if restore["restored"]:
                 result["page_state_restored"] = True
             else:
+                detail = (
+                    f"elapsed_ms={restore['elapsed_ms']};"
+                    f"url_matches={str(restore['url_matches']).lower()};"
+                    "product_order_matches="
+                    f"{str(restore['product_order_matches']).lower()};"
+                    "publish_frame_visible="
+                    f"{str(restore['publish_frame_visible']).lower()};"
+                    "observed_product_count="
+                    f"{restore['observed_product_count']};"
+                    "expected_product_count="
+                    f"{restore['expected_product_count']}"
+                )
                 result = {
                     "status": "skipped",
                     "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
@@ -381,6 +447,8 @@ def perform_random_collection_action(
                     "read_only": True,
                     "source": "current_page",
                     "page_state_restored": False,
+                    "detail": detail,
+                    "restore_diagnostics": restore,
                 }
     return result
 

@@ -178,7 +178,7 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 素材匹配阶段使用 `workflow_step` 区分同一阶段内的两步：目录审查为 `folder_review`，本地 Worker 生成图片期间为 `gallery_preparing`，可选图结果为 `image_selection`。文件夹确认使用 `local_action` 事务更新 revision，但不生成 `handoff.json`。`gallery-job.json` 绑定 session/stage、revision/input SHA-256、文件夹决定 SHA-256、商品边界、候选策略、图片策略和本地资源身份；每次执行保留在 `gallery-attempts/<attempt_id>/`。图片画廊还包含 `gallery_identity`：`session_id`、`stage_id`、`prepared_from_revision`、`prepared_from_input_sha256`、`folder_decisions_sha256`、`prepared_folder_keys`。勾选单张图片时的双比例预裁剪结果写入 `selection-preflight-cache.json`，条目以 `asset_id` 索引，并绑定源 SHA-256、图片策略 SHA-256 和算法版本；算法版本 2 表示单次读取/解码后完成双比例编码探测。前端队列另维护 `queued|running|completed|cancelled|failed`、当前采用意图、意图版本和任务权重；该瞬时状态不进入 handoff，只有预裁剪通过且仍为最新采用意图时才写入正式图片决定。该文件是可失效重建的任务内缓存，不是 handoff。最终选图提交只接受当前任务且当前采用文件夹为已准备范围子集的画廊；重新采用未准备文件夹会使画廊失效。最终校验成功后写入 `selected-asset-preflight.json`、`final-material-package.json` 和唯一的 `handoff_kind=final_material_selection` 交接。
 
-gallery Worker 按每商品 30 张窗口处理：窗口内使用最多 8 个线程、总权重不超过 12 的并发执行器，同一原图只读取、哈希和解码一次，预览直接复用该解码结果；异步完成项按原抽样序号合并，保证重复内容的保留归属不受线程完成顺序影响。每个窗口完成后把只读结果写入 `partial-gallery.json`，并通过 `gallery-job.json.progress.available_candidate_count/published_batch_count` 触发前端渐进刷新；此时仍为 `gallery_preparing`，不能采用、预裁剪或提交。最终窗口完成后才发布 `confirmed-gallery.json` 并切换为 `image_selection`。
+gallery Worker 枚举受支持扩展名后，先对每条唯一路径执行一次只读 `stat`；只有 200KiB–20MiB（含边界）的图片进入候选分配池，超限或元数据不可读的路径不读取、不哈希、不解码，并从其余合规路径补足每商品最多 100 张。合规候选使用最多 8 个线程的固定并发队列，每张统一占用一个工作槽；同一原图只读取、哈希和解码一次，预览直接复用该解码结果。异步完成项按原抽样序号合并，保证重复内容的保留归属不受线程完成顺序影响。每累计 10 张有序结果把累计只读结果写入 `partial-gallery.json`，并通过 `gallery-job.json.progress.available_candidate_count/published_batch_count` 触发前端渐进刷新；页面仍按每批最多 30 张分页。此时仍为 `gallery_preparing`，不能采用、预裁剪或提交。全部候选完成后才发布 `confirmed-gallery.json` 并切换为 `image_selection`。
 
 `gallery-checkpoint.json` 是当前时间戳任务专用的可重建断点，绑定 gallery identity。每条完成项保存源路径、大小、mtime、完整 SHA-256、检查结果和任务预览路径；同任务重试只在身份、大小、mtime 与预览文件均匹配时复用。身份或源事实变化会重新读取，损坏文件会被安全重建。该文件、`partial-gallery.json` 和 `preview-cache/` 均不得提升为用户级或跨任务缓存。
 
@@ -188,7 +188,7 @@ gallery Worker 按每商品 30 张窗口处理：窗口内使用最多 8 个线�
 - `asset_candidates`：逐候选 `asset_id`、商品、稳定 `folder_id`、可审计 `folder_path`、来源、绝对只读路径、SHA-256、尺寸、匹配类型、匹配状态、授权状态、校验状态与远端重复标记。
 - `candidate_strategy`：默认覆盖优先、剩余名额按文件夹图片数比例抽样时为 `proportional_task_sample`；`candidate_strategy_version` 固定策略版本，只有显式离线审计流程才从全量图片索引生成。
 - `candidate_limit` 默认按商品独立限制为 100，`page_size` 默认 30；`sampling_seed` 使用当前任务 ID，`sampling_identity_sha256` 记录策略 ID、版本与任务身份的稳定摘要。
-- `scan_summary`：记录采用文件夹总数，以及明确区分的 `discovered_path_count`、`planned_inspection_count`、`inspected_count`、`inspection_failure_count`、`content_duplicate_count`、`final_candidate_count` 和 `pending_count`。不变量为 `planned=inspected+failures`、`inspected=final+duplicates`、`asset_candidates.length=final`；逐商品保存同口径字段。兼容字段 `discovered_count`、`prepared_count` 仍可读取，但新页面不能用它们表达最终候选数。逐商品还包含 `nonempty_folders`、`represented_folders`、`uncovered_folders`、`complete_folder_coverage` 和 `reason_codes`。每个采用文件夹都必须保留分配行，包含 `folder_id`、路径、来源、原始发现数、唯一发现数、`base_allocation`、`proportional_allocation`、`sampled_images`、`final_candidate_count` 和 `zero_allocation_reason`。任务级按需候选不得把“发现路径数”表述成“已完成全量图片索引”；父子文件夹的原始递归计数允许重叠。
+- `scan_summary`：记录采用文件夹总数，以及明确区分的 `discovered_path_count`、`size_eligible_count`、`size_filtered_count`、`size_below_minimum_count`、`size_exceeded_count`、`source_stat_failure_count`、`planned_inspection_count`、`inspected_count`、`inspection_failure_count`、`content_duplicate_count`、`final_candidate_count` 和 `pending_count`。不变量为 `planned=inspected+failures`、`inspected=final+duplicates`、`asset_candidates.length=final`；逐商品保存同口径字段。兼容字段 `discovered_count`、`prepared_count` 仍可读取，但新页面不能用它们表达最终候选数。逐商品还包含 `nonempty_folders`、`represented_folders`、`uncovered_folders`、`complete_folder_coverage` 和 `reason_codes`。每个采用文件夹都必须保留分配行，包含 `folder_id`、路径、来源、原始发现数、唯一发现数、大小合规数、三类预筛排除数、`base_allocation`、`proportional_allocation`、`sampled_images`、`final_candidate_count` 和 `zero_allocation_reason`。任务级按需候选不得把“发现路径数”表述成“已完成全量图片索引”；父子文件夹的原始递归计数允许重叠。
 - `remote_dedupe_status`：仅在提供可信远端内容指纹并完成比对时为 `checked`；后台只有素材 ID 时为 `not_available`。
 - `reason_codes`：包含远端指纹不可用等批次级原因。
 
@@ -197,7 +197,7 @@ gallery Worker 按每商品 30 张窗口处理：窗口内使用最多 8 个线�
 - `license_decisions`：`asset_id` 与 `status=confirmed`；由同一批 `asset_decisions` 中的采用项自动生成，不要求用户逐图重复勾选授权。
 - `asset_decisions`：`product_id`、`asset_id`、`sha256`、来源、`decision=selected`、`selection_order`。第三阶段不写 `group_index` 或坑位内 `position`；第五阶段完成编排后再生成。
 
-候选选择按固定窗口执行任务内稳定伪随机抽样：路径先规范化排序，抽样身份绑定策略版本、任务、商品和稳定文件夹；相同任务输入不变时必须得到相同候选，新任务可以得到不同窗口。默认只对当前任务预备窗口计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。
+候选选择在大小合规池中执行任务内稳定伪随机抽样：路径先规范化排序，抽样身份绑定策略版本、任务、商品和稳定文件夹；相同任务输入不变时必须得到相同候选，新任务可以得到不同候选。默认只对当前任务抽中的合规候选计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。
 
 ## AI 文案响应
 

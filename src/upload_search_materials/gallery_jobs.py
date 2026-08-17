@@ -799,7 +799,17 @@ def process_gallery_job(
                             allocation.get("raw_discovered_images", 0)
                         ),
                         "gallery_unique_path_count": int(
-                            allocation.get("discovered_images", 0)
+                            allocation.get(
+                                "size_eligible_images",
+                                allocation.get("discovered_images", 0),
+                            )
+                        ),
+                        "gallery_size_filtered_count": int(
+                            allocation.get("size_below_minimum_images", 0)
+                        )
+                        + int(allocation.get("size_exceeded_images", 0))
+                        + int(
+                            allocation.get("source_stat_failure_images", 0)
                         ),
                         "gallery_sampled_inspection_count": int(
                             allocation.get("sampled_images", 0)
@@ -913,7 +923,7 @@ def process_gallery_job(
                     "revision": int(job["identity"]["revision"]),
                     "status": "needs_user_input",
                     "summary": (
-                        f"首批候选已显示，当前可预览 {candidate_count} 张；"
+                        f"候选正在渐进显示，当前可预览 {candidate_count} 张；"
                         "其余图片仍在准备"
                     ),
                     "blocking_reasons": [],
@@ -1022,6 +1032,31 @@ def process_gallery_job(
                 "discovered_path_count": int(
                     data.get("scan_summary", {}).get(
                         "discovered_path_count", 0
+                    )
+                ),
+                "size_eligible_count": int(
+                    data.get("scan_summary", {}).get(
+                        "size_eligible_count", 0
+                    )
+                ),
+                "size_filtered_count": int(
+                    data.get("scan_summary", {}).get(
+                        "size_filtered_count", 0
+                    )
+                ),
+                "size_below_minimum_count": int(
+                    data.get("scan_summary", {}).get(
+                        "size_below_minimum_count", 0
+                    )
+                ),
+                "size_exceeded_count": int(
+                    data.get("scan_summary", {}).get(
+                        "size_exceeded_count", 0
+                    )
+                ),
+                "source_stat_failure_count": int(
+                    data.get("scan_summary", {}).get(
+                        "source_stat_failure_count", 0
                     )
                 ),
                 "planned_inspection_count": int(

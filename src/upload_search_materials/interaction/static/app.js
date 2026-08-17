@@ -925,6 +925,14 @@
       );
   }
 
+  function hasExplicitGallerySizeCounts(progress) {
+    return progress
+      && Object.prototype.hasOwnProperty.call(
+        progress,
+        "size_eligible_count",
+      );
+  }
+
   function galleryProgressMessage(job = currentGalleryJob) {
     const progress = job?.progress || {};
     if (!hasExplicitGalleryCounts(progress)) {
@@ -938,9 +946,27 @@
     const duplicates = Number(progress.content_duplicate_count || 0);
     const inspected = Number(progress.inspected_count || 0);
     const available = Number(progress.available_candidate_count || 0);
+    const discovered = Number(progress.discovered_path_count || 0);
+    const hasSizeCounts = hasExplicitGallerySizeCounts(progress);
+    const sizeEligible = hasSizeCounts
+      ? Number(progress.size_eligible_count || 0)
+      : discovered;
+    const sizeFiltered = hasSizeCounts
+      ? Number(progress.size_filtered_count || 0)
+      : 0;
+    const belowMinimum = Number(progress.size_below_minimum_count || 0);
+    const sizeExceeded = Number(progress.size_exceeded_count || 0);
+    const statFailures = Number(progress.source_stat_failure_count || 0);
     return (
       `本机正在加载图片：发现 `
-      + `${Number(progress.discovered_path_count || 0)} 张，本轮进入候选检查 `
+      + `${discovered} 张，大小预筛可用 `
+      + `${sizeEligible} 张`
+      + (
+        sizeFiltered
+          ? `，已跳过 ${sizeFiltered} 张（小于 200KiB ${belowMinimum} 张、大于 20MiB ${sizeExceeded} 张、无法读取信息 ${statFailures} 张）`
+          : ""
+      )
+      + `；本轮进入候选检查 `
       + `${Number(progress.planned_inspection_count || 0)} 张，已处理 `
       + `${inspected + failures}/`
       + `${Number(progress.planned_inspection_count || 0)} 张`
@@ -959,8 +985,17 @@
         + `${job?.result?.candidate_count ?? progress.prepared_count ?? 0} 张。`
       );
     }
+    const discovered = Number(progress.discovered_path_count || 0);
+    const hasSizeCounts = hasExplicitGallerySizeCounts(progress);
+    const sizeEligible = hasSizeCounts
+      ? Number(progress.size_eligible_count || 0)
+      : discovered;
+    const sizeFiltered = hasSizeCounts
+      ? Number(progress.size_filtered_count || 0)
+      : 0;
     return (
-      `本机图片加载完成：检查 `
+      `本机图片加载完成：发现 ${discovered} 张，大小预筛可用 `
+      + `${sizeEligible} 张${sizeFiltered ? `、跳过 ${sizeFiltered} 张` : ""}；检查 `
       + `成功 ${Number(progress.inspected_count || 0)} 张，失败 `
       + `${Number(progress.inspection_failure_count || 0)} 张，内容重复 `
       + `${Number(progress.content_duplicate_count || 0)} 张，可展示候选 `
@@ -2083,8 +2118,13 @@
         }
         if (candidate.gallery_unique_path_count != null) {
           countText += (
-            ` · 去重后可分配 `
+            ` · 大小预筛后可分配 `
             + `${Number(candidate.gallery_unique_path_count || 0)} 张`
+            + (
+              Number(candidate.gallery_size_filtered_count || 0)
+                ? `（跳过 ${Number(candidate.gallery_size_filtered_count || 0)} 张）`
+                : ""
+            )
             + ` · 本轮进入候选检查 `
             + `${Number(candidate.gallery_sampled_inspection_count || 0)} 张`
             + ` · 最终可选素材 `
@@ -2263,7 +2303,7 @@
         "",
         galleryComplete
           ? `已按实际扫描结果展示 ${requirements.length} 个商品、${candidates.length} 张候选图片。`
-          : `首批候选已就绪：当前展示 ${requirements.length} 个商品、${candidates.length} 张图片，其余仍在准备。`,
+          : `候选正在渐进加载：当前展示 ${requirements.length} 个商品、${candidates.length} 张图片，其余仍在准备。`,
       );
       const action = element("section");
       action.append(
@@ -2315,6 +2355,12 @@
         prepared?.planned_inspection_count
           ?? prepared?.prepared_candidates
           ?? rawProductCandidates.length,
+      );
+      const sizeEligibleCount = Number(
+        prepared?.size_eligible_count ?? discoveredCount,
+      );
+      const sizeFilteredCount = Number(
+        prepared?.size_filtered_count || 0,
       );
       const inspectedCandidateCount = Number(
         prepared?.inspected_count ?? preparedCandidateCount,
@@ -2475,6 +2521,8 @@
         candidateSummary.textContent = (
           `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇`
           + ` · 文件夹内共发现 ${discoveredCount} 张`
+          + ` · 大小预筛可用 ${sizeEligibleCount} 张`
+          + `${sizeFilteredCount ? `（跳过 ${sizeFilteredCount} 张）` : ""}`
           + ` · 本轮计划检查 ${preparedCandidateCount} 张`
           + ` · 检查成功 ${inspectedCandidateCount} 张`
           + ` · 检查失败 ${inspectionFailureCount} 张`

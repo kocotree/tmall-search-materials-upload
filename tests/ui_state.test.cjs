@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 let UiState = {};
 try {
@@ -11,6 +13,22 @@ try {
 } catch (_error) {
   // Assertions below report the missing production interface as test failures.
 }
+
+test("workbench application script remains valid JavaScript", () => {
+  const source = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "src",
+      "upload_search_materials",
+      "interaction",
+      "static",
+      "app.js",
+    ),
+    "utf8",
+  );
+  assert.doesNotThrow(() => new vm.Script(source));
+});
 
 test("results remains read-only even when the upload is blocked", () => {
   assert.equal(typeof UiState.createState, "function");

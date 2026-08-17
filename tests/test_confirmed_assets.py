@@ -9,9 +9,10 @@ import upload_search_materials.image_compliance as image_compliance
 from upload_search_materials.confirmed_assets import (
     CANDIDATE_STRATEGY_VERSION,
     COVERAGE_LIMIT_REASON,
+    NO_SIZE_ELIGIBLE_IMAGES,
     _allocation_breakdown,
     _iter_images,
-    _run_weighted_window,
+    _run_concurrent_window,
     _proportional_allocations,
     _sample_paths,
     build_confirmed_folder_gallery,
@@ -22,6 +23,11 @@ from upload_search_materials.models import ProductRecord
 
 def _image(path: Path, color: tuple[int, int, int]) -> None:
     Image.new("RGB", (40, 30), color=color).save(path)
+    minimum_size = 200 * 1024
+    current_size = path.stat().st_size
+    if current_size < minimum_size:
+        with path.open("ab") as stream:
+            stream.write(b"\0" * (minimum_size - current_size))
 
 
 def test_proportional_allocations_build_a_one_hundred_image_pool():
@@ -580,7 +586,7 @@ def test_confirmed_gallery_publishes_first_thirty_then_remainder(tmp_path):
         batch_callback=lambda partial: published.append(partial),
     )
 
-    assert [len(item["asset_candidates"]) for item in published] == [30, 35]
+    assert [len(item["asset_candidates"]) for item in published] == [10, 20, 30, 35]
     assert all(item["gallery_complete"] is False for item in published)
     assert data["gallery_complete"] is True
 
@@ -597,7 +603,6 @@ def test_confirmed_gallery_reports_completion_before_ordered_batch(
     def complete_out_of_order(items, worker, **kwargs):
         results = []
         for _index, decision, path in items:
-            kwargs["weight_resolver"](path)
             results.append(worker(decision, path))
         kwargs["completion_callback"](items[1][0], results[1])
         kwargs["completion_callback"](items[0][0], results[0])
@@ -606,7 +611,7 @@ def test_confirmed_gallery_reports_completion_before_ordered_batch(
 
     monkeypatch.setattr(
         confirmed_assets,
-        "_run_weighted_window",
+        "_run_concurrent_window",
         complete_out_of_order,
     )
 
@@ -718,10 +723,75 @@ def test_confirmed_gallery_batches_checkpoint_writes(tmp_path, monkeypatch):
         checkpoint_identity_sha256="checkpoint-batch",
     )
 
-    assert 1 <= checkpoint_writes <= 3
+    assert 1 <= checkpoint_writes <= 4
     assert data["scan_summary"]["performance"][
         "checkpoint_write_count"
     ] == checkpoint_writes
+
+
+def test_confirmed_gallery_filters_size_before_read_and_fills_from_eligible_pool(
+    tmp_path, monkeypatch
+):
+    eligible_folder = tmp_path / "eligible"
+    filtered_folder = tmp_path / "filtered"
+    eligible_folder.mkdir()
+    filtered_folder.mkdir()
+    for index in range(5):
+        _image(
+            eligible_folder / f"eligible-{index}.png",
+            (index * 20, index * 30, index * 40),
+        )
+    too_small = filtered_folder / "too-small.png"
+    Image.new("RGB", (20, 20), color=(1, 2, 3)).save(too_small)
+    too_large = filtered_folder / "too-large.png"
+    with too_large.open("wb") as stream:
+        stream.seek(20 * 1024 * 1024)
+        stream.write(b"x")
+    original_read_bytes = Path.read_bytes
+
+    def reject_filtered_reads(path):
+        if path in {too_small, too_large}:
+            raise AssertionError("size-filtered files must not be read")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_filtered_reads)
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [
+            {
+                "decision": "confirmed",
+                "folder_id": "ELIGIBLE",
+                "folder_path": str(eligible_folder),
+                "product_id": "123",
+                "source_system": "model",
+            },
+            {
+                "decision": "confirmed",
+                "folder_id": "FILTERED",
+                "folder_path": str(filtered_folder),
+                "product_id": "123",
+                "source_system": "model",
+            },
+        ],
+        candidate_limit=5,
+    )
+
+    summary = data["scan_summary"]
+    assert summary["discovered_path_count"] == 7
+    assert summary["size_eligible_count"] == 5
+    assert summary["size_filtered_count"] == 2
+    assert summary["size_below_minimum_count"] == 1
+    assert summary["size_exceeded_count"] == 1
+    assert summary["planned_inspection_count"] == 5
+    assert len(data["asset_candidates"]) == 5
+    allocations = {
+        item["folder_id"]: item
+        for item in summary["per_product"][0]["folder_allocations"]
+    }
+    assert allocations["FILTERED"]["zero_allocation_reason"] == (
+        NO_SIZE_ELIGIBLE_IMAGES
+    )
 
 
 def test_confirmed_gallery_stats_each_selected_source_once(
@@ -756,7 +826,7 @@ def test_confirmed_gallery_stats_each_selected_source_once(
     assert data["scan_summary"]["performance"]["source_stat_count"] == 1
 
 
-def test_weighted_completion_order_does_not_change_duplicate_owner(
+def test_concurrent_completion_order_does_not_change_duplicate_owner(
     tmp_path, monkeypatch
 ):
     folder = tmp_path / "素材"
@@ -792,52 +862,44 @@ def test_weighted_completion_order_does_not_change_duplicate_owner(
     assert len(data["asset_candidates"]) == 1
 
 
-def test_weighted_window_respects_budget_and_returns_input_order(
-    tmp_path, monkeypatch
+def test_concurrent_window_uses_fixed_worker_count_and_returns_input_order(
+    tmp_path,
 ):
     paths = [tmp_path / f"{index}.png" for index in range(4)]
-    weights = {"0.png": 3, "1.png": 3, "2.png": 2, "3.png": 1}
-    active_weight = 0
-    highest_weight = 0
+    active_count = 0
+    highest_count = 0
     lock = threading.Lock()
-
-    monkeypatch.setattr(
-        "upload_search_materials.confirmed_assets._inspection_weight",
-        lambda path: weights[path.name],
-    )
+    all_started = threading.Event()
 
     def worker(_decision, path):
-        nonlocal active_weight, highest_weight
+        nonlocal active_count, highest_count
         with lock:
-            active_weight += weights[path.name]
-            highest_weight = max(highest_weight, active_weight)
+            active_count += 1
+            highest_count = max(highest_count, active_count)
+            if active_count == 4:
+                all_started.set()
+        assert all_started.wait(1)
         time.sleep(0.01 * (4 - int(path.stem)))
         with lock:
-            active_weight -= weights[path.name]
+            active_count -= 1
         return path.name
 
-    results = _run_weighted_window(
+    results = _run_concurrent_window(
         [(index, {}, path) for index, path in enumerate(paths)],
         worker,
         max_workers=4,
-        max_weight=5,
     )
 
-    assert highest_weight <= 5
+    assert highest_count == 4
     assert results == [path.name for path in paths]
 
 
-def test_weighted_queue_starts_next_batch_before_first_batch_is_published(
-    tmp_path, monkeypatch
+def test_concurrent_queue_starts_next_batch_before_first_batch_is_published(
+    tmp_path,
 ):
     paths = [tmp_path / f"{index}.png" for index in range(4)]
     third_started = threading.Event()
     published = []
-    monkeypatch.setattr(
-        "upload_search_materials.confirmed_assets._inspection_weight",
-        lambda _path: 1,
-    )
-
     def worker(_decision, path):
         if path.name == "2.png":
             third_started.set()
@@ -845,11 +907,10 @@ def test_weighted_queue_starts_next_batch_before_first_batch_is_published(
             assert third_started.wait(1)
         return path.name
 
-    results = _run_weighted_window(
+    results = _run_concurrent_window(
         [(index, {}, path) for index, path in enumerate(paths)],
         worker,
         max_workers=4,
-        max_weight=4,
         batch_size=2,
         ordered_batch_callback=lambda _items, batch: published.append(
             list(batch)

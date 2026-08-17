@@ -812,9 +812,17 @@ def scan_recommended_material_status(
                 )
                 next_random_action_page = page_number + interval
                 if event.get("page_state_restored") is False:
+                    detail = str(event.get("detail", "")).strip()
                     raise _pagination_error(
                         "RANDOM_ACTION_PAGE_RESTORE_FAILED",
-                        f"page={page_number}",
+                        ";".join(
+                            value
+                            for value in (
+                                f"page={page_number}",
+                                detail,
+                            )
+                            if value
+                        ),
                     )
                 if human_check_waiter is not None:
                     human_check_waiter(page_number, "after_random_action")

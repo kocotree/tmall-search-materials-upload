@@ -20,11 +20,12 @@ from .models import ProductRecord
 
 
 CANDIDATE_STRATEGY_ID = "proportional_task_sample"
-CANDIDATE_STRATEGY_VERSION = 2
+CANDIDATE_STRATEGY_VERSION = 3
 COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
+NO_SIZE_ELIGIBLE_IMAGES = "NO_SIZE_ELIGIBLE_IMAGES"
 GALLERY_CHECKPOINT_SCHEMA_VERSION = 1
 GALLERY_MAX_WORKERS = 8
-GALLERY_MAX_WEIGHT = 12
+GALLERY_PROGRESSIVE_PUBLISH_SIZE = 10
 GALLERY_CHECKPOINT_FLUSH_ITEMS = 10
 GALLERY_CHECKPOINT_FLUSH_SECONDS = 1.0
 
@@ -364,28 +365,6 @@ def _write_task_checkpoint(
         temporary.unlink(missing_ok=True)
 
 
-def _inspection_weight(path: Path) -> int:
-    """Estimate memory/codec pressure without reading the source payload."""
-
-    try:
-        size_bytes = path.stat().st_size
-    except OSError:
-        return 1
-    return _inspection_weight_from_size(path, size_bytes)
-
-
-def _inspection_weight_from_size(path: Path, size_bytes: int) -> int:
-    extension = path.suffix.casefold()
-    weight = 2 if extension in {".png", ".gif", ".bmp", ".heic"} else 1
-    if size_bytes >= 16 * 1024 * 1024:
-        weight = max(weight, 4)
-    elif size_bytes >= 8 * 1024 * 1024:
-        weight = max(weight, 3)
-    elif size_bytes >= 4 * 1024 * 1024:
-        weight = max(weight, 2)
-    return weight
-
-
 def _inspect_candidate_once(
     decision: Mapping[str, Any],
     path: Path,
@@ -508,7 +487,7 @@ def _inspect_candidate_once(
     )
 
 
-def _run_weighted_window(
+def _run_concurrent_window(
     items: Sequence[tuple[int, Mapping[str, Any], Path]],
     worker: Callable[[Mapping[str, Any], Path], _InspectionOutcome],
     *,
@@ -524,44 +503,34 @@ def _run_weighted_window(
     ]
     | None = None,
     batch_size: int | None = None,
-    weight_resolver: Callable[[Path], int] | None = None,
     max_workers: int = GALLERY_MAX_WORKERS,
-    max_weight: int = GALLERY_MAX_WEIGHT,
 ) -> list[_InspectionOutcome | Exception]:
-    """Run one sustained weighted queue and publish ready ordered batches."""
+    """Run one fixed-concurrency queue and publish ready ordered batches."""
 
     pending = list(items)
-    active: dict[Future[_InspectionOutcome], tuple[int, int]] = {}
+    active: dict[Future[_InspectionOutcome], int] = {}
     results: dict[int, _InspectionOutcome | Exception] = {}
-    active_weight = 0
     pending_position = 0
     next_batch_position = 0
     ordered_indices = [index for index, _decision, _path in items]
     if len(set(ordered_indices)) != len(ordered_indices):
-        raise ValueError("weighted gallery item indices must be unique")
+        raise ValueError("gallery item indices must be unique")
     if ordered_batch_callback is not None and (
         batch_size is None or batch_size < 1
     ):
         raise ValueError("batch_size must be positive when publishing batches")
-    resolve_weight = weight_resolver or _inspection_weight
-
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         while pending_position < len(pending) or active:
             while pending_position < len(pending) and len(active) < max_workers:
                 index, decision, path = pending[pending_position]
-                weight = min(resolve_weight(path), max_weight)
-                if active and active_weight + weight > max_weight:
-                    break
                 pending_position += 1
                 future = executor.submit(worker, decision, path)
-                active[future] = (index, weight)
-                active_weight += weight
+                active[future] = index
             if not active:
                 continue
             completed, _ = wait(active, return_when=FIRST_COMPLETED)
             for future in completed:
-                index, weight = active.pop(future)
-                active_weight -= weight
+                index = active.pop(future)
                 try:
                     results[index] = future.result()
                 except Exception as error:  # merged deterministically below
@@ -570,13 +539,9 @@ def _run_weighted_window(
                     completion_callback(index, results[index])
             while pending_position < len(pending) and len(active) < max_workers:
                 index, decision, path = pending[pending_position]
-                weight = min(resolve_weight(path), max_weight)
-                if active and active_weight + weight > max_weight:
-                    break
                 pending_position += 1
                 future = executor.submit(worker, decision, path)
-                active[future] = (index, weight)
-                active_weight += weight
+                active[future] = index
             while (
                 ordered_batch_callback is not None
                 and next_batch_position < len(items)
@@ -609,6 +574,10 @@ def _build_gallery_document(
     page_size: int,
     sampling_seed: str,
     discovered: int,
+    size_eligible: int,
+    size_below_minimum: int,
+    size_exceeded: int,
+    source_stat_failures: int,
     planned_inspections: int,
     inspected: int,
     inspection_failures: int,
@@ -666,6 +635,13 @@ def _build_gallery_document(
             len(value) for value in confirmed_by_product.values()
         ),
         "discovered_images": discovered,
+        "size_eligible_count": size_eligible,
+        "size_filtered_count": (
+            size_below_minimum + size_exceeded + source_stat_failures
+        ),
+        "size_below_minimum_count": size_below_minimum,
+        "size_exceeded_count": size_exceeded,
+        "source_stat_failure_count": source_stat_failures,
         "inspected_candidates": inspected,
         "inspection_failures": inspection_failures,
         "discovered_path_count": discovered,
@@ -745,8 +721,15 @@ def build_confirmed_folder_gallery(
     if not confirmed_by_product:
         raise ValueError("at least one confirmed folder decision is required")
 
+    image_policy = default_image_policy()
+    minimum_size_bytes = int(image_policy["min_size_kb"]) * 1024
+    maximum_size_bytes = int(image_policy["max_size_mb"]) * 1024 * 1024
     records: list[_GalleryRecord] = []
     discovered = 0
+    size_eligible = 0
+    size_below_minimum = 0
+    size_exceeded = 0
+    source_stat_failures = 0
     planned_inspections = 0
     inspected = 0
     inspection_failures = 0
@@ -823,6 +806,15 @@ def build_confirmed_folder_gallery(
                     "discovered_count": discovered,
                     "prepared_count": inspected,
                     "discovered_path_count": discovered,
+                    "size_eligible_count": size_eligible,
+                    "size_filtered_count": (
+                        size_below_minimum
+                        + size_exceeded
+                        + source_stat_failures
+                    ),
+                    "size_below_minimum_count": size_below_minimum,
+                    "size_exceeded_count": size_exceeded,
+                    "source_stat_failure_count": source_stat_failures,
                     "planned_inspection_count": planned_inspections,
                     "inspected_count": inspected,
                     "inspection_failure_count": inspection_failures,
@@ -850,9 +842,66 @@ def build_confirmed_folder_gallery(
         performance["avoided_recursive_scan_count"] = int(
             performance["avoided_recursive_scan_count"]
         ) + int(enumeration_stats["avoided_recursive_scan_count"])
-        discovered += sum(
+        product_discovered = sum(
             len(paths) for _decision, paths, _raw_count in candidates_by_folder
         )
+        discovered += product_discovered
+        source_facts: dict[
+            str, tuple[os.stat_result | None, OSError | None]
+        ] = {}
+        filter_stats_by_folder: dict[str, dict[str, int]] = {}
+        eligible_candidates_by_folder: list[
+            tuple[dict[str, Any], list[Path], int]
+        ] = []
+        for decision, paths, raw_discovered_count in candidates_by_folder:
+            eligible_paths: list[Path] = []
+            folder_below_minimum = 0
+            folder_size_exceeded = 0
+            folder_stat_failures = 0
+            for path in paths:
+                source_key = _path_key(path)
+                facts = source_facts.get(source_key)
+                if facts is None:
+                    started = time.perf_counter()
+                    source_stat = None
+                    source_error = None
+                    try:
+                        source_stat = path.stat()
+                    except OSError as error:
+                        source_error = error
+                    performance["source_stat_ms"] = float(
+                        performance["source_stat_ms"]
+                    ) + (time.perf_counter() - started) * 1000
+                    performance["source_stat_count"] = int(
+                        performance["source_stat_count"]
+                    ) + 1
+                    facts = (source_stat, source_error)
+                    source_facts[source_key] = facts
+                source_stat, source_error = facts
+                if source_error is not None or source_stat is None:
+                    folder_stat_failures += 1
+                elif int(source_stat.st_size) < minimum_size_bytes:
+                    folder_below_minimum += 1
+                elif int(source_stat.st_size) > maximum_size_bytes:
+                    folder_size_exceeded += 1
+                else:
+                    eligible_paths.append(path)
+            folder_id = _decision_folder_id(decision)
+            filter_stats_by_folder[folder_id] = {
+                "unique_discovered_images": len(paths),
+                "size_eligible_images": len(eligible_paths),
+                "size_below_minimum_images": folder_below_minimum,
+                "size_exceeded_images": folder_size_exceeded,
+                "source_stat_failure_images": folder_stat_failures,
+            }
+            size_eligible += len(eligible_paths)
+            size_below_minimum += folder_below_minimum
+            size_exceeded += folder_size_exceeded
+            source_stat_failures += folder_stat_failures
+            eligible_candidates_by_folder.append(
+                (decision, eligible_paths, raw_discovered_count)
+            )
+        candidates_by_folder = eligible_candidates_by_folder
 
         counts = [len(paths) for _, paths, _ in candidates_by_folder]
         sample_size = min(candidate_limit, sum(counts))
@@ -895,13 +944,16 @@ def build_confirmed_folder_gallery(
             ).hexdigest()
             sampled_paths = _sample_paths(paths, allocation, seed=folder_seed)
             selected.extend((decision, path) for path in sampled_paths)
+            filter_stats = filter_stats_by_folder[folder_id]
             zero_allocation_reason = ""
-            if not paths:
+            if filter_stats["unique_discovered_images"] == 0:
                 zero_allocation_reason = (
                     "EMPTY_FOLDER"
                     if raw_discovered_count == 0
                     else "FULLY_OVERLAPPED_FOLDER"
                 )
+            elif not paths:
+                zero_allocation_reason = NO_SIZE_ELIGIBLE_IMAGES
             elif allocation == 0:
                 zero_allocation_reason = COVERAGE_LIMIT_REASON
             per_folder.append(
@@ -912,7 +964,21 @@ def build_confirmed_folder_gallery(
                         decision.get("source_system", "confirmed_folder")
                     ),
                     "raw_discovered_images": raw_discovered_count,
-                    "discovered_images": len(paths),
+                    "discovered_images": filter_stats[
+                        "unique_discovered_images"
+                    ],
+                    "size_eligible_images": filter_stats[
+                        "size_eligible_images"
+                    ],
+                    "size_below_minimum_images": filter_stats[
+                        "size_below_minimum_images"
+                    ],
+                    "size_exceeded_images": filter_stats[
+                        "size_exceeded_images"
+                    ],
+                    "source_stat_failure_images": filter_stats[
+                        "source_stat_failure_images"
+                    ],
                     "base_allocation": base_allocation,
                     "proportional_allocation": proportional_allocation,
                     "sampled_images": len(sampled_paths),
@@ -947,7 +1013,9 @@ def build_confirmed_folder_gallery(
             "represented_folders": represented_folder_count,
             "uncovered_folders": uncovered_folder_count,
             "complete_folder_coverage": complete_folder_coverage,
-            "discovered_images": sum(counts),
+            "discovered_images": product_discovered,
+            "size_eligible_count": sum(counts),
+            "size_filtered_count": product_discovered - sum(counts),
             "prepared_candidates": len(selected),
             "planned_inspection_count": len(selected),
             "inspected_count": product_inspected,
@@ -976,6 +1044,15 @@ def build_confirmed_folder_gallery(
                     "discovered_count": discovered,
                     "prepared_count": inspected,
                     "discovered_path_count": discovered,
+                    "size_eligible_count": size_eligible,
+                    "size_filtered_count": (
+                        size_below_minimum
+                        + size_exceeded
+                        + source_stat_failures
+                    ),
+                    "size_below_minimum_count": size_below_minimum,
+                    "size_exceeded_count": size_exceeded,
+                    "source_stat_failure_count": source_stat_failures,
                     "planned_inspection_count": planned_inspections,
                     "inspected_count": reported_inspections,
                     "inspection_failure_count": reported_failures,
@@ -991,41 +1068,15 @@ def build_confirmed_folder_gallery(
                 }
             )
 
-        source_facts: dict[
-            str, tuple[os.stat_result | None, OSError | None, int]
-        ] = {}
-
-        def resolve_weight(path: Path) -> int:
-            source_key = _path_key(path)
-            cached_facts = source_facts.get(source_key)
-            if cached_facts is not None:
-                return cached_facts[2]
-            started = time.perf_counter()
-            source_stat = None
-            source_error = None
-            try:
-                source_stat = Path(path).stat()
-            except OSError as error:
-                source_error = error
-            performance["source_stat_ms"] = float(
-                performance["source_stat_ms"]
-            ) + (time.perf_counter() - started) * 1000
-            performance["source_stat_count"] = int(
-                performance["source_stat_count"]
-            ) + 1
-            weight = (
-                1
-                if source_stat is None
-                else _inspection_weight_from_size(path, source_stat.st_size)
-            )
-            source_facts[source_key] = (source_stat, source_error, weight)
-            return weight
+        emit_progress()
 
         def worker(
             decision: Mapping[str, Any], path: Path
         ) -> _InspectionOutcome:
-            source_stat, source_error, _weight = source_facts[_path_key(path)]
-            if source_error is not None:
+            source_stat, source_error = source_facts[_path_key(path)]
+            if source_error is not None or source_stat is None:
+                if source_error is None:
+                    raise OSError(f"image source metadata is unavailable: {path}")
                 raise source_error
             return _inspect_candidate_once(
                 decision,
@@ -1143,6 +1194,10 @@ def build_confirmed_folder_gallery(
                     page_size=page_size,
                     sampling_seed=sampling_seed,
                     discovered=discovered,
+                    size_eligible=size_eligible,
+                    size_below_minimum=size_below_minimum,
+                    size_exceeded=size_exceeded,
+                    source_stat_failures=source_stat_failures,
                     planned_inspections=planned_inspections,
                     inspected=inspected,
                     inspection_failures=inspection_failures,
@@ -1161,13 +1216,12 @@ def build_confirmed_folder_gallery(
                     performance["batch_publish_count"]
                 ) + 1
 
-        _run_weighted_window(
+        _run_concurrent_window(
             indexed_selected,
             worker,
             completion_callback=checkpoint_completion,
             ordered_batch_callback=merge_ready_batch,
-            batch_size=page_size,
-            weight_resolver=resolve_weight,
+            batch_size=min(page_size, GALLERY_PROGRESSIVE_PUBLISH_SIZE),
         )
         flush_checkpoint(force=True)
         per_product.append(product_summary)
@@ -1181,6 +1235,10 @@ def build_confirmed_folder_gallery(
         page_size=page_size,
         sampling_seed=sampling_seed,
         discovered=discovered,
+        size_eligible=size_eligible,
+        size_below_minimum=size_below_minimum,
+        size_exceeded=size_exceeded,
+        source_stat_failures=source_stat_failures,
         planned_inspections=planned_inspections,
         inspected=inspected,
         inspection_failures=inspection_failures,

@@ -169,6 +169,43 @@ def test_random_action_views_filled_slot_on_current_page(monkeypatch):
     assert human_checks == ["random_action_after_open"]
 
 
+def test_random_action_chooses_type_before_specific_slot(monkeypatch):
+    class PreferEmptyRandom(FixedRandom):
+        def __init__(self):
+            self.choice_sizes = []
+
+        def choice(self, values):
+            self.choice_sizes.append(len(values))
+            if values and isinstance(values[0], str):
+                return "open_empty_image_text"
+            return values[0]
+
+    row = Row("150")
+    page = Page([row])
+    slots = Slots(6)
+    common_stubs(monkeypatch, slots, [6])
+    opened = []
+    monkeypatch.setattr(
+        collection_actions,
+        "_open_slot_publish_form",
+        lambda target, product_id, position, **kwargs: opened.append(
+            (target, product_id, position, kwargs["row"])
+        ),
+    )
+    rng = PreferEmptyRandom()
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=rng,
+    )
+
+    assert result["action"] == "open_empty_image_text"
+    assert result["slot_position"] == 6
+    assert rng.choice_sizes == [2, 1]
+    assert opened == [(page, "150", 6, row)]
+
+
 def test_random_action_opens_current_empty_slot_without_searching(monkeypatch):
     row = Row("200")
     page = Page([row])
@@ -221,6 +258,46 @@ def test_random_action_reports_failed_page_restoration(monkeypatch):
 
     assert result["reason_code"] == "RANDOM_ACTION_PAGE_RESTORE_FAILED"
     assert result["page_state_restored"] is False
+    assert result["restore_diagnostics"]["product_order_matches"] is False
+    assert "product_order_matches=false" in result["detail"]
+
+
+def test_random_action_allows_slow_page_hydration_before_restoration(
+    monkeypatch,
+):
+    class SlowlyRestoredPage(Page):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.expected_rows = list(rows)
+            self.restore_pending = False
+            self.restore_polls = 0
+
+        def wait_for_timeout(self, milliseconds):
+            super().wait_for_timeout(milliseconds)
+            if not self.restore_pending or milliseconds != 250:
+                return
+            self.restore_polls += 1
+            if self.restore_polls >= 24:
+                self.rows = list(self.expected_rows)
+
+    page = SlowlyRestoredPage([Row("700")])
+    slots = Slots(1)
+    common_stubs(monkeypatch, slots, [])
+
+    def temporarily_unload_rows(**_kwargs):
+        page.rows = []
+        page.restore_pending = True
+
+    slots.values[0].click = temporarily_unload_rows
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=FixedRandom(),
+    )
+
+    assert result["page_state_restored"] is True
+    assert page.restore_polls >= 26
 
 
 def test_publish_form_exit_finds_close_control_outside_publish_frame():
