@@ -18,7 +18,7 @@
 
 - Windows 11，使用日常登录的普通桌面用户操作，不要切换到另一个管理员账号安装或运行工作台。
 - 已安装并登录 Codex 桌面端。
-- 已安装 Git for Windows，并且当前用户有权通过 SSH 读取项目的 Gitee 仓库。
+- 已安装 Git for Windows，并且当前用户能够通过 HTTPS 读取项目的 Gitee 公开仓库；不需要配置 Gitee SSH 公钥。
 - 当前电脑能够连接公司网络中的两个固定 NAS。尚未建立访问会话时，可以在首次配置页面中由用户点击“连接共享盘”并通过 Windows 完成认证。
 
 打开 PowerShell，依次检查：
@@ -26,20 +26,19 @@
 ```powershell
 git --version
 codex.cmd --version
-ssh -T git@gitee.com
 ```
 
 说明：
 
-- `ssh -T` 只用于确认 Gitee SSH 身份。首次连接时按公司安全要求核对主机指纹。
-- 不要把 NAS 密码、Cookie、Token 或 SSH 私钥复制到项目目录或 Codex 对话中。
+- 安装使用公开仓库的 HTTPS 只读地址，不要求登录 Gitee，也不需要添加 SSH 主机密钥。
+- 不要把 NAS 密码、Cookie、Token 或其他凭据复制到项目目录或 Codex 对话中。
 
 ## 二、添加 Windows Marketplace
 
 以下命令会让 Codex 从远程 `win` 分支读取 Marketplace 清单，不需要手工复制项目目录：
 
 ```powershell
-codex.cmd plugin marketplace add git@gitee.com:QuanLongZhang/tmall-search-materials-upload.git --ref win --json
+codex.cmd plugin marketplace add https://gitee.com/QuanLongZhang/tmall-search-materials-upload.git --ref win --json
 ```
 
 然后检查 Marketplace：
@@ -51,7 +50,7 @@ codex.cmd plugin marketplace list --json
 输出中应存在：
 
 - `name` 为 `tmall-materials-team`；
-- `marketplaceSource.source` 为本项目的 Gitee SSH 地址。
+- `marketplaceSource.source` 为本项目的 Gitee HTTPS 地址。
 
 如果这台电脑已经配置过同名 Marketplace，不要直接覆盖或猜测当前来源。先执行“六、已有旧版本时的处理”。
 
@@ -76,7 +75,7 @@ codex.cmd plugin list --json
 - `enabled` 为 `true`；
 - `version` 与本次 Windows 发布版本一致；
 - `source.ref` 为 `win`，不能是 `main`；
-- `marketplaceSource.source` 为本项目的 Gitee SSH 地址。
+- `marketplaceSource.source` 为本项目的 Gitee HTTPS 地址。
 
 任何一项不满足都不要继续。尤其当 `source.ref` 为 `main` 时，说明远程 Windows Marketplace 清单尚未正确发布。
 
@@ -134,7 +133,7 @@ codex.cmd plugin list --json
 ```powershell
 codex.cmd plugin remove tmall-search-materials@tmall-materials-team --json
 codex.cmd plugin marketplace remove tmall-materials-team --json
-codex.cmd plugin marketplace add git@gitee.com:QuanLongZhang/tmall-search-materials-upload.git --ref win --json
+codex.cmd plugin marketplace add https://gitee.com/QuanLongZhang/tmall-search-materials-upload.git --ref win --json
 codex.cmd plugin add tmall-search-materials@tmall-materials-team --json
 ```
 
@@ -142,9 +141,9 @@ codex.cmd plugin add tmall-search-materials@tmall-materials-team --json
 
 ## 七、常见问题
 
-### Gitee 报权限不足或 Host key verification failed
+### Gitee HTTPS 下载失败
 
-先由目标电脑使用者修复当前 Windows 用户的 Git/SSH 访问。不要把私钥复制到项目或 Plugin 缓存中。
+先确认目标电脑能够用浏览器访问 Gitee，并检查公司网络、代理或 TLS 证书策略。公开仓库的只读安装不需要 Gitee 账号、SSH 公钥或私钥。
 
 ### `codex` 在 PowerShell 中被执行策略阻止
 
