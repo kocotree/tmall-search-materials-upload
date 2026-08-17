@@ -8,6 +8,7 @@ import hashlib
 from io import BytesIO
 import json
 import math
+import os
 from pathlib import Path
 import time
 from typing import Any, Mapping, Protocol
@@ -514,15 +515,21 @@ def load_image_preflight_source(
     source_path: Path,
     *,
     policy: Mapping[str, Any] | None = None,
+    source_stat: os.stat_result | None = None,
+    resolve_source: bool = True,
 ) -> tuple[dict[str, Any], Image.Image | None, str, dict[str, float]]:
     """Read, hash, and decode one source exactly once for ratio probes."""
 
     image_policy = normalize_image_policy(policy or default_image_policy())
-    source = Path(source_path).resolve()
+    source = (
+        Path(source_path).resolve()
+        if resolve_source
+        else Path(os.path.abspath(os.fspath(source_path)))
+    )
     started = time.perf_counter()
     inspected_at = datetime.now(timezone.utc).isoformat()
     try:
-        stat = source.stat()
+        stat = source_stat if source_stat is not None else source.stat()
         read_started = time.perf_counter()
         payload = source.read_bytes()
         read_ms = (time.perf_counter() - read_started) * 1000

@@ -60,6 +60,33 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
+test("completeness products can be filtered by owner without changing status scope", () => {
+  assert.equal(typeof UiState.filterCompletenessProducts, "function");
+  const products = [
+    { product_id: "1", product_title: "太阳镜", owner: "张三", status: "needs_supplement" },
+    { product_id: "2", product_title: "软软镜", owner: "李四", status: "complete" },
+    { product_id: "3", product_title: "稳稳镜", owner: "", status: "needs_supplement" },
+  ];
+
+  assert.deepEqual(
+    UiState.filterCompletenessProducts(products, { owner: "张三" })
+      .map((product) => product.product_id),
+    ["1"],
+  );
+  assert.deepEqual(
+    UiState.filterCompletenessProducts(products, {
+      owner: "__unassigned__",
+      status: "needs_supplement",
+    }).map((product) => product.product_id),
+    ["3"],
+  );
+  assert.deepEqual(
+    UiState.filterCompletenessProducts(products, { query: "李四" })
+      .map((product) => product.product_id),
+    ["2"],
+  );
+});
+
 test("a live processing claim reports that the workbench is processing", () => {
   assert.equal(typeof UiState.connectionView, "function");
   let state = UiState.createState("asset_matching");

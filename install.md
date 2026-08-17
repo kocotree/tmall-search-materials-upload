@@ -159,4 +159,4 @@ codex.cmd plugin add tmall-search-materials@tmall-materials-team --json
 
 ### 已安装但仍然是旧代码
 
-检查 `codex.cmd plugin list --json` 中的 `version` 和 `source.ref`。若版本号未变化或仍指向 `main`，停止测试，由维护者修正远程 `win` 清单并发布新的不可变版本；不要继续复用旧缓存。
+检查 `codex.cmd plugin list --json` 中的 `version` 和 `source.ref`。若版本号未变化或不是 `win`，停止测试，由维护者修正远程 `win` 清单并发布新的不可变版本；不要继续复用旧缓存。

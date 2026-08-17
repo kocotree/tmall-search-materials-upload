@@ -122,16 +122,16 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 ## Completeness Matrix
 
-本轮只上传搜推素材，不审查或补传基础素材。运行 `tmall-materials inspect-completeness`，将搜推素材实时采集 CSV 转为第二阶段矩阵。矩阵范围严格等于“商品分类 → 搜推高价值”的全量采集结果；商品总表只补充名称与货号，不得扩入其他商品。输出使用 `contract_version=1`、`source_filter=search_recommend_high_value`，包含 `summary` 和 `products`。
+本轮只上传搜推素材，不审查或补传基础素材。运行 `tmall-materials inspect-completeness`，将搜推素材实时采集 CSV 转为第二阶段矩阵。矩阵范围严格等于“商品分类 → 搜推高价值”的全量采集结果；商品总表只补充名称、货号与负责人（“运营”列），不得扩入其他商品。输出使用 `contract_version=1`、`source_filter=search_recommend_high_value`，包含 `summary` 和 `products`。
 
 每个商品必须包含：
 
-- `product_id`、`sku`、`product_title`、整体 `status` 和布尔值 `selectable`。
+- `product_id`、`sku`、`product_title`、`owner`、整体 `status` 和布尔值 `selectable`；`owner` 来自商品总表“运营”列，未填写时为空字符串。
 - `eligibility.status/reason_codes/evidence`；标题或等级命中 `uvno`、`积分`、`清仓`、`好物体验`、`会员日` 时，写为 `status=excluded`、`selectable=false`，页面保留展示但禁选。
 - `promotion.target_slots/current_count/missing_count`、远端素材 ID、原因码、采集时间和证据；无法识别容量时标记 `needs_manual_review`，不得根据分类猜测目标容量。
 - `candidate_asset_count`；第二阶段尚未完成素材匹配时保持 `null`，页面显示“待素材匹配”，不得伪造为 0。
 
-页面决定写入 `02-completeness/input.json.values`。`selected_product_ids` 只保存用户选择直接进入第三阶段“素材匹配”的可选商品 ID，至少选择一个才能提交。搜索和状态筛选只改变当前显示范围；“选择当前筛选结果”自动跳过排除项，“取消当前筛选结果”批量更新可见商品，不清除其他筛选条件下已经选择的商品。服务端提交时再次拒绝排除项或不属于当前矩阵的陈旧商品 ID。
+页面决定写入 `02-completeness/input.json.values`。`selected_product_ids` 只保存用户选择直接进入第三阶段“素材匹配”的可选商品 ID，至少选择一个才能提交。搜索、状态筛选和负责人筛选只改变当前显示范围；负责人筛选支持精确负责人和“未分配负责人”。“选择当前筛选结果”自动跳过排除项，“取消当前筛选结果”批量更新可见商品，不清除其他筛选条件下已经选择的商品。服务端提交时再次拒绝排除项或不属于当前矩阵的陈旧商品 ID。
 
 第二阶段完整度巡检和第三阶段素材匹配在 Agent 返回 `needs_user_input` 或 `blocked` 时，同时保存只读 `review-context.json`。用户增量保存选择、文件夹确认或排除决定会更新 `input.json` revision，但必须继续展示该审查上下文；修改前置阶段时才使后续审查上下文失效。用户不能通过页面修改 `review-context.json`。
 

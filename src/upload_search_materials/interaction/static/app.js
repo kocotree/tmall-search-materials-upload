@@ -76,6 +76,8 @@
   let currentGalleryProgress = null;
   let currentGalleryJob = null;
   let isHydrating = false;
+  let currentStageInputLoaded = false;
+  let currentStageHasPersistedInput = false;
   let folderCountsLoading = false;
   let folderCountsLoadedFor = "";
   let setupLoginReady = !setupLoginGate;
@@ -1021,22 +1023,8 @@
               ? ""
               : `/${worker.terminal_page}`
           )
-          + (
-            worker.terminal_proof
-              ? " · 末页已验证"
-              : ""
-          )
-          + (
-            worker.pagination_reason_code
-              ? ` · ${worker.pagination_reason_code}`
-              : ""
-          )
         );
-      actionMessage.textContent =
-        `采集 Worker 正在执行 ${worker.action || worker.phase || "启动"} ` +
-        `（目标 ${worker.target || "当前阶段"}，重试 ${worker.retry_count || 0}）；` +
-        `${page}；${pagination}；心跳 ${formatClaimTime(worker.heartbeat_at)}。` +
-        `${worker.next_recovery ? ` 恢复建议：${worker.next_recovery}` : ""}`;
+      actionMessage.textContent = `${page}；${pagination}`;
       return;
     }
     if (currentCollectionStatus?.status === "processing_indeterminate") {
@@ -1453,7 +1441,6 @@
     [
       ["全部商品", products.length],
       ["待补充", statusCounts.needs_supplement || 0],
-      ["需人工确认", statusCounts.needs_manual_review || 0],
       ["已完整", statusCounts.complete || 0],
       ["已排除", view.result?.data?.summary?.excluded_count || 0],
       ["已选择", selected.size],
@@ -1499,7 +1486,6 @@
     [
       ["all", "全部"],
       ["needs_supplement", "待补充"],
-      ["needs_manual_review", "需人工确认"],
       ["complete", "已完整"],
       ["excluded", "已自动排除"],
       ["abnormal", "异常"],
@@ -1509,26 +1495,42 @@
       option.textContent = label;
       filter.appendChild(option);
     });
+    const ownerFilter = document.createElement("select");
+    ownerFilter.setAttribute("aria-label", "筛选负责人");
+    const ownerOptions = [
+      ["all", "全部负责人"],
+      ...[...new Set(
+        products.map((product) => String(product.owner || "").trim()).filter(Boolean),
+      )]
+        .sort((left, right) => left.localeCompare(right, "zh-CN"))
+        .map((owner) => [owner, owner]),
+    ];
+    if (products.some((product) => !String(product.owner || "").trim())) {
+      ownerOptions.push(["__unassigned__", "未分配负责人"]);
+    }
+    ownerOptions.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      ownerFilter.appendChild(option);
+    });
     const bulkSelect = element("button", "secondary-button", "选择当前筛选结果");
     bulkSelect.type = "button";
     bulkSelect.disabled = locked;
     const bulkClear = element("button", "secondary-button", "取消当前筛选结果");
     bulkClear.type = "button";
     bulkClear.disabled = locked;
-    toolbar.append(search, filter, bulkSelect, bulkClear);
+    toolbar.append(search, filter, ownerFilter, bulkSelect, bulkClear);
     content.appendChild(toolbar);
 
     const list = element("div", "inspection-list");
     content.appendChild(list);
 
     const visibleProducts = () => {
-      const needle = search.value.trim().toLocaleLowerCase("zh-CN");
-      return products.filter((product) => {
-        const matchesFilter = filter.value === "all" || product.status === filter.value;
-        const haystack = [product.product_id, product.sku, product.product_title]
-          .join(" ")
-          .toLocaleLowerCase("zh-CN");
-        return matchesFilter && (!needle || haystack.includes(needle));
+      return UiState.filterCompletenessProducts(products, {
+        query: search.value,
+        status: filter.value,
+        owner: ownerFilter.value,
       });
     };
 
@@ -1549,6 +1551,7 @@
         identity.append(
           element("strong", "", product.product_title || `商品 ${productId}`),
           element("span", "", `商品 ID ${productId} · 货号 ${product.sku || "未知"}`),
+          element("span", "", `负责人 ${product.owner || "未分配"}`),
           element("span", "inspection-status", completenessStatusLabel(product.status)),
         );
         const exclusionReasons = completenessExclusionReasons(product);
@@ -1617,6 +1620,7 @@
 
     search.addEventListener("input", draw);
     filter.addEventListener("change", draw);
+    ownerFilter.addEventListener("change", draw);
     bulkSelect.addEventListener("click", () => {
       visibleProducts().forEach((product) => {
         if (product.selectable !== false && product.status !== "excluded") {
@@ -3138,9 +3142,30 @@
     if (copyModule) copyModule.hidden = true;
     handoffActions?.classList.add("is-stage-managed");
     if (actionMessage) {
-      actionMessage.textContent = "第五阶段由当前子页面的主按钮推进；修改仍会自动保存到任务目录。";
+      actionMessage.textContent = "当前阶段由子页面主按钮推进；修改仍会自动保存到任务目录。";
     }
     content.replaceChildren();
+    const blockingReasons = Array.isArray(view.result?.blocking_reasons)
+      ? view.result.blocking_reasons
+      : [];
+    if (blockingReasons.length) {
+      const blockingPanel = element("section", "slot-blocking-summary");
+      const reasons = document.createElement("ul");
+      blockingReasons.forEach((reason) => {
+        reasons.appendChild(element("li", "", String(reason)));
+      });
+      blockingPanel.append(
+        element("strong", "", "上传前检查发现需要修改的内容"),
+        reasons,
+        element(
+          "p",
+          "",
+          view.result?.next_action
+            || "请完成修改后重新确认标题与描述。",
+        ),
+      );
+      content.appendChild(blockingPanel);
+    }
     const saved = readJsonListControl("slot_assignments");
     const stateByProduct = new Map();
     let currentPlanRevision = 0;
@@ -4037,12 +4062,13 @@
       const copyState = [];
       let finishButton = null;
       let finishHint = null;
+      let batchConfirmation = null;
       let copyVersionCount = 0;
       const copyActions = element("div", "copy-toolbar");
       const copyStatus = element(
         "span",
         "copy-toolbar-status",
-        "千牛会按商品坑位生成文案；生成后仍需逐坑人工确认。",
+        "千牛会按商品坑位生成文案；全部生成后统一核对并确认。",
       );
       const copyButton = element(
         "button",
@@ -4068,29 +4094,32 @@
         const incompleteCount = copyState.filter(
           (draft) => !draft.title || !draft.description,
         ).length;
-        const unconfirmedCount = copyState.filter(
-          (draft) => draft.title && draft.description && !draft.confirmed,
-        ).length;
         const hasCompleteDrafts = copyState.length > 0 && incompleteCount === 0;
+        const batchConfirmed = hasCompleteDrafts
+          && copyState.every((draft) => draft.confirmed === true);
         copyButton.className = hasCompleteDrafts
           ? "button-secondary"
           : "primary-button";
+        if (batchConfirmation) {
+          batchConfirmation.disabled = !hasCompleteDrafts;
+          batchConfirmation.checked = batchConfirmed;
+        }
         if (finishButton) {
           finishButton.hidden = !hasCompleteDrafts;
-          finishButton.disabled = incompleteCount > 0 || unconfirmedCount > 0;
+          finishButton.disabled = !batchConfirmed;
           finishButton.title = incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述`
-            : unconfirmedCount
-              ? `还需人工确认 ${unconfirmedCount} 个坑位`
-              : "全部坑位已核对，可以进入 dry-run";
+            : batchConfirmed
+              ? "标题和描述已确认，可以进入上传任务确认"
+              : "请统一确认全部标题和描述";
         }
         if (finishHint) {
           finishHint.textContent = incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述。`
-            : unconfirmedCount
-              ? `还需勾选确认 ${unconfirmedCount} 个坑位。`
-              : "全部坑位已核对，可以进入 dry-run。";
-          finishHint.dataset.status = incompleteCount || unconfirmedCount
+            : batchConfirmed
+              ? "标题和描述已确认，可以进入上传任务确认。"
+              : "请核对全部标题和描述后统一确认。";
+          finishHint.dataset.status = incompleteCount || !batchConfirmed
             ? "waiting"
             : "ready";
         }
@@ -4137,13 +4166,7 @@
             `商品 ${assignment.product_id} · ${assignment.target_ratio} · ${assignment.asset_ids.length} 张素材`,
           ),
         );
-        const confirmationState = element(
-          "span",
-          "copy-confirmation-state",
-          item.confirmed ? "已确认" : "待确认",
-        );
-        confirmationState.dataset.confirmed = String(item.confirmed);
-        cardHeading.append(headingIdentity, confirmationState);
+        cardHeading.append(headingIdentity);
 
         const mediaPanel = element("section", "copy-media-panel");
         mediaPanel.setAttribute("aria-label", `${assignment.slot_id} 最终素材`);
@@ -4216,21 +4239,6 @@
         );
         descriptionLabel.append(descriptionLabelRow, description);
 
-        const confirmation = document.createElement("input");
-        confirmation.type = "checkbox";
-        confirmation.checked = item.confirmed;
-        const confirmationLabel = element(
-          "label",
-          "check-control copy-confirmation-control",
-        );
-        confirmationLabel.append(
-          confirmation,
-          element(
-            "span",
-            "",
-            "我已核对该标题、描述与左侧素材一致，可进入 dry-run",
-          ),
-        );
         const reviewMeta = element("div", "copy-review-meta");
         const evidence = element("div", "copy-review-note");
         evidence.append(
@@ -4252,22 +4260,18 @@
         const save = () => {
           item.title = title.value;
           item.description = description.value;
-          item.confirmed = confirmation.checked;
+          copyState.forEach((draft) => { draft.confirmed = false; });
           titleCount.textContent = `${title.value.length}/30`;
           descriptionCount.textContent = `${description.value.length}/1000`;
-          confirmationState.textContent = item.confirmed ? "已确认" : "待确认";
-          confirmationState.dataset.confirmed = String(item.confirmed);
           writeJsonListControl("copy_edits", copyState, { notify: true });
           updateCopyActions();
         };
         title.addEventListener("input", save);
         description.addEventListener("input", save);
-        confirmation.addEventListener("change", save);
         editor.append(
           titleLabel,
           descriptionLabel,
           reviewMeta,
-          confirmationLabel,
         );
         const cardBody = element("div", "copy-slot-body");
         cardBody.append(mediaPanel, editor);
@@ -4282,13 +4286,30 @@
         element(
           "span",
           "",
-          "系统校验并本地上传当前坑位第 1 张最终图片，唤起千牛文案；只读取草稿、不填充、不发布，每个坑位都需要人工核对并确认。",
+          "系统校验并本地上传当前坑位第 1 张最终图片，唤起千牛文案；只读取草稿、不填充、不发布，全部完成后统一核对并确认。",
         ),
       );
+      const batchConfirmationLabel = element(
+        "label",
+        "check-control copy-confirmation-control",
+      );
+      batchConfirmation = document.createElement("input");
+      batchConfirmation.type = "checkbox";
+      batchConfirmationLabel.append(
+        batchConfirmation,
+        element("span", "", "已确认标题、描述，可进入上传任务确认"),
+      );
+      batchConfirmation.addEventListener("change", () => {
+        copyState.forEach((draft) => {
+          draft.confirmed = batchConfirmation.checked;
+        });
+        writeJsonListControl("copy_edits", copyState, { notify: true });
+        updateCopyActions();
+      });
       const finish = element(
         "button",
         "primary-button",
-        "完成当前阶段并进入 dry-run",
+        "进入上传任务确认",
       );
       finish.type = "button";
       finishButton = finish;
@@ -4306,7 +4327,12 @@
         { userRequested: true },
       ));
       const finalActions = element("div", "slot-page-actions");
-      finalActions.append(finishHint, backToProcess, finish);
+      finalActions.append(
+        batchConfirmationLabel,
+        finishHint,
+        backToProcess,
+        finish,
+      );
       const technical = document.createElement("details");
       technical.className = "slot-technical-details";
       technical.append(
@@ -4365,7 +4391,7 @@
         });
         writeJsonListControl("copy_edits", merged, { notify: true });
         copyStatus.textContent = drafts.length === assignments.length
-          ? "千牛文案已载入；请核对依据、风险并逐坑确认。"
+          ? "千牛文案已载入；请核对全部依据和风险后统一确认。"
           : `工作台后台已回填 ${drafts.length}/${assignments.length} 个坑位，正在继续处理。`;
         renderCopyEditor(processed, requestId);
       };
@@ -4392,7 +4418,7 @@
             return;
           }
           if (requestState === "completed") {
-            copyStatus.textContent = "千牛文案已载入；请核对并逐坑确认。";
+            copyStatus.textContent = "千牛文案已载入；请核对全部内容后统一确认。";
             copyButton.disabled = false;
             return;
           }
@@ -5070,6 +5096,24 @@
     const selected = new Set(
       String(control?.value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
     );
+    const readyTaskIds = tasks
+      .filter((task) => task.status === "ready_for_review")
+      .map((task) => String(task.task_id || ""))
+      .filter(Boolean);
+    const selectionIdentity = [
+      String(documentData.source_stage?.input_sha256 || ""),
+      ...readyTaskIds,
+    ].join("|");
+    if (
+      currentStageInputLoaded
+      && !currentStageHasPersistedInput
+      && !selected.size
+      && content.dataset.approvalSelectionInitialized !== selectionIdentity
+    ) {
+      readyTaskIds.forEach((taskId) => selected.add(taskId));
+      writeApprovalTaskIds(selected);
+    }
+    content.dataset.approvalSelectionInitialized = selectionIdentity;
     content.replaceChildren();
 
     const summary = element("div", "upload-confirmation-summary");
@@ -5265,6 +5309,8 @@
   async function loadStage() {
     const requestedStageId = currentStageId;
     if (!sessionId) {
+      currentStageInputLoaded = true;
+      currentStageHasPersistedInput = false;
       revision = 0;
       revisionLabel.textContent = "0";
       renderStatus();
@@ -5291,6 +5337,14 @@
       renderTaskAwareness(payload.task_status);
       currentGalleryJob = payload.gallery_job || null;
       currentGalleryProgress = currentGalleryJob?.progress || null;
+      currentStageInputLoaded = true;
+      currentStageHasPersistedInput = Boolean(
+        payload.input
+        && Object.prototype.hasOwnProperty.call(
+          payload.input.values || {},
+          "task_ids",
+        ),
+      );
       isHydrating = true;
       try {
         if (payload.input) {
@@ -5617,8 +5671,8 @@
         actionMessage.textContent = payload.status === "completed"
           ? requestedStageId === "slots_copy"
             ? payload.next_stage === "approval"
-              ? "自动 dry-run 已通过，正在进入上传任务确认。"
-              : "自动 dry-run 发现阻塞项，正在进入处理页面。"
+              ? "上传前检查已通过，正在进入上传任务确认。"
+              : "上传前检查发现需要修改的内容，已返回当前页面。"
             : "当前阶段已完成，可直接进入下一阶段检查。"
           : requestedStageId === "approval"
             ? "发布授权已提交；工作台后台将自动上传所选任务。"
@@ -5886,6 +5940,8 @@
     currentWorkflowDispatch = null;
     currentGalleryJob = null;
     currentGalleryProgress = null;
+    currentStageInputLoaded = false;
+    currentStageHasPersistedInput = false;
     recoverProcessingButton.hidden = true;
     recoveryButton.disabled = true;
     revision = 0;

@@ -239,7 +239,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="slots_copy",
         title="坑位编排、图片处理与文案",
-        description="先确认每个坑位的图片、顺序和唯一比例，再执行裁剪/压缩；输出校验通过后编辑并确认文案。",
+        description="先确认每个坑位的图片、顺序和唯一比例，再执行裁剪/压缩；输出校验通过后统一确认文案。",
         component="slots_copy_editor",
         previous_stage="asset_matching",
         fields=(
@@ -254,6 +254,7 @@ STAGES: tuple[StageDefinition, ...] = (
         description="自动 dry-run 仅在发现阻塞项时停留于此；处理后重新提交第四阶段。",
         component="dry_run_review",
         previous_stage="slots_copy",
+        visible=False,
         fields=(
             _field("decision", "返回修改或确认结果", "radio", required=True),
             _field("warning_notes", "非阻塞警告处理说明", "textarea"),

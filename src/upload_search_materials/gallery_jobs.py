@@ -42,6 +42,7 @@ GALLERY_JOB_STATUSES = frozenset(
     {"queued", "running", "completed", "failed", "stale"}
 )
 GALLERY_JOB_LEASE_SECONDS = 300
+GALLERY_PROGRESS_FLUSH_SECONDS = 0.75
 GALLERY_JOB_FAILED = "GALLERY_JOB_FAILED"
 GALLERY_PATH_UNREADABLE = "CONFIRMED_FOLDER_UNREADABLE"
 GALLERY_IDENTITY_STALE = "GALLERY_IDENTITY_STALE"
@@ -735,12 +736,31 @@ def process_gallery_job(
             for item in prior_data.get("folder_candidates", [])
             if isinstance(item, dict)
         ]
+        pending_progress: dict[str, Any] = {}
+        last_progress_write = 0.0
+        progress_persistence: dict[str, float | int] = {
+            "progress_persist_count": 0,
+            "progress_file_write_count": 0,
+            "progress_write_ms": 0.0,
+            "progress_suppressed_count": 0,
+        }
+
+        def progress_performance() -> dict[str, float | int]:
+            return {
+                key: round(value, 3) if isinstance(value, float) else value
+                for key, value in progress_persistence.items()
+            }
 
         def decorate_gallery_data(
             source: dict[str, Any], workflow_step: str
         ) -> dict[str, Any]:
             data = dict(source)
             data.setdefault("schema_version", 1)
+            scan_summary = dict(data.get("scan_summary") or {})
+            performance = dict(scan_summary.get("performance") or {})
+            performance.update(progress_performance())
+            scan_summary["performance"] = performance
+            data["scan_summary"] = scan_summary
             folder_candidates = [
                 dict(item) for item in base_folder_candidates
             ]
@@ -803,7 +823,33 @@ def process_gallery_job(
             data["gallery_job_id"] = job_id
             return data
 
-        def update_progress(progress: dict[str, Any]) -> None:
+        def record_progress_write(started: float) -> None:
+            progress_persistence["progress_write_ms"] = float(
+                progress_persistence["progress_write_ms"]
+            ) + (time.perf_counter() - started) * 1000
+            progress_persistence["progress_persist_count"] = int(
+                progress_persistence["progress_persist_count"]
+            ) + 1
+            progress_persistence["progress_file_write_count"] = int(
+                progress_persistence["progress_file_write_count"]
+            ) + 2
+
+        def persist_progress(*, force: bool = False) -> None:
+            nonlocal last_progress_write
+            if not pending_progress:
+                return
+            monotonic_now = time.monotonic()
+            if (
+                not force
+                and last_progress_write
+                and monotonic_now - last_progress_write
+                < GALLERY_PROGRESS_FLUSH_SECONDS
+            ):
+                progress_persistence["progress_suppressed_count"] = int(
+                    progress_persistence["progress_suppressed_count"]
+                ) + 1
+                return
+            progress_snapshot = dict(pending_progress)
             with store._session_lock(session_id):
                 active = read_gallery_job(store, session_id)
                 if (
@@ -817,23 +863,33 @@ def process_gallery_job(
                 active["progress"] = {
                     **dict(active.get("progress") or {}),
                     "workflow_step": "gallery_preparing",
-                    **progress,
+                    **progress_snapshot,
                 }
                 active["heartbeat_at"] = _iso(now)
                 active["updated_at"] = _iso(now)
                 active["lease_expires_at"] = _iso(
                     now + timedelta(seconds=GALLERY_JOB_LEASE_SECONDS)
                 )
+                write_started = time.perf_counter()
                 store._write_json_atomic(
                     gallery_job_path(store, session_id), active
                 )
                 store._write_json_atomic(
                     attempt_dir / "progress.json", active
                 )
+                record_progress_write(write_started)
+            pending_progress.clear()
+            last_progress_write = monotonic_now
+
+        def update_progress(progress: dict[str, Any]) -> None:
+            pending_progress.update(progress)
+            persist_progress()
 
         def publish_progressive_batch(partial: dict[str, Any]) -> None:
+            nonlocal last_progress_write
             data = decorate_gallery_data(partial, "gallery_preparing")
             candidate_count = len(data.get("asset_candidates", []))
+            progress_snapshot = dict(pending_progress)
             with store._session_lock(session_id):
                 active = read_gallery_job(store, session_id)
                 current_input_sha = hashlib.sha256(
@@ -870,6 +926,7 @@ def process_gallery_job(
                     session_id, "asset_matching", review
                 )
                 active_progress = dict(active.get("progress") or {})
+                active_progress.update(progress_snapshot)
                 active_progress.update(
                     {
                         "workflow_step": "gallery_preparing",
@@ -883,12 +940,16 @@ def process_gallery_job(
                 active["progress"] = active_progress
                 active["heartbeat_at"] = _iso()
                 active["updated_at"] = _iso()
+                write_started = time.perf_counter()
                 store._write_json_atomic(
                     gallery_job_path(store, session_id), active
                 )
                 store._write_json_atomic(
                     attempt_dir / "progress.json", active
                 )
+                record_progress_write(write_started)
+            pending_progress.clear()
+            last_progress_write = time.monotonic()
 
         data = build_confirmed_folder_gallery(
             products,
@@ -905,6 +966,7 @@ def process_gallery_job(
                 job["identity"]["identity_sha256"]
             ),
         )
+        persist_progress(force=True)
         data = decorate_gallery_data(data, IMAGE_SELECTION)
         with store._session_lock(session_id):
             current = read_gallery_job(store, session_id)
@@ -994,6 +1056,9 @@ def process_gallery_job(
             current["result"] = {
                 "candidate_count": len(data.get("asset_candidates", [])),
                 "product_count": len(data.get("requirements", [])),
+                "performance": dict(
+                    data.get("scan_summary", {}).get("performance", {})
+                ),
                 **current["progress"],
             }
             current["recovery_action"] = None

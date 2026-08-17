@@ -56,6 +56,15 @@
           <p class="eyebrow">按页面步骤完成即可</p>
           <h1 data-current-title>{{ stages[0].title }}</h1>
         </div>
+        <div
+          class="plugin-version"
+          data-plugin-version
+          title="当前插件版本：{{ plugin_version }}"
+          aria-label="当前插件版本：{{ plugin_version }}"
+        >
+          <span>Plugin</span>
+          <strong>v{{ plugin_version }}</strong>
+        </div>
         <dl class="header-meta">
           <div><dt>状态</dt><dd><span class="status-badge" data-current-status>编辑中</span></dd></div>
           <div class="technical-only" aria-hidden="true"><dt>任务 ID</dt><dd data-session-label>{{ session_id or "尚未创建" }}</dd></div>

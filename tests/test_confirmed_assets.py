@@ -3,6 +3,7 @@ import threading
 import time
 
 from PIL import Image
+import upload_search_materials.confirmed_assets as confirmed_assets
 import upload_search_materials.image_compliance as image_compliance
 
 from upload_search_materials.confirmed_assets import (
@@ -246,6 +247,62 @@ def test_confirmed_gallery_preserves_stable_folder_identity_across_sources_and_n
         item["folder_id"]
         for item in data["scan_summary"]["per_product"][0]["folder_allocations"]
     } == {"SOURCE-A-PARENT", "SOURCE-A-NESTED", "SOURCE-B"}
+
+
+def test_nested_confirmed_folders_share_one_recursive_enumeration(
+    tmp_path, monkeypatch
+):
+    parent = tmp_path / "parent"
+    nested = parent / "nested"
+    nested.mkdir(parents=True)
+    _image(parent / "parent.png", (1, 2, 3))
+    _image(nested / "nested.png", (4, 5, 6))
+    enumerated_roots = []
+    original_iter_images = _iter_images
+
+    def counted_iter_images(folder):
+        enumerated_roots.append(Path(folder))
+        return original_iter_images(folder)
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets._iter_images",
+        counted_iter_images,
+    )
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [
+            {
+                "decision": "confirmed",
+                "folder_id": "PARENT",
+                "folder_path": str(parent),
+                "product_id": "123",
+                "source_system": "model",
+            },
+            {
+                "decision": "confirmed",
+                "folder_id": "NESTED",
+                "folder_path": str(nested),
+                "product_id": "123",
+                "source_system": "model",
+            },
+        ],
+    )
+
+    allocations = {
+        item["folder_id"]: item
+        for item in data["scan_summary"]["per_product"][0][
+            "folder_allocations"
+        ]
+    }
+    assert enumerated_roots == [parent]
+    assert allocations["PARENT"]["raw_discovered_images"] == 2
+    assert allocations["PARENT"]["discovered_images"] == 1
+    assert allocations["NESTED"]["raw_discovered_images"] == 1
+    assert allocations["NESTED"]["discovered_images"] == 1
+    performance = data["scan_summary"]["performance"]
+    assert performance["traversal_root_count"] == 1
+    assert performance["avoided_recursive_scan_count"] == 1
 
 
 def test_confirmed_gallery_preserves_zero_allocation_rows_for_empty_and_overlapping_folders(
@@ -528,6 +585,63 @@ def test_confirmed_gallery_publishes_first_thirty_then_remainder(tmp_path):
     assert data["gallery_complete"] is True
 
 
+def test_confirmed_gallery_reports_completion_before_ordered_batch(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    for index in range(2):
+        _image(folder / f"{index}.png", (index, index + 1, index + 2))
+    events = []
+
+    def complete_out_of_order(items, worker, **kwargs):
+        results = []
+        for _index, decision, path in items:
+            kwargs["weight_resolver"](path)
+            results.append(worker(decision, path))
+        kwargs["completion_callback"](items[1][0], results[1])
+        kwargs["completion_callback"](items[0][0], results[0])
+        kwargs["ordered_batch_callback"](items, results)
+        return results
+
+    monkeypatch.setattr(
+        confirmed_assets,
+        "_run_weighted_window",
+        complete_out_of_order,
+    )
+
+    build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        progress_callback=lambda progress: events.append(
+            (
+                "progress",
+                int(progress.get("inspected_count", 0))
+                + int(progress.get("inspection_failure_count", 0)),
+            )
+        ),
+        batch_callback=lambda partial: events.append(
+            ("batch", len(partial["asset_candidates"]))
+        ),
+    )
+
+    first_completed = next(
+        index
+        for index, event in enumerate(events)
+        if event == ("progress", 1)
+    )
+    first_batch = next(
+        index for index, event in enumerate(events) if event[0] == "batch"
+    )
+    assert first_completed < first_batch
+
+
 def test_confirmed_gallery_resume_reuses_task_checkpoint_and_previews(
     tmp_path, monkeypatch
 ):
@@ -571,6 +685,75 @@ def test_confirmed_gallery_resume_reuses_task_checkpoint_and_previews(
     assert first_calls == 3
     assert calls == first_calls
     assert first["asset_candidates"] == second["asset_candidates"]
+
+
+def test_confirmed_gallery_batches_checkpoint_writes(tmp_path, monkeypatch):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    for index in range(25):
+        _image(folder / f"{index:02}.png", (index, index * 2, index * 3))
+    checkpoint_writes = 0
+    original_write = confirmed_assets._write_task_checkpoint
+
+    def counted_write(*args, **kwargs):
+        nonlocal checkpoint_writes
+        checkpoint_writes += 1
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets._write_task_checkpoint",
+        counted_write,
+    )
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        candidate_limit=25,
+        checkpoint_path=tmp_path / "gallery-checkpoint.json",
+        checkpoint_identity_sha256="checkpoint-batch",
+    )
+
+    assert 1 <= checkpoint_writes <= 3
+    assert data["scan_summary"]["performance"][
+        "checkpoint_write_count"
+    ] == checkpoint_writes
+
+
+def test_confirmed_gallery_stats_each_selected_source_once(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    source = folder / "single.png"
+    _image(source, (1, 2, 3))
+    source_stat_calls = 0
+    original_stat = Path.stat
+
+    def counted_stat(path, *args, **kwargs):
+        nonlocal source_stat_calls
+        if path == source:
+            source_stat_calls += 1
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", counted_stat)
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+    )
+
+    assert source_stat_calls == 1
+    assert data["scan_summary"]["performance"]["source_stat_count"] == 1
 
 
 def test_weighted_completion_order_does_not_change_duplicate_owner(
@@ -642,3 +825,36 @@ def test_weighted_window_respects_budget_and_returns_input_order(
 
     assert highest_weight <= 5
     assert results == [path.name for path in paths]
+
+
+def test_weighted_queue_starts_next_batch_before_first_batch_is_published(
+    tmp_path, monkeypatch
+):
+    paths = [tmp_path / f"{index}.png" for index in range(4)]
+    third_started = threading.Event()
+    published = []
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets._inspection_weight",
+        lambda _path: 1,
+    )
+
+    def worker(_decision, path):
+        if path.name == "2.png":
+            third_started.set()
+        if path.name == "0.png":
+            assert third_started.wait(1)
+        return path.name
+
+    results = _run_weighted_window(
+        [(index, {}, path) for index, path in enumerate(paths)],
+        worker,
+        max_workers=4,
+        max_weight=4,
+        batch_size=2,
+        ordered_batch_callback=lambda _items, batch: published.append(
+            list(batch)
+        ),
+    )
+
+    assert results == [path.name for path in paths]
+    assert published == [["0.png", "1.png"], ["2.png", "3.png"]]

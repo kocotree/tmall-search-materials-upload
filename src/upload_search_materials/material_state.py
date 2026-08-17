@@ -234,6 +234,9 @@ def build_completeness_matrix(
                 "product_title": str(
                     product.get("商品名称（查找引用）", product.get("product_title", ""))
                 ).strip(),
+                "owner": str(
+                    product.get("运营", product.get("owner", ""))
+                ).strip(),
                 "status": overall_status,
                 "selectable": not excluded,
                 "eligibility": {
