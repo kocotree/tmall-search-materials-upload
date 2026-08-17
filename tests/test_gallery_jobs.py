@@ -250,6 +250,58 @@ def test_gallery_job_publishes_progressive_batch_before_final_result(
     assert completed["progress"]["published_batch_count"] == 1
 
 
+def test_gallery_job_throttles_per_image_progress_writes(
+    tmp_path, monkeypatch
+):
+    store, session_id, _stage_path, decisions, committed = (
+        _local_gallery_session(tmp_path)
+    )
+    monkeypatch.setattr(gallery_module, "read_product_csv", lambda path: [])
+
+    def noisy_builder(*args, **kwargs):
+        for index in range(20):
+            kwargs["progress_callback"](
+                {
+                    "planned_inspection_count": 20,
+                    "inspected_count": index + 1,
+                    "inspection_failure_count": 0,
+                }
+            )
+        return {
+            "requirements": [{"product_id": "P1"}],
+            "asset_candidates": [],
+            "scan_summary": {
+                "discovered_images": 20,
+                "discovered_path_count": 20,
+                "planned_inspection_count": 20,
+                "inspected_count": 20,
+                "inspection_failure_count": 0,
+                "content_duplicate_count": 0,
+                "final_candidate_count": 0,
+                "pending_count": 0,
+                "performance": {},
+            },
+        }
+
+    monkeypatch.setattr(
+        gallery_module,
+        "build_confirmed_folder_gallery",
+        noisy_builder,
+    )
+    job, _ = create_or_reuse_gallery_job(
+        store, session_id, committed, decisions
+    )
+
+    completed = process_gallery_job(
+        store, session_id, job["job_id"], job["attempt_id"]
+    )
+
+    performance = completed["result"]["performance"]
+    assert performance["progress_persist_count"] == 2
+    assert performance["progress_file_write_count"] == 4
+    assert performance["progress_suppressed_count"] == 19
+
+
 def test_stale_gallery_attempt_cannot_publish(tmp_path, monkeypatch):
     store, session_id, stage_path, decisions, committed = (
         _local_gallery_session(tmp_path)

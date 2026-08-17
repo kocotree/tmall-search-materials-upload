@@ -43,7 +43,8 @@ def test_new_session_uses_deterministic_default_slot_planning(tmp_path):
         session.session_id, "slots_copy"
     )
     assert "Do not wait for, claim, retry, or create" in recovery
-    assert "declared agent-request endpoints" in recovery
+    assert "slot-planning Agent request" in recovery
+    assert "only final copywriting may create an Agent request" in recovery
     assert "current-slot-plan.json" not in recovery
 
 

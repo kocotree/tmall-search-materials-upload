@@ -1170,8 +1170,18 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "查看后台证据",
     ):
         assert text in script
+    assert '["needs_manual_review", "需人工确认"],' not in script
     assert 'element("small", "", "基础素材")' not in script
     assert 'if (!event.target?.getAttribute?.("name")) return;' in script
+
+
+def test_collection_progress_uses_concise_business_summary(client):
+    script = client.get("/static/app.js").get_data(as_text=True)
+
+    assert "采集 Worker 正在执行" not in script
+    assert "恢复建议：" not in script
+    assert "`${page}；${pagination}`" in script
+    assert "worker.pagination_reason_code" not in script
 
 
 def test_page_uses_explicit_empty_states_without_fabricated_counts(client):

@@ -1021,22 +1021,8 @@
               ? ""
               : `/${worker.terminal_page}`
           )
-          + (
-            worker.terminal_proof
-              ? " · 末页已验证"
-              : ""
-          )
-          + (
-            worker.pagination_reason_code
-              ? ` · ${worker.pagination_reason_code}`
-              : ""
-          )
         );
-      actionMessage.textContent =
-        `采集 Worker 正在执行 ${worker.action || worker.phase || "启动"} ` +
-        `（目标 ${worker.target || "当前阶段"}，重试 ${worker.retry_count || 0}）；` +
-        `${page}；${pagination}；心跳 ${formatClaimTime(worker.heartbeat_at)}。` +
-        `${worker.next_recovery ? ` 恢复建议：${worker.next_recovery}` : ""}`;
+      actionMessage.textContent = `${page}；${pagination}`;
       return;
     }
     if (currentCollectionStatus?.status === "processing_indeterminate") {
@@ -1499,7 +1485,6 @@
     [
       ["all", "全部"],
       ["needs_supplement", "待补充"],
-      ["needs_manual_review", "需人工确认"],
       ["complete", "已完整"],
       ["excluded", "已自动排除"],
       ["abnormal", "异常"],

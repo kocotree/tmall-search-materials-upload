@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
 import uuid
 
@@ -24,6 +25,8 @@ COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
 GALLERY_CHECKPOINT_SCHEMA_VERSION = 1
 GALLERY_MAX_WORKERS = 8
 GALLERY_MAX_WEIGHT = 12
+GALLERY_CHECKPOINT_FLUSH_ITEMS = 10
+GALLERY_CHECKPOINT_FLUSH_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,92 @@ def _iter_images(folder: Path) -> list[Path]:
                 except OSError:
                     raise
     return sorted(images, key=lambda path: str(path).casefold())
+
+
+def _path_key(path: Path | str) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path))).casefold()
+
+
+def _path_is_within(path_key: str, folder_key: str) -> bool:
+    try:
+        return os.path.commonpath((path_key, folder_key)) == folder_key
+    except ValueError:
+        return False
+
+
+def _enumerate_confirmed_folders(
+    decisions: Sequence[Mapping[str, Any]],
+    *,
+    before_root: Callable[[Path], None] | None = None,
+) -> tuple[list[tuple[dict[str, Any], list[Path], int]], dict[str, int]]:
+    """Traverse overlapping confirmed trees once and preserve folder ownership."""
+
+    ranked = [dict(decision) for decision in sorted(decisions, key=_folder_rank)]
+    folders = [
+        (
+            decision,
+            Path(str(decision["folder_path"])),
+            _path_key(decision["folder_path"]),
+        )
+        for decision in ranked
+    ]
+    unique_folders: dict[str, Path] = {}
+    for _decision, folder, key in folders:
+        unique_folders.setdefault(key, folder)
+    traversal_roots: list[tuple[str, Path]] = []
+    for key, folder in sorted(
+        unique_folders.items(),
+        key=lambda item: (len(Path(item[1]).parts), item[0]),
+    ):
+        if any(
+            _path_is_within(key, root_key)
+            for root_key, _root in traversal_roots
+        ):
+            continue
+        traversal_roots.append((key, folder))
+
+    paths_by_folder: list[list[Path]] = [[] for _ in folders]
+    raw_counts = [0 for _ in folders]
+    seen_paths: set[str] = set()
+    for _root_key, root in traversal_roots:
+        if before_root is not None:
+            before_root(root)
+        for path in _iter_images(root):
+            path_key = _path_key(path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            matching = [
+                index
+                for index, (_decision, _folder, folder_key) in enumerate(folders)
+                if _path_is_within(path_key, folder_key)
+            ]
+            for index in matching:
+                raw_counts[index] += 1
+            if matching:
+                paths_by_folder[matching[0]].append(path)
+
+    candidates = [
+        (
+            decision,
+            sorted(paths, key=lambda path: str(path).casefold()),
+            raw_count,
+        )
+        for (decision, _folder, _key), paths, raw_count in zip(
+            folders,
+            paths_by_folder,
+            raw_counts,
+            strict=True,
+        )
+    ]
+    return candidates, {
+        "confirmed_folder_count": len(folders),
+        "traversal_root_count": len(traversal_roots),
+        "avoided_recursive_scan_count": max(
+            len(folders) - len(traversal_roots),
+            0,
+        ),
+    }
 
 
 def _proportional_allocations(
@@ -199,6 +288,7 @@ class _InspectionOutcome:
     checkpoint_key: str
     checkpoint_entry: dict[str, Any]
     checkpoint_hit: bool = False
+    timings_ms: Mapping[str, float] | None = None
 
 
 def _checkpoint_key(
@@ -281,6 +371,10 @@ def _inspection_weight(path: Path) -> int:
         size_bytes = path.stat().st_size
     except OSError:
         return 1
+    return _inspection_weight_from_size(path, size_bytes)
+
+
+def _inspection_weight_from_size(path: Path, size_bytes: int) -> int:
     extension = path.suffix.casefold()
     weight = 2 if extension in {".png", ".gif", ".bmp", ".heic"} else 1
     if size_bytes >= 16 * 1024 * 1024:
@@ -299,10 +393,11 @@ def _inspect_candidate_once(
     *,
     preview_dir: Path | None,
     checkpoint_entries: Mapping[str, Any],
+    source_stat: os.stat_result | None = None,
 ) -> _InspectionOutcome:
     product_id = str(product.product_id)
-    source = Path(path)
-    stat = source.stat()
+    source = Path(os.path.abspath(os.fspath(path)))
+    stat = source_stat if source_stat is not None else source.stat()
     key = _checkpoint_key(product_id, decision, source)
     cached = checkpoint_entries.get(key)
     if isinstance(cached, dict):
@@ -324,11 +419,14 @@ def _inspect_candidate_once(
                     checkpoint_key=key,
                     checkpoint_entry=dict(cached),
                     checkpoint_hit=True,
+                    timings_ms={"checkpoint_hit_count": 1.0},
                 )
 
-    inspection, decoded, _, _ = load_image_preflight_source(
+    inspection, decoded, _, load_timings = load_image_preflight_source(
         source,
         policy=default_image_policy(),
+        source_stat=stat,
+        resolve_source=False,
     )
     if "size_bytes" not in inspection:
         raise OSError(f"image source is not readable: {source}")
@@ -339,6 +437,7 @@ def _inspect_candidate_once(
     fingerprint = str(inspection.get("sha256", ""))
     validation_status = "blocked" if reasons else "valid"
     preview_path = ""
+    preview_started = time.perf_counter()
     try:
         if (
             preview_dir is not None
@@ -355,8 +454,10 @@ def _inspect_candidate_once(
     finally:
         if decoded is not None:
             decoded.close()
+    preview_ms = (time.perf_counter() - preview_started) * 1000
 
     folder_path = str(decision["folder_path"])
+    absolute_folder = Path(os.path.abspath(folder_path))
     record = _GalleryRecord(
         folder_id=_decision_folder_id(decision),
         folder_path=folder_path,
@@ -364,8 +465,8 @@ def _inspect_candidate_once(
             decision.get("source_system", "confirmed_folder")
         ),
         candidate_directory=folder_path,
-        relative_path=str(source.relative_to(Path(folder_path))),
-        absolute_path=str(source.resolve()),
+        relative_path=str(source.relative_to(absolute_folder)),
+        absolute_path=str(source),
         preview_path=preview_path,
         sha256=fingerprint,
         width=(
@@ -397,6 +498,13 @@ def _inspect_candidate_once(
         record=record,
         checkpoint_key=key,
         checkpoint_entry=checkpoint_entry,
+        timings_ms={
+            "source_read_ms": float(load_timings.get("read_ms", 0.0)),
+            "sha256_ms": float(load_timings.get("sha256_ms", 0.0)),
+            "decode_ms": float(load_timings.get("decode_ms", 0.0)),
+            "preview_ms": round(preview_ms, 3),
+            "checkpoint_hit_count": 0.0,
+        },
     )
 
 
@@ -407,31 +515,48 @@ def _run_weighted_window(
     completion_callback: Callable[
         [int, _InspectionOutcome | Exception], None
     ] | None = None,
+    ordered_batch_callback: Callable[
+        [
+            Sequence[tuple[int, Mapping[str, Any], Path]],
+            Sequence[_InspectionOutcome | Exception],
+        ],
+        None,
+    ]
+    | None = None,
+    batch_size: int | None = None,
+    weight_resolver: Callable[[Path], int] | None = None,
     max_workers: int = GALLERY_MAX_WORKERS,
     max_weight: int = GALLERY_MAX_WEIGHT,
 ) -> list[_InspectionOutcome | Exception]:
-    """Run a bounded window concurrently and return results in input order."""
+    """Run one sustained weighted queue and publish ready ordered batches."""
 
     pending = list(items)
     active: dict[Future[_InspectionOutcome], tuple[int, int]] = {}
     results: dict[int, _InspectionOutcome | Exception] = {}
     active_weight = 0
+    pending_position = 0
+    next_batch_position = 0
+    ordered_indices = [index for index, _decision, _path in items]
+    if len(set(ordered_indices)) != len(ordered_indices):
+        raise ValueError("weighted gallery item indices must be unique")
+    if ordered_batch_callback is not None and (
+        batch_size is None or batch_size < 1
+    ):
+        raise ValueError("batch_size must be positive when publishing batches")
+    resolve_weight = weight_resolver or _inspection_weight
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        while pending or active:
-            submitted = False
-            while pending and len(active) < max_workers:
-                index, decision, path = pending[0]
-                weight = min(_inspection_weight(path), max_weight)
+        while pending_position < len(pending) or active:
+            while pending_position < len(pending) and len(active) < max_workers:
+                index, decision, path = pending[pending_position]
+                weight = min(resolve_weight(path), max_weight)
                 if active and active_weight + weight > max_weight:
                     break
-                pending.pop(0)
+                pending_position += 1
                 future = executor.submit(worker, decision, path)
                 active[future] = (index, weight)
                 active_weight += weight
-                submitted = True
             if not active:
-                continue
-            if submitted and pending and active_weight < max_weight:
                 continue
             completed, _ = wait(active, return_when=FIRST_COMPLETED)
             for future in completed:
@@ -443,6 +568,34 @@ def _run_weighted_window(
                     results[index] = error
                 if completion_callback is not None:
                     completion_callback(index, results[index])
+            while pending_position < len(pending) and len(active) < max_workers:
+                index, decision, path = pending[pending_position]
+                weight = min(resolve_weight(path), max_weight)
+                if active and active_weight + weight > max_weight:
+                    break
+                pending_position += 1
+                future = executor.submit(worker, decision, path)
+                active[future] = (index, weight)
+                active_weight += weight
+            while (
+                ordered_batch_callback is not None
+                and next_batch_position < len(items)
+            ):
+                batch_end = min(
+                    next_batch_position + int(batch_size or 1),
+                    len(items),
+                )
+                batch_items = items[next_batch_position:batch_end]
+                batch_indices = [
+                    index for index, _decision, _path in batch_items
+                ]
+                if not all(index in results for index in batch_indices):
+                    break
+                ordered_batch_callback(
+                    batch_items,
+                    [results[index] for index in batch_indices],
+                )
+                next_batch_position = batch_end
     return [results[index] for index, _, _ in items]
 
 
@@ -463,6 +616,7 @@ def _build_gallery_document(
     final_candidates: int,
     per_product: Sequence[Mapping[str, Any]],
     gallery_complete: bool,
+    performance: Mapping[str, float | int],
 ) -> dict[str, Any]:
     data = build_gallery_data(records, status_rows)
     data["requirements"] = [
@@ -524,6 +678,10 @@ def _build_gallery_document(
             planned_inspections - inspected - inspection_failures,
             0,
         ),
+        "performance": {
+            key: round(value, 3) if isinstance(value, float) else value
+            for key, value in performance.items()
+        },
         "per_product": [dict(item) for item in per_product],
     }
     reason_codes = list(data.get("reason_codes", []))
@@ -595,49 +753,104 @@ def build_confirmed_folder_gallery(
     content_duplicates = 0
     final_candidates = 0
     per_product: list[dict[str, Any]] = []
+    performance: dict[str, float | int] = {
+        "enumeration_ms": 0.0,
+        "source_stat_ms": 0.0,
+        "source_read_ms": 0.0,
+        "sha256_ms": 0.0,
+        "decode_ms": 0.0,
+        "preview_ms": 0.0,
+        "checkpoint_write_ms": 0.0,
+        "progress_callback_ms": 0.0,
+        "batch_publish_ms": 0.0,
+        "source_stat_count": 0,
+        "checkpoint_hit_count": 0,
+        "checkpoint_write_count": 0,
+        "progress_callback_count": 0,
+        "batch_publish_count": 0,
+        "traversal_root_count": 0,
+        "avoided_recursive_scan_count": 0,
+    }
+    checkpoint_dirty_count = 0
+    last_checkpoint_write = time.monotonic()
+
+    def publish_progress(progress: dict[str, Any]) -> None:
+        if progress_callback is None:
+            return
+        started = time.perf_counter()
+        progress_callback(progress)
+        performance["progress_callback_ms"] = float(
+            performance["progress_callback_ms"]
+        ) + (time.perf_counter() - started) * 1000
+        performance["progress_callback_count"] = int(
+            performance["progress_callback_count"]
+        ) + 1
+
+    def flush_checkpoint(*, force: bool = False) -> None:
+        nonlocal checkpoint_dirty_count, last_checkpoint_write
+        if checkpoint_dirty_count == 0:
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and checkpoint_dirty_count < GALLERY_CHECKPOINT_FLUSH_ITEMS
+            and now - last_checkpoint_write < GALLERY_CHECKPOINT_FLUSH_SECONDS
+        ):
+            return
+        started = time.perf_counter()
+        _write_task_checkpoint(checkpoint_path, checkpoint)
+        if checkpoint_path is not None:
+            performance["checkpoint_write_ms"] = float(
+                performance["checkpoint_write_ms"]
+            ) + (time.perf_counter() - started) * 1000
+            performance["checkpoint_write_count"] = int(
+                performance["checkpoint_write_count"]
+            ) + 1
+        checkpoint_dirty_count = 0
+        last_checkpoint_write = now
+
     for product_id, folder_decisions in sorted(confirmed_by_product.items()):
         product = products_by_id[product_id]
-        candidates_by_folder: list[
-            tuple[dict[str, Any], list[Path], int]
-        ] = []
-        seen_paths: set[str] = set()
-        for decision in sorted(folder_decisions, key=_folder_rank):
-            folder = Path(str(decision["folder_path"]))
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "current_product": product_id,
-                        "current_folder": str(folder),
-                        "discovered_count": discovered,
-                        "prepared_count": inspected,
-                        "discovered_path_count": discovered,
-                        "planned_inspection_count": planned_inspections,
-                        "inspected_count": inspected,
-                        "inspection_failure_count": inspection_failures,
-                        "content_duplicate_count": content_duplicates,
-                        "final_candidate_count": final_candidates,
-                        "pending_count": max(
-                            planned_inspections
-                            - inspected
-                            - inspection_failures,
-                            0,
-                        ),
-                    }
-                )
-            discovered_paths = _iter_images(folder)
-            unique_paths = []
-            for path in discovered_paths:
-                key = os.path.normcase(
-                    os.path.abspath(os.fspath(path))
-                ).casefold()
-                if key in seen_paths:
-                    continue
-                seen_paths.add(key)
-                unique_paths.append(path)
-            discovered += len(unique_paths)
-            candidates_by_folder.append(
-                (decision, unique_paths, len(discovered_paths))
+        enumeration_started = time.perf_counter()
+
+        def before_root(folder: Path) -> None:
+            publish_progress(
+                {
+                    "current_product": product_id,
+                    "current_folder": str(folder),
+                    "discovered_count": discovered,
+                    "prepared_count": inspected,
+                    "discovered_path_count": discovered,
+                    "planned_inspection_count": planned_inspections,
+                    "inspected_count": inspected,
+                    "inspection_failure_count": inspection_failures,
+                    "content_duplicate_count": content_duplicates,
+                    "final_candidate_count": final_candidates,
+                    "pending_count": max(
+                        planned_inspections - inspected - inspection_failures,
+                        0,
+                    ),
+                }
             )
+
+        candidates_by_folder, enumeration_stats = (
+            _enumerate_confirmed_folders(
+                folder_decisions,
+                before_root=before_root,
+            )
+        )
+        performance["enumeration_ms"] = float(
+            performance["enumeration_ms"]
+        ) + (time.perf_counter() - enumeration_started) * 1000
+        performance["traversal_root_count"] = int(
+            performance["traversal_root_count"]
+        ) + int(enumeration_stats["traversal_root_count"])
+        performance["avoided_recursive_scan_count"] = int(
+            performance["avoided_recursive_scan_count"]
+        ) + int(enumeration_stats["avoided_recursive_scan_count"])
+        discovered += sum(
+            len(paths) for _decision, paths, _raw_count in candidates_by_folder
+        )
 
         counts = [len(paths) for _, paths, _ in candidates_by_folder]
         sample_size = min(candidate_limit, sum(counts))
@@ -726,32 +939,30 @@ def build_confirmed_folder_gallery(
         for item in per_folder:
             item["final_candidate_count"] = 0
         product_summary = {
-                "product_id": product_id,
-                "confirmed_folders": len(folder_decisions),
-                "nonempty_folders": nonempty_folder_count,
-                "represented_folders": represented_folder_count,
-                "uncovered_folders": uncovered_folder_count,
-                "complete_folder_coverage": complete_folder_coverage,
-                "discovered_images": sum(counts),
-                "prepared_candidates": len(selected),
-                "planned_inspection_count": len(selected),
-                "inspected_count": product_inspected,
-                "inspection_failure_count": product_failures,
-                "content_duplicate_count": product_duplicates,
-                "final_candidate_count": product_final_candidates,
-                "valid_candidates": valid,
-                "reason_codes": (
-                    []
-                    if complete_folder_coverage
-                    else [COVERAGE_LIMIT_REASON]
-                ),
-                "folder_allocations": per_folder,
+            "product_id": product_id,
+            "confirmed_folders": len(folder_decisions),
+            "nonempty_folders": nonempty_folder_count,
+            "represented_folders": represented_folder_count,
+            "uncovered_folders": uncovered_folder_count,
+            "complete_folder_coverage": complete_folder_coverage,
+            "discovered_images": sum(counts),
+            "prepared_candidates": len(selected),
+            "planned_inspection_count": len(selected),
+            "inspected_count": product_inspected,
+            "inspection_failure_count": product_failures,
+            "content_duplicate_count": product_duplicates,
+            "final_candidate_count": product_final_candidates,
+            "valid_candidates": valid,
+            "reason_codes": (
+                [] if complete_folder_coverage else [COVERAGE_LIMIT_REASON]
+            ),
+            "folder_allocations": per_folder,
         }
 
         def emit_progress(current_folder: str | None = None) -> None:
             if progress_callback is None:
                 return
-            progress_callback(
+            publish_progress(
                 {
                     "current_product": product_id,
                     "current_folder": current_folder,
@@ -773,15 +984,49 @@ def build_confirmed_folder_gallery(
                 }
             )
 
+        source_facts: dict[
+            str, tuple[os.stat_result | None, OSError | None, int]
+        ] = {}
+
+        def resolve_weight(path: Path) -> int:
+            source_key = _path_key(path)
+            cached_facts = source_facts.get(source_key)
+            if cached_facts is not None:
+                return cached_facts[2]
+            started = time.perf_counter()
+            source_stat = None
+            source_error = None
+            try:
+                source_stat = Path(path).stat()
+            except OSError as error:
+                source_error = error
+            performance["source_stat_ms"] = float(
+                performance["source_stat_ms"]
+            ) + (time.perf_counter() - started) * 1000
+            performance["source_stat_count"] = int(
+                performance["source_stat_count"]
+            ) + 1
+            weight = (
+                1
+                if source_stat is None
+                else _inspection_weight_from_size(path, source_stat.st_size)
+            )
+            source_facts[source_key] = (source_stat, source_error, weight)
+            return weight
+
         def worker(
             decision: Mapping[str, Any], path: Path
         ) -> _InspectionOutcome:
+            source_stat, source_error, _weight = source_facts[_path_key(path)]
+            if source_error is not None:
+                raise source_error
             return _inspect_candidate_once(
                 decision,
                 path,
                 product,
                 preview_dir=preview_dir,
                 checkpoint_entries=checkpoint_entries,
+                source_stat=source_stat,
             )
 
         indexed_selected = [
@@ -793,20 +1038,27 @@ def build_confirmed_folder_gallery(
             _index: int,
             result: _InspectionOutcome | Exception,
         ) -> None:
-            if isinstance(result, _InspectionOutcome):
+            nonlocal checkpoint_dirty_count
+            if isinstance(result, _InspectionOutcome) and not result.checkpoint_hit:
                 checkpoint_entries[result.checkpoint_key] = (
                     result.checkpoint_entry
                 )
-                _write_task_checkpoint(checkpoint_path, checkpoint)
-            emit_progress()
+                checkpoint_dirty_count += 1
+                flush_checkpoint()
 
-        for start in range(0, len(indexed_selected), page_size):
-            window = indexed_selected[start : start + page_size]
-            results = _run_weighted_window(
-                window,
-                worker,
-                completion_callback=checkpoint_completion,
-            )
+        def merge_ready_batch(
+            window: Sequence[tuple[int, Mapping[str, Any], Path]],
+            results: Sequence[_InspectionOutcome | Exception],
+        ) -> None:
+            nonlocal inspected
+            nonlocal inspection_failures
+            nonlocal content_duplicates
+            nonlocal final_candidates
+            nonlocal product_inspected
+            nonlocal product_failures
+            nonlocal product_duplicates
+            nonlocal product_final_candidates
+            nonlocal valid
             for (_, decision, _), result in zip(
                 window,
                 results,
@@ -817,6 +1069,10 @@ def build_confirmed_folder_gallery(
                     product_failures += 1
                     emit_progress(str(decision["folder_path"]))
                     continue
+                for key, value in (result.timings_ms or {}).items():
+                    performance[key] = float(performance.get(key, 0.0)) + float(
+                        value
+                    )
                 inspected += 1
                 product_inspected += 1
                 inspected_asset = result.record
@@ -849,6 +1105,7 @@ def build_confirmed_folder_gallery(
                         )
                 emit_progress(str(decision["folder_path"]))
 
+            flush_checkpoint(force=True)
             product_summary.update(
                 {
                     "inspected_count": product_inspected,
@@ -859,25 +1116,42 @@ def build_confirmed_folder_gallery(
                 }
             )
             if batch_callback is not None:
-                batch_callback(
-                    _build_gallery_document(
-                        records,
-                        status_rows,
-                        confirmed_by_product=confirmed_by_product,
-                        products_by_id=products_by_id,
-                        candidate_limit=candidate_limit,
-                        page_size=page_size,
-                        sampling_seed=sampling_seed,
-                        discovered=discovered,
-                        planned_inspections=planned_inspections,
-                        inspected=inspected,
-                        inspection_failures=inspection_failures,
-                        content_duplicates=content_duplicates,
-                        final_candidates=final_candidates,
-                        per_product=[*per_product, product_summary],
-                        gallery_complete=False,
-                    )
+                partial = _build_gallery_document(
+                    records,
+                    status_rows,
+                    confirmed_by_product=confirmed_by_product,
+                    products_by_id=products_by_id,
+                    candidate_limit=candidate_limit,
+                    page_size=page_size,
+                    sampling_seed=sampling_seed,
+                    discovered=discovered,
+                    planned_inspections=planned_inspections,
+                    inspected=inspected,
+                    inspection_failures=inspection_failures,
+                    content_duplicates=content_duplicates,
+                    final_candidates=final_candidates,
+                    per_product=[*per_product, product_summary],
+                    gallery_complete=False,
+                    performance=performance,
                 )
+                started = time.perf_counter()
+                batch_callback(partial)
+                performance["batch_publish_ms"] = float(
+                    performance["batch_publish_ms"]
+                ) + (time.perf_counter() - started) * 1000
+                performance["batch_publish_count"] = int(
+                    performance["batch_publish_count"]
+                ) + 1
+
+        _run_weighted_window(
+            indexed_selected,
+            worker,
+            completion_callback=checkpoint_completion,
+            ordered_batch_callback=merge_ready_batch,
+            batch_size=page_size,
+            weight_resolver=resolve_weight,
+        )
+        flush_checkpoint(force=True)
         per_product.append(product_summary)
 
     data = _build_gallery_document(
@@ -896,6 +1170,7 @@ def build_confirmed_folder_gallery(
         final_candidates=final_candidates,
         per_product=per_product,
         gallery_complete=True,
+        performance=performance,
     )
     if inspected != final_candidates + content_duplicates:
         raise ValueError("gallery candidate count invariant failed")
