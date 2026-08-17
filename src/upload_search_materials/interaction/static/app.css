@@ -527,7 +527,7 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .inspection-stat { display: grid; gap: 5px; padding: 12px 14px; background: #f4f7f4; border: 1px solid var(--line); border-radius: 10px; }
 .inspection-stat span { color: var(--muted); font-size: 10px; }
 .inspection-stat strong { font-size: 20px; }
-.inspection-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 190px auto; gap: 10px; margin: 16px 0 4px; }
+.inspection-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(150px, 190px)) auto auto; gap: 10px; margin: 16px 0 4px; }
 .inspection-list { display: grid; gap: 10px; margin-top: 12px; }
 .inspection-row { display: grid; grid-template-columns: minmax(240px, 1.25fr) minmax(210px, 0.8fr) minmax(210px, 0.8fr); gap: 14px; align-items: start; padding: 14px; background: #fff; border: 1px solid var(--line); border-left: 4px solid #c49a54; border-radius: 12px; }
 .inspection-row[data-status="complete"] { border-left-color: var(--accent); }
@@ -928,6 +928,7 @@ summary:focus-visible {
   .setup-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .operation-steps { grid-template-columns: 1fr; }
   .inspection-summary { grid-template-columns: repeat(3, minmax(110px, 1fr)); }
+  .inspection-toolbar { grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(150px, 1fr)); }
   .inspection-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 

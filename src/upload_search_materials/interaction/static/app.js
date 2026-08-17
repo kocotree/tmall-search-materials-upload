@@ -1439,7 +1439,6 @@
     [
       ["全部商品", products.length],
       ["待补充", statusCounts.needs_supplement || 0],
-      ["需人工确认", statusCounts.needs_manual_review || 0],
       ["已完整", statusCounts.complete || 0],
       ["已排除", view.result?.data?.summary?.excluded_count || 0],
       ["已选择", selected.size],
@@ -1494,26 +1493,42 @@
       option.textContent = label;
       filter.appendChild(option);
     });
+    const ownerFilter = document.createElement("select");
+    ownerFilter.setAttribute("aria-label", "筛选负责人");
+    const ownerOptions = [
+      ["all", "全部负责人"],
+      ...[...new Set(
+        products.map((product) => String(product.owner || "").trim()).filter(Boolean),
+      )]
+        .sort((left, right) => left.localeCompare(right, "zh-CN"))
+        .map((owner) => [owner, owner]),
+    ];
+    if (products.some((product) => !String(product.owner || "").trim())) {
+      ownerOptions.push(["__unassigned__", "未分配负责人"]);
+    }
+    ownerOptions.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      ownerFilter.appendChild(option);
+    });
     const bulkSelect = element("button", "secondary-button", "选择当前筛选结果");
     bulkSelect.type = "button";
     bulkSelect.disabled = locked;
     const bulkClear = element("button", "secondary-button", "取消当前筛选结果");
     bulkClear.type = "button";
     bulkClear.disabled = locked;
-    toolbar.append(search, filter, bulkSelect, bulkClear);
+    toolbar.append(search, filter, ownerFilter, bulkSelect, bulkClear);
     content.appendChild(toolbar);
 
     const list = element("div", "inspection-list");
     content.appendChild(list);
 
     const visibleProducts = () => {
-      const needle = search.value.trim().toLocaleLowerCase("zh-CN");
-      return products.filter((product) => {
-        const matchesFilter = filter.value === "all" || product.status === filter.value;
-        const haystack = [product.product_id, product.sku, product.product_title]
-          .join(" ")
-          .toLocaleLowerCase("zh-CN");
-        return matchesFilter && (!needle || haystack.includes(needle));
+      return UiState.filterCompletenessProducts(products, {
+        query: search.value,
+        status: filter.value,
+        owner: ownerFilter.value,
       });
     };
 
@@ -1534,6 +1549,7 @@
         identity.append(
           element("strong", "", product.product_title || `商品 ${productId}`),
           element("span", "", `商品 ID ${productId} · 货号 ${product.sku || "未知"}`),
+          element("span", "", `负责人 ${product.owner || "未分配"}`),
           element("span", "inspection-status", completenessStatusLabel(product.status)),
         );
         const exclusionReasons = completenessExclusionReasons(product);
@@ -1602,6 +1618,7 @@
 
     search.addEventListener("input", draw);
     filter.addEventListener("change", draw);
+    ownerFilter.addEventListener("change", draw);
     bulkSelect.addEventListener("click", () => {
       visibleProducts().forEach((product) => {
         if (product.selectable !== false && product.status !== "excluded") {

@@ -514,6 +514,31 @@
     return { blockingReasons, nextAction };
   }
 
+  function filterCompletenessProducts(products, {
+    query = "",
+    status = "all",
+    owner = "all",
+  } = {}) {
+    const needle = String(query || "").trim().toLocaleLowerCase("zh-CN");
+    const selectedStatus = String(status || "all");
+    const selectedOwner = String(owner || "all");
+    return (Array.isArray(products) ? products : []).filter((product) => {
+      const productOwner = String(product?.owner || "").trim();
+      const matchesStatus = selectedStatus === "all"
+        || product?.status === selectedStatus;
+      const matchesOwner = selectedOwner === "all"
+        || (selectedOwner === "__unassigned__" && !productOwner)
+        || productOwner === selectedOwner;
+      const haystack = [
+        product?.product_id,
+        product?.sku,
+        product?.product_title,
+        productOwner,
+      ].join(" ").toLocaleLowerCase("zh-CN");
+      return matchesStatus && matchesOwner && (!needle || haystack.includes(needle));
+    });
+  }
+
   function draftRequestBody(values, revision) {
     return { values, revision };
   }
@@ -532,6 +557,7 @@
     createState,
     draftRequestBody,
     fifthStagePage,
+    filterCompletenessProducts,
     twoStepFifthStagePage,
     isCurrentRequest,
     jsonSemanticallyEqual,

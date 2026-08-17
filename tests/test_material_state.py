@@ -106,13 +106,19 @@ def test_completeness_matrix_reports_only_promotion_upload_gaps():
             }
         ],
         products=[
-            {"商品ID": "1", "货号（查找引用）": "KQ001", "商品名称（查找引用）": "分龄成长太阳镜"}
+            {
+                "商品ID": "1",
+                "货号（查找引用）": "KQ001",
+                "商品名称（查找引用）": "分龄成长太阳镜",
+                "运营": "张三",
+            }
         ],
         candidate_counts={"1": 18},
     )
 
     product = matrix["products"][0]
     assert product["product_title"] == "分龄成长太阳镜"
+    assert product["owner"] == "张三"
     assert "basic" not in product
     assert product["promotion"]["target_slots"] == 9
     assert product["promotion"]["current_count"] == 3

@@ -1162,6 +1162,9 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
     script = client.get("/static/app.js").get_data(as_text=True)
     for text in (
         "搜索商品 ID、货号或名称",
+        "全部负责人",
+        "未分配负责人",
+        "筛选负责人",
         "选择当前筛选结果",
         "取消当前筛选结果",
         "选择进入素材匹配",
@@ -1171,6 +1174,7 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
     ):
         assert text in script
     assert '["needs_manual_review", "需人工确认"],' not in script
+    assert '["需人工确认", statusCounts.needs_manual_review || 0],' not in script
     assert 'element("small", "", "基础素材")' not in script
     assert 'if (!event.target?.getAttribute?.("name")) return;' in script
 
