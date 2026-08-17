@@ -752,6 +752,8 @@ def build_confirmed_folder_gallery(
     inspection_failures = 0
     content_duplicates = 0
     final_candidates = 0
+    completed_inspections = 0
+    completed_inspection_failures = 0
     per_product: list[dict[str, Any]] = []
     performance: dict[str, float | int] = {
         "enumeration_ms": 0.0,
@@ -962,6 +964,11 @@ def build_confirmed_folder_gallery(
         def emit_progress(current_folder: str | None = None) -> None:
             if progress_callback is None:
                 return
+            reported_inspections = max(inspected, completed_inspections)
+            reported_failures = max(
+                inspection_failures,
+                completed_inspection_failures,
+            )
             publish_progress(
                 {
                     "current_product": product_id,
@@ -970,15 +977,15 @@ def build_confirmed_folder_gallery(
                     "prepared_count": inspected,
                     "discovered_path_count": discovered,
                     "planned_inspection_count": planned_inspections,
-                    "inspected_count": inspected,
-                    "inspection_failure_count": inspection_failures,
+                    "inspected_count": reported_inspections,
+                    "inspection_failure_count": reported_failures,
                     "content_duplicate_count": content_duplicates,
                     "final_candidate_count": final_candidates,
                     "available_candidate_count": len(records),
                     "pending_count": max(
                         planned_inspections
-                        - inspected
-                        - inspection_failures,
+                        - reported_inspections
+                        - reported_failures,
                         0,
                     ),
                 }
@@ -1033,18 +1040,29 @@ def build_confirmed_folder_gallery(
             (index, decision, path)
             for index, (decision, path) in enumerate(selected)
         ]
+        decision_by_index = {
+            index: decision for index, decision, _path in indexed_selected
+        }
 
         def checkpoint_completion(
-            _index: int,
+            index: int,
             result: _InspectionOutcome | Exception,
         ) -> None:
             nonlocal checkpoint_dirty_count
+            nonlocal completed_inspections
+            nonlocal completed_inspection_failures
             if isinstance(result, _InspectionOutcome) and not result.checkpoint_hit:
                 checkpoint_entries[result.checkpoint_key] = (
                     result.checkpoint_entry
                 )
                 checkpoint_dirty_count += 1
                 flush_checkpoint()
+            if isinstance(result, Exception):
+                completed_inspection_failures += 1
+            else:
+                completed_inspections += 1
+            decision = decision_by_index.get(index, {})
+            emit_progress(str(decision.get("folder_path", "")) or None)
 
         def merge_ready_batch(
             window: Sequence[tuple[int, Mapping[str, Any], Path]],

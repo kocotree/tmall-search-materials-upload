@@ -21,6 +21,8 @@ PUBLISH_FRAME_FRAGMENT = "/publish-feeds/imagePreview"
 MATERIAL_SELECTOR_FRAME_FRAGMENT = "sucai-selector-ng"
 PRODUCT_SCOPE_ATTEMPTS = 50
 PRODUCT_SCOPE_DELAY_MS = 300
+AI_COPY_TIMEOUT_MS = 90_000
+AI_COPY_POLL_MS = 500
 
 
 class QianniuCopyError(RuntimeError):
@@ -68,27 +70,187 @@ class QianniuCopyDraft:
 def parse_qianniu_ai_copy(text: str) -> tuple[str, str]:
     """Extract title and body from the visible Qianniu AI result panel."""
 
-    normalized = str(text).replace("\r\n", "\n").replace("\r", "\n")
-    match = re.search(
-        r"(?:^|\n)标题[：:]\s*(?P<title>[^\n]+)\n"
-        r"正文[：:]\s*(?P<description>.+?)"
-        r"(?=\n(?:确认|取消|填充文案|重新生成)|$)",
-        normalized,
-        flags=re.DOTALL,
+    normalized = (
+        str(text)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u00a0", " ")
     )
-    if not match:
+    lines = [line.strip() for line in normalized.split("\n") if line.strip()]
+    title_match = None
+    description_match = None
+    title_index = -1
+    description_index = -1
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"标题(?:内容)?\s*[：:]?\s*(.*)", line)
+        if match is not None:
+            title_match = match
+            title_index = index
+            break
+    if title_match is not None:
+        for index in range(title_index + 1, len(lines)):
+            match = re.fullmatch(
+                r"(?:正文|描述)(?:内容)?\s*[：:]?\s*(.*)",
+                lines[index],
+            )
+            if match is not None:
+                description_match = match
+                description_index = index
+                break
+    if title_match is None or description_match is None:
         raise QianniuCopyError(
             "QIANNIU_COPY_RESULT_INVALID",
             "未能从千牛 AI 结果面板读取标题和正文",
         )
-    title = match.group("title").strip()
-    description = match.group("description").strip()
+
+    def is_action_line(value: str) -> bool:
+        return re.fullmatch(
+            r"(?:(?:确认|取消|填充文案|重新生成)\s*)+",
+            value,
+        ) is not None
+
+    title_parts = [title_match.group(1).strip()]
+    title_parts.extend(
+        line
+        for line in lines[title_index + 1 : description_index]
+        if not is_action_line(line)
+    )
+    description_parts = [description_match.group(1).strip()]
+    for line in lines[description_index + 1 :]:
+        if is_action_line(line):
+            break
+        description_parts.append(line)
+    title = " ".join(part for part in title_parts if part).strip()
+    description = "\n".join(
+        part for part in description_parts if part
+    ).strip()
     if not title or not description:
         raise QianniuCopyError(
             "QIANNIU_COPY_RESULT_INVALID",
             "千牛 AI 返回了空标题或空正文",
         )
     return title, description
+
+
+def _click_visible_image_text_action(
+    page,
+    *,
+    attempts: int = 4,
+) -> tuple[bool, bool]:
+    """Re-resolve and click the portal action across React replacements."""
+
+    saw_unique_action = False
+    for _ in range(attempts):
+        actions = []
+        for scope in _page_scopes(page):
+            candidate = scope.get_by_text("发图文", exact=True)
+            for index in range(candidate.count()):
+                item = candidate.nth(index)
+                if item.is_visible():
+                    actions.append(item)
+        if len(actions) == 1:
+            saw_unique_action = True
+            try:
+                actions[0].evaluate(
+                    "element => element.click()",
+                    timeout=1_500,
+                )
+                return True, saw_unique_action
+            except Exception:
+                # Qianniu renders this menu through a React portal. The item
+                # can be replaced after is_visible(); re-resolve it instead
+                # of waiting on the stale locator for Playwright's 30s default.
+                pass
+        page.wait_for_timeout(150)
+    return False, saw_unique_action
+
+
+def _read_ai_result_panel(publish_frame) -> tuple[str, str] | None:
+    """Read the smallest visible AI panel, including labelled form controls."""
+
+    actions = publish_frame.get_by_text("填充文案", exact=True)
+    visible = []
+    for index in range(actions.count()):
+        action = actions.nth(index)
+        if action.is_visible():
+            visible.append(action)
+    if len(visible) != 1:
+        return None
+    try:
+        payload = visible[0].evaluate(
+            """element => {
+              let node = element;
+              let root = null;
+              for (let depth = 0; node && depth < 9; depth += 1) {
+                const text = (node.innerText || '').trim();
+                if (
+                  text.includes('重新生成')
+                  && text.includes('填充文案')
+                  && /(^|\\n)\\s*标题(?:内容)?\\s*[：:]?/m.test(text)
+                  && /(^|\\n)\\s*(?:正文|描述)(?:内容)?\\s*[：:]?/m.test(text)
+                ) {
+                  root = node;
+                  break;
+                }
+                node = node.parentElement;
+              }
+              if (!root) return null;
+              const controls = Array.from(
+                root.querySelectorAll('input, textarea, [contenteditable="true"]')
+              ).map(control => ({
+                hint: [
+                  control.getAttribute('aria-label') || '',
+                  control.getAttribute('placeholder') || '',
+                  control.getAttribute('name') || '',
+                ].join(' '),
+                context: (control.parentElement?.innerText || '').slice(0, 120),
+                value: (
+                  control.value
+                  || control.innerText
+                  || control.textContent
+                  || ''
+                ).trim(),
+              }));
+              return { text: (root.innerText || '').trim(), controls };
+            }""",
+            timeout=1_000,
+        )
+    except Exception:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    title = ""
+    description = ""
+    controls = payload.get("controls")
+    if isinstance(controls, Sequence) and not isinstance(controls, (str, bytes)):
+        for raw_control in controls:
+            if not isinstance(raw_control, Mapping):
+                continue
+            hint = str(raw_control.get("hint", "")).strip()
+            context = str(raw_control.get("context", "")).strip()
+            label = hint or context
+            value = str(raw_control.get("value", "")).strip()
+            if not value:
+                continue
+            if not title and "标题" in label and not re.search(
+                r"正文|描述", label
+            ):
+                title = value
+            if (
+                not description
+                and re.search(r"正文|描述", label)
+                and "标题" not in label
+            ):
+                description = value
+    if title and description:
+        return title, description
+    panel_text = str(payload.get("text", "")).strip()
+    if panel_text:
+        try:
+            return parse_qianniu_ai_copy(panel_text)
+        except QianniuCopyError:
+            return None
+    return None
 
 
 def _wait_for_frame(
@@ -336,49 +498,46 @@ def _open_slot_publish_form(
             f"商品 {product_id} 第 {position} 个坑位不是空坑位",
         )
 
-    menu_ready = False
-    action = None
-    for _ in range(3):
+    saw_unique_action = False
+    for _ in range(4):
         slot, publish = resolve_live_slot()
         slot.hover(force=True)
         publish.click(force=True)
-        page.wait_for_timeout(700)
-        actions = []
-        for scope in _page_scopes(page):
-            candidate = scope.get_by_text("发图文", exact=True)
-            for index in range(candidate.count()):
-                item = candidate.nth(index)
-                if item.is_visible():
-                    actions.append(item)
-        if len(actions) == 1:
-            action = actions[0]
-            menu_ready = True
+        page.wait_for_timeout(500)
+        clicked, observed = _click_visible_image_text_action(page)
+        saw_unique_action = saw_unique_action or observed
+        if not clicked:
+            slot, _publish = resolve_live_slot()
+            slot.click(force=True)
+            page.wait_for_timeout(500)
+            clicked, observed = _click_visible_image_text_action(page)
+            saw_unique_action = saw_unique_action or observed
+        if not clicked:
+            continue
+        try:
+            frame = _wait_for_frame(
+                page,
+                PUBLISH_FRAME_FRAGMENT,
+                attempts=20,
+                delay_ms=300,
+            )
             break
-        slot, _publish = resolve_live_slot()
-        slot.click(force=True)
-        page.wait_for_timeout(700)
-        actions = []
-        for scope in _page_scopes(page):
-            candidate = scope.get_by_text("发图文", exact=True)
-            for index in range(candidate.count()):
-                item = candidate.nth(index)
-                if item.is_visible():
-                    actions.append(item)
-        if len(actions) == 1:
-            action = actions[0]
-            menu_ready = True
-            break
-    if not menu_ready:
-        raise QianniuCopyError(
-            "QIANNIU_IMAGE_TEXT_ACTION_NOT_FOUND",
-            f"商品 {product_id} 第 {position} 个坑位未出现发图文入口",
+        except QianniuCopyError as error:
+            if error.reason_code != "QIANNIU_FRAME_NOT_READY":
+                raise
+    else:
+        reason_code = (
+            "QIANNIU_IMAGE_TEXT_ACTION_UNSTABLE"
+            if saw_unique_action
+            else "QIANNIU_IMAGE_TEXT_ACTION_NOT_FOUND"
         )
-    # The material table can place this portal menu just outside the iframe's
-    # viewport even though Qianniu reports it as visible. Trigger the exact,
-    # uniquely resolved menu action through the DOM so Playwright does not
-    # reject it during its viewport preflight.
-    action.evaluate("element => element.click()")
-    frame = _wait_for_frame(page, PUBLISH_FRAME_FRAGMENT, delay_ms=400)
+        raise QianniuCopyError(
+            reason_code,
+            (
+                f"商品 {product_id} 第 {position} 个坑位的发图文入口"
+                "未能稳定打开"
+            ),
+        )
     body = ""
     for _ in range(40):
         body = frame.locator("body").inner_text().strip()
@@ -592,18 +751,34 @@ def _generate_copy(page, publish_frame) -> tuple[str, str, float]:
     started = time.perf_counter()
     assistant.click(force=True)
     body = ""
-    for _ in range(80):
-        page.wait_for_timeout(500)
+    result_panel_ready = False
+    for _ in range(AI_COPY_TIMEOUT_MS // AI_COPY_POLL_MS):
+        page.wait_for_timeout(AI_COPY_POLL_MS)
         body = publish_frame.locator("body").inner_text()
         if (
             "生成中" not in body
             and "重新生成" in body
             and "填充文案" in body
         ):
-            title, description = parse_qianniu_ai_copy(body)
+            result_panel_ready = True
+            parsed = _read_ai_result_panel(publish_frame)
+            if parsed is None:
+                try:
+                    parsed = parse_qianniu_ai_copy(body)
+                except QianniuCopyError:
+                    # The action buttons can become visible before React has
+                    # committed both generated fields. Keep polling within the
+                    # same bounded AI wait instead of failing the slot early.
+                    continue
+            title, description = parsed
             return title, description, round(
                 time.perf_counter() - started, 2
             )
+    if result_panel_ready:
+        raise QianniuCopyError(
+            "QIANNIU_COPY_RESULT_INVALID",
+            "千牛 AI 结果面板已完成，但未读取到完整标题和正文",
+        )
     raise QianniuCopyError(
         "QIANNIU_AI_COPY_TIMEOUT",
         "千牛 AI 文案生成超时",

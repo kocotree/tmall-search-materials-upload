@@ -2,6 +2,9 @@ import pytest
 
 from upload_search_materials.browser.qianniu_copy import (
     QianniuCopyError,
+    _click_visible_image_text_action,
+    _generate_copy,
+    _read_ai_result_panel,
     _reset_material_selector_to_all_images,
     _wait_for_product_scope,
     parse_qianniu_ai_copy,
@@ -70,6 +73,25 @@ def test_parse_qianniu_ai_copy_excludes_concatenated_action_labels():
     assert description == "轻盈透气，夏日出行舒适防晒。"
 
 
+def test_parse_qianniu_ai_copy_accepts_labels_on_separate_lines():
+    title, description = parse_qianniu_ai_copy(
+        "\n".join(
+            [
+                "重新生成",
+                "填充文案",
+                "标题",
+                "KK树儿童轻便运动鞋",
+                "描述",
+                "轻盈鞋身，适合日常活动。",
+                "确认取消",
+            ]
+        )
+    )
+
+    assert title == "KK树儿童轻便运动鞋"
+    assert description == "轻盈鞋身，适合日常活动。"
+
+
 class _FakeInput:
     def __init__(self, placeholder, visible=True):
         self.placeholder = placeholder
@@ -91,6 +113,13 @@ class _FakeCollection:
 
     def nth(self, index):
         return self.items[index]
+
+    def is_visible(self):
+        return len(self.items) == 1 and self.items[0].is_visible()
+
+    def click(self, **kwargs):
+        assert len(self.items) == 1
+        return self.items[0].click(**kwargs)
 
 
 class _FakeScope:
@@ -117,6 +146,141 @@ class _FakePage:
         self.wait_count += 1
         if self.on_wait is not None:
             self.on_wait(self.wait_count)
+
+
+class _FakeMenuAction:
+    def __init__(self, *, stale=False):
+        self.stale = stale
+        self.clicked = False
+
+    def is_visible(self):
+        return True
+
+    def evaluate(self, expression, *, timeout):
+        assert expression == "element => element.click()"
+        assert timeout == 1_500
+        if self.stale:
+            raise RuntimeError("portal node replaced")
+        self.clicked = True
+
+
+class _ReplacingMenuScope:
+    url = "https://myseller.taobao.com/material-frame"
+
+    def __init__(self):
+        self.calls = 0
+        self.fresh = _FakeMenuAction()
+
+    def get_by_text(self, text, *, exact=False):
+        assert text == "发图文"
+        assert exact is True
+        self.calls += 1
+        action = _FakeMenuAction(stale=True) if self.calls == 1 else self.fresh
+        return _FakeCollection([action])
+
+
+def test_image_text_action_re_resolves_replaced_portal_item():
+    scope = _ReplacingMenuScope()
+    page = _FakePage([scope])
+
+    clicked, observed = _click_visible_image_text_action(page)
+
+    assert clicked is True
+    assert observed is True
+    assert scope.fresh.clicked is True
+    assert page.wait_count == 1
+
+
+class _FakeAssistantAction:
+    def __init__(self):
+        self.clicked = False
+
+    def is_visible(self):
+        return True
+
+    def click(self, *, force=False):
+        assert force is True
+        self.clicked = True
+
+
+class _FakeBody:
+    def __init__(self, page):
+        self.page = page
+
+    def inner_text(self):
+        if self.page.wait_count < 2:
+            return "重新生成\n填充文案\n标题\n正文"
+        return (
+            "重新生成\n填充文案\n标题\nKK树儿童遮阳帽\n"
+            "正文\n轻盈透气，适合夏日出行。\n确认\n取消"
+        )
+
+
+class _FakeCopyFrame:
+    def __init__(self, page):
+        self.page = page
+        self.assistant = _FakeAssistantAction()
+
+    def get_by_text(self, text, *, exact=False):
+        assert exact is True
+        if text == "AI生成文案":
+            return _FakeCollection([self.assistant])
+        if text == "填充文案":
+            return _FakeCollection([])
+        raise AssertionError(text)
+
+    def locator(self, selector):
+        assert selector == "body"
+        return _FakeBody(self.page)
+
+
+def test_generate_copy_waits_until_both_fields_are_committed():
+    page = _FakePage([])
+    frame = _FakeCopyFrame(page)
+
+    title, description, _elapsed = _generate_copy(page, frame)
+
+    assert frame.assistant.clicked is True
+    assert page.wait_count == 2
+    assert title == "KK树儿童遮阳帽"
+    assert description == "轻盈透气，适合夏日出行。"
+
+
+class _FakeResultPanelAction:
+    def is_visible(self):
+        return True
+
+    def evaluate(self, _expression, *, timeout):
+        assert timeout == 1_000
+        return {
+            "text": "",
+            "controls": [
+                {
+                    "hint": "请输入标题",
+                    "context": "标题",
+                    "value": "KK树儿童太阳镜",
+                },
+                {
+                    "hint": "请输入正文",
+                    "context": "正文",
+                    "value": "轻盈镜架，日常遮阳佩戴舒适。",
+                },
+            ],
+        }
+
+
+class _FakeResultPanelFrame:
+    def get_by_text(self, text, *, exact=False):
+        assert text == "填充文案"
+        assert exact is True
+        return _FakeCollection([_FakeResultPanelAction()])
+
+
+def test_read_ai_result_panel_prefers_labelled_control_values():
+    assert _read_ai_result_panel(_FakeResultPanelFrame()) == (
+        "KK树儿童太阳镜",
+        "轻盈镜架，日常遮阳佩戴舒适。",
+    )
 
 
 def test_product_scope_ignores_help_search_and_uses_product_frame():

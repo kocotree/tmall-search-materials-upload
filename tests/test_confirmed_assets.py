@@ -585,6 +585,63 @@ def test_confirmed_gallery_publishes_first_thirty_then_remainder(tmp_path):
     assert data["gallery_complete"] is True
 
 
+def test_confirmed_gallery_reports_completion_before_ordered_batch(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    for index in range(2):
+        _image(folder / f"{index}.png", (index, index + 1, index + 2))
+    events = []
+
+    def complete_out_of_order(items, worker, **kwargs):
+        results = []
+        for _index, decision, path in items:
+            kwargs["weight_resolver"](path)
+            results.append(worker(decision, path))
+        kwargs["completion_callback"](items[1][0], results[1])
+        kwargs["completion_callback"](items[0][0], results[0])
+        kwargs["ordered_batch_callback"](items, results)
+        return results
+
+    monkeypatch.setattr(
+        confirmed_assets,
+        "_run_weighted_window",
+        complete_out_of_order,
+    )
+
+    build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        progress_callback=lambda progress: events.append(
+            (
+                "progress",
+                int(progress.get("inspected_count", 0))
+                + int(progress.get("inspection_failure_count", 0)),
+            )
+        ),
+        batch_callback=lambda partial: events.append(
+            ("batch", len(partial["asset_candidates"]))
+        ),
+    )
+
+    first_completed = next(
+        index
+        for index, event in enumerate(events)
+        if event == ("progress", 1)
+    )
+    first_batch = next(
+        index for index, event in enumerate(events) if event[0] == "batch"
+    )
+    assert first_completed < first_batch
+
+
 def test_confirmed_gallery_resume_reuses_task_checkpoint_and_previews(
     tmp_path, monkeypatch
 ):
