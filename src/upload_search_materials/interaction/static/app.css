@@ -180,6 +180,28 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 }
 
 .workspace-header h1 { margin: 0; font: 750 clamp(22px, 2vw, 29px)/1.15 "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; letter-spacing: -0.025em; }
+.plugin-version {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: inline-flex;
+  max-width: min(36vw, 320px);
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  overflow: hidden;
+  color: #31533a;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(24, 73, 38, 0.12);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(24, 73, 38, 0.06);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+}
+.plugin-version span { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.plugin-version strong { overflow: hidden; font-weight: 750; text-overflow: ellipsis; }
 .header-meta { display: flex; gap: 28px; margin: 0; }
 .header-meta div { min-width: 86px; }
 .header-meta dt { margin-bottom: 4px; color: var(--muted); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -941,7 +963,8 @@ summary:focus-visible {
   .stage-link { min-width: 176px; }
   .stage-link.is-active::before { inset: auto 16px -1px; width: auto; height: 3px; border-radius: 4px 4px 0 0; }
   .workspace { margin-left: 0; }
-  .workspace-header { position: static; align-items: flex-start; }
+  .workspace-header { position: relative; align-items: flex-start; padding-top: 58px; }
+  .plugin-version { top: 18px; max-width: calc(100% - 34px); transform: translateX(-50%); }
   .header-meta { display: none; }
   .field-grid, .setup-business-grid, .setup-status-grid { grid-template-columns: 1fr; }
   .field-wide { grid-column: auto; }
@@ -983,6 +1006,22 @@ summary:focus-visible {
   gap: 0.65rem;
   margin: 0 0 1rem;
 }
+
+.slot-blocking-summary {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #e3a08f;
+  border-radius: 0.75rem;
+  background: #fff3ef;
+  color: #7a271a;
+}
+
+.slot-blocking-summary ul {
+  margin: 0.65rem 0;
+  padding-left: 1.25rem;
+}
+
+.slot-blocking-summary p { margin: 0; }
 
 .slot-workflow-step {
   appearance: none;
@@ -1480,6 +1519,7 @@ summary:focus-visible {
 }
 
 .copy-confirmation-control {
+  flex: 1 1 320px;
   min-height: 44px;
   margin-top: 0.1rem;
   padding: 0.65rem 0.75rem;

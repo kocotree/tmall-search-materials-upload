@@ -358,11 +358,25 @@ def test_root_renders_nine_stage_left_rail(client):
     assert html.count('data-stage-id="') == 9
 
 
-def test_new_session_hides_legacy_image_review_stage(client, session_id):
+def test_root_displays_current_plugin_version_at_header_center(client):
+    manifest = json.loads(
+        (Path(__file__).parents[1] / ".codex-plugin" / "plugin.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    html = client.get("/").get_data(as_text=True)
+
+    assert 'class="plugin-version"' in html
+    assert "data-plugin-version" in html
+    assert f"v{manifest['version']}" in html
+
+
+def test_new_session_hides_internal_and_legacy_stages(client, session_id):
     html = client.get(f"/?session_id={session_id}").get_data(as_text=True)
 
-    assert html.count('data-stage-id="') == 7
+    assert html.count('data-stage-id="') == 6
     assert 'data-stage-id="image_review"' not in html
+    assert 'data-stage-id="dry_run"' not in html
     assert 'data-stage-id="slots_copy"' in html
     assert "完整度巡检" in html
     assert "生产确认" not in html
@@ -1221,10 +1235,10 @@ def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_control
         "AI 标题与描述",
         "确认坑位并进入图片裁剪",
         "完成图片处理并进入文案生成",
-        "完成当前阶段并进入 dry-run",
+        "进入上传任务确认",
         "重新生成新版本",
         "重新生成会创建独立新版本，不覆盖历史版本，也不会发布。",
-        "还需勾选确认",
+        "已确认标题、描述，可进入上传任务确认",
     ):
         assert text in javascript
     assert '? ["process", "copy"]' in javascript
@@ -3033,6 +3047,40 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert 'currentStageId === "completeness"' in source
     assert "dispatcherOwnsRecovery" in source
     assert "currentWorkflowDispatch?.online === true" in source
+
+
+def test_frontend_uses_one_batch_copy_confirmation_and_returns_blockers_to_editor():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "已确认标题、描述，可进入上传任务确认" in source
+    assert "我已核对该标题、描述与左侧素材一致，可进入 dry-run" not in source
+    assert 'draft.confirmed = batchConfirmation.checked' in source
+    assert 'copyState.forEach((draft) => { draft.confirmed = false; });' in source
+    assert "上传前检查发现需要修改的内容" in source
+    assert 'element("section", "slot-blocking-summary")' in source
+
+
+def test_approval_tasks_default_to_all_ready_tasks_once():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'task.status === "ready_for_review"' in source
+    assert "readyTaskIds.forEach((taskId) => selected.add(taskId));" in source
+    assert "content.dataset.approvalSelectionInitialized" in source
+    assert "!currentStageHasPersistedInput" in source
 
 
 def test_approval_submit_uses_one_click_authorization(

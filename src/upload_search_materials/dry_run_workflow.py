@@ -230,8 +230,11 @@ def _set_current_stage(
 def return_blocked_dry_run_to_slots_copy(
     store: SessionStore,
     session_id: str,
+    *,
+    blocking_reasons: list[str] | None = None,
+    evidence: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Reopen the confirmed copy page after a blocked dry-run review."""
+    """Reopen the copy page and surface actionable dry-run problems there."""
 
     transitioned = False
     with store._session_lock(session_id):
@@ -258,7 +261,12 @@ def return_blocked_dry_run_to_slots_copy(
             transitioned = True
 
     _archive_completed_slot_result_for_reopen(store, session_id)
-    _restore_slots_copy_review_context(store, session_id)
+    _restore_slots_copy_review_context(
+        store,
+        session_id,
+        blocking_reasons=blocking_reasons,
+        evidence=evidence,
+    )
     if transitioned:
         store._append_event(
             store._session_path(session_id),
@@ -309,6 +317,9 @@ def _archive_completed_slot_result_for_reopen(
 def _restore_slots_copy_review_context(
     store: SessionStore,
     session_id: str,
+    *,
+    blocking_reasons: list[str] | None = None,
+    evidence: list[str] | None = None,
 ) -> bool:
     """Rebuild the board payload without changing the confirmed slot plan."""
 
@@ -352,16 +363,25 @@ def _restore_slots_copy_review_context(
     )
     state = store.load_session(session_id)
     revision = int(state["stages"]["slots_copy"]["revision"])
+    displayed_blockers = list(blocking_reasons or [])
     context = {
         "schema_version": 1,
         "session_id": session_id,
         "stage_id": "slots_copy",
         "revision": revision,
         "status": "needs_user_input",
-        "summary": "已恢复当前坑位、图片输出和文案草稿，可继续编辑后重新预检。",
-        "blocking_reasons": [],
-        "evidence": [str(package_path)],
-        "next_action": "检查或修改文案后，重新确认并自动预检。",
+        "summary": (
+            f"上传前检查发现 {len(displayed_blockers)} 个需要修改的问题"
+            if displayed_blockers
+            else "已恢复当前坑位、图片输出和文案草稿，可继续编辑后重新检查。"
+        ),
+        "blocking_reasons": displayed_blockers,
+        "evidence": list(evidence or [str(package_path)]),
+        "next_action": (
+            "请根据页面顶部提示修改坑位、图片或文案，然后重新确认标题与描述。"
+            if displayed_blockers
+            else "检查或修改文案后，重新确认并自动执行上传前检查。"
+        ),
         "created_at": _now_iso(),
         "data": board_data,
     }
@@ -695,6 +715,47 @@ def _review_context(
     }
 
 
+def _slots_copy_blocking_messages(document: dict[str, Any]) -> list[str]:
+    """Translate internal dry-run gates into actionable workbench guidance."""
+
+    messages = {
+        "DRY_RUN_SLOT_BOUNDARY_MISMATCH": (
+            "坑位、图片输出与文案的数量不一致，请重新检查坑位编排并处理图片。"
+        ),
+        "DRY_RUN_PRODUCT_ID_MISMATCH": (
+            "文案对应的商品与当前坑位不一致，请重新生成该坑位的标题与描述。"
+        ),
+        "DRY_RUN_REMOTE_SLOT_POSITION_MISSING": (
+            "未取得千牛目标坑位，请重新生成或载入该坑位的标题与描述。"
+        ),
+        "DRY_RUN_REMOTE_SLOT_POSITION_DUPLICATE": (
+            "多个坑位指向同一个千牛目标坑位，请重新生成相关坑位的标题与描述。"
+        ),
+        "DRY_RUN_COPY_NOT_CONFIRMED": (
+            "标题或描述尚未完整确认，请补齐内容后重新勾选整批确认。"
+        ),
+        "DRY_RUN_OUTPUT_MISSING": (
+            "已处理图片不存在，请返回图片处理并重新生成该坑位图片。"
+        ),
+        "DRY_RUN_OUTPUT_SHA256_MISMATCH": (
+            "已处理图片发生变化，请返回图片处理并重新生成该坑位图片。"
+        ),
+        "DRY_RUN_APPROVED_MEDIA_CHANGED": (
+            "当前图片与文案确认时的图片不一致，请重新处理图片并核对文案。"
+        ),
+    }
+    rendered: list[str] = []
+    for raw_reason in document.get("blocking_reasons", []):
+        reason = str(raw_reason)
+        code, separator, slot_id = reason.partition(":")
+        message = messages.get(
+            code,
+            "上传前检查未通过，请检查当前坑位、图片处理和文案后重试。",
+        )
+        rendered.append(f"坑位 {slot_id}：{message}" if separator else message)
+    return rendered
+
+
 def advance_slots_copy_after_submit(
     store: SessionStore,
     session_id: str,
@@ -751,9 +812,14 @@ def advance_slots_copy_after_submit(
         context = _review_context(document, stage_id="dry_run", revision=0)
         context["evidence"] = [str(dry_tasks_path)]
         store.write_review_context(session_id, "dry_run", context)
+        returned = return_blocked_dry_run_to_slots_copy(
+            store,
+            session_id,
+            blocking_reasons=_slots_copy_blocking_messages(document),
+            evidence=[str(dry_tasks_path)],
+        )
         return {
-            "status": "blocked",
-            "next_stage": "dry_run",
+            **returned,
             "document": document,
         }
 

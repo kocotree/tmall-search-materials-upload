@@ -144,6 +144,22 @@ from .stages import (
 
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
 SELECTION_PREFLIGHT_ALGORITHM_VERSION = 2
+PLUGIN_VERSION_UNKNOWN = "版本未知"
+
+
+def _load_plugin_version(plugin_root: Path | None = None) -> str:
+    root = plugin_root or Path(__file__).resolve().parents[3]
+    manifest_path = root / ".codex-plugin" / "plugin.json"
+    try:
+        with manifest_path.open("r", encoding="utf-8-sig") as stream:
+            manifest = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return PLUGIN_VERSION_UNKNOWN
+    if not isinstance(manifest, dict):
+        return PLUGIN_VERSION_UNKNOWN
+    raw_version = manifest.get("version")
+    version = raw_version.strip() if isinstance(raw_version, str) else ""
+    return version or PLUGIN_VERSION_UNKNOWN
 
 
 def _input_quality_summary(path: Path | None) -> dict[str, Any]:
@@ -575,6 +591,7 @@ def create_app(
             for name in ("app.css", "ui-state.js", "app.js")
         )
     ).hexdigest()[:12]
+    plugin_version = _load_plugin_version()
 
     @app.errorhandler(BadRequest)
     def malformed_json(_: BadRequest):
@@ -701,6 +718,7 @@ def create_app(
             runs_root=str(store.runs_root.resolve()),
             task_directory=str(task_directory),
             static_asset_version=static_asset_version,
+            plugin_version=plugin_version,
             setup_inputs={
                 "products_csv": str(runtime.products.path or ""),
                 "products_available": bool(runtime.products.path and runtime.products.path.is_file()),

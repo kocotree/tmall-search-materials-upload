@@ -19,7 +19,7 @@ from ..io_tables import sha256_file
 MATERIAL_RECOMMEND_QUERY = "?tab=recommend"
 PUBLISH_FRAME_FRAGMENT = "/publish-feeds/imagePreview"
 MATERIAL_SELECTOR_FRAME_FRAGMENT = "sucai-selector-ng"
-PRODUCT_SCOPE_ATTEMPTS = 50
+PRODUCT_SCOPE_ATTEMPTS = 200
 PRODUCT_SCOPE_DELAY_MS = 300
 AI_COPY_TIMEOUT_MS = 90_000
 AI_COPY_POLL_MS = 500
@@ -311,8 +311,27 @@ def _open_recommend_list(page, material_center_url: str) -> None:
         wait_until="domcontentloaded",
         timeout=30_000,
     )
-    page.wait_for_timeout(2_500)
     _dismiss_guides(page)
+
+
+def _recommend_list_is_current(page, material_center_url: str) -> bool:
+    target = _recommend_url(material_center_url).rstrip("/")
+    current = str(getattr(page, "url", "") or "").split("#", 1)[0].rstrip("/")
+    if current != target:
+        return False
+    return not any(
+        PUBLISH_FRAME_FRAGMENT in str(getattr(frame, "url", "") or "")
+        for frame in list(getattr(page, "frames", []) or [])
+    )
+
+
+def _ensure_recommend_list(page, material_center_url: str) -> bool:
+    """Open the list only when the preceding slot did not already return there."""
+
+    if _recommend_list_is_current(page, material_center_url):
+        return False
+    _open_recommend_list(page, material_center_url)
+    return True
 
 
 def _page_scopes(page) -> list[Any]:
@@ -414,6 +433,22 @@ def _find_product_row(page, product_id: str):
             f"scope={_scope_url(scope, 0)}"
         ),
     )
+
+
+def _find_product_row_with_recovery(
+    page,
+    product_id: str,
+    material_center_url: str,
+):
+    """Retry one slow list hydration without replaying completed slots."""
+
+    try:
+        return _find_product_row(page, product_id)
+    except QianniuCopyError as error:
+        if error.reason_code != "QIANNIU_PRODUCT_SEARCH_NOT_FOUND":
+            raise
+    _open_recommend_list(page, material_center_url)
+    return _find_product_row(page, product_id)
 
 
 def _slot_cells(row):
@@ -795,7 +830,7 @@ def generate_qianniu_copy_drafts(
 
     occurrence_by_product: dict[str, int] = {}
     drafts: list[dict[str, Any]] = []
-    _open_recommend_list(page, material_center_url)
+    _ensure_recommend_list(page, material_center_url)
     try:
         for raw_slot in slots:
             slot_id = str(raw_slot.get("slot_id", "")).strip()
@@ -816,7 +851,11 @@ def generate_qianniu_copy_drafts(
                     "QIANNIU_SLOT_OCCURRENCE_INVALID",
                     f"商品 {product_id} 的空坑位序号不可为负数",
                 )
-            row = _find_product_row(page, product_id)
+            row = _find_product_row_with_recovery(
+                page,
+                product_id,
+                material_center_url,
+            )
             empty_positions = _empty_slot_positions(row)
             requested_position = raw_slot.get("remote_slot_position")
             if requested_position is not None:

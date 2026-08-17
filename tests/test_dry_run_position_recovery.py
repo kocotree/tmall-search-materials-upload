@@ -1,7 +1,9 @@
 import pytest
 
 from upload_search_materials.dry_run_workflow import (
+    _slots_copy_blocking_messages,
     _copy_remote_positions,
+    advance_slots_copy_after_submit,
     return_blocked_dry_run_to_slots_copy,
 )
 from upload_search_materials.interaction.session import InteractionConflict
@@ -126,3 +128,62 @@ def test_dry_run_return_refuses_unrelated_current_stage(tmp_path):
 
     with pytest.raises(InteractionConflict, match="DRY_RUN_RETURN_STAGE_CHANGED"):
         return_blocked_dry_run_to_slots_copy(store, session.session_id)
+
+
+def test_blocked_automatic_dry_run_returns_to_copy_page_with_business_guidance(
+    tmp_path, monkeypatch
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    with store._session_lock(session.session_id):
+        state = store.load_session(session.session_id)
+        state["current_stage"] = "slots_copy"
+        store._write_session_state(session.session_id, state)
+    store.save_input(
+        session.session_id,
+        "slots_copy",
+        {"slot_assignments": [], "copy_edits": [], "user_notes": ""},
+    )
+    document = {
+        "schema_version": 1,
+        "session_id": session.session_id,
+        "stage_id": "dry_run",
+        "source_stage": {},
+        "status": "blocked",
+        "product_count": 1,
+        "task_count": 1,
+        "media_count": 3,
+        "blocking_reasons": [
+            "DRY_RUN_REMOTE_SLOT_POSITION_MISSING:p1-slot-1"
+        ],
+        "warnings": [],
+        "tasks": [],
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        "upload_search_materials.dry_run_workflow.build_dry_run_document",
+        lambda *args, **kwargs: document,
+    )
+
+    def capture_restore(*args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "upload_search_materials.dry_run_workflow._restore_slots_copy_review_context",
+        capture_restore,
+    )
+
+    result = advance_slots_copy_after_submit(store, session.session_id)
+
+    assert result["next_stage"] == "slots_copy"
+    assert result["status"] == "needs_user_input"
+    state = store.load_session(session.session_id)
+    assert state["current_stage"] == "slots_copy"
+    assert state["stages"]["slots_copy"]["status"] == "needs_user_input"
+    assert state["stages"]["dry_run"]["status"] == "needs_user_input"
+    assert captured["blocking_reasons"] == [
+        "坑位 p1-slot-1：未取得千牛目标坑位，请重新生成或载入该坑位的标题与描述。"
+    ]
+    assert _slots_copy_blocking_messages(document) == captured["blocking_reasons"]

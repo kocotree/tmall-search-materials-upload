@@ -3,6 +3,8 @@ import pytest
 from upload_search_materials.browser.qianniu_copy import (
     QianniuCopyError,
     _click_visible_image_text_action,
+    _ensure_recommend_list,
+    _find_product_row_with_recovery,
     _generate_copy,
     _read_ai_result_panel,
     _reset_material_selector_to_all_images,
@@ -323,6 +325,119 @@ def test_product_scope_waits_for_spa_table_hydration(monkeypatch):
     assert scope is product_scope
     assert search.placeholder == "商品名称/ID"
     assert page.wait_count == 2
+
+
+def test_product_scope_keeps_waiting_past_previous_slow_page_limit():
+    product_scope = _FakeScope(
+        "https://myseller.taobao.com/material-center",
+        ["商品名称/ID"],
+        table_ready=False,
+    )
+
+    def hydrate(wait_count):
+        if wait_count == 55:
+            product_scope.table_ready = True
+
+    page = _FakePage([product_scope], on_wait=hydrate)
+    scope, search = _wait_for_product_scope(page)
+
+    assert scope is product_scope
+    assert search.placeholder == "商品名称/ID"
+    assert page.wait_count == 55
+
+
+def test_product_scope_timeout_refreshes_once_before_retrying(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    attempts = []
+    refreshes = []
+
+    def find(_page, _product_id):
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise QianniuCopyError("QIANNIU_PRODUCT_SEARCH_NOT_FOUND")
+        return "product-row"
+
+    monkeypatch.setattr(copy_module, "_find_product_row", find)
+    monkeypatch.setattr(
+        copy_module,
+        "_open_recommend_list",
+        lambda page, url: refreshes.append((page, url)),
+    )
+    page = object()
+
+    row = _find_product_row_with_recovery(
+        page,
+        "886506466908",
+        "https://example.test/material-center",
+    )
+
+    assert row == "product-row"
+    assert attempts == [1, 2]
+    assert refreshes == [(page, "https://example.test/material-center")]
+
+
+def test_recommend_list_reuses_page_returned_by_previous_slot(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    target = "https://example.test/material-center?tab=recommend"
+    page = type(
+        "Page",
+        (),
+        {
+            "url": target,
+            "frames": [type("Frame", (), {"url": target})()],
+        },
+    )()
+    navigations = []
+    monkeypatch.setattr(
+        copy_module,
+        "_open_recommend_list",
+        lambda page, url: navigations.append((page, url)),
+    )
+
+    opened = _ensure_recommend_list(
+        page,
+        "https://example.test/material-center",
+    )
+
+    assert opened is False
+    assert navigations == []
+
+
+def test_recommend_list_does_not_reuse_an_unclosed_publish_form(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    target = "https://example.test/material-center?tab=recommend"
+    page = type(
+        "Page",
+        (),
+        {
+            "url": target,
+            "frames": [
+                type("Frame", (), {"url": target})(),
+                type(
+                    "Frame",
+                    (),
+                    {"url": "https://example.test/publish-feeds/imagePreview"},
+                )(),
+            ],
+        },
+    )()
+    navigations = []
+    monkeypatch.setattr(
+        copy_module,
+        "_open_recommend_list",
+        lambda page, url: navigations.append((page, url)),
+    )
+
+    opened = _ensure_recommend_list(
+        page,
+        "https://example.test/material-center",
+    )
+
+    assert opened is True
+    assert navigations == [(page, "https://example.test/material-center")]
 
 
 def test_product_scope_reports_observed_help_input_on_timeout(
