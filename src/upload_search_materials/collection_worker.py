@@ -15,6 +15,11 @@ import time
 from typing import Any
 
 from .browser.config import SelectorConfigError, load_selector_profile
+from .browser.session import CdpUnavailable, open_cdp_page
+from .collection_readiness import (
+    SelectorBootstrapError,
+    ensure_production_selector_profile,
+)
 from .collection_runtime import (
     CollectionBinding,
     CollectionRuntimeError,
@@ -49,6 +54,39 @@ WORKER_MANIFEST_NAME = "worker.private.json"
 PUBLIC_WORKER_NAME = "worker.json"
 ATTEMPT_DOCUMENT_NAME = "attempt.json"
 CURRENT_ATTEMPT_NAME = "current-attempt.json"
+
+
+def _write_collection_readiness_evidence(
+    store: SessionStore,
+    session_id: str,
+    handoff: dict[str, Any],
+    validation: dict[str, Any],
+) -> Path:
+    page_evidence = dict(validation.get("page_evidence") or {})
+    page_evidence.setdefault(
+        "field_results", dict(validation.get("field_results") or {})
+    )
+    path = (
+        store._session_path(session_id)
+        / "collected"
+        / "promotion"
+        / "collection-readiness-evidence.json"
+    )
+    store._write_json_atomic(
+        path,
+        {
+            **page_evidence,
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "setup",
+            "revision": handoff["revision"],
+            "input_sha256": handoff["input_sha256"],
+            "ready": validation.get("ready") is True,
+            "reason_code": str(validation.get("reason_code") or "READY"),
+            "validated_at": validation.get("validated_at") or iso_timestamp(),
+        },
+    )
+    return path
 
 
 def _windows_process_creation_identity(pid: int) -> str | None:
@@ -270,31 +308,85 @@ def launch_collection_worker(
         }
     if state == "indeterminate":
         raise InteractionConflict("COLLECTION_WORKER_OWNERSHIP_INDETERMINATE")
+    setup_input = store.read_optional_stage_document(
+        session_id, "setup", "input"
+    )
+    target_store = str(
+        (setup_input or {}).get("values", {}).get("store", "")
+    ).strip()
     selected_profile = selectors_path or runtime.selectors_file
-    if selected_profile is None:
-        return _write_selector_failure_result(
-            store,
-            session_id,
-            handoff,
-            claim,
-            SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND"),
-            attempt_id=attempt_id,
-        )
     try:
+        if selected_profile is None:
+            raise SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND")
         profile = load_selector_profile(
             selected_profile,
             purpose="high_value_collection",
             production=True,
         )
-    except SelectorConfigError as error:
-        return _write_selector_failure_result(
-            store,
-            session_id,
-            handoff,
-            claim,
-            error,
-            attempt_id=attempt_id,
-        )
+    except SelectorConfigError:
+        validation: dict[str, Any] | None = None
+        try:
+            with open_cdp_page(
+                cdp_url or runtime.cdp_url,
+                runtime.material_center_url,
+            ) as page:
+                runtime, profile, validation = (
+                    ensure_production_selector_profile(
+                        runtime,
+                        page,
+                        expected_store=target_store,
+                        selectors_path=selected_profile,
+                    )
+                )
+        except SelectorBootstrapError as error:
+            validation = error.validation
+            readiness_evidence = _write_collection_readiness_evidence(
+                store, session_id, handoff, validation
+            )
+            return _write_selector_failure_result(
+                store,
+                session_id,
+                handoff,
+                claim,
+                error,
+                attempt_id=attempt_id,
+                additional_evidence=[readiness_evidence],
+            )
+        except SelectorConfigError as error:
+            return _write_selector_failure_result(
+                store,
+                session_id,
+                handoff,
+                claim,
+                error,
+                attempt_id=attempt_id,
+            )
+        except CdpUnavailable as error:
+            return _write_selector_failure_result(
+                store,
+                session_id,
+                handoff,
+                claim,
+                SelectorConfigError(str(error).split(":", 1)[0]),
+                attempt_id=attempt_id,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            return _write_selector_failure_result(
+                store,
+                session_id,
+                handoff,
+                claim,
+                SelectorConfigError(
+                    "SELECTOR_PROFILE_BOOTSTRAP_FAILED:"
+                    f"{type(error).__name__}"
+                ),
+                attempt_id=attempt_id,
+            )
+        if validation is not None:
+            _write_collection_readiness_evidence(
+                store, session_id, handoff, validation
+            )
+    selected_profile = profile.path
     try:
         preflight = preflight_runtime_environment(
             runtime,
@@ -316,12 +408,6 @@ def launch_collection_worker(
         )
         return {"status": "needs_user_input", "result": result}
     environment = preflight["environment"]
-    setup_input = store.read_optional_stage_document(
-        session_id, "setup", "input"
-    )
-    target_store = str(
-        (setup_input or {}).get("values", {}).get("store", "")
-    ).strip()
     binding = CollectionBinding(
         session_id=session_id,
         stage_id="setup",

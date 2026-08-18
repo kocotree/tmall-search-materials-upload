@@ -78,6 +78,40 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
+test("agent-owned setup diagnostics wait for system recovery", () => {
+  assert.equal(typeof UiState.technicalDiagnosticView, "function");
+  let state = UiState.createState("setup");
+  state = UiState.receiveStage(state, {
+    stageId: "setup",
+    status: "needs_user_input",
+    result: {
+      agent_diagnostic: {
+        status: "open",
+        user_action_required: false,
+      },
+    },
+  });
+
+  assert.deepEqual(UiState.technicalDiagnosticView(state), {
+    active: true,
+    statusLabel: "系统正在处理异常",
+    submitLabel: "等待系统恢复",
+    message: "系统正在恢复本机采集配置，当前业务数据已保留。",
+  });
+
+  state = UiState.receiveStage(state, {
+    stageId: "setup",
+    status: "needs_user_input",
+    result: {
+      agent_diagnostic: {
+        status: "open",
+        user_action_required: true,
+      },
+    },
+  });
+  assert.equal(UiState.technicalDiagnosticView(state).active, false);
+});
+
 test("completeness products can be filtered by owner without changing status scope", () => {
   assert.equal(typeof UiState.filterCompletenessProducts, "function");
   const products = [

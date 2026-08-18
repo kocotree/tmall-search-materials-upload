@@ -65,6 +65,23 @@
     return { mode: "result", result: state.result };
   }
 
+  function technicalDiagnosticView(state) {
+    const diagnostic = state?.result?.agent_diagnostic;
+    const active = ["needs_user_input", "blocked"].includes(
+      String(state?.serverStatus || ""),
+    )
+      && diagnostic?.status === "open"
+      && diagnostic.user_action_required !== true;
+    return {
+      active,
+      statusLabel: active ? "系统正在处理异常" : "",
+      submitLabel: active ? "等待系统恢复" : "",
+      message: active
+        ? "系统正在恢复本机采集配置，当前业务数据已保留。"
+        : "",
+    };
+  }
+
   function submissionView(state) {
     const createdAt = state.submission?.created_at;
     return { createdAt: typeof createdAt === "string" ? createdAt : null };
@@ -574,6 +591,7 @@
     stagePollChanged,
     stageSnapshot,
     submissionView,
+    technicalDiagnosticView,
     selectInitialStage,
     selectionPreflightWeight,
     switchStage,

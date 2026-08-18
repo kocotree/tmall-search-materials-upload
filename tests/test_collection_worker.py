@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 import os
@@ -17,6 +18,8 @@ from upload_search_materials.collection_worker import (
     run_collection_worker,
 )
 from upload_search_materials.collection_runtime import attempt_path
+from upload_search_materials.collection_readiness import SelectorBootstrapError
+from upload_search_materials.browser.config import load_selector_profile
 import upload_search_materials.collection_worker as worker_module
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.io_tables import PRODUCT_REQUIRED_COLUMNS
@@ -156,6 +159,12 @@ def test_launcher_returns_promptly_and_reuses_matching_live_worker(
         "upload_search_materials.collection_worker.process_identity",
         lambda pid: f"windows:{pid}:created",
     )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_worker.open_cdp_page",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an existing production profile must not open bootstrap CDP"
+        ),
+    )
     first = launch_collection_worker(
         runs_root=runs,
         session_id=session.session_id,
@@ -185,14 +194,99 @@ def test_launcher_returns_promptly_and_reuses_matching_live_worker(
     assert "ownership_token" not in first["worker"]
 
 
-def test_missing_selector_writes_retryable_result_and_releases_claim(tmp_path):
+def test_missing_selector_bootstraps_then_launches_collection(
+    tmp_path, monkeypatch
+):
+    runtime, runs, _, session, selectors = prepare(tmp_path)
+    runtime = replace(runtime, selectors_file=None)
+    profile = load_selector_profile(
+        selectors,
+        purpose="high_value_collection",
+        production=True,
+    )
+
+    @contextmanager
+    def page_context(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(
+        "upload_search_materials.collection_worker.open_cdp_page",
+        page_context,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_worker."
+        "ensure_production_selector_profile",
+        lambda selected_runtime, _page, **_kwargs: (
+            replace(selected_runtime, selectors_file=selectors),
+            profile,
+            {
+                "ready": True,
+                "reason_code": "READY",
+                "field_results": {},
+                "page_evidence": {
+                    "page_identity": "material_center",
+                    "observed_store": "测试店铺",
+                    "store_match": True,
+                    "pagination_state": {"verified": True},
+                },
+                "validated_at": "2026-08-18T08:00:00+00:00",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_worker.process_identity",
+        lambda pid: f"windows:{pid}:created",
+    )
+
+    launched = launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+        popen=lambda *_args, **_kwargs: Process(),
+        identity_provider=lambda pid: f"windows:{pid}:created",
+    )
+
+    assert launched["status"] == "processing"
+    evidence = (
+        session.path
+        / "collected"
+        / "promotion"
+        / "collection-readiness-evidence.json"
+    )
+    assert json.loads(evidence.read_text(encoding="utf-8"))["ready"] is True
+
+
+def test_failed_selector_bootstrap_writes_retryable_result_and_releases_claim(
+    tmp_path, monkeypatch
+):
     runtime, runs, store, session, _ = prepare(tmp_path)
     runtime = replace(runtime, selectors_file=None)
-    store.wait_for_handoff(
-        session.session_id,
-        "setup",
-        timeout_seconds=0.5,
-        claimant_id="collection-worker",
+
+    @contextmanager
+    def page_context(*_args, **_kwargs):
+        yield object()
+
+    validation = {
+        "ready": False,
+        "reason_code": "SELECTOR_FIELD_INVALID:promotion_rows",
+        "field_results": {"promotion_rows": {"ready": False}},
+        "page_evidence": {
+            "reason_code": "SELECTOR_FIELD_INVALID:promotion_rows"
+        },
+        "validated_at": "2026-08-18T08:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        "upload_search_materials.collection_worker.open_cdp_page",
+        page_context,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_worker."
+        "ensure_production_selector_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SelectorBootstrapError(
+                "SELECTOR_FIELD_INVALID:promotion_rows", validation
+            )
+        ),
     )
 
     launched = launch_collection_worker(
@@ -203,19 +297,18 @@ def test_missing_selector_writes_retryable_result_and_releases_claim(tmp_path):
 
     assert launched["status"] == "needs_user_input"
     assert launched["result"]["blocking_reasons"] == [
-        "SELECTOR_PROFILE_NOT_FOUND"
+        "SELECTOR_FIELD_INVALID:promotion_rows"
     ]
     assert store.processing_claim(session.session_id, "setup") is None
     assert store.load_session(session.session_id)["stages"]["setup"]["status"] == (
         "needs_user_input"
     )
-    assert (session.path / "collected" / "selector-error.json").is_file()
     diagnostic = json.loads(
         (session.path / "agent-diagnostics" / "current.json").read_text(
             encoding="utf-8"
         )
     )
-    assert diagnostic["reason_code"] == "SELECTOR_PROFILE_NOT_FOUND"
+    assert diagnostic["reason_code"] == "SELECTOR_FIELD_INVALID"
 
 
 def test_preflight_failure_writes_result_and_releases_claim(tmp_path, monkeypatch):

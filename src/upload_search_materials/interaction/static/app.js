@@ -451,8 +451,8 @@
       "[data-collection-runtime-summary]",
     );
     selectorNode.textContent = selector.configured
-      ? `选择器已验证：${selector.profile_name} · ${selector.profile_version}`
-      : `选择器待修复：${selector.reason_code || "SELECTOR_PROFILE_NOT_FOUND"}`;
+      ? "采集页面适配已就绪"
+      : "首次采集时将自动完成页面适配";
     cdpNode.textContent = cdp.connected
       ? `CDP Chrome 已连接：${cdp.endpoint} · ${cdp.pages?.length || 0} 个页面`
       : `CDP Chrome 未连接：${cdp.reason_code || "CDP_UNAVAILABLE"}`;
@@ -825,7 +825,12 @@
   function renderStatus() {
     updateImageSourceIncompleteHint();
     const status = uiState.dirty ? "draft" : uiState.serverStatus;
-    const copy = statusCopy[status] || statusCopy.draft;
+    const technicalDiagnostic = currentStageId === "setup"
+      ? UiState.technicalDiagnosticView(uiState)
+      : { active: false };
+    const copy = technicalDiagnostic.active
+      ? technicalDiagnostic.statusLabel
+      : statusCopy[status] || statusCopy.draft;
     statusBadge.textContent = copy;
     statusBadge.dataset.status = status;
     handoffStatus.textContent = copy;
@@ -837,7 +842,9 @@
     const initialCompletenessReview = currentStageId === "completeness"
       && !uiState.submission
       && status === "needs_user_input";
-    submitButton.textContent = currentStageId === "slots_copy"
+    submitButton.textContent = technicalDiagnostic.active
+      ? technicalDiagnostic.submitLabel
+      : currentStageId === "slots_copy"
       && !["ready_for_agent", "processing", "completed"].includes(status)
       ? "确认文案并自动预检"
       : currentStageId === "approval"
@@ -862,7 +869,9 @@
     const approvalHasSelectedTasks = currentStageId !== "approval" || String(
       activeForm()?.querySelector('[name="task_ids"]')?.value || "",
     ).split(/\r?\n/).some((taskId) => taskId.trim());
-    submitButton.disabled = lockedByServer || !approvalHasSelectedTasks;
+    submitButton.disabled = lockedByServer
+      || technicalDiagnostic.active
+      || !approvalHasSelectedTasks;
     if (
       currentStageId === "asset_matching"
       && ["queued", "running"].includes(currentGalleryJob?.status)
@@ -895,6 +904,9 @@
       actionMessage.textContent = goCurrentStageButton.hidden
         ? reason
         : `${reason} 可进入任务当前阶段继续。`;
+    }
+    if (technicalDiagnostic.active) {
+      actionMessage.textContent = technicalDiagnostic.message;
     }
     withdrawButton.hidden = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;
     withdrawButton.disabled = uiState.serverStatus !== "ready_for_agent" || uiState.dirty;

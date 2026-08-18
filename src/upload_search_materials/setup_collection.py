@@ -389,6 +389,7 @@ def _write_selector_failure_result(
     error: SelectorConfigError,
     *,
     attempt_id: str | None = None,
+    additional_evidence: tuple[Any, ...] | list[Any] = (),
 ) -> dict[str, Any]:
     """Persist a retryable selector failure and release the exact claim."""
 
@@ -408,7 +409,7 @@ def _write_selector_failure_result(
             else "生产选择器配置无效"
         ),
         blocking_reasons=[str(error)],
-        evidence=[str(evidence)],
+        evidence=[str(evidence), *(str(item) for item in additional_evidence)],
         next_action="在前端修复生产选择器后恢复同一会话",
         claim_id=str(claim["claim_id"]),
         attempt_id=(

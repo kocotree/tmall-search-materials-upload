@@ -11,12 +11,14 @@ import yaml
 
 from .browser.config import (
     SelectorConfigError,
+    SelectorProfile,
     load_selector_profile,
     required_selectors,
 )
 from .browser.material_page import (
     PAGINATION_SELECTOR_FIELDS,
     PaginationStateError,
+    prepare_high_value_validation_page,
     read_pagination_state,
 )
 from .browser.session import (
@@ -27,7 +29,7 @@ from .browser.session import (
     validate_collection_page,
 )
 from .collection_runtime import COLLECTION_RUNTIME_SCHEMA_VERSION
-from .runtime_config import RuntimeConfig
+from .runtime_config import RuntimeConfig, save_selector_profile_path
 from .runtime_preflight import environment_fingerprint
 from .time_utils import iso_timestamp
 
@@ -95,6 +97,14 @@ DEFAULT_CANDIDATE_SELECTORS = {
         'button:has-text("知道了"), [aria-label*="关闭"]'
     ),
 }
+
+
+class SelectorBootstrapError(SelectorConfigError):
+    """A machine-local candidate failed current-DOM validation."""
+
+    def __init__(self, reason_code: str, validation: Mapping[str, Any]) -> None:
+        super().__init__(reason_code)
+        self.validation = dict(validation)
 
 
 def _check(
@@ -538,3 +548,108 @@ def promote_selector_candidate(
         "purpose": promoted.purpose,
         "validated_at": validation["validated_at"],
     }
+
+
+def ensure_production_selector_profile(
+    runtime: RuntimeConfig,
+    page: Any,
+    *,
+    expected_store: str,
+    selectors_path: Path | None = None,
+) -> tuple[RuntimeConfig, SelectorProfile, dict[str, Any] | None]:
+    """Reuse a production profile or bootstrap one from the current live DOM."""
+
+    explicit_path = (
+        Path(selectors_path).expanduser().resolve()
+        if selectors_path
+        else None
+    )
+    selected = explicit_path or runtime.selectors_file
+    if selected is None:
+        selected = (
+            runtime.user_data_root or runtime.workspace_root / ".local-cache"
+        ) / "config" / "selectors.local.yaml"
+    selected = Path(selected).expanduser().resolve()
+
+    if selected.is_file():
+        try:
+            production_profile = load_selector_profile(
+                selected,
+                purpose="high_value_collection",
+                production=True,
+            )
+        except SelectorConfigError as production_error:
+            try:
+                document = yaml.safe_load(
+                    selected.read_text(encoding="utf-8-sig")
+                ) or {}
+            except (OSError, UnicodeError, yaml.YAMLError):
+                raise production_error
+            if (
+                not isinstance(document, Mapping)
+                or document.get("production") is not False
+            ):
+                raise production_error
+        else:
+            return runtime, production_profile, None
+    else:
+        if explicit_path is not None:
+            raise SelectorConfigError(f"SELECTOR_PROFILE_NOT_FOUND: {selected}")
+        create_selector_candidate(
+            selected,
+            material_center_url=runtime.material_center_url,
+        )
+
+    candidate = load_selector_profile(
+        selected,
+        purpose="high_value_collection",
+        production=False,
+    )
+    try:
+        prepare_high_value_validation_page(page, candidate.selectors)
+    except Exception as error:
+        reason_code = str(error).split(":", 1)[0].strip()
+        if not reason_code or reason_code.upper() != reason_code:
+            reason_code = "SELECTOR_VALIDATION_PAGE_PREPARATION_FAILED"
+        raise SelectorBootstrapError(
+            reason_code,
+            {
+                "ready": False,
+                "reason_code": reason_code,
+                "candidate_sha256": candidate.sha256,
+                "field_results": {},
+                "page_evidence": {
+                    "reason_code": reason_code,
+                    "detail": str(error),
+                },
+                "validated_at": iso_timestamp(),
+            },
+        ) from error
+    validation = validate_selector_candidate(
+        selected,
+        page,
+        expected_store=expected_store,
+    )
+    if validation.get("ready") is not True:
+        raise SelectorBootstrapError(
+            str(
+                validation.get("reason_code")
+                or "SELECTOR_CANDIDATE_NOT_VALIDATED"
+            ),
+            validation,
+        )
+
+    promote_selector_candidate(selected, validation)
+    installed_runtime = save_selector_profile_path(runtime, selected)
+    production_profile = load_selector_profile(
+        installed_runtime.selectors_file,
+        purpose="high_value_collection",
+        production=True,
+    )
+    validation["page_evidence"]["selector_profile"] = {
+        "name": production_profile.name,
+        "version": production_profile.version,
+        "sha256": production_profile.sha256,
+        "purpose": production_profile.purpose,
+    }
+    return installed_runtime, production_profile, validation

@@ -1319,6 +1319,9 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "兼容监听已连接" in javascript
     assert "工作台后台正在处理" in javascript
     assert "工作台后台未连接" in javascript
+    assert "technicalDiagnosticView" in javascript
+    assert "系统正在处理异常" in javascript
+    assert "等待系统恢复" in javascript
     assert "maxConcurrent: 6" in javascript
     assert "maxWeight: 8" in javascript
     assert "排队中，可取消采用" in javascript

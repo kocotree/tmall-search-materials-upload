@@ -64,6 +64,56 @@ def test_dispatcher_recovers_handoff_submitted_before_start(tmp_path):
         dispatcher.stop()
 
 
+def test_dispatcher_retries_existing_selector_failure_once_after_restart(
+    tmp_path,
+):
+    store = SessionStore(tmp_path / "runs")
+    session = store.create_session()
+    handoff = store.save_input(
+        session.session_id,
+        "setup",
+        {"store": "测试店铺"},
+    )
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.5,
+        claimant_id="workbench-dispatcher",
+    )
+    claim = store.processing_claim(session.session_id, "setup")
+    assert claim is not None
+    store.write_result(
+        session.session_id,
+        "setup",
+        int(handoff["revision"]),
+        str(handoff["input_sha256"]),
+        status="needs_user_input",
+        summary="生产选择器配置无效",
+        blocking_reasons=["SELECTOR_PROFILE_NOT_FOUND"],
+        claim_id=str(claim["claim_id"]),
+    )
+    processor = RecordingProcessor()
+    dispatcher = WorkflowDispatcher(
+        store,
+        session.session_id,
+        processor,
+        poll_seconds=30,
+    )
+
+    dispatcher.start()
+    try:
+        assert processor.called.wait(2)
+        assert len(processor.tasks) == 1
+        assert processor.tasks[0].generation == (
+            f"ready-r{handoff['revision']}"
+        )
+        assert dispatcher.notify() == 0
+        time.sleep(0.05)
+        assert len(processor.tasks) == 1
+    finally:
+        dispatcher.stop()
+
+
 def test_dispatcher_wakes_for_handoff_submitted_after_start(tmp_path):
     store = SessionStore(tmp_path / "runs")
     session = store.create_session()

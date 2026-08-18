@@ -2,11 +2,14 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from upload_search_materials.collection_readiness import (
+    SelectorBootstrapError,
     build_collection_readiness,
     create_selector_candidate,
+    ensure_production_selector_profile,
     project_environment_status,
     promote_selector_candidate,
     validate_selector_candidate,
@@ -152,6 +155,116 @@ def test_candidate_is_non_production_until_all_current_dom_fields_validate(
     assert promoted["production"] is True
     assert final["production"] is True
     assert final["current_dom_validation"]["observed_store"] == "测试店铺"
+
+
+def test_first_install_bootstraps_and_installs_validated_profile(
+    tmp_path, monkeypatch
+):
+    user_data = tmp_path / "user-data"
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)},
+        start=tmp_path,
+    )
+    observed = {}
+
+    monkeypatch.setattr(
+        "upload_search_materials.collection_readiness."
+        "prepare_high_value_validation_page",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def validate(path, _page, *, expected_store):
+        candidate = yaml.safe_load(path.read_text(encoding="utf-8"))
+        observed["production_during_validation"] = candidate["production"]
+        candidate_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        return {
+            "ready": True,
+            "reason_code": "READY",
+            "candidate_sha256": candidate_sha256,
+            "field_results": {"promotion_rows": {"ready": True}},
+            "page_evidence": {
+                "page_identity": "material_center",
+                "observed_store": expected_store,
+                "store_match": True,
+                "pagination_state": {"verified": True},
+            },
+            "validated_at": "2026-08-18T08:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "upload_search_materials.collection_readiness."
+        "validate_selector_candidate",
+        validate,
+    )
+
+    installed_runtime, profile, validation = (
+        ensure_production_selector_profile(
+            runtime,
+            object(),
+            expected_store="测试店铺",
+        )
+    )
+
+    assert observed["production_during_validation"] is False
+    assert validation["ready"] is True
+    assert profile.path == installed_runtime.selectors_file
+    assert installed_runtime.selectors_file == (
+        user_data / "config" / "selectors.local.yaml"
+    ).resolve()
+    assert yaml.safe_load(
+        installed_runtime.selectors_file.read_text(encoding="utf-8")
+    )["production"] is True
+    runtime_document = json.loads(
+        (user_data / "config" / "runtime.json").read_text(encoding="utf-8")
+    )
+    assert runtime_document["selectors_file"] == str(
+        installed_runtime.selectors_file
+    )
+
+
+def test_first_install_keeps_failed_candidate_non_production(
+    tmp_path, monkeypatch
+):
+    user_data = tmp_path / "user-data"
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)},
+        start=tmp_path,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_readiness."
+        "prepare_high_value_validation_page",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.collection_readiness."
+        "validate_selector_candidate",
+        lambda path, _page, **_kwargs: {
+            "ready": False,
+            "reason_code": "SELECTOR_FIELD_INVALID:promotion_rows",
+            "candidate_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "field_results": {"promotion_rows": {"ready": False}},
+            "page_evidence": {
+                "reason_code": "SELECTOR_FIELD_INVALID:promotion_rows"
+            },
+            "validated_at": "2026-08-18T08:00:00+00:00",
+        },
+    )
+
+    with pytest.raises(
+        SelectorBootstrapError,
+        match="SELECTOR_FIELD_INVALID:promotion_rows",
+    ):
+        ensure_production_selector_profile(
+            runtime,
+            object(),
+            expected_store="测试店铺",
+        )
+
+    candidate = user_data / "config" / "selectors.local.yaml"
+    assert yaml.safe_load(candidate.read_text(encoding="utf-8"))[
+        "production"
+    ] is False
+    assert not (user_data / "config" / "runtime.json").exists()
 
 
 def test_candidate_human_check_is_one_parseable_playwright_css_selector(tmp_path):

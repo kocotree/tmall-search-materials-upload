@@ -37,6 +37,23 @@ SUPPORTED_HANDOFF_ACTIONS = frozenset(
 )
 
 
+def _selector_failure_is_recoverable(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    reasons = result.get("blocking_reasons", [])
+    if not isinstance(reasons, list):
+        return False
+    codes = {
+        str(reason).split(":", 1)[0].strip()
+        for reason in reasons
+    }
+    return any(
+        code.startswith("SELECTOR_")
+        or code == "PAGINATION_ORIGIN_UNVERIFIED"
+        for code in codes
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -273,6 +290,11 @@ class WorkflowDispatcher:
         claim = self.store.processing_claim(self.session_id, stage_id)
         handoff_recoverable = status == "ready_for_agent"
         handoff_generation = f"ready-r{stage_state.get('revision', 0)}"
+        if status == "needs_user_input" and stage_id == "setup":
+            result = self.store.read_optional_stage_document(
+                self.session_id, "setup", "result"
+            )
+            handoff_recoverable = _selector_failure_is_recoverable(result)
         if (
             status == "processing"
             and isinstance(claim, dict)
