@@ -9,7 +9,7 @@ import subprocess
 import time
 from typing import Mapping
 from urllib.error import URLError
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import build_opener, ProxyHandler, Request
 
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
@@ -27,6 +27,48 @@ class HumanCheckRequired(RuntimeError):
 
 class LoginInteractionRequired(RuntimeError):
     pass
+
+
+def recommendation_material_center_url(value: str) -> str:
+    """Return the official material page with the recommendation tab selected."""
+
+    parts = urlsplit(str(value).strip())
+    query = [
+        (key, item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if key.casefold() != "tab"
+    ]
+    query.append(("tab", "recommend"))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+
+
+def prepare_collection_page(
+    page,
+    material_center_url: str,
+    selectors: Mapping[str, str],
+) -> dict[str, object]:
+    """Start loading the exact collection page and settle recognized safe guides."""
+
+    target_url = recommendation_material_center_url(material_center_url)
+    current_url = str(getattr(page, "url", "") or "").strip()
+    if any(
+        marker in current_url.casefold()
+        for marker in ("login", "passport", "oauth", "authorize")
+    ):
+        return {"navigated": False, "login_required": True, "url": current_url}
+    if current_url != target_url:
+        page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+    from .material_page import _settle_safe_popups
+
+    closed = _settle_safe_popups(page, dict(selectors), delay_ms=250)
+    return {
+        "navigated": current_url != target_url,
+        "login_required": False,
+        "closed_popups": closed,
+        "url": str(getattr(page, "url", "") or target_url),
+    }
 
 
 class CdpUnavailable(RuntimeError):

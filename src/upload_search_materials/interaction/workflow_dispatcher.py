@@ -64,7 +64,14 @@ def _team_index_failure_is_recoverable(result: Any) -> bool:
         str(reason).split(":", 1)[0].strip()
         for reason in reasons
     }
-    return "TEAM_INDEX_NO_VALID_LOCAL_CACHE" in codes
+    return bool(
+        codes
+        & {
+            "TEAM_INDEX_NO_VALID_LOCAL_CACHE",
+            "TEAM_INDEX_AUTHENTICATION_REQUIRED",
+            "TEAM_INDEX_NO_SOURCES",
+        }
+    )
 
 
 def _now() -> str:
@@ -275,6 +282,17 @@ class WorkflowDispatcher:
             if self._enqueue(task):
                 enqueued += 1
         return enqueued
+
+    def replace_runtime_and_retry(self, runtime: RuntimeConfig) -> int:
+        """Refresh machine-local paths and retry the current recoverable handoff once."""
+
+        if isinstance(self.processor, WorkflowProcessor):
+            self.processor.runtime = runtime
+        tasks = self._discover_tasks()
+        with self._state_lock:
+            for task in tasks:
+                self._handled_attempt_keys.discard(task.attempt_key)
+        return sum(1 for task in tasks if self._enqueue(task))
 
     def public_status(self) -> dict[str, Any]:
         current: dict[str, Any] = {}

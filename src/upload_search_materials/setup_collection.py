@@ -26,6 +26,7 @@ from .browser.session import (
     ensure_cdp_browser,
     human_check_visible,
     open_cdp_page,
+    recommendation_material_center_url,
     validate_collection_page,
 )
 from .agent_diagnostics import write_agent_diagnostic
@@ -967,9 +968,8 @@ def process_setup_collection(
                 page_factory(cdp_url or runtime.cdp_url)
             )
         else:
-            material_center_url = (
-                profile.material_center_url
-                or runtime.material_center_url
+            material_center_url = recommendation_material_center_url(
+                profile.material_center_url or runtime.material_center_url
             )
             ensure_cdp_browser(
                 executable=runtime.browser_executable,

@@ -99,9 +99,11 @@ from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 from ..runtime_config import (
     RuntimeConfig,
     inspect_image_sources,
+    inspect_team_folder_index_root,
     load_runtime_config,
     save_image_sources,
     save_selector_profile_path,
+    save_team_folder_index_root,
 )
 from ..nas_sources import (
     browse_nas_folders,
@@ -737,6 +739,15 @@ def create_app(
                 "folder_index_status": folder_index_status,
                 "folder_index_label": folder_index_label,
                 "folder_index_detail": folder_index_detail,
+                "team_folder_index_root": str(
+                    runtime.team_folder_index_root or ""
+                ),
+                "team_index_source_available": False,
+                "team_index_source_message": (
+                    "已保存本机路径，提交时自动检测。"
+                    if runtime.team_folder_index_root
+                    else "请选择团队索引文件夹。"
+                ),
                 "image_sources_configured": bool(runtime.image_sources),
                 "image_config_path": str(
                     runtime.config_path
@@ -1378,6 +1389,39 @@ def create_app(
             image_sources=runtime.image_sources,
             config_path=str(runtime.config_path),
             saved=True,
+        )
+
+    @app.post("/api/runtime/team-folder-index/check")
+    def check_runtime_team_folder_index():
+        payload = _json_object()
+        return jsonify(
+            **inspect_team_folder_index_root(runtime, payload.get("path"))
+        )
+
+    @app.put("/api/runtime/team-folder-index")
+    def put_runtime_team_folder_index():
+        nonlocal runtime
+        payload = _json_object()
+        try:
+            runtime = save_team_folder_index_root(runtime, payload.get("path"))
+        except (OSError, ValueError) as error:
+            return _validation_error({"team_folder_index_root": str(error)})
+        retried = 0
+        requested_session = str(payload.get("session_id") or "").strip()
+        if (
+            requested_session
+            and workflow_dispatcher is not None
+            and workflow_dispatcher.session_id == requested_session
+        ):
+            retried = workflow_dispatcher.replace_runtime_and_retry(runtime)
+        inspection = inspect_team_folder_index_root(
+            runtime, runtime.team_folder_index_root
+        )
+        return jsonify(
+            **inspection,
+            config_path=str(runtime.config_path),
+            saved=True,
+            retry_enqueued=bool(retried),
         )
 
     @app.post("/api/runtime/folder-picker")
@@ -2223,6 +2267,7 @@ def create_app(
 
     @app.post("/api/sessions/<session_id>/stages/<stage_id>/submit")
     def submit(session_id: str, stage_id: str):
+        nonlocal runtime
         payload = _json_object()
         values = _values(payload)
         state = store.load_session(session_id)
@@ -2271,6 +2316,13 @@ def create_app(
                 store, session_id, state, values
             )
         if not field_errors and stage_id == "setup":
+            team_index_source = inspect_team_folder_index_root(
+                runtime, values.get("team_folder_index_root")
+            )
+            if team_index_source["status"] != "available":
+                field_errors["team_folder_index_root"] = str(
+                    team_index_source["message"]
+                )
             labels = values.get("image_source_labels", [])
             roots = values.get("image_roots", [])
             submitted_sources = [
@@ -2590,6 +2642,18 @@ def create_app(
             isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
         ):
             return _validation_error({"revision": "must be an integer"})
+
+        if stage_id == "setup":
+            try:
+                runtime = save_team_folder_index_root(
+                    runtime, values.get("team_folder_index_root")
+                )
+            except (OSError, ValueError) as error:
+                return _validation_error(
+                    {"team_folder_index_root": str(error)}
+                )
+            if workflow_dispatcher is not None:
+                workflow_dispatcher.replace_runtime_and_retry(runtime)
 
         if stage_id == "slots_copy":
             slot_context = _current_result(

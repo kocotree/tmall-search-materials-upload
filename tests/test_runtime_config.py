@@ -8,10 +8,12 @@ from upload_search_materials.runtime_config import (
     DEFAULT_TEAM_FOLDER_INDEX_ROOT,
     image_source_path_key,
     inspect_image_sources,
+    inspect_team_folder_index_root,
     load_runtime_config,
     normalize_image_sources,
     save_image_sources,
     save_selector_profile_path,
+    save_team_folder_index_root,
     stable_image_source_id,
 )
 
@@ -203,6 +205,38 @@ def test_loads_machine_config_from_user_data_root(tmp_path):
 
     assert runtime.config_path == config
     assert runtime.cdp_url == "http://127.0.0.1:9333"
+
+
+def test_team_folder_index_root_is_checked_and_saved_locally(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    index_root = tmp_path / "team-index"
+    source = index_root / "sources" / "source-a"
+    source.mkdir(parents=True)
+    (source / "current.json").write_text("{}", encoding="utf-8")
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    checked = inspect_team_folder_index_root(runtime, index_root)
+    updated = save_team_folder_index_root(runtime, index_root)
+
+    assert checked["status"] == "available"
+    assert checked["snapshot_source_count"] == 1
+    assert updated.team_folder_index_root == index_root.resolve()
+    saved = json.loads(updated.config_path.read_text(encoding="utf-8"))
+    assert saved["team_folder_index_root"] == str(index_root.resolve())
+
+
+def test_team_folder_index_root_rejects_missing_directory(tmp_path):
+    workspace = make_workspace(tmp_path)
+    runtime = load_runtime_config(environ={}, start=workspace)
+
+    checked = inspect_team_folder_index_root(runtime, tmp_path / "missing")
+
+    assert checked["status"] == "unavailable"
+    with pytest.raises(ValueError):
+        save_team_folder_index_root(runtime, tmp_path / "missing")
 
 
 def test_selector_profile_is_installed_in_stable_user_data(tmp_path):

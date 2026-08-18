@@ -8,6 +8,7 @@ import upload_search_materials.interaction.web as web_module
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.interaction.workflow_dispatcher import (
     WorkflowDispatcher,
+    WorkflowProcessor,
 )
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
@@ -177,6 +178,65 @@ def test_dispatcher_retries_missing_team_index_once_after_restart(tmp_path):
         dispatcher.stop()
 
 
+def test_replacing_runtime_enqueues_blocked_team_index_handoff(tmp_path):
+    store = SessionStore(tmp_path / "runs")
+    session = store.create_session()
+    setup = store.save_input(session.session_id, "setup", {"store": "测试店铺"})
+    store.write_result(
+        session.session_id,
+        "setup",
+        int(setup["revision"]),
+        str(setup["input_sha256"]),
+        status="completed",
+        summary="配置完成",
+    )
+    handoff = store.save_input(
+        session.session_id,
+        "completeness",
+        {"selected_product_ids": ["1"]},
+    )
+    store.wait_for_handoff(
+        session.session_id,
+        "completeness",
+        timeout_seconds=0.5,
+        claimant_id="workbench-dispatcher",
+    )
+    claim = store.processing_claim(session.session_id, "completeness")
+    store.write_result(
+        session.session_id,
+        "completeness",
+        int(handoff["revision"]),
+        str(handoff["input_sha256"]),
+        status="blocked",
+        summary="团队索引不可访问",
+        blocking_reasons=["TEAM_INDEX_AUTHENTICATION_REQUIRED"],
+        claim_id=str(claim["claim_id"]),
+    )
+    original = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=store.runs_root,
+        team_folder_index_root=tmp_path / "old-index",
+    )
+    replacement = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=store.runs_root,
+        team_folder_index_root=tmp_path / "new-index",
+    )
+    processor = WorkflowProcessor(store, original)
+    dispatcher = WorkflowDispatcher(store, session.session_id, processor)
+
+    enqueued = dispatcher.replace_runtime_and_retry(replacement)
+
+    assert processor.runtime is replacement
+    assert enqueued == 1
+
+
 def test_dispatcher_wakes_for_handoff_submitted_after_start(tmp_path):
     store = SessionStore(tmp_path / "runs")
     session = store.create_session()
@@ -317,6 +377,9 @@ def test_managed_workbench_submit_notifies_its_dispatcher(tmp_path, monkeypatch)
             observed["notified"] += 1
             return 1
 
+        def replace_runtime_and_retry(self, _runtime):
+            return 0
+
         def public_status(self):
             return {"online": True, "status": "idle"}
 
@@ -346,6 +409,7 @@ def test_managed_workbench_submit_notifies_its_dispatcher(tmp_path, monkeypatch)
                 "image_source_labels": ["source"],
                 "image_roots": [str(tmp_path)],
                 "folder_index_root": str(tmp_path / ".index"),
+                "team_folder_index_root": str(tmp_path),
                 "asset_manifest": "",
                 "historical_basic_xlsx": "",
                 "historical_promotion_csv": "",

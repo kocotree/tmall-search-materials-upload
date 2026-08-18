@@ -20,6 +20,8 @@ from upload_search_materials.browser.session import (
     StoreIdentityError,
     assert_store_identity,
     detect_human_check,
+    prepare_collection_page,
+    recommendation_material_center_url,
 )
 from upload_search_materials.browser.upload_page import upload_approved_item
 from upload_search_materials.browser.verifier import verify_remote_item
@@ -42,6 +44,29 @@ def test_false_success_fixture_matches_previous_final_page():
         fixture["preceding_collection"]["final_page_product_ids"]
         == fixture["false_success_collection"]["all_product_ids"]
     )
+
+
+def test_prepare_collection_page_opens_recommend_tab_before_collection():
+    class CollectionPage:
+        def __init__(self):
+            self.url = "https://myseller.taobao.com/home.htm"
+            self.visited = []
+
+        def goto(self, url, **kwargs):
+            self.visited.append((url, kwargs))
+            self.url = url
+
+    page = CollectionPage()
+    result = prepare_collection_page(
+        page,
+        "https://myseller.taobao.com/home.htm/material-center/material-management",
+        {},
+    )
+
+    assert recommendation_material_center_url(page.url).endswith("?tab=recommend")
+    assert page.visited[0][0].endswith("?tab=recommend")
+    assert page.visited[0][1]["wait_until"] == "domcontentloaded"
+    assert result["navigated"] is True
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 

@@ -15,7 +15,14 @@ import time
 from typing import Any
 
 from .browser.config import SelectorConfigError, load_selector_profile
-from .browser.session import CdpUnavailable, open_cdp_page
+from playwright.sync_api import Error as PlaywrightError
+
+from .browser.session import (
+    CdpUnavailable,
+    open_cdp_page,
+    prepare_collection_page,
+    recommendation_material_center_url,
+)
 from .collection_readiness import (
     SelectorBootstrapError,
     ensure_production_selector_profile,
@@ -54,6 +61,15 @@ WORKER_MANIFEST_NAME = "worker.private.json"
 PUBLIC_WORKER_NAME = "worker.json"
 ATTEMPT_DOCUMENT_NAME = "attempt.json"
 CURRENT_ATTEMPT_NAME = "current-attempt.json"
+
+
+def _prepare_collection_page_early(
+    cdp_url: str,
+    material_center_url: str,
+    selectors: dict[str, str],
+) -> None:
+    with open_cdp_page(cdp_url, material_center_url) as page:
+        prepare_collection_page(page, material_center_url, selectors)
 
 
 def _write_collection_readiness_evidence(
@@ -387,6 +403,18 @@ def launch_collection_worker(
                 store, session_id, handoff, validation
             )
     selected_profile = profile.path
+    material_center_url = recommendation_material_center_url(
+        profile.material_center_url or runtime.material_center_url
+    )
+    try:
+        _prepare_collection_page_early(
+            cdp_url or runtime.cdp_url,
+            material_center_url,
+            profile.selectors,
+        )
+    except (CdpUnavailable, PlaywrightError, OSError, RuntimeError):
+        # Formal preflight and the owned worker persist the authoritative failure.
+        pass
     try:
         preflight = preflight_runtime_environment(
             runtime,

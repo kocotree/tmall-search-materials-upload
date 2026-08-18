@@ -236,11 +236,21 @@
                   <p class="field-error" data-field-error="collection_readiness" aria-live="polite"></p>
                   <code data-material-center-url>{{ setup_inputs.material_center_url }}</code>
                 </article>
-                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.folder_index_available else setup_inputs.folder_index_status }}">
-                  <span>共享文件夹索引</span><strong>{{ setup_inputs.folder_index_label }}</strong>
-                  <p>{{ setup_inputs.folder_index_detail }}</p>
+                <article class="setup-status-card setup-status-card-wide team-index-config" data-component="TeamIndexConfig" data-machine-runtime-control data-ready="{{ 'true' if setup_inputs.team_index_source_available else 'false' }}">
+                  <span>团队索引文件夹</span><strong data-team-index-summary>{{ "可使用" if setup_inputs.team_index_source_available else "需要选择" }}</strong>
+                  <p class="section-instruction">选择本机当前可以打开的团队索引文件夹，用于查找已选商品对应的候选素材文件夹。</p>
+                  <label>
+                    索引文件夹
+                    <input name="team_folder_index_root" type="text" value="{{ setup_inputs.team_folder_index_root }}" maxlength="1000" required placeholder="选择包含 sources 文件夹的团队索引目录" aria-describedby="setup-team_folder_index_root-error">
+                  </label>
+                  <div class="image-source-actions">
+                    <button class="secondary-button" type="button" data-pick-team-index>选择文件夹</button>
+                    <button class="secondary-button" type="button" data-check-team-index>检测</button>
+                    <button class="secondary-button" type="button" data-save-team-index>保存为本机索引源</button>
+                  </div>
+                  <p class="image-source-feedback" data-team-index-feedback aria-live="polite">{{ setup_inputs.team_index_source_message }}</p>
                   <input name="folder_index_root" type="hidden" value="{{ setup_inputs.folder_index_root }}" aria-describedby="setup-folder_index_root-error">
-                  <p>只会读取本次任务需要的候选内容。</p>
+                  <p class="field-error" id="setup-team_folder_index_root-error" data-field-error="team_folder_index_root" aria-live="polite"></p>
                   <p class="field-error" id="setup-folder_index_root-error" data-field-error="folder_index_root" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">

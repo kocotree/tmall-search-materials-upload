@@ -127,6 +127,14 @@ STAGES: tuple[StageDefinition, ...] = (
             _field("rules_csv", "规则表", "auto_path", required=True),
             _field("folder_index_root", "共享文件夹索引", "auto_path"),
             _field(
+                "team_folder_index_root",
+                "团队索引文件夹",
+                "path",
+                required=True,
+                interaction_policy="frontend_preferred",
+                fallback_reason_codes=UI_FALLBACK_REASONS,
+            ),
+            _field(
                 "image_source_labels",
                 "图片源名称",
                 "auto_path_list",

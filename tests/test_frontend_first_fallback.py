@@ -263,6 +263,7 @@ def test_fallback_cannot_overwrite_submitted_or_processing_stage(tmp_path):
                 "store_confirmed": True,
                 "products_csv": "products.csv",
                 "rules_csv": "rules.csv",
+                "team_folder_index_root": str(tmp_path),
                 "image_source_labels": ["来源"],
                 "image_roots": [str(tmp_path)],
             },

@@ -42,6 +42,47 @@ def prepared_runtime_preflight(monkeypatch):
             ),
         },
     )
+    monkeypatch.setattr(
+        worker_module,
+        "_prepare_collection_page_early",
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def test_collection_page_starts_before_runtime_preflight(tmp_path, monkeypatch):
+    runtime, runs, _, session, selectors = prepare(tmp_path)
+    events = []
+
+    def prepare_page(_cdp_url, material_center_url, _selectors):
+        events.append(("page", material_center_url))
+
+    def preflight(_runtime, **_kwargs):
+        events.append(("preflight", ""))
+        return {
+            "ready": True,
+            "environment": worker_module.environment_fingerprint(
+                runtime.workspace_root
+            ),
+        }
+
+    monkeypatch.setattr(worker_module, "_prepare_collection_page_early", prepare_page)
+    monkeypatch.setattr(
+        "upload_search_materials.runtime_preflight.preflight_runtime_environment",
+        preflight,
+    )
+
+    launched = launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        popen=lambda *_args, **_kwargs: Process(),
+        identity_provider=lambda _pid: "test-process",
+    )
+
+    assert launched["status"] == "processing"
+    assert [event[0] for event in events[:2]] == ["page", "preflight"]
+    assert events[0][1].endswith("?tab=recommend")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")

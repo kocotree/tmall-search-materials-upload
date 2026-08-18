@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 import unicodedata
 
 from .path_diagnostics import diagnose_image_sources
+from .platform_support import AssetSourceUnavailable, resolve_asset_root
 
 
 PRODUCTS_PATTERN = "天猫商品信息表*产品数据表*数据总表.csv"
@@ -23,7 +24,7 @@ PACKAGE_DOCS_RELATIVE = Path("src/upload_search_materials/docs")
 DEFAULT_CDP_PROFILE_RELATIVE = Path(".local-cache/cdp-profile")
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DEFAULT_MATERIAL_CENTER_URL = (
-    "https://myseller.taobao.com/home.htm/material-center/material-management"
+    "https://myseller.taobao.com/home.htm/material-center/material-management?tab=recommend"
 )
 DEFAULT_TEAM_FOLDER_INDEX_ROOT = Path(
     r"\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米"
@@ -405,6 +406,89 @@ def save_image_sources(
         runtime,
         image_sources=sources,
         image_source_history=history,
+        config_path=target,
+    )
+
+
+def inspect_team_folder_index_root(
+    runtime: RuntimeConfig, value: object
+) -> dict[str, object]:
+    text = str(value or "").strip()
+    if not text or "\x00" in text or len(text) > 1000:
+        return {
+            "status": "unavailable",
+            "reason_code": "TEAM_INDEX_ROOT_REQUIRED",
+            "message": "请选择团队索引文件夹。",
+            "path": text,
+            "snapshot_source_count": 0,
+        }
+    selected = _resolve_configured_path(text, runtime.workspace_root)
+    try:
+        checked = resolve_asset_root(selected)
+    except AssetSourceUnavailable as error:
+        return {
+            "status": "unavailable",
+            "reason_code": error.reason_code,
+            "message": str(error),
+            "path": str(selected),
+            "snapshot_source_count": 0,
+        }
+    sources_root = checked.path / "sources"
+    try:
+        source_count = (
+            sum(
+                1
+                for source_root in sources_root.iterdir()
+                if source_root.is_dir()
+                and (source_root / "current.json").is_file()
+            )
+            if sources_root.is_dir()
+            else 0
+        )
+    except OSError:
+        source_count = 0
+    return {
+        "status": "available",
+        "reason_code": "",
+        "message": (
+            f"路径可访问，已发现 {source_count} 个索引来源。"
+            if source_count
+            else "路径可访问，尚无团队索引快照。"
+        ),
+        "path": str(checked.path),
+        "snapshot_source_count": source_count,
+    }
+
+
+def save_team_folder_index_root(
+    runtime: RuntimeConfig, value: object
+) -> RuntimeConfig:
+    inspection = inspect_team_folder_index_root(runtime, value)
+    if inspection["status"] != "available":
+        raise ValueError(str(inspection["message"]))
+    target = runtime.config_path or (
+        runtime.user_data_root / "config/runtime.json"
+        if runtime.user_data_root is not None
+        else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    )
+    document = _read_config(target) if target.is_file() else {}
+    selected = Path(str(inspection["path"]))
+    document["team_folder_index_root"] = str(selected)
+    if runtime.team_folder_index_nas_source_id:
+        document.setdefault(
+            "team_folder_index_nas_source_id",
+            runtime.team_folder_index_nas_source_id,
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+    return replace(
+        runtime,
+        team_folder_index_root=selected,
         config_path=target,
     )
 

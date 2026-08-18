@@ -131,7 +131,7 @@ AI 不参与选图、坑位数量、分组、顺序、比例、裁剪或压缩�
 ## 阶段输入（不是启动前置条件）
 
 - 用户在配置页确认页面可见的准确店铺名。第一阶段不再配置目标月份、商品范围或搜推采集页数。
-- 商品总表和月度规则从项目目录自动发现。图片源在任务配置页维护，可配置 1–50 个“来源名称 + 根路径”并保存为本机配置。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
+- 商品总表和月度规则从项目目录自动发现。团队索引文件夹和图片源都在任务配置页维护：团队索引文件夹保存为当前电脑的候选匹配来源，图片源可配置 1–50 个“来源名称 + 根路径”并保存为本机配置。创建任务后把商品表与规则表复制到时间戳任务目录并记录 SHA-256；不复制 NAS 原图。
 - 本轮上传范围仅为搜推素材，不导出、不审查也不补传基础素材。搜推页的“导出数据”仅是经营指标；第二阶段商品范围必须来自正确店铺实时 DOM 中“商品分类 → 搜推高价值”的全量采集结果。
 - 生产选择器运行时配置；示例文件不能直接用于生产。
 - 人工图片素材清单、历史基础素材表和历史推广素材状态都是高级可选导入，不是日常任务必填项。
@@ -250,7 +250,7 @@ Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代
 素材阶段按以下顺序执行：
 
 1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
-2. 文件夹索引由同一 Plugin 内的 `$maintain-team-folder-index` 管理。商品选择处理器在生成候选前必须执行共享快照同步：若固定 NAS 未挂载，自动打开系统 SMB 连接流程；系统认证完成且挂载身份验证通过后继续，固定索引子目录不存在时可在已验证挂载内创建。优先校验并使用 NAS 固定目录中的最新有效不可变快照，再把可移植的 `folders.csv` 缓存到 `folder_index_root/team-cache`。当前配置的路径派生 `source_id` 没有快照、但存在 canonical 路径身份键相同的旧 ID 快照时，必须把最新有效旧快照复制发布为新 ID 的不可变快照并保留全部旧快照；只有完全没有等价快照时，才自动只读遍历该素材源的目录元数据、建立本机目录索引并发布第一份不可变快照，无需再次索取授权。已有有效共享快照时不得启动 `index-folders`、生成新快照或刷新 NAS；只有用户明确要求更新某个已有索引的素材源时，才可按 `$maintain-team-folder-index` 契约运行 `--refresh-source SOURCE` 或 `--refresh-prefix SOURCE=RELATIVE_PATH`，确认完整后显式 `publish`。NAS 连接失败时允许使用最后一次校验通过的本机 `team-cache`，并在任务扫描摘要中明确记录 `origin=local_cache`；快照哈希、从 canonical source 派生的路径身份键或本机绑定路径身份键不一致时必须阻断。不得扩大刷新范围、修改其他机器快照或自动删除历史版本。商品表、名称、货号或匹配器变化时只从缓存的文件夹元数据重新匹配，不重扫 NAS。
+2. 文件夹索引由同一 Plugin 内的 `$maintain-team-folder-index` 管理。商品选择处理器在生成候选前必须使用配置页已校验并保存的 `team_folder_index_root` 执行共享快照同步；固定团队 UNC 仅是首次默认建议，当前电脑保存的可访问目录优先于该默认值。路径不可访问、需要 Windows 认证或没有有效来源时，把完整度阶段保持为 blocked，页面明确引导用户返回任务配置选择团队索引文件夹；保存后工作台刷新同一处理器运行时并幂等重试原 `process-product-selection`，不得要求重新提交商品选择。Plugin 不得传递、请求、记录或保存 SMB 凭据，也不得用低层命令静默连接共享。校验最新有效不可变快照后，把可移植的 `folders.csv` 缓存到 `folder_index_root/team-cache`。当前配置的路径派生 `source_id` 没有快照、但存在 canonical 路径身份键相同的旧 ID 快照时，必须把最新有效旧快照复制发布为新 ID 的不可变快照并保留全部旧快照；只有完全没有等价快照时，才自动只读遍历该素材源的目录元数据、建立本机目录索引并发布第一份不可变快照，无需再次索取授权。已有有效共享快照时不得启动 `index-folders`、生成新快照或刷新 NAS；只有用户明确要求更新某个已有索引的素材源时，才可按 `$maintain-team-folder-index` 契约运行 `--refresh-source SOURCE` 或 `--refresh-prefix SOURCE=RELATIVE_PATH`，确认完整后显式 `publish`。共享目录暂时不可访问时允许使用最后一次校验通过的本机 `team-cache`，并在任务扫描摘要中明确记录 `origin=local_cache`；快照哈希、从 canonical source 派生的路径身份键或本机绑定路径身份键不一致时必须阻断。不得扩大刷新范围、修改其他机器快照或自动删除历史版本。商品表、名称、货号或匹配器变化时只从缓存的文件夹元数据重新匹配，不重扫 NAS。
 3. 第二阶段商品选择正式提交后，工作台后台调度器只调用一次 `process-product-selection` 正式处理器。该唯一入口必须校验并领取精确 completeness handoff，使用当前任务商品快照、当前匹配器版本和已校验的 `team-cache/**/folders.csv` 即时匹配所选商品，原子生成任务级 `folder-candidates.csv`、扫描摘要和 `folder-review.json`，写回 completeness 完成结果与 asset-matching review context，并推进到素材匹配。全局 `folder_index_root/folder-candidates.csv` 即使存在也属于历史派生文件，禁止读取或作为回退。禁止再由 Codex 手工串联 `snapshot-folder-candidates`、`prepare-folder-review`、`result.json` 或阶段状态。任务目录不得包含 `folder-index.sqlite3`。任务摘要必须绑定商品快照 SHA-256、匹配器版本和来源 snapshot ID；入口必须幂等，已完成的同一 revision/SHA 只补齐或返回既有转换，不重复生成 revision。异常时必须在 `02-completeness/product-selection-diagnostic.json` 写入失败 phase、稳定 reason code、异常类型与消息、session/stage/revision/input SHA、相关文件存在性/大小/SHA、traceback 和同一入口恢复动作；能安全绑定当前 handoff 时把 completeness 写成 `blocked` 并清除 processing claim。Codex 读取该诊断、修复索引或处理器后，只能重跑同一入口，不得手工拼接半成品。该入口只读文件夹索引，不枚举或读取 NAS 图片。文件夹匹配优先使用商品 ID、完整货号和规范化商品基础名称；匹配基础名称时忽略末尾的“（主）/（副）”。除此之外，可将与基础名称具有至少 50% 最长公共连续字符、且公共连续部分不少于 5 个字符的文件夹作为粗略候选，但不得据此自动确认归属。若用户明确给出完整文件夹名，可用 `prepare-folder-review --exact-folder PRODUCT_ID=FOLDER_NAME` 做当前任务的一次性精确查询；不得把该查询写入别名表或自动复用于其他任务。页面必须先展示商品 ID、货号、来源、命中类型、文件夹名和完整路径；ID、货号和完整基础名称候选默认“采用”，粗略候选默认“排除”，用户筛选后再读取采用文件夹中的图片；决定写入当前时间戳会话的 `folder_decisions`。
    基础名称包含 `/`、`／`、`、` 或 `|` 时，只拆成去重后的字面片段并分别检查文件夹名是否完整包含该片段，禁止拼接公共前缀、补词或推导组合名称。少于 3 个字符的片段忽略；5 个字符及以上的完整片段候选默认采用，3–4 个字符的完整短片段候选默认排除。原有 50% 粗略候选仍按未拆分基础名称计算，且继续默认排除。
 专用 handoff 必须只有一个领取者：正常流程只允许当前精确 session 的 `workbench-dispatcher` 领取；旧兼容 `listen-handoff`、`resume-session`、`wait-handoff` 和页面恢复接口只返回经过验证的身份，不得提前领取或与调度器竞争。completeness 只路由到 `process-product-selection`，`handoff_kind=final_material_selection` 只路由到 `process-final-material-handoff`。首次完整度审查尚无正式提交记录时按钮显示“提交给工作台”；只有已提交结果被退回补充时才显示“补充后重新提交”。
@@ -310,7 +310,7 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 
 1. 先解析用户指定的精确 `session_id`；不得默认选择 `runs` 中最新的会话。
 2. 只有新任务才创建以时间戳命名的隔离会话目录；恢复时显式复用原 `session_id`。
-3. 任务配置页只要求店铺确认和图片源配置；不提供目标月份、商品范围或搜推采集页数，也不提供独立的“公司共享盘”模块。商品表、规则表和运行目录只读展示；用户直接在“本次图片源”中新增、删除、检测并保存任意 1–50 个本机目录、映射盘或 UNC 来源，人工素材清单与历史文件只放在高级设置。
+3. 任务配置页要求店铺确认、一个团队索引文件夹和图片源配置；不提供目标月份、商品范围或搜推采集页数，也不提供账号密码或“连接共享盘”模块。商品表、规则表和运行目录只读展示；用户选择、检测并保存当前电脑可访问的团队索引目录，并在“本次图片源”中新增、删除、检测并保存任意 1–50 个本机目录、映射盘或 UNC 来源，人工素材清单与历史文件只放在高级设置。
 4. 启动仅监听 `localhost` 的交互页面。
 5. 第二阶段先将“搜推高价值”全量结果与商品表合并，并自动排除标题或等级命中 `uvno`、`积分`、`清仓`、`好物体验`、`会员日` 的商品。排除项保留在页面和结果中供审计，但不可选择；用户提交其余商品后直接进入第三阶段“素材匹配”，不再设置独立的“维护范围确认”阶段。
 6. 托管工作台为当前精确 session 启动单一后台调度器。每次正式提交完成原子持久化后立即唤醒队列；服务启动时先扫描已存在的 `ready_for_agent` handoff、租约已过期的 `processing` handoff，以及 `pending` / 可恢复的 `processing` 文案请求。调度器空闲时每 2 秒执行一次轻量恢复扫描，不建立 `agent_wait`，不依赖 Codex 长轮询或聊天在线状态。
@@ -324,7 +324,7 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 
 恢复已有 `session_id` 时，页面必须先读取 `session.json` 状态并直接进入有效的 `current_stage`，同时一次性显示全部阶段的真实状态。只打开、刷新、水合图片决定或构建默认坑位不得标记 dirty、自动保存或增加 revision。草稿保存进行中收到“提交给工作台”时必须明确显示已排队，并在保存成功后使用最新 revision 继续提交；失败或阶段切换时必须明确暂停或取消，禁止静默丢弃点击。查看已完成阶段时显示锁定原因和“进入当前阶段”，不得重新启用写入。
 
-图片源行提供“选择文件夹”，仅由用户点击后通过已验证 Windows 桌面身份打开本机原生目录窗口并回填完整路径。选择器使用单实例 STA 助手及 request ID、ownership token、PID 身份和私有结果通道，必须区分选择、取消、启动失败、GUI 不可用、超时和无效返回，并保留原输入及手工填写兜底。窗口无法证明可见时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper。手工输入继续用于 UNC、远程或无界面环境。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给工作台”。
+图片源行和团队索引设置都提供“选择文件夹”，仅由用户点击后通过已验证 Windows 桌面身份打开本机原生目录窗口并回填完整路径。选择器使用单实例 STA 助手及 request ID、ownership token、PID 身份和私有结果通道，必须区分选择、取消、启动失败、GUI 不可用、超时和无效返回，并保留原输入及手工填写兜底。窗口无法证明可见时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper。手工输入继续用于 UNC、远程或无界面环境。选择目录和“检测路径”都只能读取目录元数据，不得枚举或读取图片。页面必须区分“保存为本机配置”“保存草稿”和“提交给工作台”。
 
 页面必须以统一的 `task_status` 持续显示整个任务的当前阶段、业务摘要、下一步动作、阶段进度，以及后台调度器的“已就绪、排队、处理中、完成、异常”状态。页面每 2 秒读取同一状态；`ui-status` 同步返回该 `task_status`，供 Codex 在启动、恢复、用户追问或稳定异常时说明任务状态。Codex 不通过命令轮询模拟实时监听，也不得为了状态汇报重新读取源码、运行目录或 handoff。工作台服务运行时，页面提交可直接唤醒后台；服务停止后，恢复同一精确 session 会自动扫描未完成任务。不得要求用户在聊天输入“已提交”，也不得把旧兼容 `agent_wait` 租约显示成后台在线状态。
 
@@ -344,7 +344,7 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 - NAS 原图只能由素材执行器读取。页面通过 `gallery-job.json` 排队并自动请求桌面启动；执行器必须在能访问本机挂载的用户会话中运行，校验 source ID 和相对路径，拒绝绝对路径、盘符、`..` 与目录逃逸，只把任务所需预览和校验元数据写回会话目录。每个按钮任务启动一个一次性进程，任务结束即退出，不注册系统服务。启动失败记录 `MATERIAL_EXECUTOR_LAUNCH_FAILED`；挂载不可用返回 `SOURCE_BINDING_MISSING`、`SOURCE_ACCESS_DENIED` 或 `SOURCE_PATH_INVALID` 并保留用户决定。手工 PowerShell/shell 启动脚本只用于开发诊断，不得作为日常用户步骤。Skill 不得自动建立网络盘映射、挂载共享、获取或保存 NAS 凭据，也不得绕过共享权限。
 - 配置页不得展示或自动检测 `config/nas-sources.yaml` 中的公司共享目录，也不得提供“连接 NAS”按钮。用户应先在 Windows/Explorer 中获得可用的 Y 盘、Z 盘或 UNC 路径，再直接从“本次图片源”选择或粘贴；工作台只对最终填写路径执行只读元数据检测，不自动认证、映射或挂载。共享定义和诊断命令只供开发排障，见 [nas-sources.md](references/nas-sources.md)。
 - `--runs-root` 优先；否则使用 `TMALL_RUNS_ROOT` 或本机配置；均未提供时使用用户数据目录下的 `runs/`。所有任务继续按时间戳目录隔离，不写入 Plugin 安装缓存。
-- 团队快照根路径优先使用 `TMALL_TEAM_FOLDER_INDEX_ROOT`，其次使用本机配置的 `team_folder_index_root`；NAS 身份使用 `team_folder_index_nas_source_id`。本机索引缓存路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用 `folder_index_root`，默认使用用户数据目录下的 `cache/folder-index/`。该长期缓存只保存已校验的团队 `folders.csv` 快照及同步元数据，不保存可复用商品候选；每个时间戳任务单独即时生成并保存当前商品候选快照。
+- 团队快照根路径可由 `TMALL_TEAM_FOLDER_INDEX_ROOT` 显式覆盖；否则使用配置页保存到本机配置的 `team_folder_index_root`，未保存时才使用固定 UNC 默认建议。NAS 身份使用 `team_folder_index_nas_source_id`。本机索引缓存路径优先使用 `TMALL_FOLDER_INDEX_ROOT`，其次使用 `folder_index_root`，默认使用用户数据目录下的 `cache/folder-index/`。该长期缓存只保存已校验的团队 `folders.csv` 快照及同步元数据，不保存可复用商品候选；每个时间戳任务单独即时生成并保存当前商品候选快照。
 - 本机配置格式和环境变量见 [operations-guide.md](references/operations-guide.md)。
 
 - 不保存或输出密码、Cookie、Token、短信码、二维码登录数据。

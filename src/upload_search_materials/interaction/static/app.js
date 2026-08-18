@@ -33,6 +33,7 @@
   const taskStageProgress = document.querySelector("[data-task-stage-progress]");
   const taskAutoShutdown = document.querySelector("[data-task-auto-shutdown]");
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
+  const teamIndexConfig = document.querySelector('[data-component="TeamIndexConfig"]');
   const collectionRuntimeConfig = document.querySelector(
     '[data-component="CollectionRuntimeConfig"]',
   );
@@ -439,6 +440,101 @@
     updateImageSourceConfig();
   }
 
+  function renderTeamIndexStatus(payload) {
+    if (!teamIndexConfig) return;
+    const available = payload?.status === "available";
+    const count = Number(payload?.snapshot_source_count || 0);
+    teamIndexConfig.dataset.ready = available ? "true" : "false";
+    teamIndexConfig.querySelector("[data-team-index-summary]").textContent = available
+      ? count
+        ? `可使用 · ${count} 个索引来源`
+        : "可访问 · 暂无索引来源"
+      : "需要选择";
+    teamIndexConfig.querySelector("[data-team-index-feedback]").textContent =
+      payload?.message || (available ? "索引文件夹可访问。" : "请选择团队索引文件夹。");
+  }
+
+  async function checkTeamIndex() {
+    if (!teamIndexConfig) return true;
+    const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
+    const feedback = teamIndexConfig.querySelector("[data-team-index-feedback]");
+    feedback.textContent = "正在检测团队索引文件夹…";
+    try {
+      const payload = await fetchJson("/api/runtime/team-folder-index/check", {
+        method: "POST",
+        body: JSON.stringify({ path: input.value.trim() }),
+      });
+      renderTeamIndexStatus(payload);
+      return payload.status === "available";
+    } catch (error) {
+      renderTeamIndexStatus({ status: "unavailable", message: error.userMessage || error.message });
+      return false;
+    }
+  }
+
+  async function pickTeamIndex() {
+    const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
+    const feedback = teamIndexConfig.querySelector("[data-team-index-feedback]");
+    feedback.textContent = "正在打开选择窗口…";
+    try {
+      const payload = await fetchJson("/api/runtime/folder-picker", {
+        method: "POST",
+        body: JSON.stringify({ initial_path: input.value.trim() }),
+      });
+      if (payload.cancelled) {
+        feedback.textContent = "已取消选择。";
+        return;
+      }
+      input.value = payload.path;
+      input.dispatchEvent(new CustomEvent(
+        "input",
+        { bubbles: true, detail: { source: "explicit-user-edit" } },
+      ));
+      await checkTeamIndex();
+    } catch (error) {
+      renderTeamIndexStatus({ status: "unavailable", message: error.userMessage || error.message });
+      input.focus();
+    }
+  }
+
+  async function saveTeamIndex() {
+    const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
+    const feedback = teamIndexConfig.querySelector("[data-team-index-feedback]");
+    feedback.textContent = "正在保存团队索引文件夹…";
+    try {
+      const payload = await fetchJson("/api/runtime/team-folder-index", {
+        method: "PUT",
+        body: JSON.stringify({ path: input.value.trim(), session_id: sessionId }),
+      });
+      input.value = payload.path || input.value;
+      renderTeamIndexStatus(payload);
+      feedback.textContent = payload.retry_enqueued
+        ? "已保存，系统正在自动继续匹配候选文件夹。"
+        : "已保存为这台电脑的团队索引文件夹。";
+    } catch (error) {
+      renderTeamIndexStatus({
+        status: "unavailable",
+        message: error.fieldErrors?.team_folder_index_root
+          || error.userMessage
+          || error.message,
+      });
+    }
+  }
+
+  function initializeTeamIndexConfig() {
+    if (!teamIndexConfig) return;
+    const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
+    teamIndexConfig.querySelector("[data-pick-team-index]").addEventListener("click", pickTeamIndex);
+    teamIndexConfig.querySelector("[data-check-team-index]").addEventListener("click", checkTeamIndex);
+    teamIndexConfig.querySelector("[data-save-team-index]").addEventListener("click", saveTeamIndex);
+    input.addEventListener("input", () => {
+      teamIndexConfig.dataset.ready = "false";
+      teamIndexConfig.querySelector("[data-team-index-summary]").textContent = "等待检测";
+      teamIndexConfig.querySelector("[data-team-index-feedback]").textContent =
+        "路径已修改，请检测或保存。";
+    });
+  }
+
   function renderCollectionRuntime(payload) {
     if (!collectionRuntimeConfig) return;
     const selector = payload.selector_profile || {};
@@ -757,6 +853,11 @@
       hydrateImageSources(values?.image_source_labels, values?.image_roots);
     }
     Object.entries(values || {}).forEach(([name, value]) => {
+      if (
+        form.dataset.stageForm === "setup"
+        && name === "team_folder_index_root"
+        && uiState.serverStatus === "completed"
+      ) return;
       const controls = [...form.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
       if (!controls.length) return;
       const first = controls[0];
@@ -1192,6 +1293,7 @@
     if (!form) return;
     const locked = ["ready_for_agent", "processing", "completed"].includes(status);
     form.querySelectorAll("input, textarea, select, button").forEach((control) => {
+      if (control.closest("[data-machine-runtime-control]")) return;
       if (locked && !control.disabled) {
         control.disabled = true;
         control.dataset.taskLocked = "true";
@@ -1276,6 +1378,21 @@
     const result = view.result;
     const diagnostic = result.agent_diagnostic;
     if (diagnostic?.status === "open") {
+      const teamIndexBlocked = Array.isArray(result.blocking_reasons)
+        && result.blocking_reasons.some((reason) => String(reason).startsWith("TEAM_INDEX_"));
+      if (teamIndexBlocked) {
+        heading.textContent = "需要选择团队索引文件夹";
+        const safeMessage = document.createElement("p");
+        safeMessage.textContent = "返回任务配置，选择这台电脑可以访问的团队索引文件夹；保存后系统会自动继续。";
+        const configure = document.createElement("button");
+        configure.type = "button";
+        configure.className = "secondary-button";
+        configure.textContent = "返回任务配置";
+        configure.addEventListener("click", () => activateStage("setup"));
+        summary.append(heading, safeMessage, configure);
+        content.appendChild(summary);
+        return;
+      }
       heading.textContent = diagnostic.user_action_required
         ? "需要你在已打开的窗口完成操作"
         : "系统正在处理异常";
@@ -5588,6 +5705,16 @@
     if (
       mode === "submit"
       && requestedStageId === "setup"
+      && !(await checkTeamIndex())
+    ) {
+      actionMessage.textContent =
+        "团队索引文件夹检测未通过；请选择可访问的索引文件夹后再提交。";
+      persistenceInFlight = false;
+      return;
+    }
+    if (
+      mode === "submit"
+      && requestedStageId === "setup"
       && !(await checkImageSources())
     ) {
       actionMessage.textContent =
@@ -6090,6 +6217,7 @@
 
   setInterval(pollStage, 2000);
   initializeImageSourceConfig();
+  initializeTeamIndexConfig();
   initializeCollectionRuntime();
   async function bootstrap() {
     let initialStage = currentStageId;

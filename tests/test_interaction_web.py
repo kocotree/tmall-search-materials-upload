@@ -799,6 +799,7 @@ def test_setup_submission_hands_technical_readiness_to_agent(tmp_path):
                 "image_source_labels": ["本地"],
                 "image_roots": [str(workspace)],
                 "folder_index_root": str(workspace / ".index"),
+                "team_folder_index_root": str(workspace),
                 "asset_manifest": "",
                 "historical_basic_xlsx": "",
                 "historical_promotion_csv": "",
@@ -859,7 +860,7 @@ def test_setup_page_still_opens_without_machine_local_image_configuration(tmp_pa
     assert html.count('name="image_roots"') >= 1
 
 
-def test_setup_page_requires_complete_folder_index_artifacts_and_shows_progress(
+def test_setup_page_exposes_team_index_picker_and_keeps_local_cache_internal(
     tmp_path,
 ):
     index_root = tmp_path / "folder-index"
@@ -890,10 +891,38 @@ def test_setup_page_requires_complete_folder_index_artifacts_and_shows_progress(
     html = html_module.unescape(response.get_data(as_text=True))
 
     assert response.status_code == 200
-    assert "正在建立" in html
-    assert "已发现 321 个文件夹" in html
-    assert "campaign/current" in html
-    assert "<strong>可复用</strong>" not in html
+    assert "团队索引文件夹" in html
+    assert "data-pick-team-index" in html
+    assert "data-save-team-index" in html
+    assert 'name="folder_index_root" type="hidden"' in html
+    assert "campaign/current" not in html
+
+
+def test_setup_page_does_not_probe_team_index_before_user_action(
+    tmp_path, monkeypatch
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        team_folder_index_root=Path(r"\\missing\team-index"),
+    )
+    monkeypatch.setattr(
+        web_module,
+        "inspect_team_folder_index_root",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("initial page render must not probe the team index")
+        ),
+    )
+
+    response = create_app(
+        tmp_path / "runs", runtime_config=runtime
+    ).test_client().get("/")
+
+    assert response.status_code == 200
+    assert "data-pick-team-index" in response.get_data(as_text=True)
 
 
 def test_runtime_image_source_api_saves_checks_and_reloads_multiple_roots(tmp_path):
@@ -949,6 +978,39 @@ def test_runtime_image_source_api_rejects_zero_or_duplicate_roots(tmp_path):
 
     assert empty.status_code == 422
     assert duplicate.status_code == 422
+
+
+def test_runtime_team_index_api_checks_and_saves_machine_path(tmp_path):
+    workspace = tmp_path / "workspace"
+    index_source = workspace / "team-index" / "sources" / "source-a"
+    index_source.mkdir(parents=True)
+    (index_source / "current.json").write_text("{}", encoding="utf-8")
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=workspace / "runs",
+    )
+    client = create_app(workspace / "runs", runtime_config=runtime).test_client()
+    index_root = index_source.parents[1]
+
+    checked = client.post(
+        "/api/runtime/team-folder-index/check", json={"path": str(index_root)}
+    )
+    saved = client.put(
+        "/api/runtime/team-folder-index", json={"path": str(index_root)}
+    )
+
+    assert checked.status_code == 200
+    assert checked.json["snapshot_source_count"] == 1
+    assert saved.status_code == 200
+    assert saved.json["saved"] is True
+    assert saved.json["retry_enqueued"] is False
+    config = workspace / "config" / "local-paths.json"
+    assert json.loads(config.read_text(encoding="utf-8"))[
+        "team_folder_index_root"
+    ] == str(index_root.resolve())
 
 
 def test_folder_picker_api_returns_only_user_selected_directory(
@@ -1058,6 +1120,7 @@ def test_setup_submit_checks_the_sources_currently_shown_on_the_page(
                 "image_source_labels": ["本次新增图片源"],
                 "image_roots": [str(missing)],
                 "folder_index_root": str(tmp_path / ".index"),
+                "team_folder_index_root": str(tmp_path),
                 "asset_manifest": "",
                 "historical_basic_xlsx": "",
                 "historical_promotion_csv": "",
@@ -1082,6 +1145,7 @@ def test_unclaimed_submission_can_be_withdrawn_but_processing_cannot(
         "month": "2026-07",
         "products_csv": str(readable),
         "rules_csv": str(readable),
+        "team_folder_index_root": str(tmp_path),
         "image_source_labels": ["source"],
         "image_roots": [str(tmp_path)],
         "asset_manifest": "",
@@ -1350,6 +1414,7 @@ def test_javascript_supports_dynamic_image_source_configuration(client):
         "disambiguateImageSourceLabels",
         "已根据业务目录自动区分",
         "/api/runtime/image-sources/check",
+        "/api/runtime/team-folder-index/check",
         "/api/runtime/folder-picker",
         'method: "PUT"',
         "每个图片源都必须填写来源名称并选择图片文件夹",
@@ -1359,6 +1424,8 @@ def test_javascript_supports_dynamic_image_source_configuration(client):
         "focusFirstIncompleteImageSource",
         'row.scrollIntoView({ behavior: "smooth", block: "center" })',
         "还有 ${count} 个图片源未填写完整",
+        "需要选择团队索引文件夹",
+        "data-machine-runtime-control",
     ):
         assert expected in javascript
 
@@ -2944,6 +3011,7 @@ def test_stage_status_exposes_authoritative_claim_and_expired_recovery(
                 "month": "2026-07",
                 "products_csv": str(tmp_path),
                 "rules_csv": str(tmp_path),
+                "team_folder_index_root": str(tmp_path),
                 "image_source_labels": ["测试素材源"],
                 "image_roots": [str(tmp_path)],
                 "asset_manifest": "",

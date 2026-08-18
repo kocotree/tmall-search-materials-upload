@@ -1,16 +1,17 @@
 ---
 name: maintain-team-folder-index
-description: Maintain decentralized, reusable folder-index snapshots for team material sources. Use when checking, syncing, incrementally refreshing, or explicitly publishing a shared Tmall search-material folder index, including when the fixed NAS share must first be mounted through the operating system.
+description: Maintain decentralized, reusable folder-index snapshots for team material sources. Use when checking, syncing, incrementally refreshing, or explicitly publishing a shared Tmall search-material folder index selected in the machine-local configuration.
 ---
 
 # Maintain Team Folder Index
 
 Use the repository CLI as the deterministic implementation. An ordinary upload workflow must automatically publish the first immutable snapshot for a configured source when no valid shared snapshot exists, without requesting a second verbal authorization.
 
-## Fixed team location
+## Default team location
 
 - NAS source ID: `zhejiang-kuqu`
 - Canonical share: `\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米`
+- A machine-local `team_folder_index_root` selected on the setup page takes precedence over this default suggestion unless an explicit environment override is present.
 
 Read [references/protocol.md](references/protocol.md) when diagnosing snapshot validation, conflicts, cache fallback, or portability.
 
@@ -21,11 +22,9 @@ Read [references/protocol.md](references/protocol.md) when diagnosing snapshot v
 
    `tmall-materials team-folder-index status --config config/local-paths.json`
 
-3. If the shared path is unavailable while an upload workflow needs the team index, automatically invoke the existing OS-owned SMB connection flow:
+3. If the configured path is unavailable while an upload workflow needs the team index, keep the current product-selection handoff blocked and direct the user to choose an accessible team index folder on the setup page. Saving it refreshes the managed processor runtime and retries the same handoff once.
 
-   `tmall-materials nas-prepare --config config/nas-sources.yaml --source-id zhejiang-kuqu --allow-mount`
-
-   Never pass, request, log, or store NAS credentials. Do not use a silent low-level mount command.
+   Never pass, request, log, or store NAS credentials. Windows owns any required authentication; do not invoke a silent low-level mount command.
 
 4. By default, sync the latest valid folder snapshots into the local cache:
 

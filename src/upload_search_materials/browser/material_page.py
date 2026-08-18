@@ -653,6 +653,7 @@ def scan_recommended_material_status(
         )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
+        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
     _wait_for_nonempty_promotion_rows(
         page,
         selectors["promotion_rows"],
@@ -674,6 +675,7 @@ def scan_recommended_material_status(
         )
         if action_wait_ms:
             page.wait_for_timeout(action_wait_ms)
+        _settle_safe_popups(page, selectors, delay_ms=settle_delay_ms)
         checked = category_filter.get_attribute("aria-checked")
         class_name = category_filter.get_attribute("class") or ""
     if checked != "true" and "checked" not in class_name.split():
@@ -731,6 +733,7 @@ def scan_recommended_material_status(
     )
     while True:
         page_number += 1
+        _settle_safe_popups(page, selectors, delay_ms=0)
         if pagination_state is not None:
             if pagination_state.current_page != page_number:
                 raise _pagination_error(
@@ -830,6 +833,7 @@ def scan_recommended_material_status(
             break
         if human_check_waiter is not None:
             human_check_waiter(page_number, "before_pagination")
+        _settle_safe_popups(page, selectors, delay_ms=0)
         next_page = page.locator(selectors["promotion_next_page"])
         if not next_page.is_enabled():
             if pagination_state is not None:
@@ -898,6 +902,7 @@ def scan_recommended_material_status(
             else action_wait_ms
         )
         while True:
+            _settle_safe_popups(page, selectors, delay_ms=0)
             next_row_texts = [
                 text.strip()
                 for text in page.locator(selectors["promotion_rows"]).all_inner_texts()
