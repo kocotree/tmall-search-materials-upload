@@ -2328,7 +2328,9 @@ def _team_folder_index(args) -> int:
                 database_path=local_root / "folder-index.sqlite3",
                 shared_root=shared_root,
                 source_id=source_id,
-                canonical_source=str(binding.get("canonical_unc", "")),
+                canonical_source=str(
+                    binding.get("canonical_unc") or binding.get("path", "")
+                ),
                 publisher=args.publisher,
             )
         print(json.dumps(result, ensure_ascii=False))

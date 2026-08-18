@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 from upload_search_materials.runtime_config import (
+    image_source_path_key,
     inspect_image_sources,
     load_runtime_config,
     normalize_image_sources,
     save_image_sources,
     save_selector_profile_path,
+    stable_image_source_id,
 )
 
 
@@ -254,6 +256,31 @@ def test_legacy_source_migrates_to_stable_id_across_machine_bindings(
     assert second["canonical_unc"] == r"\\nas\media\model"
 
 
+def test_source_id_uses_path_without_drive_or_unc_server_and_ignores_label(
+    tmp_path,
+):
+    drive_path = r"Y:\视觉部\1-模特图"
+    unc_path = r"\\192.168.124.85\视觉部\1-模特图"
+
+    first = normalize_image_sources(
+        [{"label": "图片源 3", "path": drive_path}],
+        tmp_path,
+    )[0]
+    renamed = normalize_image_sources(
+        [{"label": "公司模特图", "path": drive_path}],
+        tmp_path,
+    )[0]
+    unc = normalize_image_sources(
+        [{"label": "视觉部模特图", "path": unc_path}],
+        tmp_path,
+    )[0]
+
+    assert image_source_path_key(drive_path) == r"视觉部\1-模特图"
+    assert image_source_path_key(unc_path) == r"视觉部\1-模特图"
+    assert first["source_id"] == renamed["source_id"] == unc["source_id"]
+    assert first["source_id"] == stable_image_source_id(drive_path)
+
+
 def test_deleted_source_reuses_its_id_when_same_path_is_added_again(tmp_path):
     workspace = make_workspace(tmp_path)
     user_data = tmp_path / "user-data"
@@ -319,7 +346,7 @@ def test_image_source_check_reuses_unique_current_path_binding(tmp_path):
     assert checked[0]["source_id"] == saved.image_sources[0]["source_id"]
 
 
-def test_image_source_path_with_ambiguous_history_is_not_auto_rebound(tmp_path):
+def test_path_derived_id_replaces_conflicting_legacy_ids(tmp_path):
     workspace = make_workspace(tmp_path)
     user_data = tmp_path / "user-data"
     source_path = workspace / "media" / "model"
@@ -352,11 +379,16 @@ def test_image_source_path_with_ambiguous_history_is_not_auto_rebound(tmp_path):
         environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
     )
 
-    with pytest.raises(ValueError, match="曾绑定到多个图片源"):
-        inspect_image_sources(
-            runtime,
-            [{"label": "重新添加的图片源", "path": str(source_path)}],
-        )
+    checked = inspect_image_sources(
+        runtime,
+        [{"label": "重新添加的图片源", "path": str(source_path)}],
+    )
+
+    assert checked[0]["source_id"] == stable_image_source_id(source_path)
+    assert {item["source_id"] for item in runtime.image_source_history} == {
+        "source-current",
+        "source-previous",
+    }
 
 
 def test_runtime_source_contains_no_machine_specific_drive_or_username():

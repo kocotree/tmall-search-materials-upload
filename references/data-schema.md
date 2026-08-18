@@ -47,7 +47,7 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 ## Task Setup
 
-每机图片源绑定项使用 `source_id`、`label`、`path`，可选 `canonical_unc`、`last_verified_sid`、`last_verified_at` 和 `last_status`。`source_id` 是跨电脑稳定业务引用；`path` 是当前电脑的盘符或 UNC。旧 `label + path` 项加载时确定性补 source ID。该配置不得进入版本库，也不得包含 NAS 凭据、目录清单或图片内容。
+每机图片源绑定项使用 `source_id`、`label`、`path`，可选 `canonical_unc`、`last_verified_sid`、`last_verified_at` 和 `last_status`。`source_id` 是跨电脑稳定业务引用，由 `path` 去掉盘符或 UNC 服务器部分后的 NFC、大小写与分隔符归一路径键取 SHA-256 前 12 位生成；`label` 不参与。`path` 是当前电脑的盘符或 UNC，旧 ID 只保留在 `image_source_history` 中作为旧任务兼容别名。该配置不得进入版本库，也不得包含 NAS 凭据、目录清单或图片内容。
 
 任务配置 handoff 的用户输入为：`store` 和 `store_confirmed`。第一阶段不接受 `month`、`product_scope`、`product_ids` 或 `promotion_max_pages`；商品范围由第二阶段的“搜推高价值”全量采集结果决定。`products_csv` 和 `rules_csv` 由项目自动发现；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
 

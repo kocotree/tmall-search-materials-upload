@@ -34,7 +34,7 @@ from .runtime_identity import (
     current_runtime_identity,
     require_local_resource_identity,
 )
-from .runtime_config import RuntimeConfig
+from .runtime_config import RuntimeConfig, image_source_path_key
 
 
 GALLERY_JOB_SCHEMA_VERSION = 1
@@ -444,6 +444,7 @@ def _safe_relative_path(value: str) -> Path:
 def _select_local_source(
     binding: dict[str, str],
     sources: tuple[dict[str, str], ...],
+    history: tuple[dict[str, str], ...] = (),
 ) -> dict[str, str]:
     by_id = {
         str(source.get("source_id", "")).strip(): source
@@ -452,6 +453,28 @@ def _select_local_source(
     requested = str(binding.get("source_id", "")).strip()
     if requested in by_id:
         return by_id[requested]
+
+    old_sources = [
+        source
+        for source in history
+        if str(source.get("source_id", "")).strip() == requested
+    ]
+    if old_sources:
+        matching: dict[str, dict[str, str]] = {}
+        for old_source in old_sources:
+            try:
+                old_key = image_source_path_key(old_source.get("path", ""))
+            except ValueError:
+                continue
+            for source in sources:
+                try:
+                    current_key = image_source_path_key(source.get("path", ""))
+                except ValueError:
+                    continue
+                if current_key == old_key:
+                    matching[str(source.get("source_id", ""))] = source
+        if len(matching) == 1:
+            return next(iter(matching.values()))
 
     # Compatibility for indexes made before source_id was recorded. This
     # executes in the user's material-access process, where mapped roots can
@@ -514,7 +537,11 @@ def resolve_material_folders(
             ),
             "absolute_path": str(candidate.get("absolute_path", "")),
         }
-        source = _select_local_source(binding, runtime.image_sources)
+        source = _select_local_source(
+            binding,
+            runtime.image_sources,
+            runtime.image_source_history,
+        )
         relative = _safe_relative_path(binding["relative_path"])
         root = Path(source["path"])
         folder = root.joinpath(relative)

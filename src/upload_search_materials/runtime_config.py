@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PureWindowsPath
 import re
 from typing import Mapping, Sequence
+import unicodedata
 
 from .path_diagnostics import diagnose_image_sources
 
@@ -26,6 +27,43 @@ DEFAULT_MATERIAL_CENTER_URL = (
 )
 MAX_IMAGE_SOURCES = 50
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+
+
+def image_source_path_key(value: object) -> str:
+    """Return the drive/server-independent identity key for an image root."""
+
+    text = unicodedata.normalize("NFC", str(value).strip()).replace("/", "\\")
+    if not text or "\x00" in text:
+        raise ValueError("image source path is required")
+
+    if text.startswith("\\\\"):
+        parts = [part for part in text.lstrip("\\").split("\\") if part]
+        if len(parts) < 2:
+            raise ValueError("UNC image source path must include a share")
+        parts = parts[1:]
+    else:
+        windows_path = PureWindowsPath(text)
+        remainder = text[len(windows_path.drive):] if windows_path.drive else text
+        parts = [part for part in remainder.strip("\\").split("\\") if part]
+
+    normalized_parts: list[str] = []
+    for part in parts:
+        normalized = unicodedata.normalize("NFC", part).casefold()
+        if normalized == ".":
+            continue
+        if normalized == "..":
+            raise ValueError("image source path must not contain '..'")
+        normalized_parts.append(normalized)
+    if not normalized_parts:
+        raise ValueError("image source path must include a directory below its root")
+    return "\\".join(normalized_parts)
+
+
+def stable_image_source_id(value: object) -> str:
+    """Derive a cross-machine source ID from the normalized source path key."""
+
+    path_key = image_source_path_key(value)
+    return "source-" + hashlib.sha256(path_key.encode("utf-8")).hexdigest()[:12]
 
 
 def default_user_data_root(
@@ -105,8 +143,10 @@ def load_runtime_config(
         RULES_PATTERN,
     )
     image_sources = _image_sources(document.get("image_sources"), workspace_root)
-    image_source_history = _image_source_history(
-        document.get("image_source_history"), workspace_root
+    image_source_history = _merge_image_source_history(
+        workspace_root,
+        document.get("image_source_history"),
+        document.get("image_sources"),
     )
     nas_sources_value = env.get("TMALL_NAS_SOURCES_FILE") or document.get(
         "nas_sources_file"
@@ -226,11 +266,7 @@ def normalize_image_sources(
         if not raw_path or len(raw_path) > 1000 or "\x00" in raw_path:
             raise ValueError(f"image_sources[{index}].path is required")
         normalized_path = str(_resolve_configured_path(raw_path, workspace_root))
-        source_id = str(item.get("source_id", "")).strip().casefold()
-        if not source_id:
-            source_id = "source-" + hashlib.sha256(
-                label.casefold().encode("utf-8")
-            ).hexdigest()[:12]
+        source_id = stable_image_source_id(normalized_path)
         if not SOURCE_ID_PATTERN.fullmatch(source_id):
             raise ValueError(
                 f"image_sources[{index}].source_id is invalid"
@@ -320,47 +356,6 @@ def _merge_image_source_history(
     return tuple(records.values())
 
 
-def _reuse_image_source_ids(
-    value: object,
-    workspace_root: Path,
-    known_sources: object,
-) -> object:
-    """Reuse a stable ID only when one historical identity owns the path."""
-
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return value
-    ids_by_path: dict[str, set[str]] = {}
-    for source in _image_source_history(known_sources, workspace_root):
-        path_key = _image_source_path_key(source["path"], workspace_root)
-        ids_by_path.setdefault(path_key, set()).add(source["source_id"])
-
-    rebound: list[object] = []
-    for index, item in enumerate(value, start=1):
-        if not isinstance(item, Mapping):
-            rebound.append(item)
-            continue
-        source = dict(item)
-        if str(source.get("source_id", "")).strip():
-            rebound.append(source)
-            continue
-        raw_path = str(source.get("path", "")).strip()
-        if not raw_path or len(raw_path) > 1000 or "\x00" in raw_path:
-            rebound.append(source)
-            continue
-        matching_ids = ids_by_path.get(
-            _image_source_path_key(raw_path, workspace_root), set()
-        )
-        if len(matching_ids) > 1:
-            raise ValueError(
-                f"image_sources[{index}].path 曾绑定到多个图片源，"
-                "请保留已有图片源或选择新的目录"
-            )
-        if matching_ids:
-            source["source_id"] = next(iter(matching_ids))
-        rebound.append(source)
-    return rebound
-
-
 def save_image_sources(
     runtime: RuntimeConfig, value: object
 ) -> RuntimeConfig:
@@ -379,12 +374,7 @@ def save_image_sources(
         runtime.image_source_history,
         runtime.image_sources,
     )
-    rebound_value = _reuse_image_source_ids(
-        value,
-        runtime.workspace_root,
-        history,
-    )
-    sources = normalize_image_sources(rebound_value, runtime.workspace_root)
+    sources = normalize_image_sources(value, runtime.workspace_root)
     history = _merge_image_source_history(
         runtime.workspace_root,
         history,
@@ -455,17 +445,7 @@ def inspect_image_sources(
 ) -> tuple[dict[str, object], ...]:
     """Return read-only reachability status for configured directories."""
 
-    known_sources = _merge_image_source_history(
-        runtime.workspace_root,
-        runtime.image_source_history,
-        runtime.image_sources,
-    )
-    rebound_value = _reuse_image_source_ids(
-        value,
-        runtime.workspace_root,
-        known_sources,
-    )
-    sources = normalize_image_sources(rebound_value, runtime.workspace_root)
+    sources = normalize_image_sources(value, runtime.workspace_root)
     return diagnose_image_sources(sources)
 
 

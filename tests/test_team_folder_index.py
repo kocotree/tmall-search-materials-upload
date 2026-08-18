@@ -5,6 +5,10 @@ import sqlite3
 
 import pytest
 
+from upload_search_materials.runtime_config import (
+    image_source_path_key,
+    stable_image_source_id,
+)
 from upload_search_materials.team_folder_index import (
     TeamFolderIndexError,
     ensure_missing_snapshots,
@@ -14,6 +18,10 @@ from upload_search_materials.team_folder_index import (
     sync_snapshots,
     validate_snapshot,
 )
+
+
+def canonical_source_for(path: Path) -> str:
+    return rf"\\nas\{image_source_path_key(path)}"
 
 
 def make_database(path: Path, rows: list[tuple[str, str, str]]) -> None:
@@ -117,6 +125,80 @@ def test_ensure_missing_snapshots_keeps_valid_existing_snapshot(
     assert status["sources"][0]["snapshot_id"] == published["snapshot_id"]
 
 
+def test_legacy_snapshot_is_migrated_to_path_derived_source_id(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    local = tmp_path / "local"
+    products = tmp_path / "products.csv"
+    legacy_source_id = "source-legacy-model"
+    local_path = r"Y:\视觉部\1-模特图"
+    canonical_source = r"\\192.168.124.85\视觉部\1-模特图"
+    source_id = stable_image_source_id(local_path)
+    make_database(
+        database,
+        [("folder-1", legacy_source_id, "season/SKU1")],
+    )
+    make_products(products)
+    published = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id=legacy_source_id,
+        canonical_source=canonical_source,
+    )
+    binding = {
+        "source_id": source_id,
+        "label": "公司模特图",
+        "path": local_path,
+    }
+
+    ensured = ensure_missing_snapshots(
+        shared_root=shared,
+        local_root=local,
+        products_path=products,
+        image_sources=(binding,),
+    )
+
+    assert ensured["created"] == []
+    assert ensured["existing_source_ids"] == [source_id]
+    assert ensured["migrated"][0]["source_id"] == source_id
+    assert ensured["migrated"][0]["legacy_source_id"] == legacy_source_id
+    assert (
+        shared
+        / "sources"
+        / legacy_source_id
+        / "snapshots"
+        / published["snapshot_id"]
+    ).is_dir()
+
+    synced = sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        image_sources=(binding,),
+    )
+    assert synced["complete"] is True
+    assert synced["folder_rows"] == 1
+    assert synced["sources"][0]["source_id"] == source_id
+    assert synced["superseded_sources"] == [
+        {
+            "source_id": legacy_source_id,
+            "reason_code": "TEAM_INDEX_SUPERSEDED_SOURCE_ID",
+        }
+    ]
+
+    output_path = tmp_path / "run" / "folder-candidates.csv"
+    materialized = materialize_task_folder_candidates(
+        local_root=local,
+        products_path=products,
+        image_sources=(binding,),
+        selected_product_ids=("1001",),
+        output_path=output_path,
+    )
+    assert materialized["candidate_rows"] == 1
+    with output_path.open(encoding="utf-8-sig", newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert row["source_system"] == source_id
+
+
 def test_ensure_missing_snapshots_builds_and_publishes_first_snapshot(tmp_path):
     shared = tmp_path / "shared"
     shared.mkdir()
@@ -132,7 +214,6 @@ def test_ensure_missing_snapshots_builds_and_publishes_first_snapshot(tmp_path):
         image_sources=({
             "source_id": "source-a",
             "path": str(media),
-            "canonical_unc": r"\\nas\media\source-a",
         },),
     )
 
@@ -142,6 +223,14 @@ def test_ensure_missing_snapshots_builds_and_publishes_first_snapshot(tmp_path):
     status = snapshot_status(shared_root=shared, local_root=tmp_path / "local")
     assert status["using"] == "shared"
     assert status["sources"][0]["status"] == "valid"
+    snapshot_path = (
+        shared
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / result["created"][0]["snapshot_id"]
+    )
+    assert validate_snapshot(snapshot_path)["canonical_source"] == str(media)
 
 
 def test_publish_creates_portable_immutable_snapshot(tmp_path):
@@ -217,13 +306,14 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
     local = tmp_path / "local"
     products = tmp_path / "products.csv"
     local_media = tmp_path / "mounted-media"
+    canonical_source = canonical_source_for(local_media)
     make_database(database, [("folder-1", "source-a", "season/SKU1")])
     make_products(products)
     published = publish_snapshot(
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
+        canonical_source=canonical_source,
     )
 
     summary = sync_snapshots(
@@ -233,7 +323,6 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
             {
                 "source_id": "source-a",
                 "path": str(local_media),
-                "canonical_unc": r"\\nas\media\source-a",
             },
         ),
     )
@@ -250,7 +339,6 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
             {
                 "source_id": "source-a",
                 "path": str(local_media),
-                "canonical_unc": r"\\nas\media\source-a",
             },
         ),
         selected_product_ids=("1001",),
@@ -282,7 +370,6 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
             {
                 "source_id": "source-a",
                 "path": str(local_media),
-                "canonical_unc": r"\\nas\media\source-a",
             },
         ),
     )

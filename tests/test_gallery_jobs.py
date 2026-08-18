@@ -15,7 +15,11 @@ from upload_search_materials.interaction.session import (
     InteractionConflict,
     SessionStore,
 )
-from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
+from upload_search_materials.runtime_config import (
+    DiscoveredPath,
+    RuntimeConfig,
+    stable_image_source_id,
+)
 
 
 def _local_gallery_session(tmp_path: Path):
@@ -102,6 +106,51 @@ def test_material_folder_resolution_uses_source_id_and_relative_path(
     assert resolved[0]["folder_path"] == str(folder)
     assert resolved[0]["source_id"] == "model-materials"
     assert resolved[0]["relative_path"] == "year/product"
+
+
+def test_material_folder_resolution_accepts_legacy_source_id_from_history(
+    tmp_path,
+):
+    source_root = tmp_path / "mounted-source"
+    folder = source_root / "year" / "product"
+    folder.mkdir(parents=True)
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(
+            {
+                "source_id": stable_image_source_id(source_root),
+                "label": "model",
+                "path": str(source_root),
+            },
+        ),
+        runs_root=tmp_path,
+        image_source_history=(
+            {
+                "source_id": "legacy-model-materials",
+                "label": "old model",
+                "path": str(source_root),
+            },
+        ),
+    )
+
+    resolved = resolve_material_folders(
+        [
+            {
+                "folder_id": "F1",
+                "product_id": "P1",
+                "source_id": "legacy-model-materials",
+                "relative_path": "year/product",
+                "decision": "confirmed",
+            }
+        ],
+        stage_path=tmp_path / "stage",
+        runtime=runtime,
+    )
+
+    assert resolved[0]["folder_path"] == str(folder)
+    assert resolved[0]["source_id"] == stable_image_source_id(source_root)
 
 
 def test_material_folder_resolution_rejects_parent_traversal(tmp_path):

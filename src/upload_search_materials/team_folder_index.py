@@ -20,6 +20,7 @@ from .asset_matching import PRODUCT_PATH_MATCHER_VERSION, ProductPathMatcher
 from .folder_index import build_folder_index
 from .io_tables import read_product_csv, validate_product_records
 from .persistence import atomic_write_dict_csv, atomic_write_json, read_json
+from .runtime_config import image_source_path_key
 
 
 SNAPSHOT_SCHEMA_VERSION = 1
@@ -178,6 +179,88 @@ def _assert_source_publishable(database_path: Path, source_id: str) -> None:
         )
 
 
+def _publish_portable_snapshot(
+    *,
+    shared_root: Path,
+    source_id: str,
+    canonical_source: str,
+    folders: Sequence[Mapping[str, str]],
+    publisher: str = "",
+) -> dict[str, object]:
+    """Publish already-portable metadata under one immutable source identity."""
+
+    source_id = _safe_source_id(source_id)
+    canonical_source = str(canonical_source).strip()
+    if not canonical_source:
+        raise TeamFolderIndexError("TEAM_INDEX_CANONICAL_SOURCE_REQUIRED")
+    portable_folders = []
+    for folder in folders:
+        item = {field: str(folder.get(field, "")) for field in PORTABLE_FOLDER_FIELDS}
+        item["source_id"] = source_id
+        item["relative_path"] = _safe_relative_path(item["relative_path"])
+        portable_folders.append(item)
+    if not portable_folders:
+        raise TeamFolderIndexError(f"TEAM_INDEX_SOURCE_EMPTY: {source_id}")
+
+    source_root = Path(shared_root) / "sources" / source_id
+    snapshots_root = source_root / "snapshots"
+    snapshot_seed = json.dumps(
+        portable_folders, ensure_ascii=False, sort_keys=True
+    ).encode("utf-8")
+    snapshot_id = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ-")
+        + hashlib.sha256(snapshot_seed).hexdigest()[:12]
+    )
+    staging = snapshots_root / f".staging-{snapshot_id}-{uuid.uuid4().hex}"
+    final = snapshots_root / snapshot_id
+
+    with _PublishLease(source_root / ".publish.lock"):
+        staging.mkdir(parents=True, exist_ok=False)
+        try:
+            folders_path = staging / "folders.csv"
+            atomic_write_dict_csv(
+                folders_path,
+                portable_folders,
+                fieldnames=PORTABLE_FOLDER_FIELDS,
+            )
+            manifest = {
+                "schema_version": SNAPSHOT_SCHEMA_VERSION,
+                "complete": True,
+                "snapshot_id": snapshot_id,
+                "source_id": source_id,
+                "canonical_source": canonical_source,
+                "created_at": _utc_now(),
+                "publisher": publisher.strip()
+                or f"{socket.gethostname()}:{os.getpid()}",
+                "folder_count": len(portable_folders),
+                "files": {"folders.csv": {"sha256": _sha256(folders_path)}},
+            }
+            atomic_write_json(staging / "manifest.json", manifest, sort_keys=True)
+            if final.exists():
+                raise TeamFolderIndexError(
+                    f"TEAM_INDEX_SNAPSHOT_EXISTS: {snapshot_id}"
+                )
+            os.replace(staging, final)
+            atomic_write_json(
+                source_root / "current.json",
+                {
+                    "schema_version": 1,
+                    "source_id": source_id,
+                    "snapshot_id": snapshot_id,
+                    "updated_at": _utc_now(),
+                },
+                sort_keys=True,
+            )
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+    return {
+        "source_id": source_id,
+        "snapshot_id": snapshot_id,
+        "folder_count": len(portable_folders),
+    }
+
+
 def publish_snapshot(
     *,
     database_path: Path,
@@ -191,7 +274,9 @@ def publish_snapshot(
     source_id = _safe_source_id(source_id)
     database_path = Path(database_path)
     if not database_path.is_file():
-        raise TeamFolderIndexError(f"TEAM_INDEX_LOCAL_DATABASE_MISSING: {database_path}")
+        raise TeamFolderIndexError(
+            f"TEAM_INDEX_LOCAL_DATABASE_MISSING: {database_path}"
+        )
     if not canonical_source.strip():
         raise TeamFolderIndexError("TEAM_INDEX_CANONICAL_SOURCE_REQUIRED")
     _assert_source_publishable(database_path, source_id)
@@ -199,43 +284,67 @@ def publish_snapshot(
     if not folders:
         raise TeamFolderIndexError(f"TEAM_INDEX_SOURCE_EMPTY: {source_id}")
 
-    source_root = Path(shared_root) / "sources" / source_id
-    snapshots_root = source_root / "snapshots"
-    snapshot_seed = json.dumps(folders, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ-") + hashlib.sha256(snapshot_seed).hexdigest()[:12]
-    staging = snapshots_root / f".staging-{snapshot_id}-{uuid.uuid4().hex}"
-    final = snapshots_root / snapshot_id
+    return _publish_portable_snapshot(
+        shared_root=shared_root,
+        source_id=source_id,
+        canonical_source=canonical_source,
+        folders=folders,
+        publisher=publisher,
+    )
 
-    with _PublishLease(source_root / ".publish.lock"):
-        staging.mkdir(parents=True, exist_ok=False)
+
+def _binding_identity_key(binding: Mapping[str, str]) -> str:
+    identity_path = binding.get("canonical_unc") or binding.get("path", "")
+    return image_source_path_key(str(identity_path))
+
+
+def _manifest_identity_key(manifest: Mapping[str, object]) -> str:
+    canonical_source = str(manifest.get("canonical_source", "")).strip()
+    if not canonical_source:
+        raise TeamFolderIndexError("TEAM_INDEX_CANONICAL_SOURCE_REQUIRED")
+    try:
+        return image_source_path_key(canonical_source)
+    except ValueError as error:
+        raise TeamFolderIndexError(
+            "TEAM_INDEX_CANONICAL_SOURCE_INVALID"
+        ) from error
+
+
+def _equivalent_snapshot_for_binding(
+    root: Path,
+    binding: Mapping[str, str],
+    *,
+    exclude_source_id: str = "",
+) -> tuple[str, Path, dict[str, object]] | None:
+    """Find one legacy snapshot whose canonical path key matches the binding."""
+
+    try:
+        binding_key = _binding_identity_key(binding)
+    except ValueError as error:
+        raise TeamFolderIndexError("TEAM_INDEX_LOCAL_PATH_KEY_INVALID") from error
+    matches = []
+    for candidate_source_id in _source_ids(root):
+        if candidate_source_id == exclude_source_id:
+            continue
         try:
-            folders_path = staging / "folders.csv"
-            atomic_write_dict_csv(folders_path, folders, fieldnames=PORTABLE_FOLDER_FIELDS)
-            manifest = {
-                "schema_version": SNAPSHOT_SCHEMA_VERSION,
-                "complete": True,
-                "snapshot_id": snapshot_id,
-                "source_id": source_id,
-                "canonical_source": canonical_source.strip(),
-                "created_at": _utc_now(),
-                "publisher": publisher.strip() or f"{socket.gethostname()}:{os.getpid()}",
-                "folder_count": len(folders),
-                "files": {"folders.csv": {"sha256": _sha256(folders_path)}},
-            }
-            atomic_write_json(staging / "manifest.json", manifest, sort_keys=True)
-            if final.exists():
-                raise TeamFolderIndexError(f"TEAM_INDEX_SNAPSHOT_EXISTS: {snapshot_id}")
-            os.replace(staging, final)
-            atomic_write_json(source_root / "current.json", {
-                "schema_version": 1,
-                "source_id": source_id,
-                "snapshot_id": snapshot_id,
-                "updated_at": _utc_now(),
-            }, sort_keys=True)
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
-    return {"source_id": source_id, "snapshot_id": snapshot_id, "folder_count": len(folders)}
+            snapshot_path, manifest = _snapshot_for_source(
+                root, candidate_source_id
+            )
+            if _manifest_identity_key(manifest) == binding_key:
+                matches.append((candidate_source_id, snapshot_path, manifest))
+        except TeamFolderIndexError:
+            continue
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda item: (
+            str(item[2].get("created_at", "")),
+            str(item[2].get("snapshot_id", "")),
+            item[0],
+        ),
+        reverse=True,
+    )
+    return matches[0]
 
 
 def ensure_missing_snapshots(
@@ -259,6 +368,7 @@ def ensure_missing_snapshots(
     matcher = ProductPathMatcher.from_products(products, validation)
     products_sha256 = hashlib.sha256(products_path.read_bytes()).hexdigest()
     created = []
+    migrated = []
     existing = []
     for binding in image_sources:
         source_id = _safe_source_id(str(binding.get("source_id", "")))
@@ -268,10 +378,31 @@ def ensure_missing_snapshots(
             continue
         except TeamFolderIndexError:
             pass
-        canonical_source = str(binding.get("canonical_unc", "")).strip()
+        equivalent = _equivalent_snapshot_for_binding(
+            shared_root,
+            binding,
+            exclude_source_id=source_id,
+        )
+        if equivalent is not None:
+            legacy_source_id, snapshot_path, manifest = equivalent
+            folders = _read_portable_folders(snapshot_path, legacy_source_id)
+            migration = _publish_portable_snapshot(
+                shared_root=shared_root,
+                source_id=source_id,
+                canonical_source=str(manifest.get("canonical_source", "")),
+                folders=folders,
+                publisher=publisher,
+            )
+            migration["legacy_source_id"] = legacy_source_id
+            migrated.append(migration)
+            existing.append(source_id)
+            continue
+        canonical_source = str(
+            binding.get("canonical_unc") or binding.get("path", "")
+        ).strip()
         if not canonical_source:
             raise TeamFolderIndexError(
-                f"TEAM_INDEX_LOCAL_CANONICAL_SOURCE_MISSING: {source_id}"
+                f"TEAM_INDEX_LOCAL_PATH_KEY_INVALID: {source_id}"
             )
         declared_root = Path(str(binding.get("path", "")))
         if declared_root.is_symlink() or not declared_root.is_dir():
@@ -300,6 +431,7 @@ def ensure_missing_snapshots(
         "schema_version": 1,
         "mode": "automatic_missing_snapshot_bootstrap",
         "created": created,
+        "migrated": migrated,
         "existing_source_ids": existing,
     }
 
@@ -367,6 +499,48 @@ def _source_ids(root: Path) -> list[str]:
     if not sources_root.is_dir():
         return []
     return sorted(path.name for path in sources_root.iterdir() if path.is_dir() and not path.name.startswith("."))
+
+
+def _binding_for_snapshot(
+    source_id: str,
+    manifest: Mapping[str, object],
+    bindings: Mapping[str, Mapping[str, str]],
+    available_source_ids: set[str],
+) -> tuple[Mapping[str, str] | None, str]:
+    """Resolve exact or legacy snapshot identity to one current local binding."""
+
+    exact = bindings.get(source_id)
+    if exact is not None:
+        return exact, "exact"
+    try:
+        manifest_key = _manifest_identity_key(manifest)
+    except TeamFolderIndexError:
+        return None, "TEAM_INDEX_CANONICAL_SOURCE_INVALID"
+    matches = []
+    for binding in bindings.values():
+        try:
+            if _binding_identity_key(binding) == manifest_key:
+                matches.append(binding)
+        except ValueError:
+            continue
+    if len(matches) > 1:
+        return None, "TEAM_INDEX_SOURCE_PATH_KEY_CONFLICT"
+    if not matches:
+        return None, "TEAM_INDEX_LOCAL_BINDING_MISSING"
+    binding = matches[0]
+    current_source_id = str(binding.get("source_id", ""))
+    if current_source_id in available_source_ids:
+        return None, "TEAM_INDEX_SUPERSEDED_SOURCE_ID"
+    return binding, "legacy_path_key"
+
+
+def _binding_matches_manifest(
+    binding: Mapping[str, str], manifest: Mapping[str, object]
+) -> bool:
+    try:
+        return _binding_identity_key(binding) == _manifest_identity_key(manifest)
+    except (ValueError, TeamFolderIndexError):
+        return False
 
 
 def _copy_snapshot_to_cache(snapshot_path: Path, manifest: Mapping[str, object], cache_root: Path) -> Path:
@@ -450,30 +624,46 @@ def sync_snapshots(
 
     synced = []
     skipped = []
+    superseded = []
     folder_rows = 0
+    available_source_ids = {item[0] for item in snapshots}
     for source_id, snapshot_path, manifest, origin in snapshots:
-        binding = bindings.get(source_id)
+        binding, binding_status = _binding_for_snapshot(
+            source_id,
+            manifest,
+            bindings,
+            available_source_ids,
+        )
         if not binding:
-            skipped.append({"source_id": source_id, "reason_code": "TEAM_INDEX_LOCAL_BINDING_MISSING"})
+            target = (
+                superseded
+                if binding_status == "TEAM_INDEX_SUPERSEDED_SOURCE_ID"
+                else skipped
+            )
+            target.append({"source_id": source_id, "reason_code": binding_status})
             continue
-        canonical_source = str(manifest.get("canonical_source", "")).casefold().rstrip("\\/")
-        local_canonical = str(binding.get("canonical_unc", "")).casefold().rstrip("\\/")
-        if not local_canonical:
-            skipped.append({"source_id": source_id, "reason_code": "TEAM_INDEX_LOCAL_CANONICAL_SOURCE_MISSING"})
-            continue
-        if not canonical_source or canonical_source != local_canonical:
-            skipped.append({"source_id": source_id, "reason_code": "TEAM_INDEX_CANONICAL_SOURCE_MISMATCH"})
+        if not _binding_matches_manifest(binding, manifest):
+            skipped.append(
+                {
+                    "source_id": source_id,
+                    "reason_code": "TEAM_INDEX_SOURCE_PATH_KEY_MISMATCH",
+                }
+            )
             continue
         portable_folders = _read_portable_folders(snapshot_path, source_id)
         if len(portable_folders) != manifest.get("folder_count"):
             raise TeamFolderIndexError("TEAM_INDEX_FOLDER_COUNT_MISMATCH")
         folder_rows += len(portable_folders)
-        synced.append({
-            "source_id": source_id,
+        synced_item = {
+            "source_id": str(binding.get("source_id", source_id)),
             "snapshot_id": manifest["snapshot_id"],
             "folder_count": manifest["folder_count"],
             "origin": origin,
-        })
+            "binding_status": binding_status,
+        }
+        if source_id != synced_item["source_id"]:
+            synced_item["snapshot_source_id"] = source_id
+        synced.append(synced_item)
     local_root = Path(local_root)
     summary = {
         "schema_version": 1,
@@ -484,6 +674,7 @@ def sync_snapshots(
         "folder_rows": folder_rows,
         "sources": synced,
         "skipped_sources": skipped,
+        "superseded_sources": superseded,
         "errors": errors,
     }
     atomic_write_json(local_root / "team-sync.json", summary, sort_keys=True)
@@ -528,6 +719,8 @@ def materialize_task_folder_candidates(
     candidates: list[dict[str, str]] = []
     sources = []
     skipped = []
+    superseded = []
+    available_source_ids = set(selected_sources)
     for source_id in selected_sources:
         try:
             snapshot_path, manifest = _snapshot_for_source(cache_root, source_id)
@@ -536,35 +729,36 @@ def materialize_task_folder_candidates(
                 raise
             skipped.append({"source_id": source_id, "reason_code": str(error)})
             continue
-        binding = bindings.get(source_id)
+        binding, binding_status = _binding_for_snapshot(
+            source_id,
+            manifest,
+            bindings,
+            available_source_ids,
+        )
         if not binding:
-            skipped.append(
+            target = (
+                superseded
+                if binding_status == "TEAM_INDEX_SUPERSEDED_SOURCE_ID"
+                else skipped
+            )
+            target.append(
                 {
                     "source_id": source_id,
-                    "reason_code": "TEAM_INDEX_LOCAL_BINDING_MISSING",
+                    "reason_code": binding_status,
                 }
             )
             continue
-        canonical_source = str(manifest.get("canonical_source", "")).casefold().rstrip("\\/")
-        local_canonical = str(binding.get("canonical_unc", "")).casefold().rstrip("\\/")
-        if not local_canonical:
+        if not _binding_matches_manifest(binding, manifest):
             skipped.append(
                 {
                     "source_id": source_id,
-                    "reason_code": "TEAM_INDEX_LOCAL_CANONICAL_SOURCE_MISSING",
-                }
-            )
-            continue
-        if not canonical_source or canonical_source != local_canonical:
-            skipped.append(
-                {
-                    "source_id": source_id,
-                    "reason_code": "TEAM_INDEX_CANONICAL_SOURCE_MISMATCH",
+                    "reason_code": "TEAM_INDEX_SOURCE_PATH_KEY_MISMATCH",
                 }
             )
             continue
 
         root = Path(str(binding["path"]))
+        binding_source_id = str(binding.get("source_id", source_id))
         folders = _read_portable_folders(snapshot_path, source_id)
         if len(folders) != manifest.get("folder_count"):
             raise TeamFolderIndexError("TEAM_INDEX_FOLDER_COUNT_MISMATCH")
@@ -577,7 +771,7 @@ def materialize_task_folder_candidates(
                 candidates.append(
                     {
                         "folder_id": folder["folder_id"],
-                        "source_system": source_id,
+                        "source_system": binding_source_id,
                         "absolute_path": str(absolute),
                         "relative_path": folder["relative_path"],
                         "folder_name": folder["folder_name"],
@@ -588,14 +782,16 @@ def materialize_task_folder_candidates(
                         "match_status": match.match_status,
                     }
                 )
-        sources.append(
-            {
-                "source_id": source_id,
-                "snapshot_id": manifest["snapshot_id"],
-                "folder_count": manifest["folder_count"],
-                "folders_sha256": manifest["files"]["folders.csv"]["sha256"],
-            }
-        )
+        source_summary = {
+            "source_id": binding_source_id,
+            "snapshot_id": manifest["snapshot_id"],
+            "folder_count": manifest["folder_count"],
+            "folders_sha256": manifest["files"]["folders.csv"]["sha256"],
+            "binding_status": binding_status,
+        }
+        if source_id != binding_source_id:
+            source_summary["snapshot_source_id"] = source_id
+        sources.append(source_summary)
 
     if not sources:
         raise TeamFolderIndexError("TEAM_INDEX_NO_BOUND_LOCAL_SNAPSHOTS")
@@ -620,6 +816,7 @@ def materialize_task_folder_candidates(
         "matcher_version": PRODUCT_PATH_MATCHER_VERSION,
         "sources": sources,
         "skipped_sources": skipped,
+        "superseded_sources": superseded,
         "created_at": _utc_now(),
     }
 

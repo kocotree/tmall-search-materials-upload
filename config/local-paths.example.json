@@ -4,13 +4,13 @@
   "nas_sources_file": "config/nas-sources.yaml",
   "image_sources": [
     {
-      "source_id": "zhejiang-kuqu",
+      "source_id": "source-8508c0b40cf7",
       "label": "浙江酷趣",
       "path": "\\\\192.168.110.20\\浙江酷趣",
       "canonical_unc": "\\\\192.168.110.20\\浙江酷趣"
     },
     {
-      "source_id": "visual-department",
+      "source_id": "source-b75a1c1fb0fa",
       "label": "视觉部",
       "path": "\\\\192.168.124.85\\视觉部",
       "canonical_unc": "\\\\192.168.124.85\\视觉部"
