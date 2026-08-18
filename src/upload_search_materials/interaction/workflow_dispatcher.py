@@ -54,6 +54,19 @@ def _selector_failure_is_recoverable(result: Any) -> bool:
     )
 
 
+def _team_index_failure_is_recoverable(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    reasons = result.get("blocking_reasons", [])
+    if not isinstance(reasons, list):
+        return False
+    codes = {
+        str(reason).split(":", 1)[0].strip()
+        for reason in reasons
+    }
+    return "TEAM_INDEX_NO_VALID_LOCAL_CACHE" in codes
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -295,6 +308,12 @@ class WorkflowDispatcher:
                 self.session_id, "setup", "result"
             )
             handoff_recoverable = _selector_failure_is_recoverable(result)
+        if status == "blocked" and stage_id == "completeness":
+            result = self.store.read_optional_stage_document(
+                self.session_id, "completeness", "result"
+            )
+            handoff_recoverable = _team_index_failure_is_recoverable(result)
+            handoff_generation = f"blocked-r{stage_state.get('revision', 0)}"
         if (
             status == "processing"
             and isinstance(claim, dict)

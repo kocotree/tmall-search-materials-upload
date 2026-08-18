@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from upload_search_materials.runtime_config import (
+    DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID,
+    DEFAULT_TEAM_FOLDER_INDEX_ROOT,
     image_source_path_key,
     inspect_image_sources,
     load_runtime_config,
@@ -46,6 +48,11 @@ def test_discovers_unique_tables_from_workspace_relative_docs(tmp_path):
     assert runtime.rules.path == rules.resolve()
     assert runtime.runs_root == user_data / "runs"
     assert runtime.folder_index_root == user_data / "cache" / "folder-index"
+    assert runtime.team_folder_index_root == DEFAULT_TEAM_FOLDER_INDEX_ROOT
+    assert (
+        runtime.team_folder_index_nas_source_id
+        == DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID
+    )
     assert runtime.browser_profile_dir == user_data / "browser-profile"
     assert runtime.user_data_root == user_data
     assert runtime.image_sources == ()
@@ -167,6 +174,13 @@ def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
     assert updated.config_path == user_data / "config/runtime.json"
     saved = json.loads(updated.config_path.read_text(encoding="utf-8"))
     assert [item["label"] for item in saved["image_sources"]] == ["模特图", "买家秀"]
+    assert saved["team_folder_index_root"] == str(
+        DEFAULT_TEAM_FOLDER_INDEX_ROOT
+    )
+    assert (
+        saved["team_folder_index_nas_source_id"]
+        == DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID
+    )
     statuses = inspect_image_sources(updated, saved["image_sources"])
     assert [item["status"] for item in statuses] == ["available", "unavailable"]
     assert statuses[0]["reason_code"] == "PATH_AVAILABLE"

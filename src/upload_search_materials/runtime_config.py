@@ -25,6 +25,10 @@ DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DEFAULT_MATERIAL_CENTER_URL = (
     "https://myseller.taobao.com/home.htm/material-center/material-management"
 )
+DEFAULT_TEAM_FOLDER_INDEX_ROOT = Path(
+    r"\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米"
+)
+DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID = "zhejiang-kuqu"
 MAX_IMAGE_SOURCES = 50
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 
@@ -175,16 +179,15 @@ def load_runtime_config(
     team_folder_index_value = (
         env.get("TMALL_TEAM_FOLDER_INDEX_ROOT")
         or document.get("team_folder_index_root")
+        or str(DEFAULT_TEAM_FOLDER_INDEX_ROOT)
     )
-    team_folder_index_root = (
-        _resolve_configured_path(team_folder_index_value, workspace_root)
-        if team_folder_index_value
-        else None
+    team_folder_index_root = _resolve_configured_path(
+        team_folder_index_value, workspace_root
     )
     team_folder_index_nas_source_id = str(
         env.get("TMALL_TEAM_FOLDER_INDEX_NAS_SOURCE_ID")
         or document.get("team_folder_index_nas_source_id")
-        or ""
+        or DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID
     ).strip().casefold() or None
     selectors_value = env.get("TMALL_SELECTORS_FILE") or document.get(
         "selectors_file"
@@ -382,6 +385,15 @@ def save_image_sources(
     )
     document["image_sources"] = list(sources)
     document["image_source_history"] = list(history)
+    if runtime.team_folder_index_root is not None:
+        document.setdefault(
+            "team_folder_index_root", str(runtime.team_folder_index_root)
+        )
+    if runtime.team_folder_index_nas_source_id:
+        document.setdefault(
+            "team_folder_index_nas_source_id",
+            runtime.team_folder_index_nas_source_id,
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.tmp")
     temporary.write_text(

@@ -114,6 +114,69 @@ def test_dispatcher_retries_existing_selector_failure_once_after_restart(
         dispatcher.stop()
 
 
+def test_dispatcher_retries_missing_team_index_once_after_restart(tmp_path):
+    store = SessionStore(tmp_path / "runs")
+    session = store.create_session()
+    setup = store.save_input(
+        session.session_id,
+        "setup",
+        {"store": "测试店铺"},
+    )
+    store.write_result(
+        session.session_id,
+        "setup",
+        int(setup["revision"]),
+        str(setup["input_sha256"]),
+        status="completed",
+        summary="配置完成",
+    )
+    handoff = store.save_input(
+        session.session_id,
+        "completeness",
+        {"selected_product_ids": ["1"]},
+    )
+    store.wait_for_handoff(
+        session.session_id,
+        "completeness",
+        timeout_seconds=0.5,
+        claimant_id="workbench-dispatcher",
+    )
+    claim = store.processing_claim(session.session_id, "completeness")
+    assert claim is not None
+    store.write_result(
+        session.session_id,
+        "completeness",
+        int(handoff["revision"]),
+        str(handoff["input_sha256"]),
+        status="blocked",
+        summary="团队文件夹索引尚未准备完成",
+        blocking_reasons=["TEAM_INDEX_NO_VALID_LOCAL_CACHE"],
+        claim_id=str(claim["claim_id"]),
+    )
+    processor = RecordingProcessor()
+    dispatcher = WorkflowDispatcher(
+        store,
+        session.session_id,
+        processor,
+        poll_seconds=30,
+    )
+
+    dispatcher.start()
+    try:
+        assert processor.called.wait(2)
+        assert len(processor.tasks) == 1
+        task = processor.tasks[0]
+        assert task.action == "process-product-selection"
+        assert task.revision == handoff["revision"]
+        assert task.input_sha256 == handoff["input_sha256"]
+        assert task.generation == f"blocked-r{handoff['revision']}"
+        assert dispatcher.notify() == 0
+        time.sleep(0.05)
+        assert len(processor.tasks) == 1
+    finally:
+        dispatcher.stop()
+
+
 def test_dispatcher_wakes_for_handoff_submitted_after_start(tmp_path):
     store = SessionStore(tmp_path / "runs")
     session = store.create_session()
