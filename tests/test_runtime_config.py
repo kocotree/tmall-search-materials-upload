@@ -254,6 +254,111 @@ def test_legacy_source_migrates_to_stable_id_across_machine_bindings(
     assert second["canonical_unc"] == r"\\nas\media\model"
 
 
+def test_deleted_source_reuses_its_id_when_same_path_is_added_again(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    first_path = workspace / "media" / "model"
+    second_path = workspace / "media" / "buyer"
+    first_path.mkdir(parents=True)
+    second_path.mkdir(parents=True)
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+    initial = save_image_sources(
+        runtime,
+        [
+            {"label": "模特图", "path": str(first_path)},
+            {"label": "买家秀", "path": str(second_path)},
+        ],
+    )
+    original_id = initial.image_sources[0]["source_id"]
+
+    after_delete = save_image_sources(initial, [initial.image_sources[1]])
+    reloaded = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+    restored = save_image_sources(
+        reloaded,
+        [
+            reloaded.image_sources[0],
+            {"label": "图片源 2", "path": str(first_path)},
+        ],
+    )
+
+    restored_source = next(
+        item for item in restored.image_sources if item["path"] == str(first_path)
+    )
+    assert restored_source["source_id"] == original_id
+    assert any(
+        item["source_id"] == original_id
+        and item["path"] == str(first_path)
+        for item in after_delete.image_source_history
+    )
+    saved = json.loads(restored.config_path.read_text(encoding="utf-8"))
+    assert "image_source_history" in saved
+
+
+def test_image_source_check_reuses_unique_current_path_binding(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    source_path = workspace / "media" / "model"
+    source_path.mkdir(parents=True)
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+    saved = save_image_sources(
+        runtime,
+        [{"label": "模特图", "path": str(source_path)}],
+    )
+
+    checked = inspect_image_sources(
+        saved,
+        [{"label": "重新添加的图片源", "path": str(source_path)}],
+    )
+
+    assert checked[0]["source_id"] == saved.image_sources[0]["source_id"]
+
+
+def test_image_source_path_with_ambiguous_history_is_not_auto_rebound(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    source_path = workspace / "media" / "model"
+    source_path.mkdir(parents=True)
+    config = user_data / "config/runtime.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps(
+            {
+                "image_sources": [
+                    {
+                        "source_id": "source-current",
+                        "label": "当前来源",
+                        "path": str(source_path),
+                    }
+                ],
+                "image_source_history": [
+                    {
+                        "source_id": "source-previous",
+                        "label": "历史来源",
+                        "path": str(source_path),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    with pytest.raises(ValueError, match="曾绑定到多个图片源"):
+        inspect_image_sources(
+            runtime,
+            [{"label": "重新添加的图片源", "path": str(source_path)}],
+        )
+
+
 def test_runtime_source_contains_no_machine_specific_drive_or_username():
     package = Path(__file__).parents[1] / "src" / "upload_search_materials"
     source = "\n".join(

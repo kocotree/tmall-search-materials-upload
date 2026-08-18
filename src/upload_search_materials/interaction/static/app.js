@@ -297,6 +297,9 @@
       imageSourceRows().forEach((row, index) => {
         const diagnostic = payload.image_sources[index] || {};
         const status = diagnostic.status || "unavailable";
+        if (diagnostic.source_id) {
+          row.dataset.sourceId = diagnostic.source_id;
+        }
         const node = row.querySelector("[data-image-source-state]");
         node.dataset.status = status;
         node.dataset.reasonCode = diagnostic.reason_code || "";
