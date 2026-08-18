@@ -331,6 +331,7 @@ def launch_collection_worker(
         (setup_input or {}).get("values", {}).get("store", "")
     ).strip()
     selected_profile = selectors_path or runtime.selectors_file
+    page_prepared_during_selector_bootstrap = False
     try:
         if selected_profile is None:
             raise SelectorConfigError("SELECTOR_PROFILE_NOT_FOUND")
@@ -399,6 +400,7 @@ def launch_collection_worker(
                 attempt_id=attempt_id,
             )
         if validation is not None:
+            page_prepared_during_selector_bootstrap = True
             _write_collection_readiness_evidence(
                 store, session_id, handoff, validation
             )
@@ -406,15 +408,16 @@ def launch_collection_worker(
     material_center_url = recommendation_material_center_url(
         profile.material_center_url or runtime.material_center_url
     )
-    try:
-        _prepare_collection_page_early(
-            cdp_url or runtime.cdp_url,
-            material_center_url,
-            profile.selectors,
-        )
-    except (CdpUnavailable, PlaywrightError, OSError, RuntimeError):
-        # Formal preflight and the owned worker persist the authoritative failure.
-        pass
+    if not page_prepared_during_selector_bootstrap:
+        try:
+            _prepare_collection_page_early(
+                cdp_url or runtime.cdp_url,
+                material_center_url,
+                profile.selectors,
+            )
+        except (CdpUnavailable, PlaywrightError, OSError, RuntimeError):
+            # The owned worker persists the authoritative page failure.
+            pass
     try:
         preflight = preflight_runtime_environment(
             runtime,

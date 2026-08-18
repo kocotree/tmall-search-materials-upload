@@ -113,6 +113,12 @@ def test_bootstrap_and_fixed_launchers_do_not_use_installed_business_cli():
     assert '"--no-install-project"' in bootstrap_ps1
     assert '"--no-editable"' not in bootstrap_ps1
 
+    managed_launcher = (
+        REPOSITORY_ROOT / "scripts" / "start-managed-workbench.ps1"
+    ).read_text(encoding="utf-8")
+    assert 'Join-Path $PSScriptRoot "bootstrap.ps1"' in managed_launcher
+    assert "RUNTIME_BOOTSTRAP_FAILED" in managed_launcher
+
     for name in (
         "start-managed-workbench.ps1",
         "start-ui.ps1",

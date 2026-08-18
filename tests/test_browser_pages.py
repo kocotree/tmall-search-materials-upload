@@ -613,6 +613,24 @@ def test_popup_settle_catches_guide_that_appears_after_initial_quiet_check():
     assert page.clicked == ["#guide-next"]
 
 
+def test_popup_settle_closes_first_install_guide_inside_frame():
+    page = FakePopupPage()
+    page.overlay_open = False
+    frame = FakePopupPage(guide_steps=1)
+    page.frames = [frame]
+
+    closed = _settle_safe_popups(
+        page,
+        {"safe_popup_progress": "#guide-next"},
+        delay_ms=0,
+    )
+
+    assert closed == 1
+    assert page.clicked == []
+    assert frame.clicked == ["#guide-next"]
+    assert page._tmall_collection_events[-1]["before"]["scope"] == "frame"
+
+
 class OverlayBlockedTarget:
     def __init__(self):
         self.attempts = []

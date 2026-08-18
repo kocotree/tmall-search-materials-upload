@@ -382,76 +382,93 @@ def _settle_safe_popups(
         setattr(page, "_tmall_collection_events", events)
     closed = 0
     quiet_checks = 0
-    no_change_by_control: dict[str, int] = {}
+    no_change_by_control: dict[tuple[int, str], int] = {}
     for _ in range(20):
         found = False
-        for popup_selector in popup_selectors:
-            if no_change_by_control.get(popup_selector, 0) >= 2:
-                continue
-            locator = page.locator(popup_selector)
-            for index in range(locator.count()):
-                candidate = locator.nth(index)
-                try:
-                    visible = candidate.is_visible()
-                except PlaywrightError:
-                    continue
-                if not visible:
+        scopes = [page]
+        for frame in list(getattr(page, "frames", ()) or ()):
+            if frame is not None and all(frame is not scope for scope in scopes):
+                scopes.append(frame)
+        for scope_index, scope in enumerate(scopes):
+            for popup_selector in popup_selectors:
+                control_key = (id(scope), popup_selector)
+                if no_change_by_control.get(control_key, 0) >= 2:
                     continue
                 try:
-                    before_text = candidate.inner_text().strip()
+                    locator = scope.locator(popup_selector)
+                    count = int(locator.count())
                 except (AttributeError, PlaywrightError):
-                    before_text = ""
-                before = {
-                    "selector": popup_selector,
-                    "index": index,
-                    "text": before_text[:120],
-                }
-                try:
-                    candidate.click(timeout=1500)
-                except PlaywrightError:
-                    no_change_by_control[popup_selector] = (
-                        no_change_by_control.get(popup_selector, 0) + 1
+                    continue
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    try:
+                        visible = candidate.is_visible()
+                    except PlaywrightError:
+                        continue
+                    if not visible:
+                        continue
+                    try:
+                        before_text = candidate.inner_text().strip()
+                    except (AttributeError, PlaywrightError):
+                        before_text = ""
+                    before = {
+                        "selector": popup_selector,
+                        "index": index,
+                        "scope": "page" if scope_index == 0 else "frame",
+                        "text": before_text[:120],
+                    }
+                    try:
+                        candidate.click(timeout=1500)
+                    except PlaywrightError:
+                        no_change_by_control[control_key] = (
+                            no_change_by_control.get(control_key, 0) + 1
+                        )
+                        found = True
+                        break
+                    if delay_ms:
+                        page.wait_for_timeout(min(delay_ms, 300))
+                    try:
+                        after_locator = scope.locator(popup_selector)
+                        after_count = int(after_locator.count())
+                    except (AttributeError, PlaywrightError):
+                        after_count = 0
+                    after_visible = False
+                    after_text = ""
+                    if index < after_count:
+                        after_candidate = after_locator.nth(index)
+                        try:
+                            after_visible = after_candidate.is_visible()
+                            if after_visible:
+                                after_text = after_candidate.inner_text().strip()
+                        except (AttributeError, PlaywrightError):
+                            after_visible = False
+                    changed = (
+                        not after_visible
+                        or after_text[:120] != before["text"]
                     )
+                    events.append(
+                        {
+                            "action": "close_safe_popup",
+                            "target_field": popup_selector,
+                            "before": before,
+                            "after": {
+                                "visible": after_visible,
+                                "text": after_text[:120],
+                            },
+                            "changed": changed,
+                        }
+                    )
+                    if changed:
+                        no_change_by_control[control_key] = 0
+                        closed += 1
+                    else:
+                        no_change_by_control[control_key] = (
+                            no_change_by_control.get(control_key, 0) + 1
+                        )
                     found = True
                     break
-                if delay_ms:
-                    page.wait_for_timeout(min(delay_ms, 300))
-                after_locator = page.locator(popup_selector)
-                after_visible = False
-                after_text = ""
-                if index < after_locator.count():
-                    after_candidate = after_locator.nth(index)
-                    try:
-                        after_visible = after_candidate.is_visible()
-                        if after_visible:
-                            after_text = after_candidate.inner_text().strip()
-                    except (AttributeError, PlaywrightError):
-                        after_visible = False
-                changed = (
-                    not after_visible
-                    or after_text[:120] != before["text"]
-                )
-                events.append(
-                    {
-                        "action": "close_safe_popup",
-                        "target_field": popup_selector,
-                        "before": before,
-                        "after": {
-                            "visible": after_visible,
-                            "text": after_text[:120],
-                        },
-                        "changed": changed,
-                    }
-                )
-                if changed:
-                    no_change_by_control[popup_selector] = 0
-                    closed += 1
-                else:
-                    no_change_by_control[popup_selector] = (
-                        no_change_by_control.get(popup_selector, 0) + 1
-                    )
-                found = True
-                break
+                if found:
+                    break
             if found:
                 break
         quiet_checks = 0 if found else quiet_checks + 1

@@ -278,6 +278,12 @@ def test_missing_selector_bootstraps_then_launches_collection(
         "upload_search_materials.collection_worker.process_identity",
         lambda pid: f"windows:{pid}:created",
     )
+    repeated_page_preparations = []
+    monkeypatch.setattr(
+        worker_module,
+        "_prepare_collection_page_early",
+        lambda *_args, **_kwargs: repeated_page_preparations.append(True),
+    )
 
     launched = launch_collection_worker(
         runs_root=runs,
@@ -288,6 +294,7 @@ def test_missing_selector_bootstraps_then_launches_collection(
     )
 
     assert launched["status"] == "processing"
+    assert repeated_page_preparations == []
     evidence = (
         session.path
         / "collected"

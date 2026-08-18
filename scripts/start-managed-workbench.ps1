@@ -23,7 +23,13 @@ else {
 }
 $Python = Join-Path $RuntimeRoot ".venv\Scripts\python.exe"
 if (-not [System.IO.File]::Exists($Python)) {
-    throw "Prepared user runtime Python is missing."
+    & (Join-Path $PSScriptRoot "bootstrap.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNTIME_BOOTSTRAP_FAILED: bootstrap did not complete."
+    }
+}
+if (-not [System.IO.File]::Exists($Python)) {
+    throw "RUNTIME_BOOTSTRAP_FAILED: prepared user runtime Python is missing."
 }
 
 $Arguments = @(
