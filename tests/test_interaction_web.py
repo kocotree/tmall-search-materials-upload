@@ -2922,6 +2922,27 @@ def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():
     assert "历史进度口径" in source
 
 
+def test_prepare_local_gallery_materializes_visible_folder_defaults():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    function_body = source.split(
+        "async function prepareLocalGallery(button)", 1
+    )[1].split("async function persistStage", 1)[0]
+
+    assert "function materializeFolderDecisions(candidates)" in source
+    assert 'writeJsonListControl("folder_decisions", materialized);' in source
+    assert "materializeFolderDecisions(folderCandidates)" in function_body
+    assert "Number.isInteger(requestRevision)" in function_body
+    assert "revision: requestRevision" in function_body
+    assert "fieldErrors?.folder_decisions" in function_body
+
+
 def test_asset_matching_internal_decisions_are_hidden_structured_controls(client):
     html = client.get("/").get_data(as_text=True)
 

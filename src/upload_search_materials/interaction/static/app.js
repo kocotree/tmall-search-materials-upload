@@ -2046,6 +2046,44 @@
       }));
   }
 
+  function materializeFolderDecisions(candidates) {
+    const savedByKey = new Map(
+      folderDecisions().map((item) => [
+        `${item.product_id}\u0000${item.folder_id}`,
+        item,
+      ]),
+    );
+    const materialized = candidates
+      .filter(
+        (candidate) => candidate?.match_type !== "confirmed_alias"
+          && candidate?.folder_id
+          && candidate?.product_id,
+      )
+      .map((candidate) => {
+        const key = `${candidate.product_id}\u0000${candidate.folder_id}`;
+        const saved = savedByKey.get(key) || {};
+        const decision = ["confirmed", "rejected"].includes(saved.decision)
+          ? saved.decision
+          : candidate.decision === "rejected"
+            ? "rejected"
+            : "confirmed";
+        return {
+          folder_id: String(candidate.folder_id),
+          product_id: String(candidate.product_id),
+          source_system: String(candidate.source_system || ""),
+          source_id: String(
+            candidate.source_id || candidate.source_system || "",
+          ),
+          relative_path: String(candidate.relative_path || ""),
+          folder_path: String(candidate.folder_path || ""),
+          decision,
+          note: String(saved.note || candidate.note || ""),
+        };
+      });
+    writeJsonListControl("folder_decisions", materialized);
+    return materialized;
+  }
+
   function folderDecisionState(productId, folderId, defaultDecision = "confirmed") {
     const saved = folderDecisions().find(
       (item) => String(item.product_id) === String(productId)
@@ -2183,7 +2221,7 @@
     review.appendChild(safety);
 
     const decisionsByKey = new Map(
-      folderDecisions().map((item) => [
+      materializeFolderDecisions(candidates).map((item) => [
         `${item.product_id}\u0000${item.folder_id}`,
         item,
       ]),
@@ -5585,11 +5623,20 @@
     if (!form) return;
     window.clearTimeout(autoSaveTimer);
     clearFieldErrors(form);
+    const folderCandidates = Array.isArray(uiState.result?.data?.folder_candidates)
+      ? uiState.result.data.folder_candidates
+      : [];
+    materializeFolderDecisions(folderCandidates);
     let values;
     try {
       values = serializeForm(form);
     } catch (error) {
       actionMessage.textContent = error.message;
+      return;
+    }
+    const requestRevision = Number(revision);
+    if (!Number.isInteger(requestRevision)) {
+      actionMessage.textContent = "页面状态尚未同步，请刷新当前页面后重试。";
       return;
     }
     persistenceInFlight = true;
@@ -5608,7 +5655,7 @@
       ), {
         method: "POST",
         body: JSON.stringify({
-          revision,
+          revision: requestRevision,
           request_id: persistenceIdentity.value,
           values,
         }),
@@ -5636,7 +5683,16 @@
     } catch (error) {
       const fieldErrors = error.payload?.field_errors;
       if (fieldErrors) showFieldErrors(form, fieldErrors);
-      actionMessage.textContent = error.userMessage || error.message;
+      const validationMessage = fieldErrors?.folder_decisions
+        || (fieldErrors?.image_roots
+          ? "图片源路径不完整，请返回任务配置核对图片源。"
+          : "")
+        || (fieldErrors?.revision
+          ? "页面状态已经更新，请刷新当前页面后重试。"
+          : "");
+      actionMessage.textContent = validationMessage
+        || error.userMessage
+        || error.message;
       button.disabled = false;
     } finally {
       persistenceInFlight = false;
