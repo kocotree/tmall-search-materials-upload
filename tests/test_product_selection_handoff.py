@@ -579,6 +579,56 @@ def test_product_selection_bootstraps_missing_snapshots_before_sync(
     assert [event[0] for event in events] == ["ensure", "sync"]
 
 
+def test_product_selection_uses_local_cache_when_shared_smb_login_fails(
+    tmp_path, monkeypatch
+):
+    store, session_id, _handoff = _submitted_selection(tmp_path)
+    index_root = tmp_path / "local-folder-index"
+    _write_shared_index(index_root)
+    team_root = tmp_path / "unavailable-team-folder-index"
+    original_is_dir = Path.is_dir
+
+    def smb_aware_is_dir(path):
+        if path == team_root:
+            error = OSError("logon failure")
+            error.winerror = 1326
+            raise error
+        return original_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", smb_aware_is_dir)
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(
+            {
+                "source_id": "source-a",
+                "label": "Source A",
+                "path": str(tmp_path / "media"),
+                "canonical_unc": r"\\nas\source-a",
+            },
+        ),
+        runs_root=store.runs_root,
+        folder_index_root=index_root,
+        team_folder_index_root=team_root,
+    )
+
+    result = process_product_selection_handoff(
+        store,
+        session_id,
+        folder_index_root=index_root,
+        claimant_id="test-codex",
+        runtime=runtime,
+    )
+
+    assert result["status"] == "completed"
+    sync_summary = json.loads(
+        (index_root / "team-sync.json").read_text(encoding="utf-8")
+    )
+    assert sync_summary["shared_available"] is False
+    assert sync_summary["sources"][0]["origin"] == "local_cache"
+
+
 def test_failure_writes_codex_diagnostic_and_same_entry_can_resume(tmp_path):
     store, session_id, handoff = _submitted_selection(tmp_path)
     index_root = tmp_path / "missing-folder-index"

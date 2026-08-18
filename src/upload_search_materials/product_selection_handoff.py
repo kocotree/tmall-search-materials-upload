@@ -17,6 +17,8 @@ from .nas_sources import load_nas_sources, prepare_nas_source
 from .reporting import read_json
 from .runtime_config import RuntimeConfig
 from .team_folder_index import (
+    TeamFolderIndexError,
+    _directory_is_available,
     ensure_missing_snapshots,
     materialize_task_folder_candidates,
     sync_snapshots,
@@ -153,8 +155,13 @@ def _advance_to_asset_matching(store: SessionStore, session_id: str) -> None:
 
 def _ensure_team_index_mount(runtime: RuntimeConfig) -> None:
     shared_root = runtime.team_folder_index_root
-    if shared_root is None or Path(shared_root).is_dir():
+    if shared_root is None:
         return
+    try:
+        if Path(shared_root).is_dir():
+            return
+    except OSError:
+        pass
     if runtime.nas_sources_file is None or not runtime.team_folder_index_nas_source_id:
         raise RuntimeError("TEAM_INDEX_MOUNT_CONFIG_MISSING")
     sources = load_nas_sources(runtime.nas_sources_file)
@@ -163,7 +170,10 @@ def _ensure_team_index_mount(runtime: RuntimeConfig) -> None:
         raise RuntimeError("TEAM_INDEX_MOUNT_SOURCE_MISSING")
     status = prepare_nas_source(source, allow_mount=True)
     if status.state != "ready":
-        raise RuntimeError(status.reason_code or "TEAM_INDEX_MOUNT_FAILED")
+        reason_code = status.reason_code or "TEAM_INDEX_MOUNT_FAILED"
+        if reason_code == "ASSET_ROOT_AUTHENTICATION_REQUIRED":
+            reason_code = "TEAM_INDEX_AUTHENTICATION_REQUIRED"
+        raise RuntimeError(reason_code)
     mount_root = Path(status.mount_path).resolve()
     target = Path(shared_root).resolve()
     if not target.is_relative_to(mount_root):
@@ -296,18 +306,38 @@ def process_product_selection_handoff(
                 f"TEAM_INDEX_PRODUCTS_MISSING: {products_snapshot}"
             )
         if runtime.team_folder_index_root is not None:
-            _ensure_team_index_mount(runtime)
-            ensure_missing_snapshots(
-                shared_root=runtime.team_folder_index_root,
-                local_root=folder_index_root,
-                products_path=products_snapshot,
-                image_sources=runtime.image_sources,
-            )
-            sync_snapshots(
-                shared_root=runtime.team_folder_index_root,
-                local_root=folder_index_root,
-                image_sources=runtime.image_sources,
-            )
+            if _directory_is_available(runtime.team_folder_index_root):
+                ensure_missing_snapshots(
+                    shared_root=runtime.team_folder_index_root,
+                    local_root=folder_index_root,
+                    products_path=products_snapshot,
+                    image_sources=runtime.image_sources,
+                )
+                sync_snapshots(
+                    shared_root=runtime.team_folder_index_root,
+                    local_root=folder_index_root,
+                    image_sources=runtime.image_sources,
+                )
+            else:
+                try:
+                    sync_snapshots(
+                        shared_root=runtime.team_folder_index_root,
+                        local_root=folder_index_root,
+                        image_sources=runtime.image_sources,
+                    )
+                except TeamFolderIndexError:
+                    _ensure_team_index_mount(runtime)
+                    ensure_missing_snapshots(
+                        shared_root=runtime.team_folder_index_root,
+                        local_root=folder_index_root,
+                        products_path=products_snapshot,
+                        image_sources=runtime.image_sources,
+                    )
+                    sync_snapshots(
+                        shared_root=runtime.team_folder_index_root,
+                        local_root=folder_index_root,
+                        image_sources=runtime.image_sources,
+                    )
 
         phase = "match_task_candidates"
         if not team_cache.is_dir():

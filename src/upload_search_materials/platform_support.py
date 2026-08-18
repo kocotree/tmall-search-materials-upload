@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISDIR
 import sys
 from typing import Literal
 
@@ -54,22 +55,31 @@ def resolve_asset_root(
             "NAS_URL_UNSUPPORTED",
             "不直接读取 smb:// URL；请先通过系统界面连接 NAS",
         )
-    root = Path(raw).expanduser().resolve()
+    candidate = Path(raw).expanduser()
     try:
+        root = candidate.resolve()
         metadata = root.stat()
     except FileNotFoundError as error:
         raise AssetSourceUnavailable(
-            "ASSET_ROOT_NOT_FOUND", f"素材根目录不存在或 NAS 尚未挂载：{root}"
+            "ASSET_ROOT_NOT_FOUND",
+            f"素材根目录不存在或 NAS 尚未挂载：{candidate}",
         ) from error
     except PermissionError as error:
         raise AssetSourceUnavailable(
-            "ASSET_ROOT_PERMISSION_DENIED", f"没有权限读取素材根目录：{root}"
+            "ASSET_ROOT_PERMISSION_DENIED",
+            f"没有权限读取素材根目录：{candidate}",
         ) from error
     except OSError as error:
+        if getattr(error, "winerror", None) == 1326:
+            raise AssetSourceUnavailable(
+                "ASSET_ROOT_AUTHENTICATION_REQUIRED",
+                f"Windows 需要重新验证共享目录访问身份：{candidate}",
+            ) from error
         raise AssetSourceUnavailable(
-            "ASSET_ROOT_IO_ERROR", f"素材根目录不可用，可能是 NAS 断线：{root}"
+            "ASSET_ROOT_IO_ERROR",
+            f"素材根目录不可用，可能是 NAS 断线：{candidate}",
         ) from error
-    if not root.is_dir() or not metadata:
+    if not S_ISDIR(metadata.st_mode):
         raise AssetSourceUnavailable(
             "ASSET_ROOT_NOT_DIRECTORY", f"素材根路径不是目录：{root}"
         )

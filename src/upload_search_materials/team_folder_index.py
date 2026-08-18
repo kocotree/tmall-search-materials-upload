@@ -50,6 +50,13 @@ class TeamFolderIndexError(ValueError):
     """A shared snapshot cannot be used without risking corrupt state."""
 
 
+def _directory_is_available(path: Path) -> bool:
+    try:
+        return Path(path).is_dir()
+    except OSError:
+        return False
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -358,7 +365,7 @@ def ensure_missing_snapshots(
     """Build and publish only configured sources without a valid snapshot."""
 
     shared_root = Path(shared_root)
-    if not shared_root.is_dir():
+    if not _directory_is_available(shared_root):
         raise TeamFolderIndexError("TEAM_INDEX_SHARED_ROOT_UNAVAILABLE")
     products_path = Path(products_path)
     products = read_product_csv(products_path)
@@ -598,7 +605,7 @@ def sync_snapshots(
 
     bindings = {str(item.get("source_id", "")): item for item in image_sources}
     requested = sorted({_safe_source_id(value) for value in source_ids})
-    shared_available = Path(shared_root).is_dir()
+    shared_available = _directory_is_available(Path(shared_root))
     discovery_root = Path(shared_root) if shared_available else Path(local_root) / "team-cache"
     selected_ids = requested or _source_ids(discovery_root)
     if not selected_ids:
@@ -826,7 +833,7 @@ def snapshot_status(*, shared_root: Path, local_root: Path) -> dict[str, object]
 
     result: dict[str, object] = {
         "shared_root": str(shared_root),
-        "shared_available": Path(shared_root).is_dir(),
+        "shared_available": _directory_is_available(Path(shared_root)),
         "sources": [],
     }
     root = Path(shared_root) if result["shared_available"] else Path(local_root) / "team-cache"
