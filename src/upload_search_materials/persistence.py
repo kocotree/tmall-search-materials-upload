@@ -15,6 +15,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 WINDOWS_TRANSIENT_REPLACE_ERRORS = frozenset({32, 33})
 WINDOWS_ACCESS_DENIED = 5
+WINDOWS_REPLACE_ATTEMPTS = 13
+WINDOWS_RETRY_DELAY_SECONDS = 0.025
 _replace_locks_guard = threading.Lock()
 _replace_locks: dict[str, threading.Lock] = {}
 
@@ -42,8 +44,8 @@ def _replace_with_retry(
     temporary: Path,
     target: Path,
     *,
-    replace_attempts: int = 3,
-    retry_delay_seconds: float = 0.02,
+    replace_attempts: int = WINDOWS_REPLACE_ATTEMPTS,
+    retry_delay_seconds: float = WINDOWS_RETRY_DELAY_SECONDS,
 ) -> None:
     for attempt in range(max(1, int(replace_attempts))):
         try:
@@ -93,8 +95,8 @@ def atomic_write_bytes(
     path: Path,
     payload: bytes,
     *,
-    replace_attempts: int = 3,
-    retry_delay_seconds: float = 0.02,
+    replace_attempts: int = WINDOWS_REPLACE_ATTEMPTS,
+    retry_delay_seconds: float = WINDOWS_RETRY_DELAY_SECONDS,
 ) -> None:
     """Write canonical bytes through a unique sibling and atomic replace."""
 

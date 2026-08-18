@@ -150,6 +150,32 @@ def test_writable_target_winerror5_is_retried(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows access-denied retry")
+def test_writable_target_survives_reader_lock_longer_than_old_retry_window(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "review-context.json"
+    target.write_text('{"status":"old"}', encoding="utf-8")
+    real_replace = os.replace
+    calls = 0
+
+    def transient_reader(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            error = PermissionError("reader still holds target")
+            error.winerror = 5
+            raise error
+        real_replace(source, destination)
+
+    monkeypatch.setattr(persistence.os, "replace", transient_reader)
+
+    atomic_write_json(target, {"status": "complete"})
+
+    assert calls == 6
+    assert read_json(target)["status"] == "complete"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows access-denied retry")
 def test_read_only_target_winerror5_fails_without_retry(
     tmp_path, monkeypatch
 ):
@@ -197,7 +223,7 @@ def test_persistent_writable_winerror5_is_bounded(tmp_path, monkeypatch):
     ):
         atomic_write_json(target, {"status": "blocked"})
 
-    assert calls == 3
+    assert calls == persistence.WINDOWS_REPLACE_ATTEMPTS
     assert not list(tmp_path.glob(".atomic-probe-*.tmp"))
 
 
