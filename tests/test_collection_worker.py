@@ -85,6 +85,35 @@ def test_collection_page_starts_before_runtime_preflight(tmp_path, monkeypatch):
     assert events[0][1].endswith("?tab=recommend")
 
 
+def test_worker_ownership_token_is_one_argument_when_it_starts_with_dash(
+    tmp_path, monkeypatch
+):
+    runtime, runs, _, session, selectors = prepare(tmp_path)
+    captured = {}
+    monkeypatch.setattr(worker_module.secrets, "token_urlsafe", lambda _size: "-token")
+    monkeypatch.setattr(
+        worker_module,
+        "process_identity",
+        lambda pid: f"windows:{pid}:created",
+    )
+
+    def popen(argv, **_kwargs):
+        captured["argv"] = list(argv)
+        return Process()
+
+    launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        popen=popen,
+        identity_provider=lambda pid: f"windows:{pid}:created",
+    )
+
+    assert "--ownership-token=-token" in captured["argv"]
+    assert "--ownership-token" not in captured["argv"]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
 def test_windows_process_identity_matches_between_parent_and_child():
     child = subprocess.Popen(

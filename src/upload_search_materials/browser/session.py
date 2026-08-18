@@ -62,7 +62,12 @@ def prepare_collection_page(
         page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
     from .material_page import _settle_safe_popups
 
-    closed = _settle_safe_popups(page, dict(selectors), delay_ms=250)
+    closed = _settle_safe_popups(
+        page,
+        dict(selectors),
+        delay_ms=250,
+        quiet_checks_required=12,
+    )
     return {
         "navigated": current_url != target_url,
         "login_required": False,

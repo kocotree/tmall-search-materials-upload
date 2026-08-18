@@ -554,6 +554,30 @@ def test_popup_settle_retries_when_overlay_rerenders_during_click():
         "#opened-overlay-close",
         "#opened-overlay-close",
     ]
+    assert page._tmall_collection_events[-1]["click_mode"] == "force"
+
+
+def test_popup_settle_watches_long_enough_for_a_late_first_install_guide():
+    page = FakePopupPage(guide_steps=1)
+    page.overlay_open = False
+    original_wait = page.wait_for_timeout
+
+    def delayed_open(milliseconds):
+        original_wait(milliseconds)
+        if len(page.waited) == 5:
+            page.overlay_open = True
+
+    page.wait_for_timeout = delayed_open
+
+    closed = _settle_safe_popups(
+        page,
+        {"safe_popup_progress": "#guide-next"},
+        delay_ms=10,
+        quiet_checks_required=8,
+    )
+
+    assert closed == 1
+    assert page.clicked == ["#guide-next"]
 
 
 def test_popup_settle_advances_all_seven_scoped_guide_steps():

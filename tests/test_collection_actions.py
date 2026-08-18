@@ -84,6 +84,33 @@ class Backdrop:
         self.page.frames = []
 
 
+class ActionOverlayClose:
+    def __init__(self, overlay):
+        self.overlay = overlay
+        self.clicked = False
+
+    def is_visible(self):
+        return self.overlay.is_visible()
+
+    def click(self, **_kwargs):
+        self.clicked = True
+        self.overlay.page.action_overlay = None
+
+
+class ActionOverlay:
+    def __init__(self, page):
+        self.page = page
+        self.close_button = ActionOverlayClose(self)
+
+    def is_visible(self):
+        return self.page.action_overlay is self
+
+    def locator(self, selector):
+        if selector == '[aria-label*="关闭"]':
+            return LocatorList([self.close_button])
+        return LocatorList()
+
+
 class Frame:
     def __init__(self, url, close_button=None, backdrop=None):
         self.url = url
@@ -120,10 +147,15 @@ class Page:
         self.context = Context(self)
         self.waited = []
         self.parent_backdrop = None
+        self.action_overlay = None
 
     def locator(self, selector):
         if selector == ".promotion-row":
             return LocatorList(self.rows)
+        if selector == collection_actions.ACTION_OVERLAY_SELECTOR:
+            return LocatorList(
+                [self.action_overlay] if self.action_overlay is not None else []
+            )
         if (
             selector == ".next-overlay-wrapper.opened > .next-overlay-backdrop"
             and self.parent_backdrop is not None
@@ -222,6 +254,31 @@ def test_random_action_settles_popups_before_action_and_restore(monkeypatch):
         (page, {"safe_popup_close": "#safe-close"}, 250),
         (page, {"safe_popup_close": "#safe-close"}, 250),
     ]
+
+
+def test_random_action_closes_the_new_filled_slot_dialog(monkeypatch):
+    page = Page([Row("180")])
+    slots = Slots(1)
+    common_stubs(monkeypatch, slots, [])
+    opened = {}
+
+    def open_dialog(**_kwargs):
+        overlay = ActionOverlay(page)
+        page.action_overlay = overlay
+        opened["overlay"] = overlay
+
+    slots.values[0].click = open_dialog
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=FixedRandom(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["page_state_restored"] is True
+    assert opened["overlay"].close_button.clicked is True
+    assert page.action_overlay is None
 
 
 def test_random_action_skips_page_with_only_empty_slots(monkeypatch):

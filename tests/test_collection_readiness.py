@@ -32,6 +32,8 @@ def test_default_popup_selectors_cover_current_first_install_dialogs():
     assert 'a.next-dialog-close[aria-label="关闭"]' in priority
     assert '[aria-label="close"]' in priority
     assert "AiImageGenerationOfflinePushModal_closeIcon" in priority
+    assert "next-icon-remote" in priority
+    assert "GuideBalloon_" in priority
     assert 'button:has-text("以后再看")' in fallback
 
 
@@ -190,7 +192,10 @@ def test_first_install_bootstraps_and_installs_validated_profile(
     tmp_path, monkeypatch
 ):
     user_data = tmp_path / "user-data"
+    empty_config = tmp_path / "empty-runtime.json"
+    empty_config.write_text("{}\n", encoding="utf-8")
     runtime = load_runtime_config(
+        empty_config,
         environ={"TMALL_USER_DATA_ROOT": str(user_data)},
         start=tmp_path,
     )
@@ -255,7 +260,10 @@ def test_first_install_keeps_failed_candidate_non_production(
     tmp_path, monkeypatch
 ):
     user_data = tmp_path / "user-data"
+    empty_config = tmp_path / "empty-runtime.json"
+    empty_config.write_text("{}\n", encoding="utf-8")
     runtime = load_runtime_config(
+        empty_config,
         environ={"TMALL_USER_DATA_ROOT": str(user_data)},
         start=tmp_path,
     )

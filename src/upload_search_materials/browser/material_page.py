@@ -357,6 +357,7 @@ def _settle_safe_popups(
     selectors: dict[str, str],
     *,
     delay_ms: int,
+    quiet_checks_required: int = 3,
 ) -> int:
     progress_selector = str(
         selectors.get("safe_popup_progress", "")
@@ -382,6 +383,7 @@ def _settle_safe_popups(
         setattr(page, "_tmall_collection_events", events)
     closed = 0
     quiet_checks = 0
+    required_quiet_checks = max(1, int(quiet_checks_required))
     no_change_by_control: dict[tuple[int, str], int] = {}
     for _ in range(20):
         found = False
@@ -417,14 +419,23 @@ def _settle_safe_popups(
                         "scope": "page" if scope_index == 0 else "frame",
                         "text": before_text[:120],
                     }
+                    click_mode = "normal"
                     try:
                         candidate.click(timeout=1500)
                     except PlaywrightError:
-                        no_change_by_control[control_key] = (
-                            no_change_by_control.get(control_key, 0) + 1
-                        )
-                        found = True
-                        break
+                        try:
+                            candidate.click(force=True, timeout=1500)
+                            click_mode = "force"
+                        except PlaywrightError:
+                            try:
+                                candidate.evaluate("element => element.click()")
+                                click_mode = "dom"
+                            except (AttributeError, PlaywrightError):
+                                no_change_by_control[control_key] = (
+                                    no_change_by_control.get(control_key, 0) + 1
+                                )
+                                found = True
+                                break
                     if delay_ms:
                         page.wait_for_timeout(min(delay_ms, 300))
                     try:
@@ -456,6 +467,7 @@ def _settle_safe_popups(
                                 "text": after_text[:120],
                             },
                             "changed": changed,
+                            "click_mode": click_mode,
                         }
                     )
                     if changed:
@@ -472,7 +484,7 @@ def _settle_safe_popups(
             if found:
                 break
         quiet_checks = 0 if found else quiet_checks + 1
-        if quiet_checks >= 3:
+        if quiet_checks >= required_quiet_checks:
             break
         if delay_ms:
             page.wait_for_timeout(delay_ms)

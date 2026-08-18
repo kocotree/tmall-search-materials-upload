@@ -27,6 +27,12 @@ PAGE_RESTORE_CLOSE_RETRY_MS = 2_000
 PAGE_RESTORE_GO_BACK_TIMEOUT_MS = 15_000
 RANDOM_ACTION_INTERACTION_TIMEOUT_MS = 3_000
 RANDOM_ACTION_POPUP_SETTLE_DELAY_MS = 250
+ACTION_OVERLAY_SELECTOR = (
+    ".next-overlay-wrapper.opened, "
+    ".ant-modal-wrap:visible, "
+    ".ant-drawer:visible, "
+    '[role="dialog"]:visible'
+)
 
 
 def _row_product_id(row: Any) -> str:
@@ -86,6 +92,25 @@ def _publish_frame_visible(page: Any) -> bool:
         )
     except Exception:
         return False
+
+
+def _visible_action_overlays(page: Any) -> list[Any]:
+    try:
+        overlays = page.locator(ACTION_OVERLAY_SELECTOR)
+        return [
+            overlays.nth(index)
+            for index in range(overlays.count())
+            if overlays.nth(index).is_visible()
+        ]
+    except Exception:
+        return []
+
+
+def _action_surface_restored(page: Any, baseline_overlay_count: int) -> bool:
+    return (
+        not _publish_frame_visible(page)
+        and len(_visible_action_overlays(page)) <= baseline_overlay_count
+    )
 
 
 def _click_first_visible(scope: Any, selectors: tuple[str, ...]) -> bool:
@@ -205,10 +230,18 @@ def _click_outside_publish_form(page: Any, opened_scope: Any | None) -> bool:
         return False
 
 
-def _close_opened_action(page: Any, opened_scope: Any | None) -> None:
+def _close_opened_action(
+    page: Any,
+    opened_scope: Any | None,
+    *,
+    baseline_overlay_count: int = 0,
+) -> None:
     """Discard a slot detail or an unconfirmed publish form in-place."""
 
-    if _click_outside_publish_form(page, opened_scope):
+    if (
+        _click_outside_publish_form(page, opened_scope)
+        and _action_surface_restored(page, baseline_overlay_count)
+    ):
         return
 
     close_selectors = (
@@ -226,6 +259,9 @@ def _close_opened_action(page: Any, opened_scope: Any | None) -> None:
     scopes: list[Any] = []
     if opened_scope is not None:
         scopes.append(opened_scope)
+    for overlay in reversed(_visible_action_overlays(page)):
+        if all(overlay is not known for known in scopes):
+            scopes.append(overlay)
     for scope in _page_scopes(page):
         if all(scope is not known for known in scopes):
             scopes.append(scope)
@@ -239,7 +275,7 @@ def _close_opened_action(page: Any, opened_scope: Any | None) -> None:
                     page.wait_for_timeout(300)
                 except Exception:
                     return
-                if not _publish_frame_visible(page):
+                if _action_surface_restored(page, baseline_overlay_count):
                     return
         try:
             keyboard = getattr(page, "keyboard", None)
@@ -248,7 +284,7 @@ def _close_opened_action(page: Any, opened_scope: Any | None) -> None:
             page.wait_for_timeout(300)
         except Exception:
             return
-        if not _publish_frame_visible(page):
+        if _action_surface_restored(page, baseline_overlay_count):
             return
 
 
@@ -259,8 +295,13 @@ def _restore_current_page(
     product_ids_before: tuple[str, ...],
     url_before: str,
     opened_scope: Any | None,
+    baseline_overlay_count: int,
 ) -> dict[str, Any]:
-    _close_opened_action(page, opened_scope)
+    _close_opened_action(
+        page,
+        opened_scope,
+        baseline_overlay_count=baseline_overlay_count,
+    )
 
     if str(getattr(page, "url", "")) != url_before:
         try:
@@ -284,6 +325,8 @@ def _restore_current_page(
             "url_matches": str(getattr(page, "url", "")) == url_before,
             "product_order_matches": observed_product_ids == product_ids_before,
             "publish_frame_visible": _publish_frame_visible(page),
+            "action_overlay_count": len(_visible_action_overlays(page)),
+            "baseline_overlay_count": baseline_overlay_count,
             "expected_product_count": len(product_ids_before),
             "observed_product_count": len(observed_product_ids),
         }
@@ -291,6 +334,7 @@ def _restore_current_page(
             last_state["url_matches"]
             and last_state["product_order_matches"]
             and not last_state["publish_frame_visible"]
+            and last_state["action_overlay_count"] <= baseline_overlay_count
         )
         stable_samples = stable_samples + 1 if all_restored else 0
         if stable_samples >= PAGE_RESTORE_STABLE_SAMPLES:
@@ -305,9 +349,16 @@ def _restore_current_page(
         if (
             poll_index > 0
             and waited_ms % PAGE_RESTORE_CLOSE_RETRY_MS == 0
-            and last_state["publish_frame_visible"]
+            and (
+                last_state["publish_frame_visible"]
+                or last_state["action_overlay_count"] > baseline_overlay_count
+            )
         ):
-            _close_opened_action(page, opened_scope)
+            _close_opened_action(
+                page,
+                opened_scope,
+                baseline_overlay_count=baseline_overlay_count,
+            )
         try:
             page.wait_for_timeout(PAGE_RESTORE_POLL_INTERVAL_MS)
             waited_ms += PAGE_RESTORE_POLL_INTERVAL_MS
@@ -376,6 +427,7 @@ def perform_random_collection_action(
     row, product_id, position = source.choice(candidates)
     pages_before = _context_pages(page)
     url_before = str(getattr(page, "url", ""))
+    baseline_overlay_count = len(_visible_action_overlays(page))
     opened_scope = None
     result: dict[str, Any]
     action_started = False
@@ -429,6 +481,7 @@ def perform_random_collection_action(
                 product_ids_before=product_ids_before,
                 url_before=url_before,
                 opened_scope=opened_scope,
+                baseline_overlay_count=baseline_overlay_count,
             )
             if restore["restored"]:
                 result["page_state_restored"] = True
@@ -440,6 +493,10 @@ def perform_random_collection_action(
                     f"{str(restore['product_order_matches']).lower()};"
                     "publish_frame_visible="
                     f"{str(restore['publish_frame_visible']).lower()};"
+                    "action_overlay_count="
+                    f"{restore['action_overlay_count']};"
+                    "baseline_overlay_count="
+                    f"{restore['baseline_overlay_count']};"
                     "observed_product_count="
                     f"{restore['observed_product_count']};"
                     "expected_product_count="

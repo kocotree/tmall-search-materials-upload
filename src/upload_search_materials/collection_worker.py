@@ -26,6 +26,7 @@ from .browser.session import (
 from .collection_readiness import (
     SelectorBootstrapError,
     ensure_production_selector_profile,
+    merge_default_safe_popup_selectors,
 )
 from .collection_runtime import (
     CollectionBinding,
@@ -413,7 +414,7 @@ def launch_collection_worker(
             _prepare_collection_page_early(
                 cdp_url or runtime.cdp_url,
                 material_center_url,
-                profile.selectors,
+                merge_default_safe_popup_selectors(profile.selectors),
             )
         except (CdpUnavailable, PlaywrightError, OSError, RuntimeError):
             # The owned worker persists the authoritative page failure.
@@ -479,8 +480,7 @@ def launch_collection_worker(
         session_id,
         "--attempt-id",
         attempt_id,
-        "--ownership-token",
-        ownership_token,
+        f"--ownership-token={ownership_token}",
         "--claimant-id",
         claimant_id,
         "--selectors",
