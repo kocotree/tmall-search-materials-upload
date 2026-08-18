@@ -416,6 +416,16 @@ def test_publish_form_exit_clicks_parent_next_drawer_backdrop():
     assert collection_actions._publish_frame_visible(page) is False
 
 
+def test_publish_form_exit_clicks_parent_backdrop_before_frame_is_discovered():
+    page = Page([Row("650")])
+    page.parent_backdrop = Backdrop(page)
+
+    collection_actions._close_opened_action(page, None)
+
+    assert page.parent_backdrop.clicked_positions == [{"x": 8, "y": 8}]
+    assert page.keyboard.keys == []
+
+
 def test_random_page_interval_is_limited_to_one_or_two_pages():
     class UpperRandom(FixedRandom):
         def randint(self, _minimum, maximum):

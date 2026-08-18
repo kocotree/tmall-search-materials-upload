@@ -138,6 +138,26 @@ def _wait_for_publish_form_to_close(page: Any, delay_ms: int = 500) -> bool:
 def _click_outside_publish_form(page: Any, opened_scope: Any | None) -> bool:
     """Click the publish form's backdrop without touching form controls."""
 
+    # The parent drawer backdrop is actionable before its cross-origin iframe
+    # is always discoverable, so this close path must not depend on the frame.
+    try:
+        parent_backdrops = page.locator(
+            ".next-overlay-wrapper.opened > .next-overlay-backdrop"
+        )
+        for index in range(parent_backdrops.count()):
+            backdrop = parent_backdrops.nth(index)
+            if not backdrop.is_visible():
+                continue
+            backdrop.click(
+                position={"x": 8, "y": 8},
+                force=True,
+                timeout=1_500,
+            )
+            if _wait_for_publish_form_to_close(page):
+                return True
+    except Exception:
+        pass
+
     if (
         opened_scope is None
         or PUBLISH_FRAME_FRAGMENT
@@ -172,28 +192,6 @@ def _click_outside_publish_form(page: Any, opened_scope: Any | None) -> bool:
                     return True
         except Exception:
             continue
-
-    # Current Material Center revisions render the cross-origin preview iframe
-    # inside a parent-page ``next-drawer``. Its dismissible backdrop is a
-    # sibling of the drawer, not part of the iframe, so target that exact
-    # backdrop before falling back to viewport geometry.
-    try:
-        parent_backdrops = page.locator(
-            ".next-overlay-wrapper.opened > .next-overlay-backdrop"
-        )
-        for index in range(parent_backdrops.count()):
-            backdrop = parent_backdrops.nth(index)
-            if not backdrop.is_visible():
-                continue
-            backdrop.click(
-                position={"x": 8, "y": 8},
-                force=True,
-                timeout=1_500,
-            )
-            if _wait_for_publish_form_to_close(page):
-                return True
-    except Exception:
-        pass
 
     # Other revisions size the iframe to the form card and keep the backdrop
     # in the parent page. Click the centre of the largest viewport band that
@@ -249,6 +247,10 @@ def _close_opened_action(
         '[title*="关闭"]',
         '.ant-modal-close',
         '.ant-drawer-close',
+        '.next-overlay-wrapper.opened button:has(svg.next-icon-remote)',
+        '.next-overlay-wrapper.opened a:has(svg.next-icon-remote)',
+        '.next-overlay-wrapper.opened [role="button"]:has(svg.next-icon-remote)',
+        '.next-overlay-wrapper.opened svg.next-icon-remote',
         '[class*="CloseButton"]',
         '[class*="closeButton"]',
         'button:has-text("退出")',

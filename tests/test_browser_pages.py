@@ -580,7 +580,7 @@ def test_popup_settle_watches_long_enough_for_a_late_first_install_guide():
     assert page.clicked == ["#guide-next"]
 
 
-def test_popup_settle_advances_all_seven_scoped_guide_steps():
+def test_popup_settle_closes_guide_before_advancing_steps():
     page = FakePopupPage(guide_steps=7)
 
     closed = _settle_safe_popups(
@@ -592,8 +592,9 @@ def test_popup_settle_advances_all_seven_scoped_guide_steps():
         delay_ms=0,
     )
 
-    assert closed == 7
-    assert page.clicked == ["#guide-next"] * 7
+    assert closed == 1
+    assert page.clicked == ["#opened-overlay-close"]
+    assert page.guide_steps == 7
 
 
 def test_popup_settle_stops_one_noop_control_after_two_unchanged_actions():

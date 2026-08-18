@@ -369,8 +369,8 @@ def _settle_safe_popups(
     popup_selectors = [
         value
         for value in (
-            progress_selector,
             priority_selector,
+            progress_selector,
             fallback_selector,
         )
         if value

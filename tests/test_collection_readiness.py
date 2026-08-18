@@ -33,6 +33,7 @@ def test_default_popup_selectors_cover_current_first_install_dialogs():
     assert '[aria-label="close"]' in priority
     assert "AiImageGenerationOfflinePushModal_closeIcon" in priority
     assert "next-icon-remote" in priority
+    assert '.next-overlay-wrapper.opened button:has(svg.next-icon-remote)' in priority
     assert "GuideBalloon_" in priority
     assert 'button:has-text("以后再看")' in fallback
 
