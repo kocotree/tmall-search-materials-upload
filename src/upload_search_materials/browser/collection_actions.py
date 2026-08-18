@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
+
+from .material_page import _settle_safe_popups
 
 from .qianniu_copy import (
     PUBLISH_FRAME_FRAGMENT,
@@ -24,6 +26,8 @@ PAGE_RESTORE_POLL_INTERVAL_MS = 250
 PAGE_RESTORE_STABLE_SAMPLES = 3
 PAGE_RESTORE_CLOSE_RETRY_MS = 2_000
 PAGE_RESTORE_GO_BACK_TIMEOUT_MS = 15_000
+RANDOM_ACTION_INTERACTION_TIMEOUT_MS = 3_000
+RANDOM_ACTION_POPUP_SETTLE_DELAY_MS = 250
 
 
 def _row_product_id(row: Any) -> str:
@@ -322,6 +326,7 @@ def perform_random_collection_action(
     page: Any,
     *,
     rows_selector: str,
+    popup_selectors: Mapping[str, str] | None = None,
     rng: RandomSource | None = None,
     wait_for_human_check: HumanCheckWaiter | None = None,
 ) -> dict[str, Any]:
@@ -334,6 +339,13 @@ def perform_random_collection_action(
     selector = str(rows_selector).strip()
     if not selector:
         return {"status": "skipped", "reason_code": "RANDOM_ACTION_ROWS_UNAVAILABLE"}
+    safe_popup_selectors = dict(popup_selectors or {})
+    if safe_popup_selectors:
+        _settle_safe_popups(
+            page,
+            safe_popup_selectors,
+            delay_ms=RANDOM_ACTION_POPUP_SETTLE_DELAY_MS,
+        )
     source = rng or random.SystemRandom()
     rows = _visible_current_rows(page, selector)
     if not rows:
@@ -381,14 +393,23 @@ def perform_random_collection_action(
         action_started = True
         if action == "view_filled_slot":
             slot = slots.nth(position - 1)
-            slot.hover(force=True)
-            slot.click(force=True)
+            slot.hover(
+                force=True,
+                timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
+            )
+            slot.click(
+                force=True,
+                timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
+            )
         else:
             opened_scope = _open_slot_publish_form(
                 page,
                 product_id,
                 position,
                 row=row,
+                interaction_timeout_ms=(
+                    RANDOM_ACTION_INTERACTION_TIMEOUT_MS
+                ),
             )
         page.wait_for_timeout(source.randint(600, 1_200))
         if wait_for_human_check is not None:
@@ -414,6 +435,12 @@ def perform_random_collection_action(
             "detail": str(error),
         }
     finally:
+        if safe_popup_selectors:
+            _settle_safe_popups(
+                page,
+                safe_popup_selectors,
+                delay_ms=RANDOM_ACTION_POPUP_SETTLE_DELAY_MS,
+            )
         _close_new_pages(page, pages_before)
         if action_started:
             restore = _restore_current_page(

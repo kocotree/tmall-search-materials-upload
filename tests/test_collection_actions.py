@@ -13,12 +13,16 @@ class Slot:
     def __init__(self):
         self.hovered = False
         self.clicked = False
+        self.hover_options = {}
+        self.click_options = {}
 
-    def hover(self, **_kwargs):
+    def hover(self, **kwargs):
         self.hovered = True
+        self.hover_options = kwargs
 
-    def click(self, **_kwargs):
+    def click(self, **kwargs):
         self.clicked = True
+        self.click_options = kwargs
 
 
 class Slots:
@@ -164,6 +168,8 @@ def test_random_action_views_filled_slot_on_current_page(monkeypatch):
     }
     assert slots.values[0].hovered is True
     assert slots.values[0].clicked is True
+    assert slots.values[0].hover_options == {"force": True, "timeout": 3_000}
+    assert slots.values[0].click_options == {"force": True, "timeout": 3_000}
     assert page.context.pages == [page]
     assert page.keyboard.keys == ["Escape"]
     assert human_checks == ["random_action_after_open"]
@@ -204,6 +210,33 @@ def test_random_action_chooses_type_before_specific_slot(monkeypatch):
     assert result["slot_position"] == 6
     assert rng.choice_sizes == [2, 1]
     assert opened == [(page, "150", 6, row)]
+
+
+def test_random_action_settles_popups_before_action_and_restore(monkeypatch):
+    page = Page([Row("175")])
+    slots = Slots(1)
+    common_stubs(monkeypatch, slots, [])
+    settled = []
+    monkeypatch.setattr(
+        collection_actions,
+        "_settle_safe_popups",
+        lambda target, selectors, *, delay_ms: settled.append(
+            (target, dict(selectors), delay_ms)
+        ),
+    )
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        popup_selectors={"safe_popup_close": "#safe-close"},
+        rng=FixedRandom(),
+    )
+
+    assert result["status"] == "completed"
+    assert settled == [
+        (page, {"safe_popup_close": "#safe-close"}, 250),
+        (page, {"safe_popup_close": "#safe-close"}, 250),
+    ]
 
 
 def test_random_action_opens_current_empty_slot_without_searching(monkeypatch):

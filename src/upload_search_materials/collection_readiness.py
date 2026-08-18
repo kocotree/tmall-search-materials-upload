@@ -83,20 +83,50 @@ DEFAULT_CANDIDATE_SELECTORS = {
         'button:has-text("下一页"), [aria-label="下一页"]'
     ),
     "safe_popup_progress": (
+        '.next-dialog.next-closeable[class*="GuideModal_dialog"] '
+        ':text-is("下一步"), '
+        '.next-dialog.next-closeable[class*="GuideModal_dialog"] '
+        ':text-is("完成"), '
         '#react-joyride-portal :text-is("下一步"), '
         '#react-joyride-portal :text-is("完成"), '
         '#react-joyride-portal :text-is("知道了")'
     ),
     "safe_popup_close_priority": (
+        '.next-dialog.next-closeable[class*="GuideModal_dialog"] '
+        'a.next-dialog-close[aria-label="关闭"], '
+        '.ant-modal-wrap.ant-modal-centered '
+        '[aria-label="close"]'
+        '[class*="AiImageGenerationOfflinePushModal_closeIcon"], '
         '#react-joyride-portal [data-test-id="button-close"], '
         '#react-joyride-portal [data-test-id="button-skip"], '
         '.next-overlay-wrapper.opened .next-dialog-close'
     ),
     "safe_popup_close": (
+        '.ant-modal-wrap.ant-modal-centered button:has-text("以后再看"), '
         'button:has-text("稍后再看"), button:has-text("关闭"), '
         'button:has-text("知道了"), [aria-label*="关闭"]'
     ),
 }
+SAFE_POPUP_SELECTOR_FIELDS = (
+    "safe_popup_progress",
+    "safe_popup_close_priority",
+    "safe_popup_close",
+)
+
+
+def merge_default_safe_popup_selectors(
+    selectors: Mapping[str, str],
+) -> dict[str, str]:
+    """Add current safe popup controls without rewriting a validated profile."""
+
+    merged = dict(selectors)
+    for field in SAFE_POPUP_SELECTOR_FIELDS:
+        current = str(merged.get(field, "")).strip()
+        default = str(DEFAULT_CANDIDATE_SELECTORS[field]).strip()
+        merged[field] = (
+            default if not current or current == default else f"{default}, {current}"
+        )
+    return merged
 
 
 class SelectorBootstrapError(SelectorConfigError):

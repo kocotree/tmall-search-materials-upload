@@ -6,10 +6,12 @@ import pytest
 import yaml
 
 from upload_search_materials.collection_readiness import (
+    DEFAULT_CANDIDATE_SELECTORS,
     SelectorBootstrapError,
     build_collection_readiness,
     create_selector_candidate,
     ensure_production_selector_profile,
+    merge_default_safe_popup_selectors,
     project_environment_status,
     promote_selector_candidate,
     validate_selector_candidate,
@@ -18,6 +20,33 @@ from upload_search_materials.browser.material_page import (
     prepare_high_value_validation_page,
 )
 from upload_search_materials.runtime_config import load_runtime_config
+
+
+def test_default_popup_selectors_cover_current_first_install_dialogs():
+    progress = DEFAULT_CANDIDATE_SELECTORS["safe_popup_progress"]
+    priority = DEFAULT_CANDIDATE_SELECTORS["safe_popup_close_priority"]
+    fallback = DEFAULT_CANDIDATE_SELECTORS["safe_popup_close"]
+
+    assert 'class*="GuideModal_dialog"' in progress
+    assert ':text-is("下一步")' in progress
+    assert 'a.next-dialog-close[aria-label="关闭"]' in priority
+    assert '[aria-label="close"]' in priority
+    assert "AiImageGenerationOfflinePushModal_closeIcon" in priority
+    assert 'button:has-text("以后再看")' in fallback
+
+
+def test_current_popup_defaults_are_added_to_an_existing_profile():
+    merged = merge_default_safe_popup_selectors(
+        {
+            "promotion_rows": ".rows",
+            "safe_popup_close": "#legacy-close",
+        }
+    )
+
+    assert merged["promotion_rows"] == ".rows"
+    assert 'button:has-text("以后再看")' in merged["safe_popup_close"]
+    assert merged["safe_popup_close"].endswith(", #legacy-close")
+    assert 'class*="GuideModal_dialog"' in merged["safe_popup_progress"]
 
 
 def test_environment_status_accepts_windows_virtual_environment(tmp_path):

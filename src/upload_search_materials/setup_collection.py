@@ -42,6 +42,7 @@ from .io_tables import (
 )
 from .material_state import build_completeness_matrix
 from .collection_runtime import attempt_path, read_json_object
+from .collection_readiness import merge_default_safe_popup_selectors
 from .persistence import atomic_write_bytes, atomic_write_json, read_json
 from .runtime_config import RuntimeConfig
 from .supplement_collection import (
@@ -717,12 +718,18 @@ def process_setup_collection(
         )
 
     def collect(live_page: Any) -> list[dict[str, str]]:
+        collection_selectors = merge_default_safe_popup_selectors(
+            profile.selectors
+        )
+
         def wait_for_human_check(
             target_page: Any,
             page_number: int,
             location: str,
         ) -> None:
-            selector = str(profile.selectors.get("human_check", "")).strip()
+            selector = str(
+                collection_selectors.get("human_check", "")
+            ).strip()
             if not selector or not human_check_visible(target_page, selector):
                 return
             observed_page = max(1, int(page_number))
@@ -831,7 +838,8 @@ def process_setup_collection(
                 )
             return perform_random_collection_action(
                 live_page,
-                rows_selector=str(profile.selectors["promotion_rows"]),
+                rows_selector=str(collection_selectors["promotion_rows"]),
+                popup_selectors=collection_selectors,
                 wait_for_human_check=(
                     lambda target_page, location: wait_for_human_check(
                         target_page, page_number, location
@@ -858,7 +866,7 @@ def process_setup_collection(
         wait_on_main_page(0, "before_collection_validation")
         page_evidence = validate_collection_page(
             live_page,
-            profile.selectors,
+            collection_selectors,
             expected_store=str(
                 setup_input.get("values", {}).get("store", "")
             ),
@@ -887,7 +895,7 @@ def process_setup_collection(
             )
         rows = collect_supplement_material_status(
             live_page,
-            profile.selectors,
+            collection_selectors,
             scan_mode="high-value",
             output=output,
             checkpoint=checkpoint,
