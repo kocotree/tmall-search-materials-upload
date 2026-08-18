@@ -53,6 +53,25 @@ def test_high_value_profile_does_not_require_publish_selectors(tmp_path):
     assert "publish_button" not in profile.selectors
 
 
+def test_bundled_production_profile_supports_collection_and_exact_slots():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "config"
+        / "selectors.production.yaml"
+    )
+
+    high_value = load_selector_profile(
+        path, purpose="high_value_collection", production=True
+    )
+    exact_slots = load_selector_profile(
+        path, purpose="exact_material_status", production=True
+    )
+
+    assert high_value.name == "bundled-windows-production"
+    assert exact_slots.selectors["empty_slots"]
+    assert exact_slots.selectors["product_search"]
+
+
 def test_production_profile_rejects_placeholders(tmp_path):
     path = tmp_path / "selectors.local.yaml"
     write_profile(path, store_name="#store")

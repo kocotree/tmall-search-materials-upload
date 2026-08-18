@@ -806,13 +806,85 @@
     });
   }
 
+  function fieldLabel(form, name) {
+    const field = form.querySelector(`[data-field="${CSS.escape(name)}"]`);
+    const label = field?.querySelector("label[for]");
+    return String(label?.textContent || "").trim() || "此项";
+  }
+
+  function readableFieldError(form, name, message) {
+    const label = fieldLabel(form, name);
+    const detail = String(message || "").trim();
+    if ([
+      "is required",
+      "must be a non-empty string",
+      "must not be empty",
+    ].includes(detail)) {
+      return `请填写${label}`;
+    }
+    if (detail === "must be confirmed") return `请确认${label}`;
+    if (detail === "must be a list") return `${label}格式不正确，请重新选择`;
+    return detail || `请检查${label}`;
+  }
+
   function showFieldErrors(form, fieldErrors) {
     Object.entries(fieldErrors).forEach(([name, message]) => {
       const errorNode = form.querySelector(`[data-field-error="${CSS.escape(name)}"]`);
       const control = form.querySelector(`[name="${CSS.escape(name)}"]`);
-      if (errorNode) errorNode.textContent = message;
+      if (errorNode) {
+        errorNode.textContent = readableFieldError(form, name, message);
+      }
       if (control) control.setAttribute("aria-invalid", "true");
     });
+  }
+
+  function elementIsVisible(element) {
+    return Boolean(
+      element
+      && !element.hidden
+      && (element.offsetWidth || element.offsetHeight || element.getClientRects().length),
+    );
+  }
+
+  function focusFirstFieldError(form, fieldErrors) {
+    const first = Object.entries(fieldErrors || {})[0];
+    if (!first) return "";
+    const [name, detail] = first;
+    const escaped = CSS.escape(name);
+    const field = form.querySelector(`[data-field="${escaped}"]`);
+    const controls = [...form.querySelectorAll(`[name="${escaped}"]`)]
+      .filter((control) => !control.disabled);
+    const control = controls.find(elementIsVisible);
+    let target = elementIsVisible(field) ? field : control;
+    let focusControl = control;
+    if (name === "task_ids" && (!target || !focusControl)) {
+      target = document.querySelector('[data-component="ApprovalChecklist"]');
+      focusControl = target?.querySelector('input[type="checkbox"]:not(:disabled)');
+    }
+    target ||= form.querySelector(`[data-field-error="${escaped}"]`) || form;
+    window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (elementIsVisible(focusControl)) {
+        focusControl.focus({ preventScroll: true });
+      }
+    });
+    return readableFieldError(form, name, detail);
+  }
+
+  function clientFieldErrors(form) {
+    const errors = {};
+    form.querySelectorAll("[name][required]").forEach((control) => {
+      if (control.disabled || control.checkValidity()) return;
+      const name = control.name;
+      if (Object.hasOwn(errors, name)) return;
+      const label = fieldLabel(form, name);
+      errors[name] = control.validity.valueMissing
+        ? control.type === "checkbox"
+          ? `请确认${label}`
+          : `请填写${label}`
+        : `请检查${label}`;
+    });
+    return errors;
   }
 
   function serializeForm(form) {
@@ -5739,6 +5811,16 @@
       return;
     }
     clearFieldErrors(form);
+    if (mode === "submit") {
+      const fieldErrors = clientFieldErrors(form);
+      if (Object.keys(fieldErrors).length) {
+        showFieldErrors(form, fieldErrors);
+        const message = focusFirstFieldError(form, fieldErrors);
+        actionMessage.textContent = `${message}，页面已定位到需要补充的位置。`;
+        persistenceInFlight = false;
+        return;
+      }
+    }
     if (
       mode === "submit"
       && requestedStageId === "setup"
@@ -5969,7 +6051,11 @@
         sessionId,
         stageGeneration,
       )) return;
-      showFieldErrors(form, error.fieldErrors || {});
+      const fieldErrors = error.fieldErrors || {};
+      showFieldErrors(form, fieldErrors);
+      const firstFieldMessage = error.payload?.asset_validation
+        ? ""
+        : focusFirstFieldError(form, fieldErrors);
       if (
         requestedStageId === "asset_matching"
         && error.payload?.asset_validation
@@ -5998,11 +6084,14 @@
       const suffix = waitStillLive
         ? "；兼容监听仍在线，但本次提交尚未成功"
         : "";
+      const failureMessage = firstFieldMessage
+        || error.userMessage
+        || error.message;
       actionMessage.textContent = pausedSubmission
-        ? `保存失败，排队的提交已暂停：${error.userMessage || error.message}${suffix}`
+        ? `保存失败，排队的提交已暂停：${failureMessage}${suffix}`
         : mode === "submit"
-          ? `尚未提交，工作台未接收：${error.userMessage || error.message}${suffix}`
-          : `${error.userMessage || error.message}${suffix}`;
+          ? `尚未提交，工作台未接收：${failureMessage}${suffix}`
+          : `${failureMessage}${suffix}`;
       uiState = UiState.markDirty(uiState);
       renderStatus();
     } finally {

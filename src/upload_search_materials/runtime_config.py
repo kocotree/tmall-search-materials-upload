@@ -20,6 +20,7 @@ RULES_PATTERN = "天猫商品信息表*每月推品规则*Grid View.csv"
 LOCAL_CONFIG_RELATIVE = Path("config/local-paths.json")
 NAS_SOURCES_RELATIVE = Path("config/nas-sources.yaml")
 LOCAL_SELECTORS_RELATIVE = Path("config/selectors.local.yaml")
+BUNDLED_SELECTORS_RELATIVE = Path("config/selectors.production.yaml")
 PACKAGE_DOCS_RELATIVE = Path("src/upload_search_materials/docs")
 DEFAULT_CDP_PROFILE_RELATIVE = Path(".local-cache/cdp-profile")
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
@@ -534,6 +535,48 @@ def save_selector_profile_path(
         selectors_file=installed,
         config_path=target,
     )
+
+
+def initialize_bundled_selector_profile(
+    runtime: RuntimeConfig,
+) -> RuntimeConfig:
+    """Install the bundled production baseline once for this Windows user."""
+
+    if runtime.selectors_file is not None:
+        return runtime
+    installed = (
+        runtime.user_data_root / LOCAL_SELECTORS_RELATIVE
+        if runtime.user_data_root is not None
+        else runtime.workspace_root / LOCAL_SELECTORS_RELATIVE
+    ).resolve()
+    if installed.is_file():
+        return replace(runtime, selectors_file=installed)
+
+    bundled = (
+        runtime.workspace_root / BUNDLED_SELECTORS_RELATIVE
+    ).resolve()
+    if not bundled.is_file():
+        return runtime
+
+    # Import lazily to keep path resolution independent from browser startup.
+    from .browser.config import load_selector_profile
+
+    for purpose in ("high_value_collection", "exact_material_status"):
+        load_selector_profile(bundled, purpose=purpose, production=True)
+
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    temporary = installed.with_name(f".{installed.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(bundled.read_bytes())
+    try:
+        try:
+            # Windows rename does not replace an existing destination. This
+            # preserves a profile created concurrently by another startup.
+            os.rename(temporary, installed)
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
+    return save_selector_profile_path(runtime, installed)
 
 
 def inspect_image_sources(

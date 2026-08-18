@@ -46,6 +46,8 @@ uv run python -X utf8 $quickValidate .
 
 ### 1.1 每台电脑只配置一次路径
 
+Windows 工作台首次启动时，如果 `%LOCALAPPDATA%\tmall-search-materials\config\selectors.local.yaml` 不存在，会从当前 Plugin 的 `config/selectors.production.yaml` 初始化一份稳定本机副本，并把路径写入 `config/runtime.json`。随 Plugin 分发的生产基线可在新版本中维护，但升级不会覆盖已有本机副本；需要更新现有电脑时，必须先在真实千牛页面验证新 profile，再通过配置页显式保存。`selectors.example.yaml` 始终只是字段示例，不能作为生产回退。无论 profile 来源如何，采集器都必须在当前页面验证 DOM，选择器失效时停止，不得报告零素材或零空坑位。
+
 首次启动后可直接在任务配置页的“本次图片源”新增、删除和检测图片源，并点击“保存为本机配置”。配置页不再显示独立“公司共享盘”模块；用户从 Windows 原生目录窗口选择已经挂载的 Y 盘、Z 盘等目录，或直接粘贴 UNC 路径。页面支持 1–50 个“来源名称 + 根路径”。保存时每个来源使用稳定 `source_id + label`，实际盘符或 UNC 是当前电脑的本机绑定。`source_id` 由去掉盘符或 UNC 服务器部分后的规范化路径确定性生成，来源名称不参与；例如 `Y:\视觉部\1-模特图` 与 `\\192.168.124.85\视觉部\1-模特图` 得到同一 ID。旧 ID 保存在本机历史绑定中，仅用于兼容旧任务；删除后重新选择同一路径会直接恢复同一新 ID。映射层级不同仍视为不同来源。页面默认写入用户数据目录的 `config/runtime.json`；`config/local-paths.example.json` 仅用于了解字段，不应复制回 Plugin 安装目录。配置不得保存 NAS 凭据、目录清单或图片内容。
 
 每个图片源行的“选择文件夹”由用户点击后启动独立的 Windows STA 助手并打开原生目录选择窗口，只回填已验证的绝对目录，不扫描图片。助手依次记录 `started`、`window_visible`、`selected/cancelled`；窗口无法在可见性期限内证明已显示时返回 `FOLDER_PICKER_NOT_VISIBLE`，只结束本次 helper，保留原输入并继续允许手工输入。取消、窗口忙碌、选择超时、无桌面会话、启动失败或返回无效路径同样不会清空输入。UNC 或无界面环境可直接粘贴路径。

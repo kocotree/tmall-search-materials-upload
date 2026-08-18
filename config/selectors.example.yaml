@@ -1,3 +1,5 @@
+# 字段结构示例，不会作为生产配置加载。随 Plugin 维护的首次启动基线见
+# selectors.production.yaml；本机实际配置位于用户数据目录且升级时不覆盖。
 store_name: "#store"
 human_check: "#human-check"
 export_basic: "#export-basic"

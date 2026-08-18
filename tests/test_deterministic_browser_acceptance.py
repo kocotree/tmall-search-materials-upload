@@ -274,6 +274,112 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
     ).is_file()
 
 
+def test_approval_missing_identity_scrolls_to_field_without_submitting(
+    tmp_path,
+):
+    runs = tmp_path / "runs"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=runs,
+    )
+    app = create_app(
+        runs, runtime_config=runtime, enforce_stage_order=False
+    )
+    store = SessionStore(runs)
+    session = store.create_session()
+    state = store.load_session(session.session_id)
+    state["current_stage"] = "approval"
+    state["stages"]["dry_run"]["status"] = "completed"
+    store._write_session_state(session.session_id, state)
+    tasks = [
+        {
+            "task_id": f"task-{index}",
+            "status": "ready_for_review",
+            "product_id": f"product-{index}",
+            "remote_slot_position": index,
+            "target_ratio": "3:4",
+            "title": f"任务 {index}",
+            "description": "用于验证长任务列表后的必填字段定位。",
+            "media": [{"order": 1}],
+            "blocking_reasons": [],
+            "warnings": [],
+        }
+        for index in range(1, 9)
+    ]
+    store.write_review_context(
+        session.session_id,
+        "approval",
+        {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "stage_id": "approval",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请选择上传任务",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认上传任务",
+            "data": {
+                "product_count": len(tasks),
+                "media_count": len(tasks),
+                "tasks": tasks,
+                "warnings": [],
+            },
+        },
+    )
+
+    with _live_server(app) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 700})
+        submit_requests = []
+        page.on(
+            "request",
+            lambda request: submit_requests.append(request.url)
+            if request.url.endswith("/stages/approval/submit")
+            else None,
+        )
+        page.goto(
+            f"{base_url}/?session_id={session.session_id}",
+            wait_until="networkidle",
+        )
+        page.locator(".upload-task-card").first.wait_for()
+        page.wait_for_function(
+            "document.querySelector('[name=task_ids]')?.value.trim()"
+            " && !document.querySelector('[data-submit-stage]')?.disabled"
+        )
+        confirmed_by = page.locator('[name="confirmed_by"]')
+        initial_box = confirmed_by.bounding_box()
+        assert initial_box is not None and initial_box["y"] > 700
+
+        page.locator("[data-submit-stage]").click()
+        page.wait_for_function(
+            "document.activeElement?.name === 'confirmed_by'"
+        )
+        page.wait_for_function(
+            "() => {"
+            " const rect = document.querySelector('[name=confirmed_by]')"
+            ".getBoundingClientRect();"
+            " return rect.top >= 0 && rect.bottom < window.innerHeight;"
+            "}",
+            timeout=5_000,
+        )
+
+        box = confirmed_by.bounding_box()
+        assert box is not None and 0 <= box["y"] < 700
+        assert confirmed_by.get_attribute("aria-invalid") == "true"
+        assert "请填写授权人" in page.locator(
+            "[data-action-message]"
+        ).inner_text()
+        assert submit_requests == []
+        assert store.read_optional_stage_document(
+            session.session_id, "approval", "handoff"
+        ) is None
+        browser.close()
+
+
 def test_folder_prepare_refresh_and_retry_never_wake_codex(
     tmp_path, monkeypatch
 ):

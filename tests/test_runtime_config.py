@@ -9,6 +9,7 @@ from upload_search_materials.runtime_config import (
     image_source_path_key,
     inspect_image_sources,
     inspect_team_folder_index_root,
+    initialize_bundled_selector_profile,
     load_runtime_config,
     normalize_image_sources,
     save_image_sources,
@@ -265,6 +266,49 @@ def test_selector_profile_is_installed_in_stable_user_data(tmp_path):
         (user_data / "config/runtime.json").read_text(encoding="utf-8")
     )
     assert saved["selectors_file"] == str(installed.resolve())
+
+
+def test_bundled_selector_profile_is_initialized_once(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    bundled = workspace / "config" / "selectors.production.yaml"
+    repository_profile = (
+        Path(__file__).resolve().parents[1]
+        / "config"
+        / "selectors.production.yaml"
+    )
+    bundled.write_bytes(repository_profile.read_bytes())
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    initialized = initialize_bundled_selector_profile(runtime)
+    installed = user_data / "config" / "selectors.local.yaml"
+
+    assert initialized.selectors_file == installed.resolve()
+    assert installed.read_bytes() == bundled.read_bytes()
+    saved = json.loads(
+        (user_data / "config/runtime.json").read_text(encoding="utf-8")
+    )
+    assert saved["selectors_file"] == str(installed.resolve())
+
+
+def test_bundled_selector_initialization_never_overwrites_existing(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    bundled = workspace / "config" / "selectors.production.yaml"
+    bundled.write_text("bundled: true\n", encoding="utf-8")
+    installed = user_data / "config" / "selectors.local.yaml"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("existing: true\n", encoding="utf-8")
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)}, start=workspace
+    )
+
+    initialized = initialize_bundled_selector_profile(runtime)
+
+    assert initialized.selectors_file == installed.resolve()
+    assert installed.read_text(encoding="utf-8") == "existing: true\n"
 
 
 def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):

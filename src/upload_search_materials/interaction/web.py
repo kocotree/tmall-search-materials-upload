@@ -101,6 +101,7 @@ from ..runtime_config import (
     inspect_image_sources,
     inspect_team_folder_index_root,
     load_runtime_config,
+    initialize_bundled_selector_profile,
     save_image_sources,
     save_selector_profile_path,
     save_team_folder_index_root,
@@ -243,7 +244,9 @@ def create_app(
 
     app = Flask(__name__)
     store = SessionStore(runs_root)
-    runtime = runtime_config or load_runtime_config()
+    runtime = initialize_bundled_selector_profile(
+        runtime_config or load_runtime_config()
+    )
     expected_runtime_identity = (
         (service_identity or {}).get("runtime_identity")
     )

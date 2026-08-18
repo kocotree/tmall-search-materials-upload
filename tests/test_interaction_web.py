@@ -3229,6 +3229,23 @@ def test_approval_tasks_default_to_all_ready_tasks_once():
     assert "!currentStageHasPersistedInput" in source
 
 
+def test_frontend_scrolls_and_focuses_the_first_invalid_field():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "function clientFieldErrors(form)" in source
+    assert "function focusFirstFieldError(form, fieldErrors)" in source
+    assert 'target.scrollIntoView({ behavior: "smooth", block: "center" });' in source
+    assert "focusControl.focus({ preventScroll: true });" in source
+    assert "页面已定位到需要补充的位置" in source
+
+
 def test_approval_submit_uses_one_click_authorization(
     client, session_id, tmp_path
 ):

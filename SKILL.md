@@ -247,6 +247,8 @@ Python 和第三方依赖，但始终从当前 Plugin 的 `src/` 加载业务代
 `exact_slot_status=not_collected`；不得把缺失数量解释成具体空坑位编号。仅在正式
 批准和发布规划前，对选中商品执行逐商品精确坑位复核。
 
+Windows 工作台首次启动且本机尚无选择器文件时，必须把 Plugin 随包提供的生产基线初始化到 `%LOCALAPPDATA%\tmall-search-materials\config\selectors.local.yaml`，并在本机运行时配置中引用该稳定副本；已有文件不得被首次初始化或 Plugin 升级覆盖。基线同时声明 `high_value_collection` 与 `exact_material_status`，包含空坑位结构选择器，但不代替当前页面验证。每次真实采集必须按用途加载生产 profile，并在当前登录店铺 DOM 上失败关闭；任何商品身份、目标坑位、素材表、空坑位或审核状态证据缺失都返回 `SELECTOR_INVALID`，不得解释为零素材或零空坑位。
+
 素材阶段按以下顺序执行：
 
 1. 先创建或复用精确时间戳会话并启动配置页；用户提交 setup handoff 后，才把自动发现的商品表、规则表复制为本次任务输入快照。本分支不导出或审查基础素材。搜推素材必须使用 `supplement --scan-mode high-value` 选择“商品分类 → 搜推高价值”，不传 `--max-pages`，串行遍历全部分页并把结果写入当前任务目录。完成环境与商品表预检。只有商品表读取失败、缺少/重复必需表头等 schema 或批次级错误、以及空表才停止 raw indexing。`MISSING_PRODUCT_ID`、`INVALID_PRODUCT_ID`、`DUPLICATE_PRODUCT_ID` 是行级 blocked：在 `scan-summary.json` 留下 source row 与 reason codes，只排除对应行的 ID/SKU/名称匹配，其余有效行继续；非空但全部行为行级 blocked 时仍完成纯 metadata 索引。
@@ -321,6 +323,8 @@ Python 与 `uv.lock` 锁定的第三方依赖，不安装或复制 `upload_searc
 11. 根据结果停止，或明确进入下一阶段。
 
 提交前允许编辑并在停止输入约 1 秒后自动保存草稿；草稿不得生成 handoff 或唤醒工作台后台。每次草稿或正式提交携带在重试期间保持不变的 request ID，并通过版本化 stage transaction 原子推进 input、revision snapshot、handoff、session state 与审计事件。中途失败后读取状态或重试原请求必须幂等修复；相同 request ID 但内容不同返回 `REVISION_CONTENT_CONFLICT`，不得删除或覆盖既有证据。正式提交后冻结该阶段的全部配置。只有状态仍为 `ready_for_agent`、尚未被后台调度器认领时，用户才能显式撤回并继续修改；`processing` 和 `completed` 禁止覆盖。`needs_user_input` 或 `blocked` 才重新开放输入。每次草稿和正式提交都保存到阶段目录的 `revisions/<revision>/`，活动 `handoff.json` 只代表当前可认领提交。
+
+正式提交前，页面必须按当前阶段 schema 检查全部必填业务字段；缺失时不得发送提交请求，必须显示字段级业务提示、平滑滚动到首个错误位置并把焦点移入对应控件。后端仍须保留相同校验；后端返回 `field_errors` 时前端必须执行同样的错误展示、滚动和焦点恢复，不得只在固定底栏显示 `validation failed`。自定义列表或卡片字段应定位到其可见业务控件，错误节点保持 `aria-live`，不得暴露底层字段名或英文校验文本。
 
 恢复已有 `session_id` 时，页面必须先读取 `session.json` 状态并直接进入有效的 `current_stage`，同时一次性显示全部阶段的真实状态。只打开、刷新、水合图片决定或构建默认坑位不得标记 dirty、自动保存或增加 revision。草稿保存进行中收到“提交给工作台”时必须明确显示已排队，并在保存成功后使用最新 revision 继续提交；失败或阶段切换时必须明确暂停或取消，禁止静默丢弃点击。查看已完成阶段时显示锁定原因和“进入当前阶段”，不得重新启用写入。
 

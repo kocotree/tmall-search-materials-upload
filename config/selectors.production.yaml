@@ -1,0 +1,41 @@
+schema_version: 1
+profile_name: bundled-windows-production
+profile_version: "2026.08.19"
+production: true
+supported_purposes:
+  - high_value_collection
+  - exact_material_status
+material_center_url: "https://myseller.taobao.com/home.htm/material-center/material-management?tab=recommend"
+
+# Shared page identity and safety gates.
+store_name: '[data-store-name], [class*="shopName"], [class*="ShopName"]'
+human_check: 'iframe[src*="captcha"], [class*="captcha"], [class*="verify"], :text-is("验证码"), :text-is("扫码验证"), :text-is("安全验证")'
+
+# Search recommendation / high-value full collection.
+promotion_tab: 'li[role="tab"]:has-text("搜推素材"), [role="tab"]:has-text("搜推素材")'
+high_value_filter: '[role="checkbox"]:has-text("搜推高价值"), label:has-text("搜推高价值")'
+recommended_filter: '[role="checkbox"]:has-text("推荐补充素材"), label:has-text("推荐补充素材")'
+promotion_rows: "tbody tr"
+promotion_current_page: 'nav[aria-label*="分页"] [aria-current="page"], .next-pagination-list > .next-pagination-item.next-current'
+promotion_first_page: 'nav[aria-label*="分页"] [data-page="1"], .next-pagination-list > .next-pagination-item:first-of-type'
+promotion_terminal_page: 'nav[aria-label*="分页"] [data-page]:last-of-type, .next-pagination-list > .next-pagination-item:last-of-type'
+promotion_next_page: 'button:has-text("下一页"), [aria-label="下一页"]'
+
+# Exact product and empty-slot inspection. These selectors mirror the
+# structural selectors used by the Windows production collector.
+product_search: 'input[placeholder*="商品"][placeholder*="ID"], input[placeholder*="商品"][placeholder*="名称"]'
+product_id: 'tbody tr:has-text("商品ID")'
+desired_slots: 'tbody tr:has-text("发布坑位")'
+material_table: "tbody"
+material_rows: 'tbody tr td:last-child [class^="MaterialCell_container__"] > [class^="MaterialCell_materialCell__"]:not(:has([class*="PublishButton"], [class*="publishBtn"]))'
+empty_slots: 'tbody tr td:last-child [class^="MaterialCell_container__"] > [class^="MaterialCell_materialCell__"]:has([class*="PublishButton"], [class*="publishBtn"])'
+review_status: 'tbody tr td:last-child [class^="MaterialCell_container__"] > [class^="MaterialCell_materialCell__"]:not(:has([class*="PublishButton"], [class*="publishBtn"])) [class*="status" i]'
+
+safe_popup_progress: '.next-dialog.next-closeable[class*="GuideModal_dialog"] :text-is("下一步"), .next-dialog.next-closeable[class*="GuideModal_dialog"] :text-is("完成"), #react-joyride-portal :text-is("下一步"), #react-joyride-portal :text-is("完成"), #react-joyride-portal :text-is("知道了")'
+safe_popup_close_priority: '.next-dialog.next-closeable[class*="GuideModal_dialog"] a.next-dialog-close[aria-label="关闭"], .ant-modal-wrap.ant-modal-centered [aria-label="close"][class*="AiImageGenerationOfflinePushModal_closeIcon"], #react-joyride-portal [data-test-id="button-close"], #react-joyride-portal [data-test-id="button-skip"], .next-overlay-wrapper.opened .next-dialog-close'
+safe_popup_close: '.ant-modal-wrap.ant-modal-centered button:has-text("以后再看"), button:has-text("稍后再看"), button:has-text("关闭"), button:has-text("知道了"), [aria-label*="关闭"]'
+
+current_dom_validation:
+  required: true
+  mode: fail_closed
+  note: "每次采集仍需在当前登录店铺页面验证 DOM；匹配失败不得解释为零素材或零空坑位。"
