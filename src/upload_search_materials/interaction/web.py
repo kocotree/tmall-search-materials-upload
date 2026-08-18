@@ -4682,18 +4682,43 @@ def _normalize_stage_values(
     prior_input = store.read_optional_stage_document(
         session_id, stage_id, "input"
     )
-    prior_source_types = (
-        prior_input.get("values", {}).get("source_types")
+    prior_values = (
+        prior_input.get("values", {})
         if isinstance(prior_input, dict)
         and isinstance(prior_input.get("values"), dict)
-        else None
+        else {}
     )
+    prior_source_types = prior_values.get("source_types")
     normalized["source_types"] = (
         list(prior_source_types)
         if isinstance(prior_source_types, list)
         and any(str(item).strip() for item in prior_source_types)
         else ["image"]
     )
+    submitted_roots = normalized.get("image_roots")
+    if "image_roots" not in normalized or (
+        isinstance(submitted_roots, list)
+        and not any(str(item).strip() for item in submitted_roots)
+    ):
+        inherited_roots = prior_values.get("image_roots")
+        if not (
+            isinstance(inherited_roots, list)
+            and any(str(item).strip() for item in inherited_roots)
+        ):
+            setup_input = store.read_optional_stage_document(
+                session_id, "setup", "input"
+            )
+            setup_values = (
+                setup_input.get("values", {})
+                if isinstance(setup_input, dict)
+                and isinstance(setup_input.get("values"), dict)
+                else {}
+            )
+            inherited_roots = setup_values.get("image_roots")
+        if isinstance(inherited_roots, list) and any(
+            str(item).strip() for item in inherited_roots
+        ):
+            normalized["image_roots"] = list(inherited_roots)
     result = _current_result(store, session_id, stage_id, state) or {}
     data = result.get("data") if isinstance(result, dict) else {}
     data = data if isinstance(data, dict) else {}

@@ -2347,6 +2347,60 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
     assert state["stages"]["asset_matching"]["status"] == "draft"
 
 
+def test_prepare_gallery_inherits_setup_image_roots_when_stage_payload_is_empty(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    configured_roots = [str(tmp_path / "source-a"), str(tmp_path / "source-b")]
+    store.save_local_input(
+        session_id,
+        "setup",
+        {"image_roots": configured_roots},
+        expected_revision=0,
+    )
+    store.write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "folder-a",
+                        "folder_path": configured_roots[0],
+                        "product_id": "P1",
+                        "source_system": "nas",
+                        "match_type": "exact_sku",
+                    }
+                ],
+            },
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
+        json={
+            "revision": 0,
+            "values": {"image_roots": [], "folder_decisions": []},
+        },
+    )
+
+    assert response.status_code == 202
+    persisted = store.read_optional_stage_document(
+        session_id, "asset_matching", "input"
+    )
+    assert persisted["values"]["image_roots"] == configured_roots
+
+
 def test_asset_matching_folder_counts_wait_for_material_executor(
     client, session_id, tmp_path
 ):
