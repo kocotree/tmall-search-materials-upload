@@ -175,41 +175,26 @@ def test_random_action_views_filled_slot_on_current_page(monkeypatch):
     assert human_checks == ["random_action_after_open"]
 
 
-def test_random_action_chooses_type_before_specific_slot(monkeypatch):
-    class PreferEmptyRandom(FixedRandom):
-        def __init__(self):
-            self.choice_sizes = []
-
+def test_random_action_only_chooses_from_filled_slots(monkeypatch):
+    class ChooseLastRandom(FixedRandom):
         def choice(self, values):
-            self.choice_sizes.append(len(values))
-            if values and isinstance(values[0], str):
-                return "open_empty_image_text"
-            return values[0]
+            return values[-1]
 
     row = Row("150")
     page = Page([row])
     slots = Slots(6)
-    common_stubs(monkeypatch, slots, [6])
-    opened = []
-    monkeypatch.setattr(
-        collection_actions,
-        "_open_slot_publish_form",
-        lambda target, product_id, position, **kwargs: opened.append(
-            (target, product_id, position, kwargs["row"])
-        ),
-    )
-    rng = PreferEmptyRandom()
+    common_stubs(monkeypatch, slots, [2, 6])
 
     result = collection_actions.perform_random_collection_action(
         page,
         rows_selector=".promotion-row",
-        rng=rng,
+        rng=ChooseLastRandom(),
     )
 
-    assert result["action"] == "open_empty_image_text"
-    assert result["slot_position"] == 6
-    assert rng.choice_sizes == [2, 1]
-    assert opened == [(page, "150", 6, row)]
+    assert result["action"] == "view_filled_slot"
+    assert result["slot_position"] == 5
+    assert slots.values[4].clicked is True
+    assert slots.values[5].clicked is False
 
 
 def test_random_action_settles_popups_before_action_and_restore(monkeypatch):
@@ -239,19 +224,11 @@ def test_random_action_settles_popups_before_action_and_restore(monkeypatch):
     ]
 
 
-def test_random_action_opens_current_empty_slot_without_searching(monkeypatch):
+def test_random_action_skips_page_with_only_empty_slots(monkeypatch):
     row = Row("200")
     page = Page([row])
     slots = Slots(1)
     common_stubs(monkeypatch, slots, [1])
-    opened = []
-    monkeypatch.setattr(
-        collection_actions,
-        "_open_slot_publish_form",
-        lambda target, product_id, position, **kwargs: opened.append(
-            (target, product_id, position, kwargs["row"])
-        ),
-    )
 
     result = collection_actions.perform_random_collection_action(
         page,
@@ -259,9 +236,12 @@ def test_random_action_opens_current_empty_slot_without_searching(monkeypatch):
         rng=FixedRandom(),
     )
 
-    assert result["action"] == "open_empty_image_text"
-    assert result["page_state_restored"] is True
-    assert opened == [(page, "200", 1, row)]
+    assert result == {
+        "status": "skipped",
+        "reason_code": "RANDOM_ACTION_NO_FILLED_SLOT",
+    }
+    assert slots.values[0].hovered is False
+    assert slots.values[0].clicked is False
 
 
 def test_random_action_safely_skips_without_current_page_rows():

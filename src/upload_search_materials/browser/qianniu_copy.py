@@ -489,14 +489,7 @@ def _open_slot_publish_form(
     position: int,
     *,
     row=None,
-    interaction_timeout_ms: int | None = None,
 ):
-    interaction_options = (
-        {"timeout": interaction_timeout_ms}
-        if interaction_timeout_ms is not None
-        else {}
-    )
-
     def resolve_live_slot():
         last_slot_count = 0
         for _ in range(30):
@@ -543,14 +536,14 @@ def _open_slot_publish_form(
     saw_unique_action = False
     for _ in range(4):
         slot, publish = resolve_live_slot()
-        slot.hover(force=True, **interaction_options)
-        publish.click(force=True, **interaction_options)
+        slot.hover(force=True)
+        publish.click(force=True)
         page.wait_for_timeout(500)
         clicked, observed = _click_visible_image_text_action(page)
         saw_unique_action = saw_unique_action or observed
         if not clicked:
             slot, _publish = resolve_live_slot()
-            slot.click(force=True, **interaction_options)
+            slot.click(force=True)
             page.wait_for_timeout(500)
             clicked, observed = _click_visible_image_text_action(page)
             saw_unique_action = saw_unique_action or observed

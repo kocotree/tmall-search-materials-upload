@@ -12,7 +12,6 @@ from .qianniu_copy import (
     PUBLISH_FRAME_FRAGMENT,
     QianniuCopyError,
     _empty_slot_positions,
-    _open_slot_publish_form,
     _page_scopes,
     _slot_cells,
 )
@@ -330,10 +329,11 @@ def perform_random_collection_action(
     rng: RandomSource | None = None,
     wait_for_human_check: HumanCheckWaiter | None = None,
 ) -> dict[str, Any]:
-    """Open one slot from the current page and restore that exact page.
+    """View one filled slot from the current page and restore that exact page.
 
     The function never enters a product id in a search field.  Candidate rows
-    and slots are taken only from the collector's currently visible page.
+    and filled slots are taken only from the collector's currently visible
+    page. Empty slots are never opened by this read-only random action.
     """
 
     selector = str(rows_selector).strip()
@@ -352,10 +352,7 @@ def perform_random_collection_action(
         return {"status": "skipped", "reason_code": "RANDOM_ACTION_NO_CURRENT_ROW"}
 
     product_ids_before = tuple(_row_product_id(row) for row in rows)
-    candidates_by_action: dict[str, list[tuple[Any, str, int]]] = {
-        "view_filled_slot": [],
-        "open_empty_image_text": [],
-    }
+    candidates: list[tuple[Any, str, int]] = []
     for row in rows:
         product_id = _row_product_id(row)
         try:
@@ -364,25 +361,19 @@ def perform_random_collection_action(
         except QianniuCopyError:
             continue
         empty_set = set(empty_positions)
-        candidates_by_action["view_filled_slot"].extend(
+        candidates.extend(
             (row, product_id, position)
             for position in range(1, slots.count() + 1)
             if position not in empty_set
         )
-        candidates_by_action["open_empty_image_text"].extend(
-            (row, product_id, position)
-            for position in empty_positions
-        )
-    available_actions = [
-        action
-        for action in ("view_filled_slot", "open_empty_image_text")
-        if candidates_by_action[action]
-    ]
-    if not available_actions:
-        return {"status": "skipped", "reason_code": "RANDOM_ACTION_NO_SLOT"}
+    if not candidates:
+        return {
+            "status": "skipped",
+            "reason_code": "RANDOM_ACTION_NO_FILLED_SLOT",
+        }
 
-    action = source.choice(available_actions)
-    row, product_id, position = source.choice(candidates_by_action[action])
+    action = "view_filled_slot"
+    row, product_id, position = source.choice(candidates)
     pages_before = _context_pages(page)
     url_before = str(getattr(page, "url", ""))
     opened_scope = None
@@ -391,26 +382,15 @@ def perform_random_collection_action(
     try:
         slots = _slot_cells(row)
         action_started = True
-        if action == "view_filled_slot":
-            slot = slots.nth(position - 1)
-            slot.hover(
-                force=True,
-                timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
-            )
-            slot.click(
-                force=True,
-                timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
-            )
-        else:
-            opened_scope = _open_slot_publish_form(
-                page,
-                product_id,
-                position,
-                row=row,
-                interaction_timeout_ms=(
-                    RANDOM_ACTION_INTERACTION_TIMEOUT_MS
-                ),
-            )
+        slot = slots.nth(position - 1)
+        slot.hover(
+            force=True,
+            timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
+        )
+        slot.click(
+            force=True,
+            timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
+        )
         page.wait_for_timeout(source.randint(600, 1_200))
         if wait_for_human_check is not None:
             wait_for_human_check(page, "random_action_after_open")
