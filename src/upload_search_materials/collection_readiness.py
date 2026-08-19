@@ -94,6 +94,8 @@ DEFAULT_CANDIDATE_SELECTORS = {
     "safe_popup_close_priority": (
         '.next-dialog.next-closeable[class*="GuideModal_dialog"] '
         'a.next-dialog-close[aria-label="关闭"], '
+        '.ant-modal-wrap.ant-modal-centered button.ant-modal-close, '
+        '.ant-modal-wrap.ant-modal-centered [aria-label="close"], '
         '.ant-modal-wrap.ant-modal-centered '
         '[aria-label="close"]'
         '[class*="AiImageGenerationOfflinePushModal_closeIcon"], '

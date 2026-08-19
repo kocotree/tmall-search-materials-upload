@@ -98,6 +98,7 @@ from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
 from ..runtime_config import (
     RuntimeConfig,
+    discover_team_folder_index_root,
     inspect_image_sources,
     inspect_team_folder_index_root,
     load_runtime_config,
@@ -1400,6 +1401,10 @@ def create_app(
         return jsonify(
             **inspect_team_folder_index_root(runtime, payload.get("path"))
         )
+
+    @app.get("/api/runtime/team-folder-index/discover")
+    def discover_runtime_team_folder_index():
+        return jsonify(**discover_team_folder_index_root(runtime))
 
     @app.put("/api/runtime/team-folder-index")
     def put_runtime_team_folder_index():

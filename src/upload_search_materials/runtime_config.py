@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
-from typing import Mapping, Sequence
+import threading
+import time
+from typing import Callable, Mapping, Sequence
 import unicodedata
 
 from .path_diagnostics import diagnose_image_sources
@@ -30,6 +33,12 @@ DEFAULT_MATERIAL_CENTER_URL = (
 DEFAULT_TEAM_FOLDER_INDEX_ROOT = Path(
     r"\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米"
 )
+TEAM_FOLDER_INDEX_RELATIVE_PARTS = (
+    "浙江酷趣",
+    "天猫部",
+    "搜推素材索引-虾米",
+)
+TEAM_FOLDER_INDEX_DISCOVERY_TIMEOUT_SECONDS = 1.5
 DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID = "zhejiang-kuqu"
 MAX_IMAGE_SOURCES = 50
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
@@ -103,6 +112,7 @@ class RuntimeConfig:
     nas_sources_file: Path | None = None
     folder_index_root: Path = Path(".local-cache/folder-index")
     team_folder_index_root: Path | None = None
+    team_folder_index_root_source: str = "default"
     team_folder_index_nas_source_id: str | None = None
     selectors_file: Path | None = None
     cdp_url: str = DEFAULT_CDP_URL
@@ -178,10 +188,23 @@ def load_runtime_config(
         if folder_index_value
         else user_data_root / "cache" / "folder-index"
     )
+    environment_team_folder_index = str(
+        env.get("TMALL_TEAM_FOLDER_INDEX_ROOT") or ""
+    ).strip()
+    configured_team_folder_index = str(
+        document.get("team_folder_index_root") or ""
+    ).strip()
     team_folder_index_value = (
-        env.get("TMALL_TEAM_FOLDER_INDEX_ROOT")
-        or document.get("team_folder_index_root")
+        environment_team_folder_index
+        or configured_team_folder_index
         or str(DEFAULT_TEAM_FOLDER_INDEX_ROOT)
+    )
+    team_folder_index_root_source = (
+        "environment"
+        if environment_team_folder_index
+        else "config"
+        if configured_team_folder_index
+        else "default"
     )
     team_folder_index_root = _resolve_configured_path(
         team_folder_index_value, workspace_root
@@ -236,6 +259,7 @@ def load_runtime_config(
         nas_sources_file=nas_sources_file,
         folder_index_root=folder_index_root,
         team_folder_index_root=team_folder_index_root,
+        team_folder_index_root_source=team_folder_index_root_source,
         team_folder_index_nas_source_id=team_folder_index_nas_source_id,
         selectors_file=selectors_file,
         cdp_url=cdp_url,
@@ -461,6 +485,122 @@ def inspect_team_folder_index_root(
     }
 
 
+def _windows_logical_drive_roots() -> tuple[Path, ...]:
+    """Return mounted Windows roots without enumerating their contents."""
+
+    if os.name != "nt":
+        return ()
+    mask = int(ctypes.windll.kernel32.GetLogicalDrives())
+    roots: list[Path] = []
+    for index in range(26):
+        if not mask & (1 << index):
+            continue
+        root = f"{chr(65 + index)}:\\"
+        drive_type = int(ctypes.windll.kernel32.GetDriveTypeW(root))
+        if drive_type in {2, 3, 4, 6}:
+            roots.append(Path(root))
+    return tuple(roots)
+
+
+def _available_directories_with_timeout(
+    paths: Sequence[Path],
+    *,
+    timeout_seconds: float,
+    probe: Callable[[Path], bool] | None = None,
+) -> tuple[Path, ...]:
+    """Probe exact directories in daemon threads under one shared deadline."""
+
+    if not paths:
+        return ()
+    check = probe or (lambda value: value.is_dir())
+    states: dict[int, bool] = {}
+
+    def inspect(index: int, path: Path) -> None:
+        try:
+            states[index] = bool(check(path))
+        except OSError:
+            states[index] = False
+
+    threads = [
+        threading.Thread(target=inspect, args=(index, path), daemon=True)
+        for index, path in enumerate(paths)
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return tuple(path for index, path in enumerate(paths) if states.get(index) is True)
+
+
+def discover_team_folder_index_root(
+    runtime: RuntimeConfig,
+    *,
+    drive_roots: Sequence[Path] | None = None,
+    timeout_seconds: float = TEAM_FOLDER_INDEX_DISCOVERY_TIMEOUT_SECONDS,
+    probe: Callable[[Path], bool] | None = None,
+) -> dict[str, object]:
+    """Find the fixed team-index path without scanning any drive tree."""
+
+    started_at = time.monotonic()
+    total_timeout = max(0.0, float(timeout_seconds))
+    current = runtime.team_folder_index_root
+    if runtime.team_folder_index_root_source == "environment":
+        return {
+            "status": "configured",
+            "path": str(current or ""),
+            "candidates": [],
+            "auto_fill": False,
+            "message": "正在使用这台电脑的指定团队索引路径。",
+        }
+    if current is not None and runtime.team_folder_index_root_source == "config":
+        current_timeout = min(total_timeout / 2, 0.75)
+        available = _available_directories_with_timeout(
+            (current,), timeout_seconds=current_timeout, probe=probe
+        )
+        if available:
+            return {
+                "status": "configured",
+                "path": str(current),
+                "candidates": [str(current)],
+                "auto_fill": False,
+                "message": "已保存的团队索引路径当前可访问。",
+            }
+
+    roots = tuple(drive_roots) if drive_roots is not None else _windows_logical_drive_roots()
+    candidates = tuple(
+        Path(root).joinpath(*TEAM_FOLDER_INDEX_RELATIVE_PARTS)
+        for root in roots
+    )
+    remaining_timeout = max(0.0, total_timeout - (time.monotonic() - started_at))
+    matches = _available_directories_with_timeout(
+        candidates, timeout_seconds=remaining_timeout, probe=probe
+    )
+    if len(matches) == 1:
+        return {
+            "status": "discovered",
+            "path": str(matches[0]),
+            "candidates": [str(matches[0])],
+            "auto_fill": True,
+            "message": "已自动找到团队索引文件夹，提交任务时会保存。",
+        }
+    if len(matches) > 1:
+        return {
+            "status": "ambiguous",
+            "path": "",
+            "candidates": [str(path) for path in matches],
+            "auto_fill": False,
+            "message": "发现多个团队索引文件夹，请选择本次使用的文件夹。",
+        }
+    return {
+        "status": "not_found",
+        "path": "",
+        "candidates": [],
+        "auto_fill": False,
+        "message": "未自动找到团队索引文件夹，请确认共享盘已在 Windows 中打开。",
+    }
+
+
 def save_team_folder_index_root(
     runtime: RuntimeConfig, value: object
 ) -> RuntimeConfig:
@@ -490,6 +630,7 @@ def save_team_folder_index_root(
     return replace(
         runtime,
         team_folder_index_root=selected,
+        team_folder_index_root_source="config",
         config_path=target,
     )
 

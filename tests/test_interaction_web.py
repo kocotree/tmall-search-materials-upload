@@ -898,7 +898,7 @@ def test_setup_page_exposes_team_index_picker_and_keeps_local_cache_internal(
     assert "campaign/current" not in html
 
 
-def test_setup_page_does_not_probe_team_index_before_user_action(
+def test_setup_page_server_render_does_not_probe_team_index_contents(
     tmp_path, monkeypatch
 ):
     runtime = RuntimeConfig(
@@ -913,7 +913,7 @@ def test_setup_page_does_not_probe_team_index_before_user_action(
         web_module,
         "inspect_team_folder_index_root",
         lambda *_args: (_ for _ in ()).throw(
-            AssertionError("initial page render must not probe the team index")
+            AssertionError("server render must not enumerate team index contents")
         ),
     )
 
@@ -923,6 +923,55 @@ def test_setup_page_does_not_probe_team_index_before_user_action(
 
     assert response.status_code == 200
     assert "data-pick-team-index" in response.get_data(as_text=True)
+
+
+def test_team_index_discovery_api_returns_read_only_auto_fill_candidate(
+    tmp_path, monkeypatch
+):
+    candidate = tmp_path / "Z" / "浙江酷趣" / "天猫部" / "搜推素材索引-虾米"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+    monkeypatch.setattr(
+        web_module,
+        "discover_team_folder_index_root",
+        lambda _runtime: {
+            "status": "discovered",
+            "path": str(candidate),
+            "candidates": [str(candidate)],
+            "auto_fill": True,
+            "message": "已自动找到团队索引文件夹，提交任务时会保存。",
+        },
+    )
+    client = create_app(tmp_path / "runs", runtime_config=runtime).test_client()
+
+    response = client.get("/api/runtime/team-folder-index/discover")
+
+    assert response.status_code == 200
+    assert response.json["auto_fill"] is True
+    assert response.json["path"] == str(candidate)
+
+
+def test_team_index_frontend_discovers_once_without_marking_user_edit():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'fetchJson("/api/runtime/team-folder-index/discover")' in source
+    assert "input.value = payload.path" in source
+    discovery = source.split("async function discoverTeamIndex()", 1)[1].split(
+        "function initializeTeamIndexConfig()", 1
+    )[0]
+    assert "dispatchEvent" not in discovery
 
 
 def test_runtime_image_source_api_saves_checks_and_reloads_multiple_roots(tmp_path):

@@ -12,6 +12,7 @@ Use the repository CLI as the deterministic implementation. An ordinary upload w
 - NAS source ID: `zhejiang-kuqu`
 - Canonical share: `\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米`
 - A machine-local `team_folder_index_root` selected on the setup page takes precedence over this default suggestion unless an explicit environment override is present.
+- When no accessible saved path exists, the setup page may enumerate visible Windows drive letters and check only `X:\浙江酷趣\天猫部\搜推素材索引-虾米`. A unique match is prefilled but not persisted before setup submission.
 
 Read [references/protocol.md](references/protocol.md) when diagnosing snapshot validation, conflicts, cache fallback, or portability.
 
@@ -56,5 +57,5 @@ Only enter this flow when the user explicitly asks to update a named source that
 - Shared snapshots contain only `source_id + relative_path` folder metadata, never machine-specific absolute paths.
 - Sync validates schema and SHA-256, then compares the manifest canonical path identity key with the current local binding identity key before caching or using a snapshot. The binding key uses `canonical_unc` when provided and otherwise uses the local `path`, so `canonical_unc` remains optional.
 - The reusable cache contains only validated folder snapshots. `folder-candidates.csv` is generated inside the current task and must never be reused by another task or Plugin version.
-- Missing or mismatched local bindings are reported and skipped; never guess a drive letter or mount path.
+- Missing or mismatched local bindings are reported and skipped. The bounded exact-path discovery above may identify a unique visible drive, but it must never recursively scan drives, choose between multiple matches, mount a share, or infer another path.
 - Do not automatically delete old snapshots, scan image contents, upload materials, or change approval boundaries.

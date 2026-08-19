@@ -1,11 +1,17 @@
 import json
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
 from upload_search_materials.runtime_config import (
     DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID,
     DEFAULT_TEAM_FOLDER_INDEX_ROOT,
+    DiscoveredPath,
+    RuntimeConfig,
+    TEAM_FOLDER_INDEX_RELATIVE_PARTS,
+    discover_team_folder_index_root,
     image_source_path_key,
     inspect_image_sources,
     inspect_team_folder_index_root,
@@ -112,6 +118,7 @@ def test_machine_local_config_overrides_drive_letters_and_relative_paths(tmp_pat
     assert runtime.team_folder_index_root == Path(
         r"\\192.168.110.20\浙江酷趣\team-index"
     )
+    assert runtime.team_folder_index_root_source == "config"
     assert runtime.team_folder_index_nas_source_id == "zhejiang-kuqu"
     assert runtime.selectors_file is None
     assert runtime.cdp_url == "http://127.0.0.1:9333"
@@ -148,6 +155,7 @@ def test_team_folder_index_root_can_be_overridden_by_environment(tmp_path):
     )
 
     assert runtime.team_folder_index_root == shared_index.resolve()
+    assert runtime.team_folder_index_root_source == "environment"
     assert runtime.team_folder_index_nas_source_id == "zhejiang-kuqu"
 
 
@@ -238,6 +246,129 @@ def test_team_folder_index_root_rejects_missing_directory(tmp_path):
     assert checked["status"] == "unavailable"
     with pytest.raises(ValueError):
         save_team_folder_index_root(runtime, tmp_path / "missing")
+
+
+def test_team_folder_index_discovery_checks_only_the_fixed_relative_path(tmp_path):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        config_path=tmp_path / "runtime.json",
+    )
+    drive_c = tmp_path / "C"
+    drive_z = tmp_path / "Z"
+    expected = drive_z.joinpath(*TEAM_FOLDER_INDEX_RELATIVE_PARTS)
+    probed = []
+
+    discovered = discover_team_folder_index_root(
+        runtime,
+        drive_roots=(drive_c, drive_z),
+        probe=lambda path: probed.append(path) is None and path == expected,
+    )
+
+    assert discovered["status"] == "discovered"
+    assert discovered["path"] == str(expected)
+    assert discovered["auto_fill"] is True
+    assert set(probed) == {
+        drive_c.joinpath(*TEAM_FOLDER_INDEX_RELATIVE_PARTS),
+        expected,
+    }
+    assert not runtime.config_path.exists()
+
+
+def test_team_folder_index_discovery_keeps_accessible_saved_path(tmp_path):
+    saved = tmp_path / "saved-index"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        team_folder_index_root=saved,
+        team_folder_index_root_source="config",
+    )
+    probed = []
+
+    discovered = discover_team_folder_index_root(
+        runtime,
+        drive_roots=(tmp_path / "Z",),
+        probe=lambda path: probed.append(path) is None and path == saved,
+    )
+
+    assert discovered["status"] == "configured"
+    assert discovered["path"] == str(saved)
+    assert discovered["auto_fill"] is False
+    assert probed == [saved]
+
+
+def test_team_folder_index_discovery_never_overrides_environment_path(tmp_path):
+    forced = tmp_path / "forced-index"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        team_folder_index_root=forced,
+        team_folder_index_root_source="environment",
+    )
+
+    discovered = discover_team_folder_index_root(
+        runtime,
+        drive_roots=(tmp_path / "Z",),
+        probe=lambda _path: (_ for _ in ()).throw(AssertionError("must not probe")),
+    )
+
+    assert discovered["status"] == "configured"
+    assert discovered["path"] == str(forced)
+    assert discovered["auto_fill"] is False
+
+
+def test_team_folder_index_discovery_does_not_guess_between_multiple_matches(tmp_path):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    discovered = discover_team_folder_index_root(
+        runtime,
+        drive_roots=(tmp_path / "Y", tmp_path / "Z"),
+        probe=lambda _path: True,
+    )
+
+    assert discovered["status"] == "ambiguous"
+    assert discovered["path"] == ""
+    assert discovered["auto_fill"] is False
+    assert len(discovered["candidates"]) == 2
+
+
+def test_team_folder_index_discovery_has_one_shared_timeout_budget(tmp_path):
+    blocked = threading.Event()
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        team_folder_index_root=tmp_path / "stale-index",
+        team_folder_index_root_source="config",
+    )
+    started_at = time.monotonic()
+
+    discovered = discover_team_folder_index_root(
+        runtime,
+        drive_roots=(tmp_path / "Z",),
+        timeout_seconds=0.1,
+        probe=lambda _path: blocked.wait(1.0),
+    )
+
+    assert time.monotonic() - started_at < 0.3
+    assert discovered["status"] == "not_found"
 
 
 def test_selector_profile_is_installed_in_stable_user_data(tmp_path):

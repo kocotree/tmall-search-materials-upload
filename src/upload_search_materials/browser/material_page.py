@@ -91,12 +91,15 @@ def _wait_for_nonempty_promotion_rows(
     *,
     timeout_ms: int,
     poll_ms: int = 250,
+    popup_selectors: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Wait for the SPA table to hydrate after refresh or tab selection."""
 
     elapsed_ms = 0
     last_error: Exception | None = None
     while True:
+        if popup_selectors:
+            _settle_safe_popups(page, dict(popup_selectors), delay_ms=0)
         try:
             rows = [
                 str(value).strip()
@@ -687,6 +690,7 @@ def scan_recommended_material_status(
         page,
         selectors["promotion_rows"],
         timeout_ms=max(action_wait_ms, 15_000) if action_wait_ms else 0,
+        popup_selectors=selectors,
     )
 
     if on_phase is not None:

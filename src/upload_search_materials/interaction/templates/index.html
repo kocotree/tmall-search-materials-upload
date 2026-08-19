@@ -238,7 +238,7 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide team-index-config" data-component="TeamIndexConfig" data-machine-runtime-control data-ready="{{ 'true' if setup_inputs.team_index_source_available else 'false' }}">
                   <span>团队索引文件夹</span><strong data-team-index-summary>{{ "可使用" if setup_inputs.team_index_source_available else "需要选择" }}</strong>
-                  <p class="section-instruction">选择本机当前可以打开的团队索引文件夹，用于查找已选商品对应的候选素材文件夹。</p>
+                  <p class="section-instruction">系统会从当前可见盘符自动查找团队索引文件夹；未找到或存在多个时，可以手动选择。</p>
                   <label>
                     索引文件夹
                     <input name="team_folder_index_root" type="text" value="{{ setup_inputs.team_folder_index_root }}" maxlength="1000" required placeholder="选择包含 sources 文件夹的团队索引目录" aria-describedby="setup-team_folder_index_root-error">

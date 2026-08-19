@@ -51,7 +51,7 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 任务配置 handoff 的用户输入为：`store`、`store_confirmed` 和 `team_folder_index_root`。第一阶段不接受 `month`、`product_scope`、`product_ids` 或 `promotion_max_pages`；商品范围由第二阶段的“搜推高价值”全量采集结果决定。`products_csv` 和 `rules_csv` 由项目自动发现；`team_folder_index_root` 是当前电脑可访问且包含团队 `sources/` 快照的目录，只保存到每机运行时配置；`image_source_labels` 与 `image_roots` 由可视化页面的动态图片源配置成对写入，可配置 1–50 个来源。
 
-`POST /api/runtime/team-folder-index/check` 只检查目录元数据并返回可访问状态与 snapshot source 数量；`PUT /api/runtime/team-folder-index` 原子保存本机路径。请求携带当前 `session_id` 且该会话因 `TEAM_INDEX_*` 阻塞时，工作台更新处理器运行时并幂等重试原商品选择 handoff，不增加业务 revision，也不保存 SMB 凭据。
+`GET /api/runtime/team-folder-index/discover` 只枚举 Windows 当前可见盘符，并在一个短总时限内检查固定相对路径 `浙江酷趣/天猫部/搜推素材索引-虾米`；唯一命中只回填页面，不写本机配置。`POST /api/runtime/team-folder-index/check` 只检查目录元数据并返回可访问状态与 snapshot source 数量；`PUT /api/runtime/team-folder-index` 原子保存本机路径。请求携带当前 `session_id` 且该会话因 `TEAM_INDEX_*` 阻塞时，工作台更新处理器运行时并幂等重试原商品选择 handoff，不增加业务 revision，也不保存 SMB 凭据。
 
 图片源检测 API 的每项诊断包含：
 

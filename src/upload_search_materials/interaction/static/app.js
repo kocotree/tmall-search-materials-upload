@@ -521,6 +521,23 @@
     }
   }
 
+  async function discoverTeamIndex() {
+    if (!teamIndexConfig) return;
+    const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
+    const feedback = teamIndexConfig.querySelector("[data-team-index-feedback]");
+    try {
+      const payload = await fetchJson("/api/runtime/team-folder-index/discover");
+      if (payload.auto_fill && payload.path) {
+        input.value = payload.path;
+        teamIndexConfig.dataset.ready = "false";
+        teamIndexConfig.querySelector("[data-team-index-summary]").textContent = "已自动找到";
+      }
+      if (payload.message) feedback.textContent = payload.message;
+    } catch (_error) {
+      // Keep the existing manual picker available when background discovery fails.
+    }
+  }
+
   function initializeTeamIndexConfig() {
     if (!teamIndexConfig) return;
     const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
@@ -533,6 +550,7 @@
       teamIndexConfig.querySelector("[data-team-index-feedback]").textContent =
         "路径已修改，请检测或保存。";
     });
+    discoverTeamIndex();
   }
 
   function renderCollectionRuntime(payload) {

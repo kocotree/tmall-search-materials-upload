@@ -12,9 +12,11 @@ from upload_search_materials.browser.material_page import (
     SelectorInvalidError,
     _click_with_popup_retries,
     _settle_safe_popups,
+    _wait_for_nonempty_promotion_rows,
     scan_recommended_material_status,
     supplement_material_status,
 )
+from upload_search_materials.browser import material_page as material_page_module
 from upload_search_materials.browser.session import (
     HumanCheckRequired,
     StoreIdentityError,
@@ -67,6 +69,90 @@ def test_prepare_collection_page_opens_recommend_tab_before_collection():
     assert page.visited[0][0].endswith("?tab=recommend")
     assert page.visited[0][1]["wait_until"] == "domcontentloaded"
     assert result["navigated"] is True
+
+
+def test_prepare_collection_page_waits_for_spa_surface_before_popup_settlement(
+    monkeypatch,
+):
+    events = []
+
+    class Surface:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def wait_for(self, **kwargs):
+            events.append(("surface", kwargs))
+
+    class CollectionPage:
+        url = "https://myseller.taobao.com/home.htm"
+
+        def goto(self, url, **_kwargs):
+            self.url = url
+
+        def locator(self, _selector):
+            return Surface()
+
+    monkeypatch.setattr(
+        material_page_module,
+        "_settle_safe_popups",
+        lambda *_args, **_kwargs: events.append(("popups", {})) or 0,
+    )
+
+    prepare_collection_page(
+        CollectionPage(),
+        "https://myseller.taobao.com/home.htm/material-center/material-management",
+        {"promotion_tab": "#promotion-tab"},
+    )
+
+    assert events == [
+        ("surface", {"state": "attached", "timeout": 15_000}),
+        ("popups", {}),
+    ]
+
+
+def test_table_hydration_keeps_settling_late_popups(monkeypatch):
+    settled = []
+
+    class Rows:
+        def __init__(self):
+            self.reads = 0
+
+        def all_inner_texts(self):
+            self.reads += 1
+            return [] if self.reads == 1 else ["商品ID 10001"]
+
+    class Page:
+        def __init__(self):
+            self.rows = Rows()
+            self.waited = []
+
+        def locator(self, _selector):
+            return self.rows
+
+        def wait_for_timeout(self, milliseconds):
+            self.waited.append(milliseconds)
+
+    monkeypatch.setattr(
+        material_page_module,
+        "_settle_safe_popups",
+        lambda _page, selectors, *, delay_ms: settled.append(
+            (dict(selectors), delay_ms)
+        ),
+    )
+    page = Page()
+
+    rows = _wait_for_nonempty_promotion_rows(
+        page,
+        ".promotion-row",
+        timeout_ms=1_000,
+        popup_selectors={"safe_popup_close_priority": ".modal-close"},
+    )
+
+    assert rows == ["商品ID 10001"]
+    assert len(settled) == 2
+    assert page.waited == [250]
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 

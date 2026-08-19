@@ -60,6 +60,27 @@ def prepare_collection_page(
         return {"navigated": False, "login_required": True, "url": current_url}
     if current_url != target_url:
         page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+
+    # DOMContentLoaded fires before Qianniu's SPA mounts its material-center
+    # controls. Waiting for a known collection surface keeps late network
+    # hydration from racing ahead of the popup settlement window.
+    for key in ("promotion_tab", "high_value_filter", "material_page"):
+        selector = str(selectors.get(key, "")).strip()
+        if not selector:
+            continue
+        attempted_wait = False
+        candidate = None
+        try:
+            candidate = page.locator(selector)
+            first = getattr(candidate, "first", candidate)
+            wait_for = getattr(first, "wait_for", None)
+            if callable(wait_for):
+                attempted_wait = True
+                wait_for(state="attached", timeout=15_000)
+        except (AttributeError, PlaywrightError):
+            pass
+        if attempted_wait or candidate is not None:
+            break
     from .material_page import _settle_safe_popups
 
     closed = _settle_safe_popups(
