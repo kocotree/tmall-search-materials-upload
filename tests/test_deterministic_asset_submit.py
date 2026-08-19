@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -249,6 +250,113 @@ def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
         replanned.json["current_slot_plan"]["decision_source"]
         == "deterministic"
     )
+
+
+def test_preflight_cache_is_image_scoped_and_selection_rows_use_product_identity(
+    client, session_id, tmp_path
+):
+    sources = tmp_path / "shared-candidates"
+    sources.mkdir()
+    source_paths = []
+    for name in ("shared", "second", "third"):
+        source = sources / f"{name}.jpg"
+        Image.effect_noise((1440, 1920), 100).convert("RGB").save(
+            source, quality=94
+        )
+        source_paths.append(source)
+
+    def candidate(asset_id, product_id, source):
+        return {
+            "asset_id": asset_id,
+            "product_id": product_id,
+            "product_title": f"商品 {product_id}",
+            "source_path": str(source),
+            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "source_system": "folder",
+            "match_type": "exact_product_name",
+            "validation_status": "valid",
+            "preflight": {"selectable": True, "status": "direct"},
+            "source_inspection": {
+                "size_bytes": source.stat().st_size,
+                "width": 1440,
+                "height": 1920,
+            },
+        }
+
+    candidates = [
+        candidate("A", "P1", source_paths[0]),
+        candidate("A", "P2", source_paths[0]),
+        candidate("B", "P2", source_paths[1]),
+        candidate("C", "P2", source_paths[2]),
+    ]
+    first = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(sources)],
+                "source_types": ["image"],
+            }
+        },
+    )
+    store = SessionStore(tmp_path)
+    store.write_result(
+        session_id,
+        "asset_matching",
+        first.json["revision"],
+        first.json["input_sha256"],
+        status="needs_user_input",
+        summary="请选择素材",
+        data={
+            "requirements": [{"product_id": "P2", "missing_materials": 1}],
+            "asset_candidates": candidates,
+        },
+    )
+
+    for asset_id, product_id in (("A", "P1"), ("B", "P2"), ("C", "P2")):
+        checked = client.post(
+            f"/api/sessions/{session_id}/stages/asset_matching/assets/"
+            f"{asset_id}/selection-preflight",
+            json={"product_id": product_id},
+        )
+        assert checked.status_code == 200
+        assert checked.json["status"] in {"passed", "warning"}
+
+    cached = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/selection-preflights"
+    )
+    assert cached.status_code == 200
+    assert {item["asset_id"] for item in cached.json["entries"]} == {
+        "A",
+        "B",
+        "C",
+    }
+
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(sources)],
+                "source_types": ["image"],
+                "asset_decisions": [
+                    {"product_id": "P2", "asset_id": "A", "decision": "selected"},
+                    {"product_id": "P2", "asset_id": "A", "decision": "selected"},
+                    {"product_id": "P2", "asset_id": "B", "decision": "selected"},
+                    {"product_id": "P2", "asset_id": "C", "decision": "selected"},
+                ],
+            }
+        },
+    )
+
+    assert submitted.status_code == 202
+    persisted = store.read_optional_stage_document(
+        session_id, "asset_matching", "input"
+    )
+    decisions = persisted["values"]["asset_decisions"]
+    assert [(item["product_id"], item["asset_id"]) for item in decisions] == [
+        ("P2", "A"),
+        ("P2", "B"),
+        ("P2", "C"),
+    ]
 
 
 @pytest.mark.parametrize(("image_count", "shortage"), [(1, 2), (2, 1)])

@@ -94,7 +94,10 @@
       const assetId = String(candidate.asset_id || "");
       const entry = await fetchJson(apiPath(
         `/stages/asset_matching/assets/${encodeURIComponent(assetId)}/selection-preflight`,
-      ), { method: "POST", body: "{}" });
+      ), {
+        method: "POST",
+        body: JSON.stringify({ product_id: String(candidate.product_id || "") }),
+      });
       selectionPreflights.set(assetId, entry);
       return entry;
     },
@@ -1962,9 +1965,19 @@
       });
   }
 
+  function uniqueSelectedAssetDecisions(items) {
+    const seen = new Set();
+    return (Array.isArray(items) ? items : []).filter((item) => {
+      if (item?.decision !== "selected" || !item.asset_id) return false;
+      const key = `${String(item.product_id || "")}\u0000${String(item.asset_id)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
   function selectedAssetDecisions() {
-    return readJsonListControl("asset_decisions")
-      .filter((item) => item?.decision === "selected" && item.asset_id);
+    return uniqueSelectedAssetDecisions(readJsonListControl("asset_decisions"));
   }
 
   function selectionPreflightFor(assetId) {
@@ -5866,9 +5879,24 @@
       && inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
         === "image_selection"
     ) {
-      const decisions = Array.isArray(values.asset_decisions)
-        ? values.asset_decisions.filter((item) => item?.decision === "selected")
-        : [];
+      const decisions = uniqueSelectedAssetDecisions(values.asset_decisions);
+      values.asset_decisions = decisions;
+      const selectedAssetIds = new Set(
+        decisions.map((item) => String(item.asset_id || "")),
+      );
+      const seenLicenseAssetIds = new Set();
+      values.license_decisions = (Array.isArray(values.license_decisions)
+        ? values.license_decisions
+        : []).filter((item) => {
+        const assetId = String(item?.asset_id || "");
+        if (
+          item?.status !== "confirmed"
+          || !selectedAssetIds.has(assetId)
+          || seenLicenseAssetIds.has(assetId)
+        ) return false;
+        seenLicenseAssetIds.add(assetId);
+        return true;
+      });
       const pendingSelectionCount = (
         selectionPreflightScheduler.desiredPendingCount()
       );
@@ -5881,32 +5909,47 @@
       }
       let unchecked = decisions.filter((item) => {
         const result = selectionPreflightFor(item.asset_id);
-        return !result || !["passed", "warning"].includes(result.status);
+        return !result || !["passed", "warning", "blocked"].includes(result.status);
       });
       if (unchecked.length) {
         const allCandidates = Array.isArray(uiState.result?.data?.asset_candidates)
           ? uiState.result.data.asset_candidates
           : [];
-        const byAssetId = new Map(
-          allCandidates.map((candidate) => [String(candidate.asset_id || ""), candidate]),
+        const byCandidateKey = new Map(
+          allCandidates.map((candidate) => [
+            `${String(candidate.product_id || "")}\u0000${String(candidate.asset_id || "")}`,
+            candidate,
+          ]),
         );
         actionMessage.textContent = `正在补检 ${unchecked.length} 张历史已选图片…`;
-        await Promise.all(unchecked.map((item) => {
-          const candidate = byAssetId.get(String(item.asset_id || ""));
+        await Promise.allSettled(unchecked.map((item) => {
+          const candidate = byCandidateKey.get(
+            `${String(item.product_id || "")}\u0000${String(item.asset_id || "")}`,
+          );
           return candidate ? runSelectionPreflight(candidate) : Promise.resolve(null);
         }));
         unchecked = decisions.filter((item) => {
           const result = selectionPreflightFor(item.asset_id);
-          return !result || !["passed", "warning"].includes(result.status);
+          return !result || !["passed", "warning", "blocked"].includes(result.status);
         });
-        if (unchecked.length) {
-          const message = `有 ${unchecked.length} 张已选图片未通过预裁剪，已在“已选素材”中标明，请取消后更换。`;
-          showFieldErrors(form, { asset_decisions: message });
-          actionMessage.textContent = message;
-          persistenceInFlight = false;
-          renderStageResult(stages.get(currentStageId).component);
-          return;
-        }
+      }
+      const blocked = decisions.filter(
+        (item) => selectionPreflightFor(item.asset_id)?.status === "blocked",
+      );
+      if (blocked.length) {
+        const message = `有 ${blocked.length} 张已选图片未通过预裁剪，已在“已选素材”中标红，请取消后更换。`;
+        showFieldErrors(form, { asset_decisions: message });
+        actionMessage.textContent = message;
+        persistenceInFlight = false;
+        renderStageResult(stages.get(currentStageId).component);
+        return;
+      }
+      if (unchecked.length) {
+        const message = `有 ${unchecked.length} 张已选图片的预裁剪结果无法确认，请取消后重新选择。`;
+        showFieldErrors(form, { asset_decisions: message });
+        actionMessage.textContent = message;
+        persistenceInFlight = false;
+        return;
       }
       const counts = new Map();
       const ratioCounts = new Map();

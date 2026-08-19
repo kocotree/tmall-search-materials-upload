@@ -418,7 +418,6 @@ def create_app(
                 {
                     "algorithm_version": SELECTION_PREFLIGHT_ALGORITHM_VERSION,
                     "asset_id": str(candidate.get("asset_id", "")),
-                    "product_id": str(candidate.get("product_id", "")),
                     "source_sha256": str(candidate.get("sha256", "")),
                     "policy_sha256": policy_sha256,
                 },
@@ -427,6 +426,24 @@ def create_app(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+
+    def selection_preflight_matches(
+        entry: Any,
+        candidate: dict[str, Any],
+        policy_sha256: str,
+    ) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        return (
+            int(entry.get("algorithm_version") or 0)
+            == SELECTION_PREFLIGHT_ALGORITHM_VERSION
+            and str(entry.get("asset_id", ""))
+            == str(candidate.get("asset_id", ""))
+            and str(entry.get("source_sha256", ""))
+            == str(candidate.get("sha256", ""))
+            and str(entry.get("policy_sha256", "")) == policy_sha256
+            and isinstance(entry.get("preflight"), dict)
+        )
 
     def current_asset_gallery(
         session_id: str, state: dict[str, Any]
@@ -448,11 +465,7 @@ def create_app(
         identity = selection_preflight_identity(candidate, policy_sha256)
         cache = read_selection_preflight_cache(session_id)
         cached = cache["entries"].get(str(candidate.get("asset_id", "")))
-        if (
-            isinstance(cached, dict)
-            and cached.get("identity_sha256") == identity
-            and isinstance(cached.get("preflight"), dict)
-        ):
+        if selection_preflight_matches(cached, candidate, policy_sha256):
             return cached
         require_desktop_identity()
         decision = {
@@ -516,14 +529,23 @@ def create_app(
         policy_sha256: str,
         asset_matching_revision: int,
     ) -> dict[str, Any] | None:
-        by_id = {
-            str(item.get("asset_id", "")): item
+        by_key = {
+            (
+                str(item.get("product_id", "")),
+                str(item.get("asset_id", "")),
+            ): item
             for item in candidates
             if isinstance(item, dict) and item.get("asset_id")
         }
+        by_asset_id: dict[str, list[dict[str, Any]]] = {}
+        for candidate in by_key.values():
+            by_asset_id.setdefault(
+                str(candidate.get("asset_id", "")), []
+            ).append(candidate)
         cache = read_selection_preflight_cache(session_id)
         records: list[dict[str, Any]] = []
         seen_sha256: set[str] = set()
+        seen_decisions: set[tuple[str, str]] = set()
         duplicate_count = 0
         for decision in sorted(
             decisions,
@@ -533,19 +555,33 @@ def create_app(
                 str(item.get("asset_id", "")),
             ),
         ):
-            candidate = by_id.get(str(decision.get("asset_id", "")))
+            asset_id = str(decision.get("asset_id", ""))
+            product_id = str(decision.get("product_id", ""))
+            candidate = by_key.get((product_id, asset_id))
+            if candidate is None:
+                matches = by_asset_id.get(asset_id, [])
+                candidate = matches[0] if len(matches) == 1 else None
             if candidate is None:
                 return None
+            decision_key = (
+                str(candidate.get("product_id", "")),
+                str(candidate.get("asset_id", "")),
+            )
+            if decision_key in seen_decisions:
+                continue
+            seen_decisions.add(decision_key)
             entry = cache["entries"].get(str(candidate.get("asset_id", "")))
-            identity = selection_preflight_identity(candidate, policy_sha256)
             if (
-                not isinstance(entry, dict)
-                or entry.get("identity_sha256") != identity
+                not selection_preflight_matches(
+                    entry, candidate, policy_sha256
+                )
                 or not isinstance(entry.get("preflight"), dict)
                 or not entry["preflight"].get("assets")
             ):
                 return None
             asset = json.loads(json.dumps(entry["preflight"]["assets"][0]))
+            asset["product_id"] = str(candidate.get("product_id", ""))
+            asset["product_title"] = str(candidate.get("product_title", ""))
             asset["selection_order"] = int(decision.get("selection_order") or 0)
             source_sha256 = str(asset.get("source_sha256", ""))
             duplicate = bool(source_sha256 and source_sha256 in seen_sha256)
@@ -1791,8 +1827,8 @@ def create_app(
             candidate = candidates.get(str(asset_id))
             if not isinstance(entry, dict) or candidate is None:
                 continue
-            if entry.get("identity_sha256") != selection_preflight_identity(
-                candidate, policy_sha256
+            if not selection_preflight_matches(
+                entry, candidate, policy_sha256
             ):
                 continue
             entries.append(public_selection_preflight(entry))
@@ -1803,6 +1839,8 @@ def create_app(
         "<asset_id>/selection-preflight"
     )
     def preflight_asset_selection(session_id: str, asset_id: str):
+        payload = _json_object()
+        requested_product_id = str(payload.get("product_id", ""))
         state = store.load_session(session_id)
         if state["stages"]["asset_matching"]["status"] not in {
             "draft",
@@ -1830,6 +1868,11 @@ def create_app(
                 for item in data.get("asset_candidates", [])
                 if isinstance(item, dict)
                 and str(item.get("asset_id", "")) == str(asset_id)
+                and (
+                    not requested_product_id
+                    or str(item.get("product_id", ""))
+                    == requested_product_id
+                )
             ),
             None,
         )
@@ -4855,19 +4898,28 @@ def _normalize_stage_values(
             for item in normalized.get("folder_decisions", [])
             if isinstance(item, dict) and item.get("decision") == "rejected"
         }
-        candidate_by_asset_id = {
-            str(item.get("asset_id", "")): item
+        candidate_by_key = {
+            (
+                str(item.get("product_id", "")),
+                str(item.get("asset_id", "")),
+            ): item
             for item in candidates
             if isinstance(item, dict)
+            and item.get("asset_id")
             and item.get("match_type") != "confirmed_alias"
             and (
                 supported_products is None
                 or str(item.get("product_id", "")) in supported_products
             )
         }
-        allowed_asset_ids = {
-            asset_id
-            for asset_id, item in candidate_by_asset_id.items()
+        candidates_by_asset_id: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidate_by_key.values():
+            candidates_by_asset_id.setdefault(
+                str(candidate.get("asset_id", "")), []
+            ).append(candidate)
+        allowed_candidate_keys = {
+            key
+            for key, item in candidate_by_key.items()
             if (
                 str(item.get("product_id", "")),
                 _candidate_folder_id(item, folder_rows),
@@ -4881,32 +4933,39 @@ def _normalize_stage_values(
             and item["source_inspection"].get("width")
             and item["source_inspection"].get("height")
         }
+
+        def candidate_for_decision(item: dict[str, Any]) -> dict[str, Any] | None:
+            asset_id = str(item.get("asset_id", ""))
+            product_id = str(item.get("product_id", ""))
+            candidate = candidate_by_key.get((product_id, asset_id))
+            if candidate is not None:
+                return candidate
+            matches = candidates_by_asset_id.get(asset_id, [])
+            return matches[0] if len(matches) == 1 else None
+
         license_rows = normalized.get("license_decisions")
-        if isinstance(license_rows, list):
-            normalized["license_decisions"] = [
-                {
-                    "asset_id": str(item.get("asset_id", "")),
-                    "status": "confirmed",
-                }
-                for item in license_rows
-                if isinstance(item, dict)
-                and item.get("status") == "confirmed"
-                and str(item.get("asset_id", "")) in allowed_asset_ids
-            ]
         asset_rows = normalized.get("asset_decisions")
         if isinstance(asset_rows, list):
-            retained = [
-                item
-                for item in asset_rows
-                if isinstance(item, dict)
-                and item.get("decision") == "selected"
-                and str(item.get("asset_id", "")) in allowed_asset_ids
-            ]
             product_order: dict[str, int] = {}
             normalized_rows = []
-            for item in retained:
-                candidate = candidate_by_asset_id[str(item.get("asset_id", ""))]
+            seen_candidate_keys: set[tuple[str, str]] = set()
+            for item in asset_rows:
+                if not isinstance(item, dict) or item.get("decision") != "selected":
+                    continue
+                candidate = candidate_for_decision(item)
+                if candidate is None:
+                    continue
                 product_id = str(candidate.get("product_id", ""))
+                candidate_key = (
+                    product_id,
+                    str(candidate.get("asset_id", "")),
+                )
+                if (
+                    candidate_key not in allowed_candidate_keys
+                    or candidate_key in seen_candidate_keys
+                ):
+                    continue
+                seen_candidate_keys.add(candidate_key)
                 product_order[product_id] = product_order.get(product_id, 0) + 1
                 normalized_rows.append(
                     {
@@ -4925,6 +4984,14 @@ def _normalize_stage_values(
                         "source_path": str(candidate.get("source_path", "")),
                         "decision": "selected",
                         "selection_order": product_order[product_id],
+                        "selection_preflight_identity": str(
+                            item.get("selection_preflight_identity", "")
+                        ),
+                        "feasible_ratios": [
+                            str(value)
+                            for value in item.get("feasible_ratios", [])
+                            if str(value) in {"3:4", "1:1"}
+                        ],
                     }
                 )
             normalized["asset_decisions"] = normalized_rows
@@ -4934,6 +5001,18 @@ def _normalize_stage_values(
                     "status": "confirmed",
                 }
                 for item in normalized_rows
+            ]
+        elif isinstance(license_rows, list):
+            allowed_asset_ids = {key[1] for key in allowed_candidate_keys}
+            normalized["license_decisions"] = [
+                {"asset_id": asset_id, "status": "confirmed"}
+                for asset_id in dict.fromkeys(
+                    str(item.get("asset_id", ""))
+                    for item in license_rows
+                    if isinstance(item, dict)
+                    and item.get("status") == "confirmed"
+                    and str(item.get("asset_id", "")) in allowed_asset_ids
+                )
             ]
     return normalized
 
