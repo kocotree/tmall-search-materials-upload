@@ -2652,6 +2652,18 @@ def create_app(
             return _validation_error({"revision": "must be an integer"})
 
         if stage_id == "setup":
+            submitted_sources = [
+                {"label": str(label), "path": str(root)}
+                for label, root in zip(
+                    values.get("image_source_labels", []),
+                    values.get("image_roots", []),
+                    strict=False,
+                )
+            ]
+            try:
+                runtime = save_image_sources(runtime, submitted_sources)
+            except (OSError, ValueError) as error:
+                return _validation_error({"image_roots": str(error)})
             try:
                 runtime = save_team_folder_index_root(
                     runtime, values.get("team_folder_index_root")

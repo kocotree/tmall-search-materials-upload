@@ -1183,6 +1183,69 @@ def test_setup_submit_checks_the_sources_currently_shown_on_the_page(
     assert "本次新增图片源" in response.json["field_errors"]["image_roots"]
 
 
+def test_setup_submit_persists_image_sources_for_team_index_binding(tmp_path):
+    workspace = Path(__file__).parents[1]
+    config_path = tmp_path / "config" / "runtime.json"
+    image_root = tmp_path / "images"
+    team_index_root = tmp_path / "team-index"
+    products_csv = tmp_path / "products.csv"
+    rules_csv = tmp_path / "rules.csv"
+    image_root.mkdir()
+    team_index_root.mkdir()
+    products_csv.write_text("product_id\n1\n", encoding="utf-8")
+    rules_csv.write_text("product_id\n1\n", encoding="utf-8")
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        config_path=config_path,
+        user_data_root=tmp_path,
+    )
+    app = create_app(
+        runtime.runs_root,
+        runtime_config=runtime,
+        enforce_stage_order=False,
+    )
+    client = app.test_client()
+    session_id = client.post("/api/sessions", json={}).json["session_id"]
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/setup/submit",
+        json={
+            "values": {
+                "store": "测试店铺",
+                "store_confirmed": True,
+                "products_csv": str(products_csv),
+                "rules_csv": str(rules_csv),
+                "team_folder_index_root": str(team_index_root),
+                "image_source_labels": ["测试图片源"],
+                "image_roots": [str(image_root)],
+                "asset_manifest": "",
+                "historical_basic_xlsx": "",
+                "historical_promotion_csv": "",
+                "user_notes": "",
+            }
+        },
+    )
+
+    assert response.status_code == 202
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["team_folder_index_root"] == str(team_index_root.resolve())
+    assert saved["image_sources"] == [
+        {
+            "source_id": saved["image_sources"][0]["source_id"],
+            "label": "测试图片源",
+            "path": str(image_root.resolve()),
+        }
+    ]
+    assert saved["image_sources"][0]["source_id"].startswith("source-")
+    configured = client.get("/api/runtime/image-sources")
+    assert configured.status_code == 200
+    assert configured.json["image_sources"] == saved["image_sources"]
+
+
 def test_unclaimed_submission_can_be_withdrawn_but_processing_cannot(
     client, session_id, tmp_path
 ):
