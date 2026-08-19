@@ -14,7 +14,11 @@ import time
 from typing import Callable, Mapping, Sequence
 import unicodedata
 
-from .path_diagnostics import diagnose_image_sources
+from .path_diagnostics import (
+    diagnose_image_sources,
+    mapped_drive_unc,
+    portable_unc_suggestion,
+)
 from .platform_support import AssetSourceUnavailable, resolve_asset_root
 
 
@@ -40,6 +44,30 @@ TEAM_FOLDER_INDEX_RELATIVE_PARTS = (
 )
 TEAM_FOLDER_INDEX_DISCOVERY_TIMEOUT_SECONDS = 1.5
 DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID = "zhejiang-kuqu"
+IMAGE_SOURCE_DISCOVERY_TIMEOUT_SECONDS = 1.5
+DEFAULT_IMAGE_SOURCE_PROFILES = (
+    (
+        "小红书 KOC 置换 · 买家秀",
+        (
+            "浙江酷趣",
+            "运营中心",
+            "营销板块",
+            "小红书koc置换&买家秀",
+            "优质买家秀",
+        ),
+    ),
+    (
+        "小红书 KOC 置换 · 淘宝买家秀",
+        (
+            "浙江酷趣",
+            "运营中心",
+            "营销板块",
+            "小红书koc置换&淘宝买家秀",
+            "优质买家秀",
+        ),
+    ),
+    ("视觉部 · 模特图", ("视觉部", "1-模特图")),
+)
 MAX_IMAGE_SOURCES = 50
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 
@@ -599,6 +627,220 @@ def discover_team_folder_index_root(
         "auto_fill": False,
         "message": "未自动找到团队索引文件夹，请确认共享盘已在 Windows 中打开。",
     }
+
+
+def _image_source_candidate(
+    path: Path,
+    *,
+    canonicalize: Callable[[Path], str] | None = None,
+) -> dict[str, str]:
+    text = str(path)
+    canonical = str(canonicalize(path)).strip() if canonicalize else ""
+    if not canonical:
+        windows = PureWindowsPath(text)
+        if windows.drive and windows.root:
+            unc_root = mapped_drive_unc(f"{windows.drive}\\")
+            canonical = portable_unc_suggestion(text, unc_root)
+    identity = canonical or str(path.resolve())
+    candidate = {
+        "path": text,
+        "identity": identity.casefold().rstrip("\\/"),
+    }
+    if canonical.startswith("\\\\"):
+        candidate["canonical_unc"] = canonical
+    return candidate
+
+
+def _deduplicate_image_source_candidates(
+    paths: Sequence[Path],
+    *,
+    canonicalize: Callable[[Path], str] | None = None,
+) -> list[dict[str, str]]:
+    records: dict[str, dict[str, str]] = {}
+    for path in paths:
+        candidate = _image_source_candidate(path, canonicalize=canonicalize)
+        records.setdefault(candidate.pop("identity"), candidate)
+    return list(records.values())
+
+
+def _default_image_source_discovery(
+    drive_roots: Sequence[Path],
+    *,
+    timeout_seconds: float,
+    probe: Callable[[Path], bool] | None,
+    canonicalize: Callable[[Path], str] | None,
+) -> dict[str, object]:
+    paths_by_profile = [
+        tuple(Path(root).joinpath(*relative_parts) for root in drive_roots)
+        for _label, relative_parts in DEFAULT_IMAGE_SOURCE_PROFILES
+    ]
+    all_paths = tuple(path for paths in paths_by_profile for path in paths)
+    available = set(
+        _available_directories_with_timeout(
+            all_paths,
+            timeout_seconds=timeout_seconds,
+            probe=probe,
+        )
+    )
+    sources: list[dict[str, object]] = []
+    discovered_count = 0
+    ambiguous_count = 0
+    for (label, relative_parts), profile_paths in zip(
+        DEFAULT_IMAGE_SOURCE_PROFILES, paths_by_profile, strict=True
+    ):
+        candidates = _deduplicate_image_source_candidates(
+            [path for path in profile_paths if path in available],
+            canonicalize=canonicalize,
+        )
+        source: dict[str, object] = {
+            "source_id": stable_image_source_id("\\".join(relative_parts)),
+            "label": label,
+            "path": candidates[0]["path"] if len(candidates) == 1 else "",
+            "candidates": candidates,
+        }
+        if len(candidates) == 1:
+            discovered_count += 1
+            if candidates[0].get("canonical_unc"):
+                source["canonical_unc"] = candidates[0]["canonical_unc"]
+        elif len(candidates) > 1:
+            ambiguous_count += 1
+        sources.append(source)
+
+    if not discovered_count and not ambiguous_count:
+        return {
+            "status": "not_found",
+            "source": "defaults",
+            "auto_fill": False,
+            "image_sources": [],
+            "message": "未自动找到默认图片文件夹，请手动选择本次图片源。",
+        }
+    missing_count = len(sources) - discovered_count - ambiguous_count
+    status = (
+        "ambiguous"
+        if ambiguous_count
+        else "partial"
+        if missing_count
+        else "discovered"
+    )
+    return {
+        "status": status,
+        "source": "defaults",
+        "auto_fill": True,
+        "image_sources": sources,
+        "message": (
+            f"已自动找到 {discovered_count} 个默认图片源；"
+            f"还有 {ambiguous_count} 个需要选择位置。"
+            if ambiguous_count
+            else f"已自动找到 {discovered_count} 个默认图片源。"
+            if not missing_count
+            else f"已自动找到 {discovered_count} 个默认图片源，未找到的来源可手动选择。"
+        ),
+    }
+
+
+def discover_image_sources(
+    runtime: RuntimeConfig,
+    *,
+    drive_roots: Sequence[Path] | None = None,
+    timeout_seconds: float = IMAGE_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+    probe: Callable[[Path], bool] | None = None,
+    canonicalize: Callable[[Path], str] | None = None,
+) -> dict[str, object]:
+    """Resolve saved or default image roots without scanning any drive tree."""
+
+    started_at = time.monotonic()
+    total_timeout = max(0.0, float(timeout_seconds))
+    roots = (
+        tuple(Path(root) for root in drive_roots)
+        if drive_roots is not None
+        else _windows_logical_drive_roots()
+    )
+    saved_sources = [dict(source) for source in runtime.image_sources]
+    if saved_sources:
+        saved_paths = tuple(Path(str(source["path"])) for source in saved_sources)
+        current_timeout = min(total_timeout / 3, 0.5)
+        current_available = set(
+            _available_directories_with_timeout(
+                saved_paths,
+                timeout_seconds=current_timeout,
+                probe=probe,
+            )
+        )
+        if len(current_available) == len(saved_paths):
+            return {
+                "status": "configured",
+                "source": "saved",
+                "auto_fill": False,
+                "image_sources": saved_sources,
+                "message": f"已优先加载 {len(saved_sources)} 个常用图片源。",
+            }
+
+        paths_by_source: list[tuple[Path, ...]] = []
+        candidate_paths: list[Path] = []
+        for source, saved_path in zip(saved_sources, saved_paths, strict=True):
+            if saved_path in current_available:
+                paths_by_source.append(())
+                continue
+            relative_parts = tuple(PureWindowsPath(image_source_path_key(source["path"])).parts)
+            paths = tuple(root.joinpath(*relative_parts) for root in roots)
+            paths_by_source.append(paths)
+            candidate_paths.extend(paths)
+        remaining = max(0.0, total_timeout - (time.monotonic() - started_at))
+        rebound_available = set(
+            _available_directories_with_timeout(
+                tuple(candidate_paths),
+                timeout_seconds=remaining,
+                probe=probe,
+            )
+        )
+        usable_count = len(current_available)
+        ambiguous_count = 0
+        rebound_count = 0
+        projected: list[dict[str, object]] = []
+        for source, saved_path, source_paths in zip(
+            saved_sources, saved_paths, paths_by_source, strict=True
+        ):
+            item: dict[str, object] = dict(source)
+            if saved_path in current_available:
+                projected.append(item)
+                continue
+            candidates = _deduplicate_image_source_candidates(
+                [path for path in source_paths if path in rebound_available],
+                canonicalize=canonicalize,
+            )
+            item["candidates"] = candidates
+            if len(candidates) == 1:
+                item["path"] = candidates[0]["path"]
+                if candidates[0].get("canonical_unc"):
+                    item["canonical_unc"] = candidates[0]["canonical_unc"]
+                usable_count += 1
+                rebound_count += 1
+            elif len(candidates) > 1:
+                ambiguous_count += 1
+            projected.append(item)
+
+        if usable_count or ambiguous_count:
+            return {
+                "status": "ambiguous" if ambiguous_count else "configured",
+                "source": "saved",
+                "auto_fill": bool(rebound_count or ambiguous_count),
+                "image_sources": projected,
+                "message": (
+                    f"已优先加载常用图片源；还有 {ambiguous_count} 个来源需要选择位置。"
+                    if ambiguous_count
+                    else f"已优先加载常用图片源，并自动恢复 {rebound_count} 个盘符绑定。"
+                    if rebound_count
+                    else "已优先加载可访问的常用图片源。"
+                ),
+            }
+
+    remaining = max(0.0, total_timeout - (time.monotonic() - started_at))
+    return _default_image_source_discovery(
+        roots,
+        timeout_seconds=remaining,
+        probe=probe,
+        canonicalize=canonicalize,
+    )
 
 
 def save_team_folder_index_root(

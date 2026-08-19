@@ -408,10 +408,18 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   border: 1px solid var(--line);
   border-radius: 9px;
 }
+.image-source-row[data-has-candidates="true"] {
+  grid-template-areas:
+    "name path actions"
+    "choice choice choice"
+    "state state state";
+}
 .image-source-row > label { display: grid; min-width: 0; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .image-source-row > label:first-child { grid-area: name; }
 .image-source-row > label:nth-child(2) { grid-area: path; }
 .image-source-row input[type="text"] { min-width: 0; min-height: var(--control-height); padding: 9px 11px; font-size: 13px; }
+.image-source-candidate-picker { grid-area: choice; }
+.image-source-candidate-picker select { width: 100%; min-width: 0; min-height: var(--control-height); }
 .image-source-row-actions {
   grid-area: actions;
   display: grid;
@@ -431,11 +439,21 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
       "actions actions"
       "state state";
   }
+  .image-source-row[data-has-candidates="true"] {
+    grid-template-areas:
+      "name path"
+      "choice choice"
+      "actions actions"
+      "state state";
+  }
 }
 @container image-source-list (max-width: 520px) {
   .image-source-row {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas: "name" "path" "actions" "state";
+  }
+  .image-source-row[data-has-candidates="true"] {
+    grid-template-areas: "name" "path" "choice" "actions" "state";
   }
 }
 .image-source-actions { display: flex; flex-wrap: wrap; gap: 8px; }

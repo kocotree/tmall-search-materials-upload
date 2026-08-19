@@ -83,6 +83,7 @@
   let folderCountsLoadedFor = "";
   let setupLoginReady = !setupLoginGate;
   let setupLoginGateStarted = false;
+  let imageSourceDiscoveryStarted = false;
   let selectedAssetValidation = null;
   const selectionPreflights = new Map();
   const selectionPreflightCardRefreshers = new Map();
@@ -222,6 +223,68 @@
     imageSourceConfig.querySelector("[data-image-source-list]").appendChild(row);
     updateImageSourceConfig();
     return row;
+  }
+
+  function renderImageSourceCandidates(row, candidates) {
+    const picker = row.querySelector("[data-image-source-candidate-picker]");
+    const select = row.querySelector("[data-image-source-candidate-select]");
+    if (!picker || !select) return;
+    const values = Array.isArray(candidates)
+      ? candidates.filter((candidate) => candidate?.path)
+      : [];
+    select.replaceChildren(new Option("请选择", ""));
+    values.forEach((candidate) => {
+      const option = new Option(candidate.path, candidate.path);
+      option.dataset.canonicalUnc = candidate.canonical_unc || "";
+      select.appendChild(option);
+    });
+    const show = values.length > 1;
+    picker.hidden = !show;
+    row.dataset.hasCandidates = show ? "true" : "false";
+    if (show) {
+      const currentPath = row.querySelector('[name="image_roots"]')?.value || "";
+      select.value = values.some((candidate) => candidate.path === currentPath)
+        ? currentPath
+        : "";
+    }
+  }
+
+  function applyImageSourceDiscovery(sources) {
+    if (!Array.isArray(sources) || !sources.length) return;
+    const list = imageSourceConfig.querySelector("[data-image-source-list]");
+    list.replaceChildren();
+    sources.forEach((source) => {
+      const row = appendImageSource(
+        source.label || "图片源",
+        source.path || "",
+        source.source_id || "",
+        source.canonical_unc || "",
+      );
+      renderImageSourceCandidates(row, source.candidates);
+      const state = row.querySelector("[data-image-source-state]");
+      const candidates = Array.isArray(source.candidates) ? source.candidates : [];
+      state.textContent = candidates.length > 1
+        ? "找到多个文件夹位置，请选择本次使用的位置。"
+        : source.path
+          ? "已自动找到，提交时会再次检测。"
+          : "未自动找到，请选择文件夹。";
+    });
+    updateImageSourceConfig();
+  }
+
+  async function discoverImageSources() {
+    if (!imageSourceConfig || imageSourceDiscoveryStarted) return;
+    imageSourceDiscoveryStarted = true;
+    const feedback = imageSourceConfig.querySelector("[data-image-source-feedback]");
+    feedback.textContent = "正在查找可用图片源…";
+    try {
+      const payload = await fetchJson("/api/runtime/image-sources/discover");
+      if (payload.auto_fill) applyImageSourceDiscovery(payload.image_sources);
+      feedback.textContent = payload.message || "图片源准备完成。";
+    } catch (error) {
+      feedback.textContent = error.userMessage
+        || "暂未自动找到图片源，可以手动选择文件夹。";
+    }
   }
 
   function configuredImageSources() {
@@ -430,6 +493,20 @@
       uiState = UiState.markDirty(uiState);
       renderStatus();
       scheduleAutoSave();
+    });
+    imageSourceConfig.querySelector("[data-image-source-list]").addEventListener("change", (event) => {
+      const select = event.target.closest("[data-image-source-candidate-select]");
+      if (!select || !select.value) return;
+      const row = select.closest("[data-image-source-row]");
+      const pathInput = row.querySelector('[name="image_roots"]');
+      pathInput.value = select.value;
+      row.dataset.canonicalUnc = select.selectedOptions[0]?.dataset.canonicalUnc || "";
+      row.querySelector("[data-image-source-state]").textContent =
+        "已选择，提交时会再次检测。";
+      pathInput.dispatchEvent(new CustomEvent(
+        "input",
+        { bubbles: true, detail: { source: "explicit-user-edit" } },
+      ));
     });
     imageSourceConfig.addEventListener("input", (event) => {
       if (event.target.matches('[name="image_source_labels"], [name="image_roots"]')) {
@@ -5616,6 +5693,7 @@
       renderStatus();
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
+      if (requestedStageId === "setup") await discoverImageSources();
       return;
     }
     try {
@@ -5665,6 +5743,9 @@
             `已载入 Codex 对话保底数据（${latestFallback.fallback_reason_code}），` +
             "可在本页继续检查和修改。";
         }
+      }
+      if (requestedStageId === "setup" && !payload.input) {
+        await discoverImageSources();
       }
       renderStatus();
       renderHandoffStatus(currentHandoffStatus, currentWorkflowDispatch);

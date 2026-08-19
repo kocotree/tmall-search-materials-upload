@@ -98,6 +98,7 @@ from werkzeug.exceptions import BadRequest, NotFound, UnsupportedMediaType
 
 from ..runtime_config import (
     RuntimeConfig,
+    discover_image_sources,
     discover_team_folder_index_root,
     inspect_image_sources,
     inspect_team_folder_index_root,
@@ -1349,6 +1350,11 @@ def create_app(
                 item["last_status"] = "available"
             projected.append(item)
         return jsonify(image_sources=projected)
+
+    @app.get("/api/runtime/image-sources/discover")
+    def discover_runtime_image_sources():
+        require_desktop_identity()
+        return jsonify(**discover_image_sources(runtime))
 
     @app.get("/api/runtime/nas-sources")
     def get_runtime_nas_sources():

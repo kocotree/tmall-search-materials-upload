@@ -46,6 +46,8 @@ def client(tmp_path):
             },
         ),
         runs_root=tmp_path,
+        config_path=tmp_path / "config" / "runtime.json",
+        user_data_root=tmp_path / "user-data",
     )
     return create_app(
         tmp_path, runtime_config=runtime, enforce_stage_order=False
@@ -840,6 +842,7 @@ def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(clien
         assert root in html
     assert 'data-component="ImageSourceConfig"' in html
     assert "已预填 3 个常用来源" in html
+    assert "尚未保存时，会自动查找常用业务文件夹" in html
     assert "提交时系统会自动检测" in html
     assert "添加图片源" in html
     assert "检测路径" in html
@@ -848,6 +851,7 @@ def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(clien
     assert 'id="selected-source-heading">本次图片源</h4>' in html
     assert "公司共享盘" not in html
     assert 'class="image-source-row-actions"' in html
+    assert "data-image-source-candidate-select" in html
     assert html.count('name="image_source_labels"') >= 3
 
 
@@ -979,6 +983,64 @@ def test_team_index_frontend_discovers_once_without_marking_user_edit():
     assert "input.value = payload.path" in source
     discovery = source.split("async function discoverTeamIndex()", 1)[1].split(
         "function initializeTeamIndexConfig()", 1
+    )[0]
+    assert "dispatchEvent" not in discovery
+
+
+def test_image_source_discovery_api_returns_default_candidates(tmp_path, monkeypatch):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+    monkeypatch.setattr(
+        web_module,
+        "discover_image_sources",
+        lambda _runtime: {
+            "status": "ambiguous",
+            "source": "defaults",
+            "auto_fill": True,
+            "image_sources": [
+                {
+                    "source_id": "source-test",
+                    "label": "视觉部 · 模特图",
+                    "path": "",
+                    "candidates": [
+                        {"path": r"Y:\视觉部\1-模特图"},
+                        {"path": r"Z:\视觉部\1-模特图"},
+                    ],
+                }
+            ],
+            "message": "请选择文件夹位置。",
+        },
+    )
+    client = create_app(tmp_path / "runs", runtime_config=runtime).test_client()
+
+    response = client.get("/api/runtime/image-sources/discover")
+
+    assert response.status_code == 200
+    assert response.json["auto_fill"] is True
+    assert len(response.json["image_sources"][0]["candidates"]) == 2
+
+
+def test_image_source_frontend_autofills_and_uses_location_select_without_unc_copy():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'fetchJson("/api/runtime/image-sources/discover")' in source
+    assert "payload.auto_fill" in source
+    assert "data-image-source-candidate-select" in source
+    assert 'new Option("请选择", "")' in source
+    discovery = source.split("async function discoverImageSources()", 1)[1].split(
+        "function configuredImageSources()", 1
     )[0]
     assert "dispatchEvent" not in discovery
 
@@ -1631,6 +1693,8 @@ def test_compact_styles_keep_result_tables_scrollable_above_fixed_handoff(client
     assert "container: image-source-list / inline-size;" in stylesheet
     assert "@container image-source-list (max-width: 760px)" in stylesheet
     assert "@container image-source-list (max-width: 520px)" in stylesheet
+    assert '.image-source-row[data-has-candidates="true"]' in stylesheet
+    assert 'grid-template-areas: "name" "path" "choice" "actions" "state"' in stylesheet
     assert ".nas-source-actions" not in stylesheet
     assert 'grid-template-areas: "name" "path" "actions" "state"' in stylesheet
     assert ".handoff-actions button { width: 100%; min-width: 0; }" in stylesheet
@@ -3475,6 +3539,7 @@ def test_setup_validation_does_not_require_store_confirmation(
     response = client.post(f"/api/sessions/{session_id}/stages/setup/submit", json={"values": values})
 
     assert response.status_code == 202
+    assert (tmp_path / "user-data" / "config" / "runtime.json").is_file()
 
 
 def test_source_code_never_imports_execution_modules():

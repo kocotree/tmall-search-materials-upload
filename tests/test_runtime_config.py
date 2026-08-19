@@ -6,11 +6,13 @@ import time
 import pytest
 
 from upload_search_materials.runtime_config import (
+    DEFAULT_IMAGE_SOURCE_PROFILES,
     DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID,
     DEFAULT_TEAM_FOLDER_INDEX_ROOT,
     DiscoveredPath,
     RuntimeConfig,
     TEAM_FOLDER_INDEX_RELATIVE_PARTS,
+    discover_image_sources,
     discover_team_folder_index_root,
     image_source_path_key,
     inspect_image_sources,
@@ -369,6 +371,136 @@ def test_team_folder_index_discovery_has_one_shared_timeout_budget(tmp_path):
 
     assert time.monotonic() - started_at < 0.3
     assert discovered["status"] == "not_found"
+
+
+def test_default_image_source_discovery_checks_only_three_exact_paths_per_drive(
+    tmp_path,
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+    drive_c = tmp_path / "C"
+    drive_y = tmp_path / "Y"
+    drive_z = tmp_path / "Z"
+    expected = {
+        drive_z.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[0][1]),
+        drive_z.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[1][1]),
+        drive_y.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[2][1]),
+    }
+    probed = []
+
+    discovered = discover_image_sources(
+        runtime,
+        drive_roots=(drive_c, drive_y, drive_z),
+        probe=lambda path: probed.append(path) is None and path in expected,
+    )
+
+    assert discovered["status"] == "discovered"
+    assert discovered["auto_fill"] is True
+    assert {Path(item["path"]) for item in discovered["image_sources"]} == expected
+    assert len(probed) == len(DEFAULT_IMAGE_SOURCE_PROFILES) * 3
+
+
+def test_image_source_discovery_keeps_accessible_saved_sources_first(tmp_path):
+    saved = tmp_path / "saved-source"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=({"label": "常用来源", "path": str(saved)},),
+        runs_root=tmp_path / "runs",
+    )
+    probed = []
+
+    discovered = discover_image_sources(
+        runtime,
+        drive_roots=(tmp_path / "Z",),
+        probe=lambda path: probed.append(path) is None and path == saved,
+    )
+
+    assert discovered["status"] == "configured"
+    assert discovered["source"] == "saved"
+    assert discovered["auto_fill"] is False
+    assert discovered["image_sources"] == [dict(runtime.image_sources[0])]
+    assert probed == [saved]
+
+
+def test_image_source_discovery_rebinds_saved_source_to_current_drive(tmp_path):
+    drive_y = tmp_path / "Y"
+    expected = drive_y / "视觉部" / "1-模特图"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=({"label": "模特图", "path": r"Q:\视觉部\1-模特图"},),
+        runs_root=tmp_path / "runs",
+    )
+
+    discovered = discover_image_sources(
+        runtime,
+        drive_roots=(drive_y,),
+        probe=lambda path: path == expected,
+    )
+
+    assert discovered["status"] == "configured"
+    assert discovered["auto_fill"] is True
+    assert discovered["image_sources"][0]["path"] == str(expected)
+
+
+def test_image_source_discovery_deduplicates_equivalent_unc_locations(tmp_path):
+    drives = (tmp_path / "Y", tmp_path / "Z")
+    model_parts = DEFAULT_IMAGE_SOURCE_PROFILES[2][1]
+    model_paths = {drive.joinpath(*model_parts) for drive in drives}
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    discovered = discover_image_sources(
+        runtime,
+        drive_roots=drives,
+        probe=lambda path: path in model_paths,
+        canonicalize=lambda _path: r"\\nas\visual\1-模特图",
+    )
+
+    assert discovered["status"] == "partial"
+    model = discovered["image_sources"][2]
+    assert len(model["candidates"]) == 1
+    assert model["path"] in {str(path) for path in model_paths}
+
+
+def test_image_source_discovery_keeps_distinct_locations_for_user_choice(tmp_path):
+    drives = (tmp_path / "Y", tmp_path / "Z")
+    model_parts = DEFAULT_IMAGE_SOURCE_PROFILES[2][1]
+    model_paths = {drive.joinpath(*model_parts) for drive in drives}
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    discovered = discover_image_sources(
+        runtime,
+        drive_roots=drives,
+        probe=lambda path: path in model_paths,
+        canonicalize=lambda path: str(path),
+    )
+
+    assert discovered["status"] == "ambiguous"
+    model = discovered["image_sources"][2]
+    assert model["path"] == ""
+    assert {item["path"] for item in model["candidates"]} == {
+        str(path) for path in model_paths
+    }
 
 
 def test_selector_profile_is_installed_in_stable_user_data(tmp_path):
