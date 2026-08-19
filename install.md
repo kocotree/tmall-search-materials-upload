@@ -83,7 +83,7 @@ codex.cmd plugin list --json
 
 普通用户不需要打开 Plugin 缓存目录，也不需要手动运行 `bootstrap.cmd`、安装 Python 或同步依赖。
 
-首次在 Codex 中启动本 Plugin 时，Agent 会自动检查用户级运行环境。环境缺失时，Agent 使用当前 Plugin 自带的 `scripts\bootstrap.cmd`，在 `%LOCALAPPDATA%\tmall-search-materials\runtime` 下准备 Python 3.11、锁定依赖、虚拟环境和缓存，然后继续打开配置页。
+首次在 Codex 中启动本 Plugin 时，Agent 会自动检查用户级运行环境。环境缺失时，Agent 使用当前 Plugin 自带的 `scripts\bootstrap.cmd`，在 `%LOCALAPPDATA%\tmall-search-materials\runtime` 下准备 Python 3.11、锁定依赖、虚拟环境和缓存，然后继续打开配置页。第三方依赖默认优先从清华 TUNA 镜像下载，镜像不可用时自动回退 Python 官方源；版本和 SHA-256 仍严格取自随 Plugin 发布的 `uv.lock`，不会因切换下载源而改变依赖。下载中断留下的半成品虚拟环境不会被视为可用，下一次启动会继续修复。
 
 工作台首次启动还会把随 Plugin 发布的生产选择器基线初始化到 `%LOCALAPPDATA%\tmall-search-materials\config\selectors.local.yaml`，其中包含“搜推高价值”全量采集和空坑位精确复核所需选择器。该文件已经存在时绝不覆盖，Plugin 升级也不会替换本机维护版本。基线只用于免除首次手工配置；每次真实采集仍校验当前千牛页面 DOM，校验失败时停止并提示选择器失效，不会把未匹配到的元素当作零素材或零空坑位。
 

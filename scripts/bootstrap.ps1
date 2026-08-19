@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("official", "tuna", "aliyun", "tencent")]
-    [string]$Mirror = "official",
+    [ValidateSet("auto", "official", "tuna", "aliyun", "tencent")]
+    [string]$Mirror = "auto",
 
     [string]$Python = $env:TMALL_PYTHON,
 
@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$configFile = Join-Path $projectRoot "config\uv-$Mirror.toml"
+$officialConfigFile = Join-Path $projectRoot "config\uv-official.toml"
 $runtimeRoot = if ($env:TMALL_RUNTIME_ROOT) {
     [System.IO.Path]::GetFullPath($env:TMALL_RUNTIME_ROOT)
 }
@@ -28,7 +28,7 @@ $cacheDir = Join-Path $runtimeRoot "uv-cache"
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 $env:UV_PROJECT_ENVIRONMENT = $environmentDir
 $commonArguments = @(
-    "--config-file", $configFile,
+    "--config-file", $officialConfigFile,
     "--cache-dir", $cacheDir
 )
 
@@ -70,7 +70,11 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 Push-Location $projectRoot
 try {
     if ($UpdateLock) {
-        & $uvExecutable @commonArguments lock `
+        if ($Mirror -eq "auto") {
+            throw "LOCK_UPDATE_MIRROR_REQUIRED: pass an explicit -Mirror when updating uv.lock."
+        }
+        $lockConfigFile = Join-Path $projectRoot "config\uv-$Mirror.toml"
+        & $uvExecutable --config-file $lockConfigFile --cache-dir $cacheDir lock `
             --python $Python `
             --no-managed-python `
             --system-certs
@@ -79,24 +83,76 @@ try {
         }
     }
 
-    $syncArguments = @(
-        "sync",
+    $bootstrapMetadataDir = Join-Path $runtimeRoot "bootstrap"
+    $requirementsFile = Join-Path $bootstrapMetadataDir "requirements.locked.txt"
+    New-Item -ItemType Directory -Path $bootstrapMetadataDir -Force | Out-Null
+    $exportArguments = @(
+        "export",
         "--locked",
-        "--no-install-project",
+        "--no-emit-project",
+        "--no-dev",
+        "--format", "requirements-txt",
+        "--output-file", $requirementsFile,
         "--python", $Python,
         "--no-managed-python",
         "--system-certs"
     )
     if ($WithTests) {
-        $syncArguments += @("--extra", "test")
+        $exportArguments += @("--extra", "test")
     }
 
-    & $uvExecutable @commonArguments @syncArguments
+    $exportConfigFile = if ($UpdateLock) {
+        $lockConfigFile
+    }
+    else {
+        $officialConfigFile
+    }
+    & $uvExecutable --config-file $exportConfigFile --cache-dir $cacheDir @exportArguments
     if ($LASTEXITCODE -ne 0) {
-        throw "DEPENDENCY_SYNC_FAILED: the lockfile may belong to another mirror. Rerun with -UpdateLock only when intentionally changing the lock source."
+        throw "DEPENDENCY_EXPORT_FAILED: uv.lock could not be exported."
     }
 
     $runtimePython = Join-Path $environmentDir "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $runtimePython -PathType Leaf)) {
+        & $uvExecutable @commonArguments venv $environmentDir `
+            --python $Python `
+            --no-managed-python `
+            --system-certs
+        if ($LASTEXITCODE -ne 0) {
+            throw "RUNTIME_VENV_FAILED: uv could not create the user runtime environment."
+        }
+    }
+
+    $mirrorOrder = if ($Mirror -eq "auto") {
+        @("tuna", "official")
+    }
+    else {
+        @($Mirror)
+    }
+    $syncSucceeded = $false
+    $failedMirrors = @()
+    foreach ($mirrorName in $mirrorOrder) {
+        $configFile = Join-Path $projectRoot "config\uv-$mirrorName.toml"
+        Write-Host "Synchronizing locked dependencies from '$mirrorName'."
+        & $uvExecutable --config-file $configFile --cache-dir $cacheDir pip sync `
+            $requirementsFile `
+            --python $runtimePython `
+            --no-managed-python `
+            --system-certs
+        if ($LASTEXITCODE -eq 0) {
+            $syncSucceeded = $true
+            break
+        }
+        $failedMirrors += $mirrorName
+        if ($Mirror -eq "auto" -and $mirrorName -ne $mirrorOrder[-1]) {
+            Write-Warning "Dependency download from '$mirrorName' failed; retrying with the official index."
+        }
+    }
+    if (-not $syncSucceeded) {
+        $attempted = $failedMirrors -join ", "
+        throw "DEPENDENCY_SYNC_FAILED: locked dependencies could not be downloaded from: $attempted."
+    }
+
     if (-not (Test-Path -LiteralPath $runtimePython -PathType Leaf)) {
         throw "RUNTIME_SMOKE_TEST_FAILED: prepared Python was not installed."
     }

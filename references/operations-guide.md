@@ -23,7 +23,7 @@ uv run tmall-materials migrate-deterministic-selection --runs-root <runs目录> 
 在本 Plugin 目录使用 `uv` 管理 Python 3.11、锁文件和依赖虚拟环境：
 
 ```powershell
-.\scripts\bootstrap.cmd -Mirror official -WithTests
+.\scripts\bootstrap.cmd -WithTests
 $quickValidate = Join-Path $env:USERPROFILE ".codex\skills\.system\skill-creator\scripts\quick_validate.py"
 uv run python -X utf8 $quickValidate .
 ```
@@ -42,7 +42,7 @@ uv run python -X utf8 $quickValidate .
 .\scripts\bootstrap.cmd -Python "<python.exe>" -Mirror official -WithTests
 ```
 
-网络受限时可把 `-Mirror` 改为 `tuna`、`aliyun` 或 `tencent`。镜像选择会影响 `uv.lock` 的依赖来源；只有明确切换锁文件来源时才传 `-UpdateLock`，并在提交前复核锁文件差异。公开仓库默认保留 `official`，不在源码或配置中保存镜像凭证。脚本使用用户数据目录中的 runtime、uv-cache 和系统证书。默认位置为 `%LOCALAPPDATA%\tmall-search-materials`；可分别用 `TMALL_USER_DATA_ROOT` 和 `TMALL_RUNTIME_ROOT` 覆盖。
+默认 `-Mirror auto` 先使用清华 TUNA，失败后自动回退 Python 官方源。安装器先从 `uv.lock` 导出带 SHA-256 的精确依赖清单，再通过所选下载源同步，因此镜像切换不会改变已锁定版本，也不需要在用户电脑上改写锁文件。维护者可显式传 `official`、`tuna`、`aliyun` 或 `tencent` 只使用一个来源；只有维护者明确更新锁文件时才同时传显式 `-Mirror` 与 `-UpdateLock`，并在提交前复核差异。源码和配置不得保存镜像凭证。脚本使用用户数据目录中的 runtime、uv-cache 和系统证书。默认位置为 `%LOCALAPPDATA%\tmall-search-materials`；可分别用 `TMALL_USER_DATA_ROOT` 和 `TMALL_RUNTIME_ROOT` 覆盖。
 
 ### 1.1 每台电脑只配置一次路径
 

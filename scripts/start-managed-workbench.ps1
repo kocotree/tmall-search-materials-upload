@@ -22,7 +22,29 @@ else {
     Join-Path $HOME ".local\state\tmall-search-materials\runtime"
 }
 $Python = Join-Path $RuntimeRoot ".venv\Scripts\python.exe"
-if (-not [System.IO.File]::Exists($Python)) {
+$LockPath = Join-Path $ProjectRoot "uv.lock"
+$FingerprintPath = Join-Path $RuntimeRoot "environment-fingerprint.json"
+$EnvironmentReady = (
+    [System.IO.File]::Exists($Python) -and
+    [System.IO.File]::Exists($FingerprintPath)
+)
+if ($EnvironmentReady) {
+    try {
+        $Fingerprint = Get-Content -LiteralPath $FingerprintPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $CurrentLock = (Get-FileHash -LiteralPath $LockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $EnvironmentReady = (
+            [int]$Fingerprint.schema_version -eq 2 -and
+            [string]$Fingerprint.lock_sha256 -eq $CurrentLock -and
+            [string]$Fingerprint.dependency_mode -eq "no-install-project" -and
+            [string]$Fingerprint.launch_mode -eq "current-plugin-source"
+        )
+    }
+    catch {
+        $EnvironmentReady = $false
+    }
+}
+if (-not $EnvironmentReady) {
     & (Join-Path $PSScriptRoot "bootstrap.ps1")
     if ($LASTEXITCODE -ne 0) {
         throw "RUNTIME_BOOTSTRAP_FAILED: bootstrap did not complete."

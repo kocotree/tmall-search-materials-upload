@@ -3,8 +3,8 @@ param(
     [string]$Session,
     [string]$RunsRoot,
     [string]$Config,
-    [ValidateSet("official", "tuna", "aliyun", "tencent")]
-    [string]$Mirror = "official",
+    [ValidateSet("auto", "official", "tuna", "aliyun", "tencent")]
+    [string]$Mirror = "auto",
     [int]$PortStart = 8765,
     [int]$PortEnd = 8795,
     [switch]$OpenSystemBrowser,

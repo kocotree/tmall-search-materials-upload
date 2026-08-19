@@ -387,18 +387,15 @@ def _settle_safe_popups(
     closed = 0
     quiet_checks = 0
     required_quiet_checks = max(1, int(quiet_checks_required))
-    no_change_by_control: dict[tuple[int, str], int] = {}
+    no_change_by_control: dict[tuple[int, str, int, str], int] = {}
     for _ in range(20):
-        found = False
+        changed_control = False
         scopes = [page]
         for frame in list(getattr(page, "frames", ()) or ()):
             if frame is not None and all(frame is not scope for scope in scopes):
                 scopes.append(frame)
         for scope_index, scope in enumerate(scopes):
             for popup_selector in popup_selectors:
-                control_key = (id(scope), popup_selector)
-                if no_change_by_control.get(control_key, 0) >= 2:
-                    continue
                 try:
                     locator = scope.locator(popup_selector)
                     count = int(locator.count())
@@ -416,6 +413,21 @@ def _settle_safe_popups(
                         before_text = candidate.inner_text().strip()
                     except (AttributeError, PlaywrightError):
                         before_text = ""
+                    try:
+                        control_identity = "|".join(
+                            str(candidate.get_attribute(attribute) or "")
+                            for attribute in ("class", "aria-label", "title", "role")
+                        )
+                    except (AttributeError, PlaywrightError):
+                        control_identity = before_text[:120]
+                    control_key = (
+                        id(scope),
+                        popup_selector,
+                        index,
+                        control_identity,
+                    )
+                    if no_change_by_control.get(control_key, 0) >= 2:
+                        continue
                     before = {
                         "selector": popup_selector,
                         "index": index,
@@ -423,22 +435,26 @@ def _settle_safe_popups(
                         "text": before_text[:120],
                     }
                     click_mode = "normal"
+                    clicked = False
                     try:
                         candidate.click(timeout=1500)
+                        clicked = True
                     except PlaywrightError:
                         try:
                             candidate.click(force=True, timeout=1500)
                             click_mode = "force"
+                            clicked = True
                         except PlaywrightError:
                             try:
                                 candidate.evaluate("element => element.click()")
                                 click_mode = "dom"
+                                clicked = True
                             except (AttributeError, PlaywrightError):
                                 no_change_by_control[control_key] = (
                                     no_change_by_control.get(control_key, 0) + 1
                                 )
-                                found = True
-                                break
+                    if not clicked:
+                        continue
                     if delay_ms:
                         page.wait_for_timeout(min(delay_ms, 300))
                     try:
@@ -457,7 +473,8 @@ def _settle_safe_popups(
                         except (AttributeError, PlaywrightError):
                             after_visible = False
                     changed = (
-                        not after_visible
+                        after_count < count
+                        or not after_visible
                         or after_text[:120] != before["text"]
                     )
                     events.append(
@@ -476,17 +493,18 @@ def _settle_safe_popups(
                     if changed:
                         no_change_by_control[control_key] = 0
                         closed += 1
+                        changed_control = True
                     else:
                         no_change_by_control[control_key] = (
                             no_change_by_control.get(control_key, 0) + 1
                         )
-                    found = True
+                    if changed_control:
+                        break
+                if changed_control:
                     break
-                if found:
-                    break
-            if found:
+            if changed_control:
                 break
-        quiet_checks = 0 if found else quiet_checks + 1
+        quiet_checks = 0 if changed_control else quiet_checks + 1
         if quiet_checks >= required_quiet_checks:
             break
         if delay_ms:

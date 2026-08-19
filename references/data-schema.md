@@ -105,7 +105,7 @@ revision、策略 SHA-256、源检查身份、检测提供方版本、统计及�
 
 采集中出现滑动验证、验证码或风控时，`human-checkpoint.json` 使用同一 session、revision、input SHA、selector SHA、target store 和 attempt 身份，保存 `status`、`reason_code`、`location`、`current_page`、`last_completed_page`、`row_count`、`events[]` 与时间。`events[]` 只记录 `detected/resolved`、检查位置和页码，不保存验证内容、Cookie 或 DOM。Worker 在 `waiting_human_check` 阶段保持心跳；验证元素消失后更新为 `resolved` 并继续同一 attempt。
 
-只读随机动作按随机 1–2 页间隔运行，证据写入 `store-page-evidence.json.safe_actions`，至少包含页码、`view_filled_slot`、商品 ID、坑位序号、状态、`source=current_page`、`read_only=true` 和 `page_state_restored`。候选目标只能来自当前采集页的可见行和已填坑位，不得输入或搜索商品 ID，不得打开空坑位或进入“发图文”表单；当前页没有已填坑位时跳过本次随机动作并继续采集。退出详情后必须核验当前 URL、发布表单状态和有序商品 ID 已恢复，再允许翻页。不得把动作产生的页面状态写入商品采集 CSV。
+只读随机动作按随机 1–2 页间隔运行，证据写入 `store-page-evidence.json.safe_actions`，至少包含页码、`view_filled_slot`、商品 ID、坑位序号、状态、`source=current_page`、`read_only=true` 和 `page_state_restored`。候选目标只能来自当前采集页的可见行和已填坑位，不得输入或搜索商品 ID，不得打开空坑位或进入“发图文”表单；当前页没有已填坑位时跳过本次随机动作并继续采集。动作前先关闭受限安全弹窗；仍存在任何可见弹窗、抽屉或对话框时记录安全跳过，不得强制点击被遮挡坑位或把既有弹窗计入恢复基线。退出详情后必须核验当前 URL、详情弹窗状态和有序商品 ID 已恢复，再允许翻页。不得把动作产生的页面状态写入商品采集 CSV。
 
 ## Collection readiness and managed attempt
 

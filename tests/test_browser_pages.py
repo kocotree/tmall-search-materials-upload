@@ -742,6 +742,73 @@ def test_popup_settle_closes_first_install_guide_inside_frame():
     assert page._tmall_collection_events[-1]["before"]["scope"] == "frame"
 
 
+def test_popup_settle_continues_past_covered_control_in_stacked_dialogs():
+    class StackedControl:
+        def __init__(self, page, kind):
+            self.page = page
+            self.kind = kind
+
+        def is_visible(self):
+            return self.page.guide_open if self.kind == "guide" else self.page.ant_open
+
+        def inner_text(self):
+            return ""
+
+        def get_attribute(self, name):
+            return self.kind if name == "class" else ""
+
+        def click(self, **_kwargs):
+            self.page.clicked.append(self.kind)
+            if self.kind == "ant":
+                self.page.ant_open = False
+            elif not self.page.ant_open:
+                self.page.guide_open = False
+
+    class StackedLocator:
+        def __init__(self, page):
+            self.page = page
+
+        def values(self):
+            output = []
+            if self.page.guide_open:
+                output.append(StackedControl(self.page, "guide"))
+            if self.page.ant_open:
+                output.append(StackedControl(self.page, "ant"))
+            return output
+
+        def count(self):
+            return len(self.values())
+
+        def nth(self, index):
+            return self.values()[index]
+
+    class StackedPage:
+        def __init__(self):
+            self.guide_open = True
+            self.ant_open = True
+            self.clicked = []
+            self.frames = []
+
+        def locator(self, _selector):
+            return StackedLocator(self)
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = StackedPage()
+
+    closed = _settle_safe_popups(
+        page,
+        {"safe_popup_close_priority": "#stacked-close"},
+        delay_ms=0,
+    )
+
+    assert closed == 2
+    assert page.ant_open is False
+    assert page.guide_open is False
+    assert page.clicked == ["guide", "ant", "guide"]
+
+
 class OverlayBlockedTarget:
     def __init__(self):
         self.attempts = []

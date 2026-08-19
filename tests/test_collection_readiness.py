@@ -30,7 +30,13 @@ def test_default_popup_selectors_cover_current_first_install_dialogs():
     assert 'class*="GuideModal_dialog"' in progress
     assert ':text-is("下一步")' in progress
     assert 'a.next-dialog-close[aria-label="关闭"]' in priority
+    assert 'a.next-dialog-close, ' in priority
     assert '.ant-modal-wrap.ant-modal-centered [aria-label="close"]' in priority
+    assert "AiImageGenerationOfflinePushModal_customCloseBtn" in priority
+    assert "AiImageGenerationOfflinePushModal_cancelBtn" in priority
+    assert priority.index("AiImageGenerationOfflinePushModal_customCloseBtn") < priority.index(
+        "GuideModal_dialog"
+    )
     assert '[aria-label="close"]' in priority
     assert "AiImageGenerationOfflinePushModal_closeIcon" in priority
     assert "next-icon-remote" in priority

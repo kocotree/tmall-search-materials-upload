@@ -110,14 +110,20 @@ def test_fingerprint_records_dependencies_without_installing_project(tmp_path):
 
 def test_bootstrap_and_fixed_launchers_do_not_use_installed_business_cli():
     bootstrap_ps1 = (REPOSITORY_ROOT / "scripts" / "bootstrap.ps1").read_text()
-    assert '"--no-install-project"' in bootstrap_ps1
+    assert '"--no-emit-project"' in bootstrap_ps1
+    assert "pip sync `" in bootstrap_ps1
     assert '"--no-editable"' not in bootstrap_ps1
+    assert '[string]$Mirror = "auto"' in bootstrap_ps1
+    assert '@("tuna", "official")' in bootstrap_ps1
+    assert "requirements.locked.txt" in bootstrap_ps1
 
     managed_launcher = (
         REPOSITORY_ROOT / "scripts" / "start-managed-workbench.ps1"
     ).read_text(encoding="utf-8")
     assert 'Join-Path $PSScriptRoot "bootstrap.ps1"' in managed_launcher
     assert "RUNTIME_BOOTSTRAP_FAILED" in managed_launcher
+    assert "environment-fingerprint.json" in managed_launcher
+    assert "lock_sha256" in managed_launcher
 
     for name in (
         "start-managed-workbench.ps1",

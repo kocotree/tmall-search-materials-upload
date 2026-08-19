@@ -399,6 +399,11 @@ def perform_random_collection_action(
             safe_popup_selectors,
             delay_ms=RANDOM_ACTION_POPUP_SETTLE_DELAY_MS,
         )
+    if _visible_action_overlays(page):
+        return {
+            "status": "skipped",
+            "reason_code": "RANDOM_ACTION_PREEXISTING_OVERLAY",
+        }
     source = rng or random.SystemRandom()
     rows = _visible_current_rows(page, selector)
     if not rows:
@@ -429,7 +434,7 @@ def perform_random_collection_action(
     row, product_id, position = source.choice(candidates)
     pages_before = _context_pages(page)
     url_before = str(getattr(page, "url", ""))
-    baseline_overlay_count = len(_visible_action_overlays(page))
+    baseline_overlay_count = 0
     opened_scope = None
     result: dict[str, Any]
     action_started = False

@@ -281,6 +281,26 @@ def test_random_action_closes_the_new_filled_slot_dialog(monkeypatch):
     assert page.action_overlay is None
 
 
+def test_random_action_skips_when_an_existing_overlay_cannot_be_closed(monkeypatch):
+    page = Page([Row("190")])
+    slots = Slots(1)
+    common_stubs(monkeypatch, slots, [])
+    page.action_overlay = ActionOverlay(page)
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=FixedRandom(),
+    )
+
+    assert result == {
+        "status": "skipped",
+        "reason_code": "RANDOM_ACTION_PREEXISTING_OVERLAY",
+    }
+    assert slots.values[0].hovered is False
+    assert slots.values[0].clicked is False
+
+
 def test_random_action_skips_page_with_only_empty_slots(monkeypatch):
     row = Row("200")
     page = Page([row])
