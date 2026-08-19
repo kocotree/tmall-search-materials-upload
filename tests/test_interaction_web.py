@@ -387,6 +387,11 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     html = html_module.unescape(client.get("/").get_data(as_text=True))
 
     assert "确认本次任务" in html
+    assert "确认索引" in html
+    assert "确认店铺" not in html
+    assert "核对系统识别的店铺名称" not in html
+    assert "请核对这里显示的是本次要操作的店铺" not in html
+    assert re.search(r'<input id="setup-store" name="store" type="hidden"', html)
     assert "任务所需内容" in html
     assert "按下面 3 步完成" in html
     assert "高级设置 · 导入已有文件" in html

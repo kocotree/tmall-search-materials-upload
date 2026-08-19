@@ -168,18 +168,12 @@
               <span>按下面 3 步完成</span>
             </div>
             <ol class="operation-steps" aria-label="本页操作步骤">
-              <li><span>1</span><div><strong>确认店铺</strong><p>核对系统识别的店铺名称。</p></div></li>
+              <li><span>1</span><div><strong>确认索引</strong></div></li>
               <li><span>2</span><div><strong>选择图片文件夹</strong><p>添加本次要检索的业务文件夹，名称保持清晰且不重复。</p></div></li>
               <li><span>3</span><div><strong>提交处理</strong><p>确认页面没有红色提示后，点击底部“提交给工作台”。</p></div></li>
             </ol>
-            <div class="setup-business-grid">
-              <div class="field" data-field="store">
-                <label for="setup-store">目标店铺<span class="required" aria-label="必填">*</span></label>
-                <input id="setup-store" name="store" type="text" required aria-describedby="setup-store-error" placeholder="系统识别后会自动显示">
-                <p class="help-text">请核对这里显示的是本次要操作的店铺。</p>
-                <p class="field-error" id="setup-store-error" data-field-error="store" aria-live="polite"></p>
-              </div>
-            </div>
+            <input id="setup-store" name="store" type="hidden" aria-describedby="setup-store-error">
+            <p id="setup-store-error" data-field-error="store" hidden aria-live="polite"></p>
 
             <section class="setup-auto-section" aria-labelledby="setup-auto-title">
               <div class="form-heading compact-heading">

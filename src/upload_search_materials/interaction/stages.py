@@ -102,7 +102,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="setup",
         title="任务配置",
-        description="确认店铺和素材来源；后台全量采集“搜推高价值”，商品在第二阶段选择。",
+        description="确认索引和素材来源；后台自动识别店铺并全量采集“搜推高价值”，商品在第二阶段选择。",
         component="setup_form",
         interaction_policy="frontend_preferred",
         fields=(
@@ -111,7 +111,7 @@ STAGES: tuple[StageDefinition, ...] = (
                 "目标店铺",
                 "text",
                 required=True,
-                help_text="由 Agent 从已登录页面识别；用户核对页面可见店铺名",
+                help_text="由系统从已登录页面自动识别，不需要用户填写",
                 interaction_policy="frontend_preferred",
                 fallback_reason_codes=UI_FALLBACK_REASONS,
             ),
