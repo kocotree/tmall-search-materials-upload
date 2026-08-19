@@ -105,6 +105,7 @@
   });
   let selectionPreflightHydrationKey = "";
   let selectionPreflightHydrationInFlight = false;
+  let galleryAutoFocusedFor = "";
 
   const statusCopy = UiState.statusLabels;
   const stageActions = { draft: "/draft", submit: "/submit" };
@@ -2298,18 +2299,6 @@
     if (!content) return;
 
     const review = element("section", "folder-review");
-    const safety = element("div", "asset-safety");
-    safety.dataset.status = "checked";
-    safety.append(
-      element("strong", "", "请先筛选候选文件夹"),
-      element(
-        "span",
-        "",
-        "精确候选和不少于 5 字的完整名称片段默认采用；3–4 字短片段与 50% 粗略候选默认排除。采用文件夹只会加载候选图片，不会自动采用其中图片。",
-      ),
-    );
-    review.appendChild(safety);
-
     const decisionsByKey = new Map(
       materializeFolderDecisions(candidates).map((item) => [
         `${item.product_id}\u0000${item.folder_id}`,
@@ -2360,23 +2349,14 @@
         const countStatus = String(
           candidate.image_count_status || "pending",
         );
-        let countText = "素材数统计中";
+        let countText = "";
         if (countStatus === "ready") {
           countText = (
             `文件夹内素材（递归统计）：`
             + `${Number(candidate.raw_recursive_image_count || 0)} 张`
           );
-        } else if (countStatus === "unknown") {
-          countText = (
-            `素材数未知`
-            + (
-              candidate.image_count_reason_code
-                ? `（${candidate.image_count_reason_code}）`
-                : ""
-            )
-          );
         }
-        if (candidate.gallery_unique_path_count != null) {
+        if (countText && candidate.gallery_unique_path_count != null) {
           countText += (
             ` · 大小预筛后可分配 `
             + `${Number(candidate.gallery_unique_path_count || 0)} 张`
@@ -2409,9 +2389,11 @@
                   : "名称候选",
           ),
           element("small", "", candidate.source_system || "未知来源"),
-          element("small", "folder-image-count", countText),
-          element("code", "", candidate.folder_path || ""),
         );
+        if (countText) {
+          identity.appendChild(element("small", "folder-image-count", countText));
+        }
+        identity.appendChild(element("code", "", candidate.folder_path || ""));
         const controls = element("div", "folder-card-controls");
         const decision = document.createElement("select");
         decision.setAttribute("aria-label", `${candidate.folder_name} 归属决定`);
@@ -2572,8 +2554,8 @@
           "p",
           "",
           galleryComplete
-            ? "选择本次采用的图片；采用即确认该图片可用于本次发布，每次勾选都会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，提交将按每坑 3–9 张自动生成坑位草稿。"
-            : "可以先浏览已完成的候选。全部图片准备完成后，系统会自动开放采用和提交。",
+            ? "点击图片即可选择；系统会立即检查 1:1、3:4 预裁剪。全部已选图片检查完成后，提交将按每坑 3–9 张自动生成坑位草稿。"
+            : "可以先浏览已完成的候选。全部图片准备完成后，系统会自动开放选择和提交。",
         ),
       );
       resultSummary.replaceChildren(heading, action);
@@ -2607,37 +2589,6 @@
       );
       const prepared = data.scan_summary?.per_product?.find(
         (item) => String(item.product_id || "") === productId,
-      );
-      const discoveredCount = Number(
-        prepared?.discovered_images || rawProductCandidates.length,
-      );
-      const preparedCandidateCount = Number(
-        prepared?.planned_inspection_count
-          ?? prepared?.prepared_candidates
-          ?? rawProductCandidates.length,
-      );
-      const sizeEligibleCount = Number(
-        prepared?.size_eligible_count ?? discoveredCount,
-      );
-      const sizeFilteredCount = Number(
-        prepared?.size_filtered_count || 0,
-      );
-      const inspectedCandidateCount = Number(
-        prepared?.inspected_count ?? preparedCandidateCount,
-      );
-      const inspectionFailureCount = Number(
-        prepared?.inspection_failure_count || 0,
-      );
-      const contentDuplicateCount = Number(
-        prepared?.content_duplicate_count || 0,
-      );
-      const finalCandidateCount = Number(
-        prepared?.final_candidate_count
-          ?? rawProductCandidates.length,
-      );
-      const validCandidateCount = Number(
-        prepared?.valid_candidates
-          ?? rawProductCandidates.filter((candidate) => candidate.validation_status === "valid").length,
       );
       const candidateLimit = Math.max(1, Number(data.candidate_limit || 100));
       const pageSize = Math.max(1, Number(data.page_size || 30));
@@ -2780,15 +2731,6 @@
         pageIndex = Math.min(pageIndex, pageCount - 1);
         candidateSummary.textContent = (
           `商品 ID ${productId} · 后台缺 ${missingMaterials} 篇`
-          + ` · 文件夹内共发现 ${discoveredCount} 张`
-          + ` · 大小预筛可用 ${sizeEligibleCount} 张`
-          + `${sizeFilteredCount ? `（跳过 ${sizeFilteredCount} 张）` : ""}`
-          + ` · 本轮计划检查 ${preparedCandidateCount} 张`
-          + ` · 检查成功 ${inspectedCandidateCount} 张`
-          + ` · 检查失败 ${inspectionFailureCount} 张`
-          + ` · 内容重复 ${contentDuplicateCount} 张`
-          + ` · 最终可选素材 ${finalCandidateCount} 张`
-          + ` · 预检有效 ${validCandidateCount} 张`
           + ` · 当前可见 ${productCandidates.length} 张`
           + ` / 每商品检查上限 ${candidateLimit} 张`
           + ` · 每批显示 ${pageSize} 张`
@@ -2817,6 +2759,8 @@
             && !hashesUsedElsewhere.has(String(candidate.sha256 || ""))
             && selectionCheck?.status !== "blocked";
           const card = element("article", "asset-card");
+          card.tabIndex = 0;
+          card.setAttribute("role", "checkbox");
           card.dataset.selectionPreflightStatus = checking
             ? "checking"
             : selectionCheck?.status || "unchecked";
@@ -2854,16 +2798,13 @@
             element("small", "", candidate.source_path || ""),
           );
           const controls = element("div", "asset-card-controls");
-          const selectLabel = element("label", "asset-check");
           const select = document.createElement("input");
           select.type = "checkbox";
           select.checked = selectionJob?.desiredSelected || selectedIds.has(assetId);
           select.disabled = !selectable;
-          selectLabel.append(select, document.createTextNode("采用"));
-          controls.append(selectLabel);
           if (!galleryComplete) {
             controls.appendChild(
-              element("span", "asset-warning", "候选仍在加载，完成后可采用"),
+              element("span", "asset-warning", "候选仍在加载，完成后可选择"),
             );
           }
           const selectionFeedback = element("span", "asset-selection-check");
@@ -2918,6 +2859,12 @@
             select.disabled = !selectable || result?.status === "blocked";
             select.indeterminate = false;
             card.classList.toggle("is-selected", selectedIds.has(assetId));
+            card.classList.toggle(
+              "is-unselectable",
+              galleryComplete && select.disabled,
+            );
+            card.setAttribute("aria-checked", String(desired));
+            card.setAttribute("aria-disabled", String(select.disabled));
             card.dataset.selectionPreflightStatus = isQueued
               ? "queued"
               : isRunning && desired
@@ -2928,13 +2875,13 @@
             selectionFeedback.className = "asset-selection-check";
             if (isQueued) {
               selectionFeedback.classList.add("asset-warning");
-              selectionFeedback.textContent = "排队中，可取消采用";
+              selectionFeedback.textContent = "排队中，可再次点击取消";
             } else if (isRunning && desired) {
               selectionFeedback.classList.add("asset-warning");
-              selectionFeedback.textContent = "正在检查 1:1、3:4 预裁剪，可取消采用";
+              selectionFeedback.textContent = "正在检查 1:1、3:4 预裁剪，可再次点击取消";
             } else if (isRunning) {
               selectionFeedback.classList.add("asset-warning");
-              selectionFeedback.textContent = "已取消采用；后台结果仅用于缓存";
+              selectionFeedback.textContent = "已取消选择；后台结果仅用于缓存";
             } else if (result?.status === "passed") {
               selectionFeedback.classList.add("is-passed");
               selectionFeedback.textContent = `预裁剪通过：${result.feasible_ratios.join("、")}`;
@@ -3012,6 +2959,20 @@
             updateSelectionSummary();
             renderSelected();
           });
+          const toggleCardSelection = () => {
+            if (select.disabled) return;
+            select.checked = !select.checked;
+            select.dispatchEvent(new Event("change"));
+          };
+          card.addEventListener("click", (event) => {
+            if (event.target.closest("button, a, input, select, textarea, label")) return;
+            toggleCardSelection();
+          });
+          card.addEventListener("keydown", (event) => {
+            if (!["Enter", " "].includes(event.key)) return;
+            event.preventDefault();
+            toggleCardSelection();
+          });
         });
         updateSelectionSummary();
         pageLabel.textContent = `第 ${pageIndex + 1} / ${pageCount} 批 · 本批 ${displayedCandidates.length} 张`;
@@ -3088,7 +3049,7 @@
             image.src = apiPath(
               `/stages/asset_matching/assets/${encodeURIComponent(candidate.asset_id)}`,
             );
-            const remove = element("button", "button-secondary", "取消采用");
+            const remove = element("button", "button-secondary", "取消选择");
             remove.type = "button";
             remove.addEventListener("click", () => {
               const assetId = String(candidate.asset_id);
@@ -3162,6 +3123,23 @@
       });
       draw();
     });
+    if (galleryComplete) {
+      const focusIdentity = [
+        sessionId,
+        String(data.gallery_identity?.folder_decisions_sha256 || ""),
+        requirements.map((item) => String(item.product_id || "")).join(","),
+        candidates.length,
+      ].join("|");
+      if (galleryAutoFocusedFor !== focusIdentity) {
+        galleryAutoFocusedFor = focusIdentity;
+        window.requestAnimationFrame(() => {
+          content.querySelector(".asset-product")?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        });
+      }
+    }
   }
 
   function renderImageReview(view) {
@@ -5390,6 +5368,21 @@
     ));
   }
 
+  function hydrateApproverOptions(options) {
+    const list = document.querySelector("[data-approver-options]");
+    if (!list) return;
+    list.replaceChildren();
+    [...new Set(
+      (options || [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean),
+    )].forEach((owner) => {
+      const option = document.createElement("option");
+      option.value = owner;
+      list.appendChild(option);
+    });
+  }
+
   function renderUploadTaskConfirmation(view) {
     const module = document.querySelector('[data-component="ApprovalChecklist"]');
     const content = module?.querySelector("[data-result-content]");
@@ -5399,7 +5392,6 @@
 
     const documentData = view.result?.data || {};
     const tasks = Array.isArray(documentData.tasks) ? documentData.tasks : [];
-    const warnings = Array.isArray(documentData.warnings) ? documentData.warnings : [];
     const control = activeForm()?.querySelector('[name="task_ids"]');
     const selected = new Set(
       String(control?.value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
@@ -5429,22 +5421,12 @@
       ["商品", documentData.product_count || 0],
       ["可审任务", tasks.filter((task) => task.status === "ready_for_review").length],
       ["图片", documentData.media_count || 0],
-      ["警告", warnings.length],
     ].forEach(([label, value]) => {
       const item = element("div", "upload-confirmation-metric");
       item.append(element("strong", "", String(value)), element("span", "", label));
       summary.appendChild(item);
     });
     content.appendChild(summary);
-
-    if (warnings.length) {
-      const warningPanel = element("div", "upload-confirmation-warnings");
-      warningPanel.appendChild(element("strong", "", "上传前检查提醒"));
-      warnings.forEach((warning) => {
-        warningPanel.appendChild(element("p", "", warning.message || warning.code || "待复查"));
-      });
-      content.appendChild(warningPanel);
-    }
 
     const actions = element("div", "upload-confirmation-actions");
     const selectAll = element("button", "secondary-button", "选择全部可授权任务");
@@ -5481,9 +5463,6 @@
       card.append(choice, meta, title, description);
       (task.blocking_reasons || []).forEach((reason) => {
         card.appendChild(element("p", "upload-task-blocker", reason));
-      });
-      (task.warnings || []).forEach((warning) => {
-        card.appendChild(element("p", "upload-task-warning", warning));
       });
       checkbox.addEventListener("change", () => {
         if (checkbox.checked) selected.add(task.task_id);
@@ -5657,6 +5636,9 @@
       try {
         if (payload.input) {
           hydrateForm(activeForm(), payload.input.values);
+        }
+        if (requestedStageId === "approval") {
+          hydrateApproverOptions(payload.approver_options);
         }
         renderStageResult(stages.get(requestedStageId).component);
       } finally {

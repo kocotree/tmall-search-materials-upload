@@ -1592,6 +1592,10 @@ def create_app(
             response["gallery_job"] = reconcile_gallery_job(
                 store, session_id
             )
+        elif stage_id == "approval":
+            response["approver_options"] = _completeness_owner_options(
+                store, session_id, state
+            )
         return jsonify(response)
 
     @app.post(
@@ -5044,6 +5048,30 @@ def _current_result(
     return context
 
 
+def _completeness_owner_options(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> list[str]:
+    result = _current_result(store, session_id, "completeness", state)
+    data = result.get("data") if isinstance(result, dict) else None
+    products = data.get("products") if isinstance(data, dict) else None
+    if not isinstance(products, list):
+        return []
+    owners: list[str] = []
+    seen: set[str] = set()
+    for product in products:
+        owner = (
+            str(product.get("owner", "")).strip()
+            if isinstance(product, dict)
+            else ""
+        )
+        if owner and owner not in seen:
+            seen.add(owner)
+            owners.append(owner)
+    return owners
+
+
 def _completed_approval_result(
     store: SessionStore,
     session_id: str,
@@ -5559,10 +5587,11 @@ def _value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, s
 
 def _unknown_value_errors(stage: StageDefinition, values: dict[str, Any]) -> dict[str, str]:
     allowed_names = {field.name for field in stage.fields}
+    compatibility_names = {"store_confirmed"} if stage.id == "setup" else set()
     return {
         name: "is not allowed for this stage"
         for name in values
-        if name not in allowed_names
+        if name not in allowed_names and name not in compatibility_names
     }
 
 

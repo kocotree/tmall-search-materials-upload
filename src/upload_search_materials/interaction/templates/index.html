@@ -168,7 +168,7 @@
               <span>按下面 3 步完成</span>
             </div>
             <ol class="operation-steps" aria-label="本页操作步骤">
-              <li><span>1</span><div><strong>确认店铺</strong><p>核对系统识别的店铺名称，并勾选确认。</p></div></li>
+              <li><span>1</span><div><strong>确认店铺</strong><p>核对系统识别的店铺名称。</p></div></li>
               <li><span>2</span><div><strong>选择图片文件夹</strong><p>添加本次要检索的业务文件夹，名称保持清晰且不重复。</p></div></li>
               <li><span>3</span><div><strong>提交处理</strong><p>确认页面没有红色提示后，点击底部“提交给工作台”。</p></div></li>
             </ol>
@@ -178,13 +178,6 @@
                 <input id="setup-store" name="store" type="text" required aria-describedby="setup-store-error" placeholder="系统识别后会自动显示">
                 <p class="help-text">请核对这里显示的是本次要操作的店铺。</p>
                 <p class="field-error" id="setup-store-error" data-field-error="store" aria-live="polite"></p>
-              </div>
-              <div class="field field-wide" data-field="store_confirmed">
-                <label class="check-control">
-                  <input id="setup-store-confirmed" name="store_confirmed" type="checkbox" data-value-kind="boolean" required aria-describedby="setup-store_confirmed-error">
-                  <span>我已确认当前页面店铺与目标店铺一致</span>
-                </label>
-                <p class="field-error" id="setup-store_confirmed-error" data-field-error="store_confirmed" aria-live="polite"></p>
               </div>
             </div>
 
@@ -359,10 +352,6 @@
             <p class="field-error" id="slots_copy-copy_edits-error" data-field-error="copy_edits" aria-live="polite"></p>
             <p class="field-error" id="slots_copy-user_notes-error" data-field-error="user_notes" aria-live="polite"></p>
             {% else %}
-            <div class="form-heading">
-              <div><p class="eyebrow">USER INPUT</p><h3>{{ "恢复处理" if stage.id == "results" else "本阶段输入" }}</h3></div>
-              <span>字段由阶段 Schema 生成</span>
-            </div>
             <div class="field-grid">
               {% for field in stage.fields %}
               <div class="field{% if field.component in ['textarea', 'table', 'path_list', 'auto_path_list', 'multi_select'] %} field-wide{% endif %}{% if (stage.id == 'completeness' and field.name == 'selected_product_ids') or (stage.id == 'image_review' and field.name == 'decisions') or (stage.id == 'slots_copy' and field.name == 'slot_assignments') or (stage.id == 'approval' and field.name == 'task_ids') %} interaction-data-field{% endif %}" data-field="{{ field.name }}"{% if field.component in ['hidden', 'hidden_json_list'] or (stage.id == 'approval' and field.name == 'task_ids') %} hidden{% endif %}>
@@ -410,10 +399,12 @@
                   id="{{ stage.id }}-{{ field.name }}"
                   name="{{ field.name }}"
                   type="{{ 'text' if field.component == 'path' else ('datetime-local' if field.component == 'datetime' else field.component) }}"
+                  {% if stage.id == "approval" and field.name == "confirmed_by" %}list="approval-confirmed-by-options" autocomplete="name"{% endif %}
                   aria-describedby="{{ stage.id }}-{{ field.name }}-error"
                   {% if field.component == "number" %}step="any" data-value-kind="number"{% endif %}
                   {% if field.required %}required{% endif %}{% if field.disabled %} disabled{% endif %}
                 >
+                {% if stage.id == "approval" and field.name == "confirmed_by" %}<datalist id="approval-confirmed-by-options" data-approver-options></datalist>{% endif %}
                 {% endif %}
                 {% endif %}
 

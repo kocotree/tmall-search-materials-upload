@@ -403,6 +403,10 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert 'name="products_csv"' in html and 'type="hidden"' in html
     assert 'name="rules_csv"' in html
     assert html.count('name="image_roots"') >= 3
+    assert 'name="store_confirmed"' not in html
+    assert "我已确认当前页面店铺与目标店铺一致" not in html
+    assert "本阶段输入" not in html
+    assert 'data-approver-options' in html
     for removed in ("basic_xlsx", "search_xlsx", "asset_root", "runs_root"):
         assert f'name="{removed}"' not in html
     assert re.search(
@@ -1500,8 +1504,8 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "等待系统恢复" in javascript
     assert "maxConcurrent: 6" in javascript
     assert "maxWeight: 8" in javascript
-    assert "排队中，可取消采用" in javascript
-    assert "已取消采用；后台结果仅用于缓存" in javascript
+    assert "排队中，可再次点击取消" in javascript
+    assert "已取消选择；后台结果仅用于缓存" in javascript
     assert "selectionPreflightConcurrency = 3" not in javascript
     assert "2000" in javascript
     assert "/api/sessions" in javascript
@@ -2133,6 +2137,29 @@ def test_approval_stage_exposes_upload_task_review_context(
     store = SessionStore(tmp_path)
     store.write_review_context(
         session_id,
+        "completeness",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "completeness",
+            "revision": 0,
+            "status": "completed",
+            "summary": "products ready",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "review",
+            "data": {
+                "products": [
+                    {"product_id": "1001", "owner": "小雨"},
+                    {"product_id": "1002", "owner": "阿杰"},
+                    {"product_id": "1003", "owner": "小雨"},
+                    {"product_id": "1004", "owner": ""},
+                ]
+            },
+        },
+    )
+    store.write_review_context(
+        session_id,
         "approval",
         {
             "schema_version": 1,
@@ -2164,6 +2191,7 @@ def test_approval_stage_exposes_upload_task_review_context(
     assert response.status_code == 200
     assert response.json["result"]["summary"] == "upload tasks ready"
     assert response.json["result"]["data"]["tasks"][0]["task_id"] == "task-1"
+    assert response.json["approver_options"] == ["小雨", "阿杰"]
 
 
 def test_approval_autosave_preserves_review_context_in_frontend(client):
@@ -3024,16 +3052,13 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         "license_decisions",
         "folder_decisions",
         "排除该文件夹",
-        "请先筛选候选文件夹",
-        "3–4 字短片段与 50% 粗略候选默认排除",
         "完整名称片段命中",
         "短名称片段候选",
         "folder-decision-changed",
         "pruneSelectedCandidates",
         "历史候选未关联文件夹",
         "preservesReviewContext",
-        "候选仍在加载，完成后可采用",
-        "首批候选已就绪",
+        "候选仍在加载，完成后可选择",
         "已渐进展示",
     ):
         assert expected in source
@@ -3045,7 +3070,17 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "第 1 步：筛选文件夹" in source
     assert "第 2 步：选择图片" in source
     assert '["pending", "待确认"]' not in source
-    assert "采用即确认该图片可用于本次发布" in source
+    assert "点击图片即可选择" in source
+    assert "galleryAutoFocusedFor" in source
+    assert "scrollIntoView" in source
+    assert 'card.setAttribute("role", "checkbox")' in source
+    assert '"is-unselectable"' in source
+    assert "hydrateApproverOptions" in source
+    assert "请先筛选候选文件夹" not in source
+    assert "素材数统计中" not in source
+    assert "文件夹内共发现" not in source
+    assert "上传前检查提醒" not in source
+    assert 'document.createTextNode("采用")' not in source
     assert 'document.createTextNode("授权已确认")' not in source
     assert "按每坑 3–9 张自动生成坑位草稿" in source
     assert "预计创建 ${guidance.completeSlots} 个完整坑位" in source
@@ -3414,17 +3449,17 @@ def test_validation_enforces_approval_task_list(client, session_id, tmp_path):
 
 
 
-def test_setup_validation_requires_store_confirmation(
+def test_setup_validation_does_not_require_store_confirmation(
     client, session_id, tmp_path
 ):
     readable = tmp_path / "readable.txt"
     readable.write_text("ok", encoding="utf-8")
     values = {
         "store": "测试店铺",
-        "store_confirmed": False,
-        "month": "2026-07",
         "products_csv": str(readable),
         "rules_csv": str(readable),
+        "team_folder_index_root": str(tmp_path),
+        "image_source_labels": ["测试图片源"],
         "image_roots": [str(tmp_path)],
         "asset_manifest": "",
         "historical_basic_xlsx": "",
@@ -3434,8 +3469,7 @@ def test_setup_validation_requires_store_confirmation(
 
     response = client.post(f"/api/sessions/{session_id}/stages/setup/submit", json={"values": values})
 
-    assert response.status_code == 422
-    assert response.json["field_errors"]["store_confirmed"] == "must be confirmed"
+    assert response.status_code == 202
 
 
 def test_source_code_never_imports_execution_modules():

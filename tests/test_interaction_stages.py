@@ -52,12 +52,12 @@ def test_asset_matching_keeps_technical_decisions_out_of_the_visible_form():
 
 def test_each_stage_declares_its_exact_fields_and_dependency():
     expected_fields = {
-            "setup": (
-                "store",
-                "store_confirmed",
-                "products_csv",
+        "setup": (
+            "store",
+            "products_csv",
             "rules_csv",
             "folder_index_root",
+            "team_folder_index_root",
             "image_source_labels",
             "image_roots",
             "asset_manifest",

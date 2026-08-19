@@ -611,10 +611,13 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
   background: #f7f8f6;
   border: 1px solid var(--line);
   border-radius: 9px;
+  cursor: pointer;
   transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 .asset-card:hover { transform: translateY(-2px); border-color: #b9d2bf; box-shadow: 0 8px 18px rgba(24, 73, 38, 0.08); }
-.asset-card.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(48, 160, 76, 0.14); }
+.asset-card.is-selected { border-color: var(--accent); background: #f3fbf5; box-shadow: 0 0 0 2px rgba(48, 160, 76, 0.2); }
+.asset-card.is-unselectable { border-color: #c65443; background: #fff4f1; box-shadow: 0 0 0 2px rgba(198, 84, 67, 0.12); cursor: not-allowed; }
+.asset-card[aria-disabled="true"]:hover { transform: none; }
 .asset-card[data-selection-preflight-status="checking"] { border-color: #c58a32; background: #fffaf0; }
 .asset-card[data-selection-preflight-status="queued"] { border-color: #8a6b3d; background: #fffdf7; }
 .asset-card[data-selection-preflight-status="cancelled"] { border-color: #b9b2a7; background: #faf9f7; }
