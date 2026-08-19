@@ -239,7 +239,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="slots_copy",
         title="坑位编排、图片处理与文案",
-        description="先确认每个坑位的图片、顺序和唯一比例，再执行裁剪/压缩；输出校验通过后统一确认文案。",
+        description="先确认每个坑位的图片、顺序和唯一比例，再执行裁剪/压缩；输出校验通过后核对并填写完整文案。",
         component="slots_copy_editor",
         previous_stage="asset_matching",
         fields=(

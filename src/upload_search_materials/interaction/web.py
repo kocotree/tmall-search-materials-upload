@@ -2783,13 +2783,12 @@ def create_app(
                         not copy
                         or not str(copy.get("title", "")).strip()
                         or not str(copy.get("description", "")).strip()
-                        or copy.get("confirmed") is not True
                     ):
                         return _validation_error(
                             {
                                 "copy_edits": (
-                                    f"{slot_id}: title, description and confirmation "
-                                    "are required after outputs are ready"
+                                    f"{slot_id}: title and description are required "
+                                    "after outputs are ready"
                                 )
                             }
                         )
@@ -2816,6 +2815,7 @@ def create_app(
                             "plan_sha256": processed["plan_sha256"],
                             "output_sha256": output_sha_by_slot.get(slot_id, []),
                             "status": "confirmed",
+                            "confirmed": True,
                         }
                     )
                 values["copy_edits"] = normalized_copy
@@ -4626,11 +4626,11 @@ def create_app(
                 ),
                 [],
             )
-            if reasons or item.get("confirmed") is not True:
+            if reasons:
                 return _validation_error(
                     {
                         "copy_edits": (
-                            f"{slot_id}: copy must be valid and confirmed "
+                            f"{slot_id}: copy must be valid "
                             f"({','.join(reasons)})"
                         )
                     }

@@ -732,7 +732,7 @@ def _slots_copy_blocking_messages(document: dict[str, Any]) -> list[str]:
             "多个坑位指向同一个千牛目标坑位，请重新生成相关坑位的标题与描述。"
         ),
         "DRY_RUN_COPY_NOT_CONFIRMED": (
-            "标题或描述尚未完整确认，请补齐内容后重新勾选整批确认。"
+            "标题或描述尚未填写完整，请补齐内容后重新进入上传任务确认。"
         ),
         "DRY_RUN_OUTPUT_MISSING": (
             "已处理图片不存在，请返回图片处理并重新生成该坑位图片。"

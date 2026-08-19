@@ -81,7 +81,7 @@ checkpoint 恢复和需要人工修复；handoff 文件只展示原提交身份�
 | 搜推高价值商品选择、搜索、筛选、排除 | `inspection_matrix` | `frontend_required` | 不允许业务值降级 |
 | 文件夹采用/排除、换批、图片采用、预检、重复提示 | `asset_match_gallery` | `frontend_required` | 不允许业务值降级 |
 | 坑位、顺序、比例、裁剪、压缩、独立裁剪预校验 | `slots_copy_editor` 第一子页 | `frontend_required` | 不允许业务值降级；预校验未通过时完成按钮必须禁用 |
-| AI 文案任务进度、逐坑回填、标题、描述、风险和逐坑确认 | `slots_copy_editor` 第二子页 | `frontend_required` | 页面只创建/轮询 Agent 请求，不得同步运行 Playwright；schema gap 可记录，不得旁路发布 |
+| AI 文案任务进度、逐坑回填、标题、描述、风险和必填完整度 | `slots_copy_editor` 第二子页 | `frontend_required` | 页面只创建/轮询 Agent 请求；标题或描述存在空项时进入按钮必须禁用，不得同步运行 Playwright或旁路发布 |
 | dry-run 审查 | `dry_run_review` | `frontend_required` | 不允许业务值降级 |
 | 精确批准 | `approval_table` | `frontend_preferred` | 页面不可用时仍须绑定不可变清单与哈希 |
 | 生产确认 | `production_confirmation` | `frontend_preferred` | 页面不可用时仍须精确确认店铺、任务、坑位和 manifest 哈希 |

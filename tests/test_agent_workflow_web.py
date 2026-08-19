@@ -687,6 +687,71 @@ def test_copy_request_is_blocked_until_final_outputs_are_ready(tmp_path):
     assert "final image outputs are not ready" in str(response.json)
 
 
+def test_complete_copy_fields_are_confirmed_without_checkbox(
+    tmp_path, monkeypatch
+):
+    from upload_search_materials.interaction import web as interaction_web
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = "copy-complete-fields"
+    request_document = {
+        "request_id": request_id,
+        "kind": "copy_draft",
+        "status": "completed",
+        "request_context": {
+            "slot_plan_revision": 1,
+            "final_outputs_sha256": "outputs-sha",
+            "slots": [
+                {"slot_id": "slot-a", "trusted_source_fields": {}}
+            ],
+        },
+    }
+    monkeypatch.setattr(
+        interaction_web,
+        "read_agent_request",
+        lambda *_args, **_kwargs: request_document,
+    )
+    response_path = (
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "response.json"
+    )
+    store._write_json_atomic(
+        response_path,
+        {
+            "schema_version": 1,
+            "result": {
+                "copy_drafts": [
+                    {
+                        "slot_id": "slot-a",
+                        "title": "原始标题",
+                        "description": "这是原始生成的素材描述内容",
+                    }
+                ]
+            }
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/copy-drafts/confirm",
+        json={
+            "request_id": request_id,
+            "copy_edits": [
+                {
+                    "slot_id": "slot-a",
+                    "title": "人工核对标题",
+                    "description": "这是已经人工核对完成的素材描述内容",
+                    "confirmed": False,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.json
+    assert response.json["copy_drafts"][0]["confirmed"] is True
+
+
 def test_copy_progress_autosave_does_not_supersede_open_request(tmp_path):
     client, store, session_id = _prepared_slot_client(tmp_path)
     current_endpoint = (

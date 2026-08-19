@@ -1539,16 +1539,6 @@ summary:focus-visible {
   background: #fff9ee;
 }
 
-.copy-confirmation-control {
-  flex: 1 1 320px;
-  min-height: 44px;
-  margin-top: 0.1rem;
-  padding: 0.65rem 0.75rem;
-  border: 1px solid #dce4df;
-  border-radius: 0.65rem;
-  background: #f7faf8;
-}
-
 @media (max-width: 900px) {
   .copy-slot-body {
     grid-template-columns: 1fr;

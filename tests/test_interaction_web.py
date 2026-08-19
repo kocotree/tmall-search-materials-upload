@@ -1485,9 +1485,10 @@ def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_control
         "进入上传任务确认",
         "重新生成新版本",
         "重新生成会创建独立新版本，不覆盖历史版本，也不会发布。",
-        "已确认标题、描述，可进入上传任务确认",
+        "全部标题和描述已填写，可以进入上传任务确认",
     ):
         assert text in javascript
+    assert "已确认标题、描述，可进入上传任务确认" not in javascript
     assert '? ["process", "copy"]' in javascript
     assert "请求 ID：" not in javascript
     assert 'detail: { source: "explicit-user-edit" }' in javascript
@@ -3411,7 +3412,7 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert "currentWorkflowDispatch?.online === true" in source
 
 
-def test_frontend_uses_one_batch_copy_confirmation_and_returns_blockers_to_editor():
+def test_frontend_enables_copy_submit_only_when_all_fields_are_complete():
     source = (
         Path(__file__).parents[1]
         / "src"
@@ -3421,10 +3422,13 @@ def test_frontend_uses_one_batch_copy_confirmation_and_returns_blockers_to_edito
         / "app.js"
     ).read_text(encoding="utf-8")
 
-    assert "已确认标题、描述，可进入上传任务确认" in source
+    assert "已确认标题、描述，可进入上传任务确认" not in source
     assert "我已核对该标题、描述与左侧素材一致，可进入 dry-run" not in source
-    assert 'draft.confirmed = batchConfirmation.checked' in source
-    assert 'copyState.forEach((draft) => { draft.confirmed = false; });' in source
+    assert "batchConfirmation" not in source
+    assert "finishButton.disabled = !hasCompleteDrafts;" in source
+    assert "finishButton.hidden = !hasCompleteDrafts;" not in source
+    assert "String(draft.title || \"\").trim()" in source
+    assert "String(draft.description || \"\").trim()" in source
     assert "上传前检查发现需要修改的内容" in source
     assert 'element("section", "slot-blocking-summary")' in source
 

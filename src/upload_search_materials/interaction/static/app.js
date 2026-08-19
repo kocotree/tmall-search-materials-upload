@@ -4429,7 +4429,6 @@
       const hasMeaningfulCopyDrafts = (drafts) => drafts.some((item) => (
         String(item?.title || "").trim()
         || String(item?.description || "").trim()
-        || item?.confirmed === true
       ));
       const savedCopy = new Map(
         savedCopyItems.map((item) => [String(item.slot_id), item]),
@@ -4438,13 +4437,12 @@
       const copyState = [];
       let finishButton = null;
       let finishHint = null;
-      let batchConfirmation = null;
       let copyVersionCount = 0;
       const copyActions = element("div", "copy-toolbar");
       const copyStatus = element(
         "span",
         "copy-toolbar-status",
-        "千牛会按商品坑位生成文案；全部生成后统一核对并确认。",
+        "千牛会按商品坑位生成文案；全部生成后请逐项核对标题和描述。",
       );
       const copyButton = element(
         "button",
@@ -4468,34 +4466,24 @@
       copyActions.append(copyStatus, copyToolbarActions);
       const updateCopyActions = () => {
         const incompleteCount = copyState.filter(
-          (draft) => !draft.title || !draft.description,
+          (draft) => !String(draft.title || "").trim()
+            || !String(draft.description || "").trim(),
         ).length;
         const hasCompleteDrafts = copyState.length > 0 && incompleteCount === 0;
-        const batchConfirmed = hasCompleteDrafts
-          && copyState.every((draft) => draft.confirmed === true);
         copyButton.className = hasCompleteDrafts
           ? "button-secondary"
           : "primary-button";
-        if (batchConfirmation) {
-          batchConfirmation.disabled = !hasCompleteDrafts;
-          batchConfirmation.checked = batchConfirmed;
-        }
         if (finishButton) {
-          finishButton.hidden = !hasCompleteDrafts;
-          finishButton.disabled = !batchConfirmed;
+          finishButton.disabled = !hasCompleteDrafts;
           finishButton.title = incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述`
-            : batchConfirmed
-              ? "标题和描述已确认，可以进入上传任务确认"
-              : "请统一确认全部标题和描述";
+            : "全部标题和描述已填写，可以进入上传任务确认";
         }
         if (finishHint) {
           finishHint.textContent = incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述。`
-            : batchConfirmed
-              ? "标题和描述已确认，可以进入上传任务确认。"
-              : "请核对全部标题和描述后统一确认。";
-          finishHint.dataset.status = incompleteCount || !batchConfirmed
+            : "全部标题和描述已填写，可以进入上传任务确认。";
+          finishHint.dataset.status = incompleteCount
             ? "waiting"
             : "ready";
         }
@@ -4510,7 +4498,10 @@
           product_id: assignment.product_id,
           title: String(existing.title || ""),
           description: String(existing.description || ""),
-          confirmed: existing.confirmed === true,
+          confirmed: Boolean(
+            String(existing.title || "").trim()
+            && String(existing.description || "").trim()
+          ),
           source: String(existing.source || "manual"),
           evidence: Array.isArray(existing.evidence) ? existing.evidence : [],
           risks: Array.isArray(existing.risks) ? existing.risks : [],
@@ -4636,7 +4627,12 @@
         const save = () => {
           item.title = title.value;
           item.description = description.value;
-          copyState.forEach((draft) => { draft.confirmed = false; });
+          copyState.forEach((draft) => {
+            draft.confirmed = Boolean(
+              String(draft.title || "").trim()
+              && String(draft.description || "").trim()
+            );
+          });
           titleCount.textContent = `${title.value.length}/30`;
           descriptionCount.textContent = `${description.value.length}/1000`;
           writeJsonListControl("copy_edits", copyState, { notify: true });
@@ -4662,26 +4658,9 @@
         element(
           "span",
           "",
-          "系统校验并本地上传当前坑位第 1 张最终图片，唤起千牛文案；只读取草稿、不填充、不发布，全部完成后统一核对并确认。",
+          "系统校验并本地上传当前坑位第 1 张最终图片，唤起千牛文案；只读取草稿、不填充、不发布，全部完成后请核对标题和描述。",
         ),
       );
-      const batchConfirmationLabel = element(
-        "label",
-        "check-control copy-confirmation-control",
-      );
-      batchConfirmation = document.createElement("input");
-      batchConfirmation.type = "checkbox";
-      batchConfirmationLabel.append(
-        batchConfirmation,
-        element("span", "", "已确认标题、描述，可进入上传任务确认"),
-      );
-      batchConfirmation.addEventListener("change", () => {
-        copyState.forEach((draft) => {
-          draft.confirmed = batchConfirmation.checked;
-        });
-        writeJsonListControl("copy_edits", copyState, { notify: true });
-        updateCopyActions();
-      });
       const finish = element(
         "button",
         "primary-button",
@@ -4704,7 +4683,6 @@
       ));
       const finalActions = element("div", "slot-page-actions");
       finalActions.append(
-        batchConfirmationLabel,
         finishHint,
         backToProcess,
         finish,
@@ -4760,14 +4738,17 @@
             description: draft.description || "",
             evidence: draft.evidence || [],
             risks: draft.risks || [],
-            confirmed: false,
+            confirmed: Boolean(
+              String(draft.title || "").trim()
+              && String(draft.description || "").trim()
+            ),
             source: String(draft.source || "qianniu_builtin_ai"),
             request_id: requestId,
           };
         });
         writeJsonListControl("copy_edits", merged, { notify: true });
         copyStatus.textContent = drafts.length === assignments.length
-          ? "千牛文案已载入；请核对全部依据和风险后统一确认。"
+          ? "千牛文案已载入；请核对全部标题、描述、依据和风险。"
           : `工作台后台已回填 ${drafts.length}/${assignments.length} 个坑位，正在继续处理。`;
         renderCopyEditor(processed, requestId);
       };

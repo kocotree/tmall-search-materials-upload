@@ -163,6 +163,30 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
         json={"slot_assignments": slot_assignments},
     )
     assert process_response.status_code == 200, process_response.json
+    copy_request_id = process_response.json["copy_request_id"]
+    store._write_json_atomic(
+        store._stage_path(session.session_id, "slots_copy")
+        / "agent-requests"
+        / copy_request_id
+        / "response.json",
+        {
+            "schema_version": 1,
+            "result": {
+                "copy_drafts": [
+                    {
+                        "slot_id": "slot-square",
+                        "product_id": "P1",
+                        "remote_slot_position": 1,
+                    },
+                    {
+                        "slot_id": "slot-portrait",
+                        "product_id": "P1",
+                        "remote_slot_position": 2,
+                    },
+                ]
+            },
+        },
+    )
     slot_submit = client.post(
         f"/api/sessions/{session.session_id}/stages/slots_copy/submit",
         json={
@@ -175,14 +199,15 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
                         "product_id": "P1",
                         "title": "square dry-run",
                         "description": "square description",
-                        "confirmed": True,
+                        "request_id": copy_request_id,
                     },
                     {
                         "slot_id": "slot-portrait",
                         "product_id": "P1",
                         "title": "portrait dry-run",
                         "description": "portrait description",
-                        "confirmed": True,
+                        "confirmed": False,
+                        "request_id": copy_request_id,
                     },
                 ],
                 "user_notes": "",
@@ -191,10 +216,10 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
     )
     assert slot_submit.status_code == 202
     assert slot_submit.json["status"] == "completed"
-    assert slot_submit.json["next_stage"] == "dry_run"
-    assert slot_submit.json["dry_run_status"] == "blocked"
+    assert slot_submit.json["next_stage"] == "approval"
+    assert slot_submit.json["dry_run_status"] == "needs_user_input"
     assert slot_submit.json["dry_run"]["task_count"] == 2
-    assert store.load_session(session.session_id)["current_stage"] == "dry_run"
+    assert store.load_session(session.session_id)["current_stage"] == "approval"
     slot_input = store.read_optional_stage_document(
         session.session_id, "slots_copy", "input"
     )
@@ -202,6 +227,10 @@ def test_stage_three_to_stage_five_dry_run_preserves_sources(tmp_path):
         assignment["target_ratio"]
         for assignment in slot_input["values"]["slot_assignments"]
     ] == ["1:1", "3:4"]
+    assert all(
+        copy["confirmed"] is True
+        for copy in slot_input["values"]["copy_edits"]
+    )
     processed = json.loads(
         (
             store._stage_path(session.session_id, "slots_copy")
