@@ -1904,6 +1904,16 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "maxWeight: 8" in javascript
     assert "排队中，可再次点击取消" in javascript
     assert "已取消选择；后台结果仅用于缓存" in javascript
+    assert "backNavigationChanged" in javascript
+    assert "仍有图片检测在后台进行；返回上一步会放弃当前素材选择。" in javascript
+    back_enabled_expression = re.search(
+        r"const backEnabled = Boolean\((.*?)\);\s*backButton\.hidden",
+        javascript,
+        re.DOTALL,
+    )
+    assert back_enabled_expression is not None
+    assert "!localBackLockActive" in back_enabled_expression.group(1)
+    assert "!selectionCheckActive" not in back_enabled_expression.group(1)
     assert "selectionPreflightConcurrency = 3" not in javascript
     assert "2000" in javascript
     assert "/api/sessions" in javascript

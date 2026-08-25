@@ -1176,20 +1176,21 @@
       currentBackNavigation?.visible
       && currentBackNavigation?.target_stage_id,
     );
+    const localBackLockActive = persistenceInFlight || stageLocalActionInFlight;
     const backEnabled = Boolean(
       backVisible
       && currentBackNavigation?.enabled
-      && !persistenceInFlight
-      && !stageLocalActionInFlight
-      && !selectionCheckActive,
+      && !localBackLockActive,
     );
     backButton.hidden = !backVisible;
     backButton.disabled = !backEnabled;
     backButton.textContent = currentBackNavigation?.label || "上一步";
-    backButton.title = selectionCheckActive
-      ? "正在检测所选图片，完成后才能返回上一步。"
-      : stageLocalActionInFlight
+    backButton.title = localBackLockActive
+      ? stageLocalActionInFlight
         ? "当前步骤正在保存或处理，完成后才能返回上一步。"
+        : "当前步骤正在保存，完成后才能返回上一步。"
+      : selectionCheckActive && currentBackNavigation?.enabled
+        ? "仍有图片检测在后台进行；返回上一步会放弃当前素材选择。"
         : currentBackNavigation?.message || "";
     handoffActions?.classList.toggle("has-stage-back", backVisible);
     if (lockedByServer) {
@@ -2941,6 +2942,7 @@
         grid.replaceChildren();
 
         displayedCandidates.forEach((candidate) => {
+          const renderGeneration = stageGeneration;
           const assetId = String(candidate.asset_id || "");
           const selectionCheck = selectionPreflightFor(assetId);
           const selectionJob = selectionPreflightScheduler.get(assetId);
@@ -3089,6 +3091,10 @@
           refreshSelectionCard();
 
           const applySelectionPreflight = (result) => {
+            if (
+              currentStageId !== "asset_matching"
+              || renderGeneration !== stageGeneration
+            ) return;
             if (!result || result.cancelled || result.status === "cancelled") {
               refreshSelectionCard();
               return;
@@ -3130,6 +3136,10 @@
               const request = runSelectionPreflight(candidate);
               refreshSelectionCard();
               request.then(applySelectionPreflight).catch((error) => {
+                if (
+                  currentStageId !== "asset_matching"
+                  || renderGeneration !== stageGeneration
+                ) return;
                 selectionPreflightScheduler.cancel(assetId);
                 selectedIds.delete(assetId);
                 persistLicense(assetId, false);
@@ -6408,7 +6418,12 @@
       currentCollectionStatus = stageState.collection_status || null;
       currentHandoffStatus = stageState.handoff_status || null;
       currentWorkflowDispatch = stageState.workflow_dispatch || null;
+      const priorBackNavigation = currentBackNavigation;
       currentBackNavigation = stageState.back_navigation || null;
+      const backNavigationChanged = !UiState.jsonSemanticallyEqual(
+        priorBackNavigation || null,
+        currentBackNavigation || null,
+      );
       renderTaskAwareness(sessionPayload.task_status || stageState.task_status);
       const priorGalleryStatus = currentGalleryJob?.status || null;
       const priorGalleryAttempt = currentGalleryJob?.attempt_id || null;
@@ -6440,7 +6455,7 @@
             currentGalleryJob?.progress?.published_batch_count || 0,
           )
         );
-      if (stageChanged || galleryChanged) {
+      if (stageChanged || galleryChanged || backNavigationChanged) {
         renderStatus();
         await loadStage();
       } else {
@@ -6524,6 +6539,7 @@
       !currentBackNavigation?.enabled
       || !currentBackNavigation?.target_stage_id
       || persistenceInFlight
+      || stageLocalActionInFlight
     ) return;
     const unsavedWarning = uiState.dirty
       ? " 当前步骤尚未保存的修改也不会保留。"

@@ -222,6 +222,7 @@ def test_gallery_job_success_publishes_review_without_handoff(
     )
 
     assert completed["status"] == "completed"
+    assert completed["message"] == "本机图片加载完成"
     assert not (stage_path / "handoff.json").exists()
     assert not (stage_path / "processing-claim.json").exists()
     review = store.read_optional_stage_document(

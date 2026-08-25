@@ -993,6 +993,7 @@ def process_gallery_job(
                 session_id, "asset_matching", review
             )
             current["status"] = "completed"
+            current["message"] = "本机图片加载完成"
             current["updated_at"] = _iso()
             current["heartbeat_at"] = _iso()
             current["lease_expires_at"] = None
