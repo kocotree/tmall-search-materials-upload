@@ -630,8 +630,8 @@ def test_source_id_uses_path_without_drive_or_unc_server_and_ignores_label(
         tmp_path,
     )[0]
 
-    assert image_source_path_key(drive_path) == r"视觉部\1-模特图"
-    assert image_source_path_key(unc_path) == r"视觉部\1-模特图"
+    assert image_source_path_key(drive_path) == "视觉部/1-模特图"
+    assert image_source_path_key(unc_path) == "视觉部/1-模特图"
     assert first["source_id"] == renamed["source_id"] == unc["source_id"]
     assert first["source_id"] == stable_image_source_id(drive_path)
 

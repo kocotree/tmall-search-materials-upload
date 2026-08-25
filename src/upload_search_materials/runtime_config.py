@@ -99,7 +99,7 @@ def image_source_path_key(value: object) -> str:
         normalized_parts.append(normalized)
     if not normalized_parts:
         raise ValueError("image source path must include a directory below its root")
-    return "\\".join(normalized_parts)
+    return "/".join(normalized_parts)
 
 
 def stable_image_source_id(value: object) -> str:

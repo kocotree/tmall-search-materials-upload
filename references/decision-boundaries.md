@@ -46,6 +46,7 @@ uv run tmall-materials list-agent-requests --runs-root <runs目录> --session <s
 uv run tmall-materials wait-agent-request --runs-root <runs目录> --session <session_id> --timeout 30
 uv run tmall-materials claim-agent-request --runs-root <runs目录> --session <session_id> --request <request_id>
 uv run tmall-materials complete-agent-request --runs-root <runs目录> --session <session_id> --request <request_id> --response <response.json>
+uv run tmall-materials cancel-agent-request --runs-root <runs目录> --session <session_id> --request <request_id>
 ```
 
 历史兼容等待必须有界；新任务页面读取 `workflow_dispatch` 与请求进度，允许重试 AI 或转为人工编排，

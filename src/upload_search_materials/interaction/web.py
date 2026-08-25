@@ -135,6 +135,7 @@ from .session import (
     AGENT_WAIT_SEGMENT_SECONDS,
     InteractionConflict,
     InteractionPathError,
+    STAGE_BACK_TARGETS,
     SessionStore,
 )
 from .workflow_dispatcher import WorkflowDispatcher, WorkflowProcessor
@@ -150,6 +151,24 @@ from .stages import (
 RESULTS_USER_ACTION_STATUSES = frozenset({"needs_user_input", "blocked"})
 SELECTION_PREFLIGHT_ALGORITHM_VERSION = 2
 PLUGIN_VERSION_UNKNOWN = "版本未知"
+STAGE_BACK_READY_COPY = {
+    "completeness": (
+        "返回任务配置后可以修改素材源等配置；店铺不变且已有完整采集时会复用空坑位，"
+        "已完成的后续选择会失效。"
+    ),
+    "asset_matching": "返回完整度巡检后可以重新选择商品，已完成的素材选择会失效。",
+    "slots_copy": "返回素材匹配后可以重新选择文件夹和图片，坑位与文案草稿会失效。",
+    "approval": "返回坑位编排与文案后可以继续修改，本次上传确认会失效。",
+}
+STAGE_BACK_ERROR_COPY = {
+    "STAGE_BACK_NOT_ALLOWED": "当前阶段不能回到上一步。",
+    "STAGE_BACK_NOT_CURRENT": "任务已经进入其他阶段，请先进入当前阶段。",
+    "STAGE_BACK_REVISION_STALE": "页面状态已更新，请刷新后再返回上一步。",
+    "STAGE_BACK_PROCESSING": "工作台正在处理当前步骤，完成后才能返回上一步。",
+    "STAGE_BACK_COMPLETED": "当前步骤已经完成，请进入任务当前阶段继续。",
+    "STAGE_BACK_GALLERY_ACTIVE": "图片正在加载，完成或停止后才能返回上一步。",
+    "STAGE_BACK_COPY_ACTIVE": "文案正在生成，完成后才能返回上一步。",
+}
 
 
 def _load_plugin_version(plugin_root: Path | None = None) -> str:
@@ -165,6 +184,98 @@ def _load_plugin_version(plugin_root: Path | None = None) -> str:
     raw_version = manifest.get("version")
     version = raw_version.strip() if isinstance(raw_version, str) else ""
     return version or PLUGIN_VERSION_UNKNOWN
+
+
+def _has_active_copy_request(store: SessionStore, session_id: str) -> bool:
+    root = store._stage_path(session_id, "slots_copy") / "agent-requests"
+    if not root.is_dir():
+        return False
+    for path in root.iterdir():
+        if not path.is_dir() or path.name.startswith("tmp-"):
+            continue
+        try:
+            request_document = read_agent_request(store, session_id, path.name)
+        except (InteractionConflict, ValueError):
+            continue
+        if (
+            request_document.get("kind") == "copy_draft"
+            and request_document.get("status") in {"pending_agent", "processing"}
+        ):
+            return True
+    return False
+
+
+def _stage_back_navigation(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+    stage_id: str,
+) -> dict[str, Any]:
+    target_stage_id = STAGE_BACK_TARGETS.get(stage_id)
+    navigation = {
+        "visible": False,
+        "enabled": False,
+        "from_stage_id": stage_id,
+        "target_stage_id": target_stage_id,
+        "target_stage_title": (
+            get_stage(target_stage_id).title if target_stage_id else ""
+        ),
+        "label": (
+            f"上一步：{get_stage(target_stage_id).title}"
+            if target_stage_id
+            else "上一步"
+        ),
+        "message": "",
+        "reason_code": "STAGE_BACK_NOT_ALLOWED",
+    }
+    if target_stage_id is None or state.get("current_stage") != stage_id:
+        return navigation
+    navigation["visible"] = True
+    stage_status = str(state["stages"][stage_id]["status"])
+    if stage_status == "completed":
+        navigation.update(
+            message=STAGE_BACK_ERROR_COPY["STAGE_BACK_COMPLETED"],
+            reason_code="STAGE_BACK_COMPLETED",
+        )
+        return navigation
+    if stage_status == "processing":
+        navigation.update(
+            message=STAGE_BACK_ERROR_COPY["STAGE_BACK_PROCESSING"],
+            reason_code="STAGE_BACK_PROCESSING",
+        )
+        return navigation
+    claim = store.processing_claim(session_id, stage_id)
+    if claim is not None and not claim.get("expired", True):
+        navigation.update(
+            message=STAGE_BACK_ERROR_COPY["STAGE_BACK_PROCESSING"],
+            reason_code="STAGE_BACK_PROCESSING",
+        )
+        return navigation
+    if stage_id == "asset_matching":
+        gallery_job = read_gallery_job(store, session_id)
+        if gallery_job is not None and gallery_job.get("status") in {
+            "queued",
+            "running",
+        }:
+            navigation.update(
+                message=STAGE_BACK_ERROR_COPY["STAGE_BACK_GALLERY_ACTIVE"],
+                reason_code="STAGE_BACK_GALLERY_ACTIVE",
+            )
+            return navigation
+    if stage_id in {"slots_copy", "approval"} and _has_active_copy_request(
+        store, session_id
+    ):
+        navigation.update(
+            message=STAGE_BACK_ERROR_COPY["STAGE_BACK_COPY_ACTIVE"],
+            reason_code="STAGE_BACK_COPY_ACTIVE",
+        )
+        return navigation
+    navigation.update(
+        enabled=True,
+        message=STAGE_BACK_READY_COPY[stage_id],
+        reason_code="",
+    )
+    return navigation
 
 
 def _input_quality_summary(path: Path | None) -> dict[str, Any]:
@@ -1622,6 +1733,9 @@ def create_app(
             ),
             "workflow_dispatch": workflow_dispatch_status(session_id),
             "task_status": workflow_task_status(session_id, state),
+            "back_navigation": _stage_back_navigation(
+                store, session_id, state, stage_id
+            ),
         }
         if stage_id == "setup":
             authoritative = get_collection_status(
@@ -3146,6 +3260,76 @@ def create_app(
         )
         return jsonify(result)
 
+    @app.post("/api/sessions/<session_id>/stages/<stage_id>/back")
+    def reopen_previous_stage(session_id: str, stage_id: str):
+        payload = _json_object()
+        get_stage(stage_id)
+        expected_revision = payload.get("revision")
+        if isinstance(expected_revision, bool) or not isinstance(
+            expected_revision, int
+        ):
+            return _validation_error({"revision": "must be an integer"})
+        state = store.load_session(session_id)
+        navigation = _stage_back_navigation(
+            store, session_id, state, stage_id
+        )
+        if not navigation["enabled"]:
+            return _error(
+                "stage back is unavailable",
+                409,
+                reason_code=str(navigation["reason_code"]),
+                message=str(navigation["message"]),
+            )
+        try:
+            result = store.reopen_previous_stage(
+                session_id,
+                stage_id,
+                expected_revision=expected_revision,
+            )
+        except InteractionConflict as error:
+            reason_code = str(error)
+            return _error(
+                "stage back is unavailable",
+                409,
+                reason_code=reason_code,
+                message=STAGE_BACK_ERROR_COPY.get(
+                    reason_code, "当前暂时不能返回上一步，请刷新后重试。"
+                ),
+            )
+        invalidation_label = f"back-{secrets.token_hex(6)}"
+        target_stage_id = result["target_stage_id"]
+        if target_stage_id in {"setup", "completeness"}:
+            _archive_stage_work_files(
+                store,
+                session_id,
+                "asset_matching",
+                invalidation_label,
+                names=(
+                    "gallery-job.json",
+                    "gallery-checkpoint.json",
+                    "partial-gallery.json",
+                    "confirmed-gallery.json",
+                    "selection-preflight-cache.json",
+                    "selected-asset-preflight.json",
+                ),
+            )
+        if target_stage_id in {"setup", "completeness", "asset_matching"}:
+            _archive_stage_work_files(
+                store,
+                session_id,
+                "slots_copy",
+                invalidation_label,
+                names=(
+                    "current-slot-plan.json",
+                    "crop-preflight.json",
+                    "processed-outputs.json",
+                    "slot-plan.snapshot.json",
+                    "confirmed-copy-drafts.json",
+                ),
+                directories=("agent-requests",),
+            )
+        return jsonify(result)
+
     @app.get("/api/sessions/<session_id>/stages/<stage_id>/status")
     def status(session_id: str, stage_id: str):
         state = store.load_session(session_id)
@@ -3159,6 +3343,9 @@ def create_app(
         )
         payload["workflow_dispatch"] = workflow_dispatch_status(session_id)
         payload["task_status"] = workflow_task_status(session_id, state)
+        payload["back_navigation"] = _stage_back_navigation(
+            store, session_id, state, stage_id
+        )
         claim = store.processing_claim(session_id, stage_id)
         if claim is not None:
             payload["processing_claim"] = claim
@@ -5849,6 +6036,31 @@ def _archive_slot_output_metadata(
             "confirmed-copy-drafts.json",
         )
         if (stage_path / name).is_file()
+    ]
+    if not targets:
+        return
+    destination = stage_path / "invalidated" / label
+    destination.mkdir(parents=True, exist_ok=True)
+    for target in targets:
+        target.replace(destination / target.name)
+
+
+def _archive_stage_work_files(
+    store: SessionStore,
+    session_id: str,
+    stage_id: str,
+    label: str,
+    *,
+    names: tuple[str, ...],
+    directories: tuple[str, ...] = (),
+) -> None:
+    """Archive mutable derived work without discarding its audit evidence."""
+
+    stage_path = store._stage_path(session_id, stage_id)
+    targets = [
+        stage_path / name
+        for name in (*names, *directories)
+        if (stage_path / name).exists()
     ]
     if not targets:
         return

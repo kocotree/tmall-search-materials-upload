@@ -813,9 +813,8 @@ def test_recovery_instruction_names_absolute_session_path_and_stage(tmp_path):
 
     assert str(session.path.resolve()) in instruction
     assert "setup" in instruction
-    assert "handoff_status.handoff_identity" in instruction
-    assert "handoff.json" not in instruction
-    assert "input_sha256" in instruction
+    assert "handoff_identity" in instruction
+    assert "workflow_dispatch" in instruction
 
 
 def test_edit_cannot_be_overwritten_by_stale_result_claim(tmp_path, monkeypatch):
@@ -1042,6 +1041,99 @@ def test_only_unclaimed_handoff_can_be_withdrawn(tmp_path):
             "setup",
             expected_revision=submitted_again["revision"],
         )
+
+
+def test_reopen_previous_stage_retains_target_input_and_invalidates_later_work(
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    completeness = store.save_draft(
+        session.session_id,
+        "completeness",
+        {"selected_product_ids": ["1"]},
+        expected_revision=0,
+    )
+    asset = store.save_draft(
+        session.session_id,
+        "asset_matching",
+        {"folder_decisions": [], "asset_decisions": []},
+        expected_revision=0,
+    )
+    completeness_path = store._stage_path(session.session_id, "completeness")
+    asset_path = store._stage_path(session.session_id, "asset_matching")
+    slots_path = store._stage_path(session.session_id, "slots_copy")
+    store._write_json_atomic(
+        completeness_path / "review-context.json",
+        {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "stage_id": "completeness",
+        },
+    )
+    for path in (
+        completeness_path / "result.json",
+        asset_path / "handoff.json",
+        asset_path / "result.json",
+        asset_path / "review-context.json",
+        slots_path / "review-context.json",
+    ):
+        store._write_json_atomic(path, {"schema_version": 1})
+    state = store.load_session(session.session_id)
+    state["stages"]["completeness"]["status"] = "completed"
+    state["current_stage"] = "asset_matching"
+    store._write_session_state(session.session_id, state)
+
+    reopened = store.reopen_previous_stage(
+        session.session_id,
+        "asset_matching",
+        expected_revision=asset["revision"],
+    )
+
+    assert reopened == {
+        "status": "needs_user_input",
+        "from_stage_id": "asset_matching",
+        "target_stage_id": "completeness",
+        "target_revision": completeness["revision"],
+    }
+    state = store.load_session(session.session_id)
+    assert state["current_stage"] == "completeness"
+    assert state["stages"]["completeness"]["status"] == "needs_user_input"
+    assert (completeness_path / "input.json").is_file()
+    assert (completeness_path / "review-context.json").is_file()
+    assert not (completeness_path / "result.json").exists()
+    assert not (asset_path / "handoff.json").exists()
+    assert not (asset_path / "result.json").exists()
+    assert not (asset_path / "review-context.json").exists()
+    assert not (slots_path / "review-context.json").exists()
+    assert (
+        completeness_path
+        / "revisions"
+        / f"{completeness['revision']:04d}"
+        / "input.json"
+    ).is_file()
+    assert _events(session.path)[-1]["event"] == "stage_reopened_for_edit"
+
+
+def test_reopen_previous_stage_rejects_live_processing_claim(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create_session()
+    state = store.load_session(session.session_id)
+    state["current_stage"] = "asset_matching"
+    state["processing_claim"] = {
+        "stage_id": "asset_matching",
+        "lease_expires_at": "2999-01-01T00:00:00+00:00",
+    }
+    store._write_session_state(session.session_id, state)
+
+    with pytest.raises(InteractionConflict, match="STAGE_BACK_PROCESSING"):
+        store.reopen_previous_stage(
+            session.session_id,
+            "asset_matching",
+            expected_revision=0,
+        )
+
+    assert store.load_session(session.session_id)["current_stage"] == "asset_matching"
 
 
 def test_wait_claims_each_handoff_revision_only_once_sequentially(tmp_path):

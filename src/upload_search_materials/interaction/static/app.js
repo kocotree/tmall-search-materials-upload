@@ -16,6 +16,7 @@
     "[data-setup-image-source-incomplete]",
   );
   const recoveryButton = document.querySelector("[data-copy-recovery]");
+  const backButton = document.querySelector("[data-go-back]");
   const withdrawButton = document.querySelector("[data-withdraw-submission]");
   const offlinePanel = document.querySelector("[data-offline-panel]");
   const statusBadge = document.querySelector("[data-current-status]");
@@ -67,6 +68,7 @@
   let stageGeneration = 0;
   let autoSaveTimer = null;
   let persistenceInFlight = false;
+  let stageLocalActionInFlight = false;
   let pendingPersistenceMode = null;
   let localEditVersion = 0;
   const persistenceRequestIds = new Map();
@@ -74,6 +76,7 @@
   let currentCollectionStatus = null;
   let currentHandoffStatus = null;
   let currentWorkflowDispatch = null;
+  let currentBackNavigation = null;
   let currentGalleryProgress = null;
   let currentGalleryJob = null;
   let isHydrating = false;
@@ -1167,6 +1170,28 @@
       && stages.has(sessionCurrentStageId)
       && sessionCurrentStageId !== currentStageId
     );
+    const selectionCheckActive = currentStageId === "asset_matching"
+      && selectionPreflightScheduler.desiredPendingCount() > 0;
+    const backVisible = Boolean(
+      currentBackNavigation?.visible
+      && currentBackNavigation?.target_stage_id,
+    );
+    const backEnabled = Boolean(
+      backVisible
+      && currentBackNavigation?.enabled
+      && !persistenceInFlight
+      && !stageLocalActionInFlight
+      && !selectionCheckActive,
+    );
+    backButton.hidden = !backVisible;
+    backButton.disabled = !backEnabled;
+    backButton.textContent = currentBackNavigation?.label || "上一步";
+    backButton.title = selectionCheckActive
+      ? "正在检测所选图片，完成后才能返回上一步。"
+      : stageLocalActionInFlight
+        ? "当前步骤正在保存或处理，完成后才能返回上一步。"
+        : currentBackNavigation?.message || "";
+    handoffActions?.classList.toggle("has-stage-back", backVisible);
     if (lockedByServer) {
       const reason = {
         completed: "该阶段已完成，不能再次保存或提交。",
@@ -5693,6 +5718,7 @@
       currentCollectionStatus = payload.collection_status || null;
       currentHandoffStatus = payload.handoff_status || null;
       currentWorkflowDispatch = payload.workflow_dispatch || null;
+      currentBackNavigation = payload.back_navigation || null;
       renderTaskAwareness(payload.task_status);
       currentGalleryJob = payload.gallery_job || null;
       currentGalleryProgress = currentGalleryJob?.progress || null;
@@ -6307,6 +6333,7 @@
       currentCollectionStatus = stageState.collection_status || null;
       currentHandoffStatus = stageState.handoff_status || null;
       currentWorkflowDispatch = stageState.workflow_dispatch || null;
+      currentBackNavigation = stageState.back_navigation || null;
       renderTaskAwareness(sessionPayload.task_status || stageState.task_status);
       const priorGalleryStatus = currentGalleryJob?.status || null;
       const priorGalleryAttempt = currentGalleryJob?.attempt_id || null;
@@ -6373,11 +6400,13 @@
     stageGeneration += 1;
     window.clearTimeout(autoSaveTimer);
     pendingPersistenceMode = null;
+    stageLocalActionInFlight = false;
     currentStageId = stageId;
     uiState = UiState.switchStage(uiState, stageId);
     currentProcessingClaim = null;
     currentHandoffStatus = null;
     currentWorkflowDispatch = null;
+    currentBackNavigation = null;
     currentGalleryJob = null;
     currentGalleryProgress = null;
     currentStageInputLoaded = false;
@@ -6414,6 +6443,39 @@
   });
   goCurrentStageButton.addEventListener("click", () => {
     if (stages.has(sessionCurrentStageId)) activateStage(sessionCurrentStageId);
+  });
+  backButton.addEventListener("click", async () => {
+    if (
+      !currentBackNavigation?.enabled
+      || !currentBackNavigation?.target_stage_id
+      || persistenceInFlight
+    ) return;
+    const unsavedWarning = uiState.dirty
+      ? " 当前步骤尚未保存的修改也不会保留。"
+      : "";
+    const confirmed = window.confirm(
+      `${currentBackNavigation.message || "返回后，当前步骤以及后面的选择会失效。"}`
+      + `${unsavedWarning}\n\n是否继续？`,
+    );
+    if (!confirmed) return;
+    window.clearTimeout(autoSaveTimer);
+    pendingPersistenceMode = null;
+    backButton.disabled = true;
+    actionMessage.textContent = "正在返回上一步…";
+    try {
+      const payload = await fetchJson(apiPath(
+        `/stages/${encodeURIComponent(currentStageId)}/back`,
+      ), {
+        method: "POST",
+        body: JSON.stringify({ revision }),
+      });
+      sessionCurrentStageId = payload.target_stage_id;
+      currentBackNavigation = null;
+      activateStage(payload.target_stage_id);
+    } catch (error) {
+      actionMessage.textContent = error.userMessage || error.message;
+      await loadStage();
+    }
   });
   recoverProcessingButton.addEventListener("click", recoverExpiredProcessing);
   retryGalleryButton.addEventListener("click", async () => {

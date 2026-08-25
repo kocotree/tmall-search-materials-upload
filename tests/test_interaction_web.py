@@ -1361,6 +1361,140 @@ def test_unclaimed_submission_can_be_withdrawn_but_processing_cannot(
     assert rejected.status_code == 409
 
 
+@pytest.mark.parametrize(
+    ("current_stage", "target_stage", "target_title"),
+    (
+        ("completeness", "setup", "任务配置"),
+        ("asset_matching", "completeness", "完整度巡检"),
+        ("slots_copy", "asset_matching", "素材匹配"),
+        ("approval", "slots_copy", "坑位编排、图片处理与文案"),
+    ),
+)
+def test_current_stage_can_return_to_previous_editable_stage(
+    client,
+    session_id,
+    tmp_path,
+    current_stage,
+    target_stage,
+    target_title,
+):
+    store = SessionStore(tmp_path)
+    state = store.load_session(session_id)
+    state["current_stage"] = current_stage
+    state["stages"][current_stage] = {
+        "revision": 3,
+        "status": "needs_user_input",
+    }
+    store._write_session_state(session_id, state)
+
+    stage = client.get(
+        f"/api/sessions/{session_id}/stages/{current_stage}"
+    )
+
+    assert stage.status_code == 200
+    assert stage.json["back_navigation"]["visible"] is True
+    assert stage.json["back_navigation"]["enabled"] is True
+    assert stage.json["back_navigation"]["from_stage_id"] == current_stage
+    assert stage.json["back_navigation"]["target_stage_id"] == target_stage
+    assert stage.json["back_navigation"]["target_stage_title"] == target_title
+    assert stage.json["back_navigation"]["label"] == f"上一步：{target_title}"
+    assert stage.json["back_navigation"]["message"]
+    assert stage.json["back_navigation"]["reason_code"] == ""
+    reopened = client.post(
+        f"/api/sessions/{session_id}/stages/{current_stage}/back",
+        json={"revision": 3},
+    )
+
+    assert reopened.status_code == 200
+    assert reopened.json["target_stage_id"] == target_stage
+    assert store.load_session(session_id)["current_stage"] == target_stage
+
+
+def test_gallery_loading_temporarily_disables_previous_stage(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    state = store.load_session(session_id)
+    state["current_stage"] = "asset_matching"
+    state["stages"]["asset_matching"] = {
+        "revision": 1,
+        "status": "needs_user_input",
+    }
+    store._write_session_state(session_id, state)
+    store._write_json_atomic(
+        store._stage_path(session_id, "asset_matching") / "gallery-job.json",
+        {"schema_version": 1, "status": "running"},
+    )
+
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/status"
+    )
+
+    assert status.status_code == 200
+    assert status.json["back_navigation"]["visible"] is True
+    assert status.json["back_navigation"]["enabled"] is False
+    assert (
+        status.json["back_navigation"]["reason_code"]
+        == "STAGE_BACK_GALLERY_ACTIVE"
+    )
+
+
+def test_returning_to_product_selection_archives_task_work_but_keeps_previews(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    state = store.load_session(session_id)
+    state["current_stage"] = "asset_matching"
+    state["stages"]["asset_matching"] = {
+        "revision": 1,
+        "status": "needs_user_input",
+    }
+    store._write_session_state(session_id, state)
+    asset_path = store._stage_path(session_id, "asset_matching")
+    slots_path = store._stage_path(session_id, "slots_copy")
+    store._write_json_atomic(
+        asset_path / "gallery-job.json",
+        {"schema_version": 1, "status": "completed"},
+    )
+    store._write_json_atomic(
+        asset_path / "confirmed-gallery.json",
+        {"schema_version": 1},
+    )
+    preview = asset_path / "preview-cache" / "asset.jpg"
+    preview.parent.mkdir()
+    preview.write_bytes(b"task-local-preview")
+    store._write_json_atomic(
+        slots_path / "current-slot-plan.json",
+        {"schema_version": 1},
+    )
+    requests = slots_path / "agent-requests" / "completed-request"
+    requests.mkdir(parents=True)
+    store._write_json_atomic(
+        requests / "request.json",
+        {"schema_version": 1, "status": "completed"},
+    )
+
+    reopened = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/back",
+        json={"revision": 1},
+    )
+
+    assert reopened.status_code == 200
+    assert not (asset_path / "gallery-job.json").exists()
+    assert not (asset_path / "confirmed-gallery.json").exists()
+    assert preview.is_file()
+    assert not (slots_path / "current-slot-plan.json").exists()
+    assert not (slots_path / "agent-requests").exists()
+    archived_asset = list(
+        (asset_path / "invalidated").glob("back-*/gallery-job.json")
+    )
+    archived_slots = list(
+        (slots_path / "invalidated").glob("back-*/current-slot-plan.json")
+    )
+    assert len(archived_asset) == 1
+    assert len(archived_slots) == 1
+
+
 def test_api_is_json_service_description(client):
     response = client.get("/api")
 

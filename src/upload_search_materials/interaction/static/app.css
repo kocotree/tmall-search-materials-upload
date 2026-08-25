@@ -1073,7 +1073,11 @@ summary:focus-visible {
 }
 
 .slot-subpage[hidden],
-.handoff-actions.is-stage-managed {
+.handoff-actions.is-stage-managed:not(.has-stage-back) {
+  display: none;
+}
+
+.handoff-actions.is-stage-managed.has-stage-back > :not([data-go-back]) {
   display: none;
 }
 

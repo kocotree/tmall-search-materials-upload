@@ -48,6 +48,12 @@ HANDOFF_AGENT_ACTIONS = {
 }
 AGENT_WAIT_LEASE_SECONDS = 30
 AGENT_WAIT_SEGMENT_SECONDS = 15
+STAGE_BACK_TARGETS = {
+    "completeness": "setup",
+    "asset_matching": "completeness",
+    "slots_copy": "asset_matching",
+    "approval": "slots_copy",
+}
 
 
 class InteractionPathError(ValueError):
@@ -527,6 +533,91 @@ class SessionStore:
                 revision=expected_revision,
             )
             return {"status": "draft", "revision": expected_revision}
+
+    def reopen_previous_stage(
+        self,
+        session_id: str,
+        stage_id: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Reopen the previous editable stage and revoke all derived work."""
+
+        self._stage_index(stage_id)
+        target_stage_id = STAGE_BACK_TARGETS.get(stage_id)
+        if target_stage_id is None:
+            raise InteractionConflict("STAGE_BACK_NOT_ALLOWED")
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            if state.get("current_stage") != stage_id:
+                raise InteractionConflict("STAGE_BACK_NOT_CURRENT")
+            stage_state = state["stages"][stage_id]
+            if expected_revision != int(stage_state["revision"]):
+                raise InteractionConflict("STAGE_BACK_REVISION_STALE")
+            if stage_state["status"] in {"processing", "completed"}:
+                raise InteractionConflict("STAGE_BACK_PROCESSING")
+
+            target_index = self._stage_index(target_stage_id)
+            claim = state.get("processing_claim")
+            if isinstance(claim, dict):
+                claim_stage_id = str(claim.get("stage_id", ""))
+                try:
+                    claim_index = self._stage_index(claim_stage_id)
+                except KeyError:
+                    claim_index = len(STAGES) + 1
+                if (
+                    claim_index >= target_index
+                    and not self._claim_is_expired(claim)
+                ):
+                    raise InteractionConflict("STAGE_BACK_PROCESSING")
+                if claim_index >= target_index:
+                    state["processing_claim"] = None
+
+            self._invalidate_after_edit(
+                session_id,
+                target_stage_id,
+                state,
+                remove_current_handoff=True,
+            )
+            target_path = self._stage_path(session_id, target_stage_id)
+            target_state = state["stages"][target_stage_id]
+            target_state["status"] = (
+                "needs_user_input"
+                if target_stage_id != "setup"
+                and (
+                    (target_path / "input.json").is_file()
+                    or (target_path / "review-context.json").is_file()
+                )
+                else "draft"
+            )
+            state["current_stage"] = target_stage_id
+
+            wait = state.get("agent_wait")
+            if isinstance(wait, dict):
+                wait_stage_id = str(wait.get("stage_id", ""))
+                try:
+                    wait_index = self._stage_index(wait_stage_id)
+                except KeyError:
+                    wait_index = len(STAGES) + 1
+                if wait_index >= target_index:
+                    state["agent_wait"] = None
+
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "stage_reopened_for_edit",
+                session_id=session_id,
+                from_stage_id=stage_id,
+                target_stage_id=target_stage_id,
+                from_revision=expected_revision,
+                target_revision=int(target_state["revision"]),
+            )
+            return {
+                "status": target_state["status"],
+                "from_stage_id": stage_id,
+                "target_stage_id": target_stage_id,
+                "target_revision": int(target_state["revision"]),
+            }
 
     def write_result(
         self,

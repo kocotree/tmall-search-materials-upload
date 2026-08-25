@@ -12,7 +12,7 @@ sources/<source_id>/
 
 Each publish creates a new snapshot directory. Existing snapshot directories are never overwritten. `current.json` is only a small pointer and may be replaced atomically after the snapshot is complete.
 
-`folders.csv` contains `folder_id`, `source_id`, `relative_path`, `folder_name`, and `parent_relative_path`. It must not contain an absolute path. The manifest records source identity, row count, schema version, completion flag, publisher, time, and SHA-256 of the CSV. Snapshot selection and local binding use exact `source_id` only; `canonical_source` is retained only as an audit/display field when present and is not used for matching.
+`folders.csv` contains `folder_id`, `source_id`, `relative_path`, `folder_name`, and `parent_relative_path`. It must not contain an absolute path. The manifest records source identity, row count, schema version, completion flag, publisher, time, and SHA-256 of the CSV. New snapshots do not write `canonical_source`; older manifests may contain it, but snapshot selection and local binding still use exact current `source_id` only.
 
 ## Selection and fallback
 

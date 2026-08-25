@@ -5,10 +5,7 @@ import sqlite3
 
 import pytest
 
-from upload_search_materials.runtime_config import (
-    image_source_path_key,
-    stable_image_source_id,
-)
+from upload_search_materials.runtime_config import stable_image_source_id
 from upload_search_materials.team_folder_index import (
     TeamFolderIndexError,
     ensure_missing_snapshots,
@@ -18,11 +15,6 @@ from upload_search_materials.team_folder_index import (
     sync_snapshots,
     validate_snapshot,
 )
-
-
-def canonical_source_for(path: Path) -> str:
-    return rf"\\nas\{image_source_path_key(path)}"
-
 
 def make_database(path: Path, rows: list[tuple[str, str, str]]) -> None:
     connection = sqlite3.connect(path)
@@ -101,7 +93,6 @@ def test_ensure_missing_snapshots_keeps_valid_existing_snapshot(
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
     )
     monkeypatch.setattr(
         "upload_search_materials.team_folder_index.build_folder_index",
@@ -133,7 +124,6 @@ def test_old_snapshot_with_same_path_identity_is_ignored_for_new_source_id(tmp_p
     legacy_source_id = "source-legacy-model"
     local_path = tmp_path / "视觉部" / "1-模特图"
     (local_path / "season" / "SKU1").mkdir(parents=True)
-    canonical_source = r"\\192.168.124.85\视觉部\1-模特图"
     source_id = stable_image_source_id(local_path)
     make_database(
         database,
@@ -144,7 +134,6 @@ def test_old_snapshot_with_same_path_identity_is_ignored_for_new_source_id(tmp_p
         database_path=database,
         shared_root=shared,
         source_id=legacy_source_id,
-        canonical_source=canonical_source,
     )
     binding = {
         "source_id": source_id,
@@ -160,7 +149,6 @@ def test_old_snapshot_with_same_path_identity_is_ignored_for_new_source_id(tmp_p
     )
 
     assert ensured["existing_source_ids"] == []
-    assert ensured["migrated"] == []
     assert ensured["created"][0]["source_id"] == source_id
     assert (
         shared
@@ -235,7 +223,7 @@ def test_ensure_missing_snapshots_builds_and_publishes_first_snapshot(tmp_path):
         / "snapshots"
         / result["created"][0]["snapshot_id"]
     )
-    assert validate_snapshot(snapshot_path)["canonical_source"] == str(media)
+    assert "canonical_source" not in validate_snapshot(snapshot_path)
 
 
 def test_publish_creates_portable_immutable_snapshot(tmp_path):
@@ -247,14 +235,12 @@ def test_publish_creates_portable_immutable_snapshot(tmp_path):
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
         publisher="machine-a",
     )
     second = publish_snapshot(
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
         publisher="machine-b",
     )
 
@@ -281,13 +267,11 @@ def test_status_falls_back_to_newest_valid_immutable_snapshot(tmp_path):
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
     )
     second = publish_snapshot(
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
     )
     latest_csv = (
         shared
@@ -311,14 +295,12 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
     local = tmp_path / "local"
     products = tmp_path / "products.csv"
     local_media = tmp_path / "mounted-media"
-    canonical_source = canonical_source_for(local_media)
     make_database(database, [("folder-1", "source-a", "season/SKU1")])
     make_products(products)
     published = publish_snapshot(
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=canonical_source,
     )
 
     summary = sync_snapshots(
@@ -393,31 +375,36 @@ def test_requested_sync_blocks_when_local_binding_is_missing(tmp_path):
         database_path=database,
         shared_root=shared,
         source_id="source-a",
-        canonical_source=r"\\nas\media\source-a",
     )
 
-    summary = sync_snapshots(
-        shared_root=shared,
-        local_root=tmp_path / "local",
-        image_sources=(),
-    )
-
-    assert summary["complete"] is False
-    assert summary["skipped_sources"][0]["reason_code"] == "TEAM_INDEX_LOCAL_BINDING_MISSING"
-    assert summary["folder_rows"] == 0
+    with pytest.raises(TeamFolderIndexError, match="TEAM_INDEX_LOCAL_BINDING_MISSING"):
+        sync_snapshots(
+            shared_root=shared,
+            local_root=tmp_path / "local",
+            image_sources=(),
+            source_ids=("source-a",),
+        )
 
 
-def test_publish_rejects_missing_canonical_identity(tmp_path):
+def test_publish_manifest_omits_machine_path_identity(tmp_path):
     database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
     make_database(database, [("folder-1", "source-a", "season/SKU1")])
 
-    with pytest.raises(TeamFolderIndexError, match="CANONICAL_SOURCE_REQUIRED"):
-        publish_snapshot(
-            database_path=database,
-            shared_root=tmp_path / "shared",
-            source_id="source-a",
-            canonical_source="",
-        )
+    result = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+    )
+    snapshot_path = (
+        shared
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / result["snapshot_id"]
+    )
+
+    assert "canonical_source" not in validate_snapshot(snapshot_path)
 
 
 def test_publish_rejects_partial_local_refresh(tmp_path):
@@ -436,5 +423,4 @@ def test_publish_rejects_partial_local_refresh(tmp_path):
             database_path=database,
             shared_root=tmp_path / "shared",
             source_id="source-a",
-            canonical_source=r"\\nas\media\source-a",
         )

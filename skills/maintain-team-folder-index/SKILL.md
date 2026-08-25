@@ -54,7 +54,7 @@ Only enter this flow when the user explicitly asks to update a named source that
 
 - Any authorized team machine may publish; there is no maintainer machine.
 - Publishing uses a short per-source lease and creates a new snapshot plus a current pointer.
-- Shared snapshots contain only `source_id + relative_path` folder metadata, never machine-specific absolute paths.
+- Shared snapshots contain only `source_id + relative_path` folder metadata, never machine-specific absolute paths. Current `source_id` values are generated upstream from a normalized path identity key whose separator is always `/`.
 - Sync validates schema and SHA-256, then binds a snapshot only when its `source_id` exactly matches one current local image-source binding. `canonical_source` and `canonical_unc` are not matching or blocking conditions.
 - The reusable cache contains only validated folder snapshots. `folder-candidates.csv` is generated inside the current task and must never be reused by another task or Plugin version.
 - Missing or mismatched local bindings are reported and skipped. The bounded exact-path discovery above may identify a unique visible drive, but it must never recursively scan drives, choose between multiple matches, mount a share, or infer another path.
