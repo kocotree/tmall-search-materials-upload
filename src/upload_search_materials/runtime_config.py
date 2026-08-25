@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ctypes
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import os
@@ -123,11 +123,147 @@ def default_user_data_root(
     return (root / "tmall-search-materials").resolve()
 
 
+def _bool_config_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().casefold()
+    return text in {"1", "true", "yes", "y", "on", "启用", "是"}
+
+
+def _bounded_text(value: object, *, limit: int, field_name: str) -> str:
+    text = str(value or "").strip()
+    if "\x00" in text:
+        raise ValueError(f"{field_name} must not contain NUL")
+    if len(text) > limit:
+        raise ValueError(f"{field_name} is too long")
+    return text
+
+
+def normalize_lark_base_config(
+    value: object,
+    environ: Mapping[str, str] | None = None,
+) -> LarkBaseConfig:
+    """Normalize optional Feishu Base settings from local config/env."""
+
+    document = value if isinstance(value, Mapping) else {}
+    env = os.environ if environ is None else environ
+
+    def configured(name: str, env_name: str, *, limit: int = 2000) -> str:
+        return _bounded_text(
+            env.get(env_name) or document.get(name),
+            limit=limit,
+            field_name=f"lark_base.{name}",
+        )
+
+    product_base_url = configured(
+        "product_base_url", "TMALL_LARK_PRODUCT_BASE_URL"
+    )
+    product_base_token = configured(
+        "product_base_token", "TMALL_LARK_PRODUCT_BASE_TOKEN", limit=200
+    )
+    product_table_id = configured(
+        "product_table_id", "TMALL_LARK_PRODUCT_TABLE_ID", limit=200
+    )
+    upload_log_base_url = configured(
+        "upload_log_base_url", "TMALL_LARK_UPLOAD_LOG_BASE_URL"
+    )
+    upload_log_base_token = configured(
+        "upload_log_base_token", "TMALL_LARK_UPLOAD_LOG_BASE_TOKEN", limit=200
+    )
+    upload_log_table_id = configured(
+        "upload_log_table_id", "TMALL_LARK_UPLOAD_LOG_TABLE_ID", limit=200
+    )
+    enabled_raw = env.get("TMALL_LARK_BASE_ENABLED")
+    enabled_explicit = enabled_raw is not None or "enabled" in document
+    enabled = _bool_config_value(
+        enabled_raw if enabled_raw is not None else document.get("enabled")
+    )
+    if not enabled and not enabled_explicit and any(
+        (
+            product_base_url,
+            product_base_token,
+            product_table_id,
+            upload_log_base_url,
+            upload_log_base_token,
+            upload_log_table_id,
+        )
+    ):
+        enabled = True
+    timeout_raw = (
+        env.get("TMALL_LARK_COMMAND_TIMEOUT_SECONDS")
+        or document.get("command_timeout_seconds")
+        or 30
+    )
+    try:
+        timeout = float(timeout_raw)
+    except (TypeError, ValueError):
+        timeout = 30.0
+    timeout = min(max(timeout, 5.0), 120.0)
+    return LarkBaseConfig(
+        enabled=enabled,
+        product_base_url=product_base_url,
+        product_base_token=product_base_token,
+        product_table_id=product_table_id,
+        upload_log_base_url=upload_log_base_url,
+        upload_log_base_token=upload_log_base_token,
+        upload_log_table_id=upload_log_table_id,
+        command_timeout_seconds=timeout,
+    )
+
+
+def _lark_base_document(config: LarkBaseConfig) -> dict[str, object]:
+    return {
+        "enabled": config.enabled,
+        "product_base_url": config.product_base_url,
+        "product_base_token": config.product_base_token,
+        "product_table_id": config.product_table_id,
+        "upload_log_base_url": config.upload_log_base_url,
+        "upload_log_base_token": config.upload_log_base_token,
+        "upload_log_table_id": config.upload_log_table_id,
+        "command_timeout_seconds": config.command_timeout_seconds,
+    }
+
+
 @dataclass(frozen=True)
 class DiscoveredPath:
     path: Path | None
     status: str
     candidates: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class LarkBaseConfig:
+    """Machine-local Feishu Base integration settings.
+
+    The Base URLs/tokens point at team documents and are intentionally kept out
+    of tracked defaults.  Each Windows user stores them in the local runtime
+    config or provides them through environment variables.
+    """
+
+    enabled: bool = False
+    product_base_url: str = ""
+    product_base_token: str = ""
+    product_table_id: str = ""
+    upload_log_base_url: str = ""
+    upload_log_base_token: str = ""
+    upload_log_table_id: str = ""
+    command_timeout_seconds: float = 30.0
+
+    @property
+    def product_sync_configured(self) -> bool:
+        return bool(
+            self.enabled
+            and (self.product_base_url or self.product_base_token)
+            and (self.product_table_id or self.product_base_url)
+        )
+
+    @property
+    def upload_log_configured(self) -> bool:
+        return bool(
+            self.enabled
+            and (self.upload_log_base_url or self.upload_log_base_token)
+            and (self.upload_log_table_id or self.upload_log_base_url)
+        )
 
 
 @dataclass(frozen=True)
@@ -150,6 +286,7 @@ class RuntimeConfig:
     config_path: Path | None = None
     user_data_root: Path | None = None
     image_source_history: tuple[dict[str, str], ...] = ()
+    lark_base: LarkBaseConfig = field(default_factory=LarkBaseConfig)
 
 
 def load_runtime_config(
@@ -273,6 +410,7 @@ def load_runtime_config(
         or document.get("material_center_url")
         or DEFAULT_MATERIAL_CENTER_URL
     ).strip()
+    lark_base = normalize_lark_base_config(document.get("lark_base"), env)
     return RuntimeConfig(
         workspace_root=workspace_root,
         products=products,
@@ -292,6 +430,7 @@ def load_runtime_config(
         config_path=selected_config,
         user_data_root=user_data_root,
         image_source_history=(),
+        lark_base=lark_base,
     )
 
 
@@ -388,6 +527,33 @@ def save_image_sources(
         runtime,
         image_sources=sources,
         image_source_history=(),
+        config_path=target,
+    )
+
+
+def save_lark_base_config(
+    runtime: RuntimeConfig, value: object
+) -> RuntimeConfig:
+    """Persist optional Feishu Base settings to the machine-local JSON."""
+
+    target = runtime.config_path or (
+        runtime.user_data_root / "config/runtime.json"
+        if runtime.user_data_root is not None
+        else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
+    )
+    document = _read_config(target) if target.is_file() else {}
+    config = normalize_lark_base_config(value, {})
+    document["lark_base"] = _lark_base_document(config)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+    return replace(
+        runtime,
+        lark_base=config,
         config_path=target,
     )
 

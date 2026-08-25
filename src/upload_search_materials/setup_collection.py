@@ -40,6 +40,7 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
+from .lark_base_sync import sync_product_metadata
 from .material_state import build_completeness_matrix
 from .collection_runtime import attempt_path, read_json_object
 from .collection_readiness import merge_default_safe_popup_selectors
@@ -593,6 +594,18 @@ def process_setup_collection(
             attempt_id=attempt_id,
         )
         return {"status": "blocked", "result": result}
+
+    lark_sync_evidence = session_path / "inputs" / "lark-product-sync.json"
+    lark_sync = sync_product_metadata(
+        products,
+        runtime.lark_base,
+        evidence_path=(
+            lark_sync_evidence if runtime.lark_base.enabled else None
+        ),
+    )
+    products = list(lark_sync.records)
+    scan_summary["lark_product_sync"] = lark_sync.evidence()
+    _write_json(session_path / "inputs" / "scan-summary.json", scan_summary)
 
     selected_profile_path = selectors_path or runtime.selectors_file
     if selected_profile_path is None:
@@ -1212,6 +1225,7 @@ def process_setup_collection(
             published["promotion_status"],
             published["checkpoint"],
             published["pagination_evidence"],
+            *([str(lark_sync_evidence)] if lark_sync_evidence.is_file() else []),
             *([str(human_checkpoint)] if human_checkpoint.is_file() else []),
             str(completeness_path),
         ],
@@ -1228,6 +1242,7 @@ def process_setup_collection(
             "product_row_anomalies": matrix[
                 "product_row_anomalies"
             ],
+            "lark_product_sync": lark_sync.evidence(),
         },
         claim_id=claim_id,
         attempt_id=attempt_id,

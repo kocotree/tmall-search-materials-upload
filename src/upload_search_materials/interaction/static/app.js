@@ -35,6 +35,7 @@
   const taskAutoShutdown = document.querySelector("[data-task-auto-shutdown]");
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
   const teamIndexConfig = document.querySelector('[data-component="TeamIndexConfig"]');
+  const larkBaseConfig = document.querySelector('[data-component="LarkBaseConfig"]');
   const collectionRuntimeConfig = document.querySelector(
     '[data-component="CollectionRuntimeConfig"]',
   );
@@ -635,6 +636,98 @@
         "路径已修改，请检测或保存。";
     });
     discoverTeamIndex();
+  }
+
+  function larkBasePayload() {
+    if (!larkBaseConfig) return {};
+    const enabled = Boolean(larkBaseConfig.querySelector("[data-lark-enabled]")?.checked);
+    const productBaseUrl = larkBaseConfig.querySelector("[data-lark-product-base-url]")?.value.trim() || "";
+    const uploadLogBaseUrl = larkBaseConfig.querySelector("[data-lark-upload-log-base-url]")?.value.trim() || productBaseUrl;
+    return {
+      enabled,
+      product_base_url: productBaseUrl,
+      product_table_id: larkBaseConfig.querySelector("[data-lark-product-table-id]")?.value.trim() || "",
+      upload_log_base_url: uploadLogBaseUrl,
+      upload_log_table_id: larkBaseConfig.querySelector("[data-lark-upload-log-table-id]")?.value.trim() || "",
+    };
+  }
+
+  function renderLarkBaseStatus(payload) {
+    if (!larkBaseConfig) return;
+    const summary = larkBaseConfig.querySelector("[data-lark-base-summary]");
+    const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
+    const status = payload?.status || "not_configured";
+    const product = payload?.product_sync || {};
+    const uploadLog = payload?.upload_log || {};
+    const ready = status === "available"
+      || product.status === "available"
+      || uploadLog.status === "available";
+    larkBaseConfig.dataset.ready = ready ? "true" : status;
+    summary.textContent = ready
+      ? `可用 · ${[product, uploadLog].filter((item) => item.status === "available").length} / 2`
+      : larkBasePayload().enabled
+        ? "需要检查"
+        : "未启用";
+    const details = [product.message, uploadLog.message].filter(Boolean).join("；");
+    feedback.textContent = payload?.message || details || "飞书同步未配置。";
+  }
+
+  async function checkLarkBase() {
+    if (!larkBaseConfig) return true;
+    const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
+    feedback.textContent = "正在检测飞书多维表格…";
+    try {
+      const payload = await fetchJson("/api/runtime/lark-base/check", {
+        method: "POST",
+        body: JSON.stringify({ lark_base: larkBasePayload() }),
+      });
+      renderLarkBaseStatus(payload);
+      return payload.status === "available";
+    } catch (error) {
+      renderLarkBaseStatus({
+        status: "unavailable",
+        message: error.fieldErrors?.lark_base || error.userMessage || error.message,
+      });
+      return false;
+    }
+  }
+
+  async function saveLarkBase() {
+    if (!larkBaseConfig) return;
+    const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
+    feedback.textContent = "正在保存飞书配置…";
+    try {
+      const payload = await fetchJson("/api/runtime/lark-base", {
+        method: "PUT",
+        body: JSON.stringify({ lark_base: larkBasePayload() }),
+      });
+      larkBaseConfig.dataset.ready = payload.product_sync_configured || payload.upload_log_configured
+        ? "true"
+        : "pending";
+      larkBaseConfig.querySelector("[data-lark-base-summary]").textContent = payload.enabled
+        ? "已保存"
+        : "未启用";
+      feedback.textContent = payload.enabled
+        ? "已保存。后续任务会自动同步负责人并记录成功上传。"
+        : "已关闭飞书同步；后续任务继续使用本地商品表。";
+    } catch (error) {
+      renderLarkBaseStatus({
+        status: "unavailable",
+        message: error.fieldErrors?.lark_base || error.userMessage || error.message,
+      });
+    }
+  }
+
+  function initializeLarkBaseConfig() {
+    if (!larkBaseConfig) return;
+    larkBaseConfig.querySelector("[data-check-lark-base]")?.addEventListener("click", checkLarkBase);
+    larkBaseConfig.querySelector("[data-save-lark-base]")?.addEventListener("click", saveLarkBase);
+    larkBaseConfig.addEventListener("input", () => {
+      larkBaseConfig.dataset.ready = "pending";
+      larkBaseConfig.querySelector("[data-lark-base-summary]").textContent = "等待保存";
+      larkBaseConfig.querySelector("[data-lark-base-feedback]").textContent =
+        "配置已修改，请保存后用于下一次任务。";
+    });
   }
 
   function renderCollectionRuntime(payload) {
@@ -6621,6 +6714,7 @@
   setInterval(pollStage, 2000);
   initializeImageSourceConfig();
   initializeTeamIndexConfig();
+  initializeLarkBaseConfig();
   initializeCollectionRuntime();
   async function bootstrap() {
     let initialStage = currentStageId;

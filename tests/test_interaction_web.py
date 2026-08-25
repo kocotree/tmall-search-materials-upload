@@ -125,6 +125,62 @@ def test_create_session_returns_timestamp_id(client):
     assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{2})?", response.json["session_id"])
 
 
+def test_runtime_lark_base_config_can_be_saved(client):
+    response = client.put(
+        "/api/runtime/lark-base",
+        json={
+            "lark_base": {
+                "enabled": True,
+                "product_base_url": "https://example.feishu.cn/wiki/base",
+                "product_table_id": "产品数据表",
+                "upload_log_base_url": "https://example.feishu.cn/wiki/base",
+                "upload_log_table_id": "搜推素材上传记录",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["saved"] is True
+    assert response.json["product_sync_configured"] is True
+    assert response.json["upload_log_configured"] is True
+
+    current = client.get("/api/runtime/lark-base")
+    assert current.json["enabled"] is True
+    assert current.json["product_table_id"] == "产品数据表"
+
+
+def test_runtime_lark_base_check_is_soft_readiness(
+    client, monkeypatch
+):
+    observed = {}
+
+    def fake_inspect(config):
+        observed["config"] = config
+        return {
+            "status": "available",
+            "message": "ok",
+            "product_sync": {"status": "available"},
+            "upload_log": {"status": "available"},
+        }
+
+    monkeypatch.setattr(web_module, "inspect_lark_base_config", fake_inspect)
+
+    response = client.post(
+        "/api/runtime/lark-base/check",
+        json={
+            "lark_base": {
+                "enabled": True,
+                "product_base_token": "base-token",
+                "product_table_id": "产品数据表",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["status"] == "available"
+    assert observed["config"].product_base_token == "base-token"
+
+
 def test_bounded_agent_action_processes_product_selection_inside_workbench(
     client, session_id, tmp_path, monkeypatch
 ):

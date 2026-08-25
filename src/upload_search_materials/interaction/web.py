@@ -71,6 +71,7 @@ from ..gallery_jobs import (
 )
 from ..material_executor_launcher import MaterialExecutorLaunchError
 from ..io_tables import SchemaError, read_product_csv, validate_product_records
+from ..lark_base_sync import inspect_lark_base_config
 from ..image_review import (
     build_image_review_data,
     normalize_review_decisions,
@@ -103,8 +104,10 @@ from ..runtime_config import (
     inspect_image_sources,
     inspect_team_folder_index_root,
     load_runtime_config,
+    normalize_lark_base_config,
     initialize_bundled_selector_profile,
     save_image_sources,
+    save_lark_base_config,
     save_selector_profile_path,
     save_team_folder_index_root,
 )
@@ -908,6 +911,19 @@ def create_app(
                     / "config"
                     / "local-paths.json"
                 ),
+                "lark_base": {
+                    "enabled": runtime.lark_base.enabled,
+                    "product_base_url": runtime.lark_base.product_base_url,
+                    "product_base_token": runtime.lark_base.product_base_token,
+                    "product_table_id": runtime.lark_base.product_table_id,
+                    "upload_log_base_url": runtime.lark_base.upload_log_base_url,
+                    "upload_log_base_token": runtime.lark_base.upload_log_base_token,
+                    "upload_log_table_id": runtime.lark_base.upload_log_table_id,
+                    "configured": bool(
+                        runtime.lark_base.product_sync_configured
+                        or runtime.lark_base.upload_log_configured
+                    ),
+                },
             },
         )
 
@@ -1583,6 +1599,55 @@ def create_app(
             config_path=str(runtime.config_path),
             saved=True,
             retry_enqueued=bool(retried),
+        )
+
+    @app.get("/api/runtime/lark-base")
+    def get_runtime_lark_base():
+        config = runtime.lark_base
+        config_path = runtime.config_path or (
+            runtime.user_data_root / "config/runtime.json"
+            if runtime.user_data_root is not None
+            else runtime.workspace_root / "config/local-paths.json"
+        )
+        return jsonify(
+            enabled=config.enabled,
+            product_base_url=config.product_base_url,
+            product_base_token=config.product_base_token,
+            product_table_id=config.product_table_id,
+            upload_log_base_url=config.upload_log_base_url,
+            upload_log_base_token=config.upload_log_base_token,
+            upload_log_table_id=config.upload_log_table_id,
+            product_sync_configured=config.product_sync_configured,
+            upload_log_configured=config.upload_log_configured,
+            config_path=str(config_path),
+        )
+
+    @app.post("/api/runtime/lark-base/check")
+    def check_runtime_lark_base():
+        payload = _json_object()
+        try:
+            config = normalize_lark_base_config(payload.get("lark_base"), {})
+        except ValueError as error:
+            return _validation_error({"lark_base": str(error)})
+        return jsonify(**inspect_lark_base_config(config))
+
+    @app.put("/api/runtime/lark-base")
+    def put_runtime_lark_base():
+        nonlocal runtime
+        payload = _json_object()
+        try:
+            runtime = save_lark_base_config(
+                runtime, payload.get("lark_base")
+            )
+        except (OSError, ValueError) as error:
+            return _validation_error({"lark_base": str(error)})
+        config = runtime.lark_base
+        return jsonify(
+            saved=True,
+            enabled=config.enabled,
+            product_sync_configured=config.product_sync_configured,
+            upload_log_configured=config.upload_log_configured,
+            config_path=str(runtime.config_path),
         )
 
     @app.post("/api/runtime/folder-picker")

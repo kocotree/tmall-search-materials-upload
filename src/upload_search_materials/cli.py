@@ -105,6 +105,7 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
+from .lark_base_sync import write_successful_upload_log
 from .interaction.session import (
     AGENT_WAIT_SEGMENT_SECONDS,
     InteractionConflict,
@@ -1748,6 +1749,19 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
         for record in records
     )
     results_path = Path(prepared["run_dir"]) / "upload-results.json"
+    upload_log_path = store._stage_path(args.session, "approval") / "lark-upload-log.json"
+    upload_log = None
+    if completed:
+        upload_log = write_successful_upload_log(
+            run_dir=Path(prepared["run_dir"]),
+            session_inputs_dir=store._session_path(args.session) / "inputs",
+            task_records=records,
+            config=runtime.lark_base,
+            confirmed_by=str(prepared.get("confirmed_by", "")),
+            evidence_path=(
+                upload_log_path if runtime.lark_base.enabled else None
+            ),
+        )
     store.write_result(
         args.session,
         "approval",
@@ -1760,7 +1774,11 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
             else "上传未全部完成，已保留逐任务状态并停止自动重试。"
         ),
         blocking_reasons=[] if completed else ["PUBLISH_BATCH_INCOMPLETE"],
-        evidence=[str(manifest_path), str(results_path)],
+        evidence=[
+            str(manifest_path),
+            str(results_path),
+            *([str(upload_log_path)] if upload_log_path.is_file() else []),
+        ],
         next_action=(
             "在千牛查看审核状态。"
             if completed
@@ -1776,6 +1794,14 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
                 and record["status"] in {"submitted", "under_review", "success"}
             ),
             "tasks": records,
+            "lark_upload_log": (
+                upload_log.evidence()
+                if upload_log is not None
+                else {
+                    "status": "skipped",
+                    "reason_code": "PUBLISH_BATCH_INCOMPLETE",
+                }
+            ),
         },
         claim_id=str(claim.get("claim_id", "")) or None,
         attempt_id=str(claim.get("attempt_id", "")) or None,
