@@ -125,13 +125,14 @@ def test_ensure_missing_snapshots_keeps_valid_existing_snapshot(
     assert status["sources"][0]["snapshot_id"] == published["snapshot_id"]
 
 
-def test_legacy_snapshot_is_migrated_to_path_derived_source_id(tmp_path):
+def test_old_snapshot_with_same_path_identity_is_ignored_for_new_source_id(tmp_path):
     database = tmp_path / "folder-index.sqlite3"
     shared = tmp_path / "shared"
     local = tmp_path / "local"
     products = tmp_path / "products.csv"
     legacy_source_id = "source-legacy-model"
-    local_path = r"Y:\视觉部\1-模特图"
+    local_path = tmp_path / "视觉部" / "1-模特图"
+    (local_path / "season" / "SKU1").mkdir(parents=True)
     canonical_source = r"\\192.168.124.85\视觉部\1-模特图"
     source_id = stable_image_source_id(local_path)
     make_database(
@@ -148,7 +149,7 @@ def test_legacy_snapshot_is_migrated_to_path_derived_source_id(tmp_path):
     binding = {
         "source_id": source_id,
         "label": "公司模特图",
-        "path": local_path,
+        "path": str(local_path),
     }
 
     ensured = ensure_missing_snapshots(
@@ -158,10 +159,9 @@ def test_legacy_snapshot_is_migrated_to_path_derived_source_id(tmp_path):
         image_sources=(binding,),
     )
 
-    assert ensured["created"] == []
-    assert ensured["existing_source_ids"] == [source_id]
-    assert ensured["migrated"][0]["source_id"] == source_id
-    assert ensured["migrated"][0]["legacy_source_id"] == legacy_source_id
+    assert ensured["existing_source_ids"] == []
+    assert ensured["migrated"] == []
+    assert ensured["created"][0]["source_id"] == source_id
     assert (
         shared
         / "sources"
@@ -169,21 +169,25 @@ def test_legacy_snapshot_is_migrated_to_path_derived_source_id(tmp_path):
         / "snapshots"
         / published["snapshot_id"]
     ).is_dir()
+    assert (
+        shared
+        / "sources"
+        / source_id
+        / "snapshots"
+        / ensured["created"][0]["snapshot_id"]
+    ).is_dir()
 
     synced = sync_snapshots(
         shared_root=shared,
         local_root=local,
         image_sources=(binding,),
+        source_ids=(source_id,),
     )
     assert synced["complete"] is True
-    assert synced["folder_rows"] == 1
+    assert synced["folder_rows"] >= 1
     assert synced["sources"][0]["source_id"] == source_id
-    assert synced["superseded_sources"] == [
-        {
-            "source_id": legacy_source_id,
-            "reason_code": "TEAM_INDEX_SUPERSEDED_SOURCE_ID",
-        }
-    ]
+    assert synced["skipped_sources"] == []
+    assert synced["superseded_sources"] == []
 
     output_path = tmp_path / "run" / "folder-candidates.csv"
     materialized = materialize_task_folder_candidates(
@@ -192,6 +196,7 @@ def test_legacy_snapshot_is_migrated_to_path_derived_source_id(tmp_path):
         image_sources=(binding,),
         selected_product_ids=("1001",),
         output_path=output_path,
+        source_ids=(source_id,),
     )
     assert materialized["candidate_rows"] == 1
     with output_path.open(encoding="utf-8-sig", newline="") as stream:

@@ -33,7 +33,7 @@ Read [references/protocol.md](references/protocol.md) when diagnosing snapshot v
 
    If NAS is unavailable, this command may use the last verified local snapshot cache. Report that fallback explicitly. Product matching is not persisted here: each upload task rematches the cached folder metadata against its own current product snapshot and matcher version.
 
-5. Existing valid team snapshots are preferred and never refreshed automatically. If the current path-derived source ID has no snapshot but an older source ID has the same canonical path identity key, copy the newest valid portable metadata into a new immutable snapshot under the current ID and keep every old snapshot. Only when no equivalent snapshot exists should the workflow build the directory-only index and publish the first immutable snapshot without requesting a second authorization.
+5. Existing valid team snapshots under the current path-derived source ID are preferred and never refreshed automatically. If the current source ID has no snapshot, build the directory-only index from the current local binding and publish the first immutable snapshot for that current ID without requesting a second authorization. Do not migrate, match, or reuse an older source ID by `canonical_source` or path identity. Keep old snapshots as immutable historical data, but do not use them for new tasks.
 
 Directory enumeration uses a 60-second no-progress timeout so large SMB/NAS directories can return their first entry without being treated as stalled. A timeout still produces a partial result that must not be published; refresh the same local index after NAS access recovers.
 
@@ -55,7 +55,7 @@ Only enter this flow when the user explicitly asks to update a named source that
 - Any authorized team machine may publish; there is no maintainer machine.
 - Publishing uses a short per-source lease and creates a new snapshot plus a current pointer.
 - Shared snapshots contain only `source_id + relative_path` folder metadata, never machine-specific absolute paths.
-- Sync validates schema and SHA-256, then compares the manifest canonical path identity key with the current local binding identity key before caching or using a snapshot. The binding key uses `canonical_unc` when provided and otherwise uses the local `path`, so `canonical_unc` remains optional.
+- Sync validates schema and SHA-256, then binds a snapshot only when its `source_id` exactly matches one current local image-source binding. `canonical_source` and `canonical_unc` are not matching or blocking conditions.
 - The reusable cache contains only validated folder snapshots. `folder-candidates.csv` is generated inside the current task and must never be reused by another task or Plugin version.
 - Missing or mismatched local bindings are reported and skipped. The bounded exact-path discovery above may identify a unique visible drive, but it must never recursively scan drives, choose between multiple matches, mount a share, or infer another path.
 - Do not automatically delete old snapshots, scan image contents, upload materials, or change approval boundaries.

@@ -187,11 +187,6 @@ def load_runtime_config(
         RULES_PATTERN,
     )
     image_sources = _image_sources(document.get("image_sources"), workspace_root)
-    image_source_history = _merge_image_source_history(
-        workspace_root,
-        document.get("image_source_history"),
-        document.get("image_sources"),
-    )
     nas_sources_value = env.get("TMALL_NAS_SOURCES_FILE") or document.get(
         "nas_sources_file"
     )
@@ -296,7 +291,7 @@ def load_runtime_config(
         material_center_url=material_center_url,
         config_path=selected_config,
         user_data_root=user_data_root,
-        image_source_history=image_source_history,
+        image_source_history=(),
     )
 
 
@@ -359,60 +354,6 @@ def normalize_image_sources(
     return tuple(sources)
 
 
-def _image_source_path_key(value: object, workspace_root: Path) -> str:
-    normalized = str(_resolve_configured_path(value, workspace_root))
-    return normalized.casefold().rstrip("\\/")
-
-
-def _image_source_history(
-    value: object, workspace_root: Path
-) -> tuple[dict[str, str], ...]:
-    """Read valid historical identities without applying current-list uniqueness."""
-
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return ()
-    records: dict[tuple[str, str], dict[str, str]] = {}
-    for item in value:
-        if not isinstance(item, Mapping):
-            continue
-        source_id = str(item.get("source_id", "")).strip().casefold()
-        raw_path = str(item.get("path", "")).strip()
-        if (
-            not SOURCE_ID_PATTERN.fullmatch(source_id)
-            or not raw_path
-            or len(raw_path) > 1000
-            or "\x00" in raw_path
-        ):
-            continue
-        normalized_path = str(_resolve_configured_path(raw_path, workspace_root))
-        path_key = normalized_path.casefold().rstrip("\\/")
-        label = str(item.get("label", "")).strip() or source_id
-        record = {
-            "source_id": source_id,
-            "label": label[:100],
-            "path": normalized_path,
-        }
-        canonical_unc = str(item.get("canonical_unc", "")).strip()
-        if canonical_unc.startswith("\\\\"):
-            record["canonical_unc"] = canonical_unc
-        records[(source_id, path_key)] = record
-    return tuple(records.values())
-
-
-def _merge_image_source_history(
-    workspace_root: Path, *values: object
-) -> tuple[dict[str, str], ...]:
-    records: dict[tuple[str, str], dict[str, str]] = {}
-    for value in values:
-        for record in _image_source_history(value, workspace_root):
-            key = (
-                record["source_id"],
-                _image_source_path_key(record["path"], workspace_root),
-            )
-            records[key] = record
-    return tuple(records.values())
-
-
 def save_image_sources(
     runtime: RuntimeConfig, value: object
 ) -> RuntimeConfig:
@@ -424,21 +365,9 @@ def save_image_sources(
         else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
     )
     document = _read_config(target) if target.is_file() else {}
-    history = _merge_image_source_history(
-        runtime.workspace_root,
-        document.get("image_source_history"),
-        document.get("image_sources"),
-        runtime.image_source_history,
-        runtime.image_sources,
-    )
     sources = normalize_image_sources(value, runtime.workspace_root)
-    history = _merge_image_source_history(
-        runtime.workspace_root,
-        history,
-        sources,
-    )
     document["image_sources"] = list(sources)
-    document["image_source_history"] = list(history)
+    document.pop("image_source_history", None)
     if runtime.team_folder_index_root is not None:
         document.setdefault(
             "team_folder_index_root", str(runtime.team_folder_index_root)
@@ -458,7 +387,7 @@ def save_image_sources(
     return replace(
         runtime,
         image_sources=sources,
-        image_source_history=history,
+        image_source_history=(),
         config_path=target,
     )
 

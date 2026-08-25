@@ -587,7 +587,7 @@ def test_image_source_configuration_requires_unique_nonempty_items(tmp_path):
         )
 
 
-def test_legacy_source_migrates_to_stable_id_across_machine_bindings(
+def test_source_id_uses_path_identity_across_machine_bindings(
     tmp_path
 ):
     first = normalize_image_sources(
@@ -671,13 +671,9 @@ def test_deleted_source_reuses_its_id_when_same_path_is_added_again(tmp_path):
         item for item in restored.image_sources if item["path"] == str(first_path)
     )
     assert restored_source["source_id"] == original_id
-    assert any(
-        item["source_id"] == original_id
-        and item["path"] == str(first_path)
-        for item in after_delete.image_source_history
-    )
+    assert after_delete.image_source_history == ()
     saved = json.loads(restored.config_path.read_text(encoding="utf-8"))
-    assert "image_source_history" in saved
+    assert "image_source_history" not in saved
 
 
 def test_image_source_check_reuses_unique_current_path_binding(tmp_path):
@@ -740,10 +736,7 @@ def test_path_derived_id_replaces_conflicting_legacy_ids(tmp_path):
     )
 
     assert checked[0]["source_id"] == stable_image_source_id(source_path)
-    assert {item["source_id"] for item in runtime.image_source_history} == {
-        "source-current",
-        "source-previous",
-    }
+    assert runtime.image_source_history == ()
 
 
 def test_runtime_source_contains_no_machine_specific_drive_or_username():

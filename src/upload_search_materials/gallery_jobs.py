@@ -34,7 +34,7 @@ from .runtime_identity import (
     current_runtime_identity,
     require_local_resource_identity,
 )
-from .runtime_config import RuntimeConfig, image_source_path_key
+from .runtime_config import RuntimeConfig
 
 
 GALLERY_JOB_SCHEMA_VERSION = 1
@@ -444,7 +444,6 @@ def _safe_relative_path(value: str) -> Path:
 def _select_local_source(
     binding: dict[str, str],
     sources: tuple[dict[str, str], ...],
-    history: tuple[dict[str, str], ...] = (),
 ) -> dict[str, str]:
     by_id = {
         str(source.get("source_id", "")).strip(): source
@@ -454,54 +453,9 @@ def _select_local_source(
     if requested in by_id:
         return by_id[requested]
 
-    old_sources = [
-        source
-        for source in history
-        if str(source.get("source_id", "")).strip() == requested
-    ]
-    if old_sources:
-        matching: dict[str, dict[str, str]] = {}
-        for old_source in old_sources:
-            try:
-                old_key = image_source_path_key(old_source.get("path", ""))
-            except ValueError:
-                continue
-            for source in sources:
-                try:
-                    current_key = image_source_path_key(source.get("path", ""))
-                except ValueError:
-                    continue
-                if current_key == old_key:
-                    matching[str(source.get("source_id", ""))] = source
-        if len(matching) == 1:
-            return next(iter(matching.values()))
-
-    # Compatibility for indexes made before source_id was recorded. This
-    # executes in the user's material-access process, where mapped roots can
-    # be resolved. New snapshots do not depend on the old absolute path.
-    old_absolute = str(binding.get("absolute_path", "")).casefold()
-    if old_absolute:
-        matching: list[tuple[int, dict[str, str]]] = []
-        for source in sources:
-            try:
-                root = str(Path(source["path"]).resolve()).casefold().rstrip("\\/")
-            except OSError:
-                continue
-            if old_absolute == root or old_absolute.startswith(root + "\\"):
-                matching.append((len(root), source))
-        if matching:
-            return max(matching, key=lambda item: item[0])[1]
-
-    legacy = str(binding.get("source_system", "")).strip().casefold()
-    if legacy == "model_nas" and sources:
-        return sources[0]
-    if legacy == "xhs_taobao" and sources:
-        return sources[-1]
-    if legacy == "xhs_buyer" and len(sources) >= 2:
-        return sources[-2]
     raise ValueError(
         f"{GALLERY_SOURCE_BINDING_MISSING}: "
-        f"{requested or legacy or 'unknown'}"
+        f"{requested or 'unknown'}"
     )
 
 
@@ -540,7 +494,6 @@ def resolve_material_folders(
         source = _select_local_source(
             binding,
             runtime.image_sources,
-            runtime.image_source_history,
         )
         relative = _safe_relative_path(binding["relative_path"])
         root = Path(source["path"])

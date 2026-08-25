@@ -521,6 +521,7 @@ def test_product_selection_syncs_configured_team_index_before_snapshot(
     assert len(ensured) == 1
     assert calls[0]["shared_root"] == team_root
     assert calls[0]["local_root"] == index_root
+    assert calls[0]["source_ids"] == ("source-a",)
     assert "products_path" not in calls[0]
     assert ensured[0]["products_path"] == products_snapshot
 
@@ -577,6 +578,7 @@ def test_product_selection_bootstraps_missing_snapshots_before_sync(
 
     assert result["status"] == "completed"
     assert [event[0] for event in events] == ["ensure", "sync"]
+    assert events[1][1]["source_ids"] == ("source-a",)
 
 
 def test_product_selection_uses_local_cache_when_shared_smb_login_fails(

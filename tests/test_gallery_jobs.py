@@ -18,7 +18,6 @@ from upload_search_materials.interaction.session import (
 from upload_search_materials.runtime_config import (
     DiscoveredPath,
     RuntimeConfig,
-    stable_image_source_id,
 )
 
 
@@ -108,7 +107,7 @@ def test_material_folder_resolution_uses_source_id_and_relative_path(
     assert resolved[0]["relative_path"] == "year/product"
 
 
-def test_material_folder_resolution_accepts_legacy_source_id_from_history(
+def test_material_folder_resolution_rejects_legacy_source_id_from_history(
     tmp_path,
 ):
     source_root = tmp_path / "mounted-source"
@@ -120,7 +119,7 @@ def test_material_folder_resolution_accepts_legacy_source_id_from_history(
         rules=DiscoveredPath(None, "missing"),
         image_sources=(
             {
-                "source_id": stable_image_source_id(source_root),
+                "source_id": "current-model-materials",
                 "label": "model",
                 "path": str(source_root),
             },
@@ -135,22 +134,20 @@ def test_material_folder_resolution_accepts_legacy_source_id_from_history(
         ),
     )
 
-    resolved = resolve_material_folders(
-        [
-            {
-                "folder_id": "F1",
-                "product_id": "P1",
-                "source_id": "legacy-model-materials",
-                "relative_path": "year/product",
-                "decision": "confirmed",
-            }
-        ],
-        stage_path=tmp_path / "stage",
-        runtime=runtime,
-    )
-
-    assert resolved[0]["folder_path"] == str(folder)
-    assert resolved[0]["source_id"] == stable_image_source_id(source_root)
+    with pytest.raises(ValueError, match="SOURCE_BINDING_MISSING"):
+        resolve_material_folders(
+            [
+                {
+                    "folder_id": "F1",
+                    "product_id": "P1",
+                    "source_id": "legacy-model-materials",
+                    "relative_path": "year/product",
+                    "decision": "confirmed",
+                }
+            ],
+            stage_path=tmp_path / "stage",
+            runtime=runtime,
+        )
 
 
 def test_material_folder_resolution_rejects_parent_traversal(tmp_path):

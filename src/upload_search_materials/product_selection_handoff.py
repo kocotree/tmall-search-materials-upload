@@ -305,6 +305,13 @@ def process_product_selection_handoff(
             raise FileNotFoundError(
                 f"TEAM_INDEX_PRODUCTS_MISSING: {products_snapshot}"
             )
+        configured_source_ids = tuple(
+            str(source.get("source_id", "")).strip()
+            for source in runtime.image_sources
+            if str(source.get("source_id", "")).strip()
+        )
+        if not configured_source_ids:
+            raise TeamFolderIndexError("TEAM_INDEX_IMAGE_SOURCES_REQUIRED")
         if runtime.team_folder_index_root is not None:
             if _directory_is_available(runtime.team_folder_index_root):
                 ensure_missing_snapshots(
@@ -317,6 +324,7 @@ def process_product_selection_handoff(
                     shared_root=runtime.team_folder_index_root,
                     local_root=folder_index_root,
                     image_sources=runtime.image_sources,
+                    source_ids=configured_source_ids,
                 )
             else:
                 try:
@@ -324,6 +332,7 @@ def process_product_selection_handoff(
                         shared_root=runtime.team_folder_index_root,
                         local_root=folder_index_root,
                         image_sources=runtime.image_sources,
+                        source_ids=configured_source_ids,
                     )
                 except TeamFolderIndexError:
                     _ensure_team_index_mount(runtime)
@@ -337,6 +346,7 @@ def process_product_selection_handoff(
                         shared_root=runtime.team_folder_index_root,
                         local_root=folder_index_root,
                         image_sources=runtime.image_sources,
+                        source_ids=configured_source_ids,
                     )
 
         phase = "match_task_candidates"
@@ -363,6 +373,7 @@ def process_product_selection_handoff(
             image_sources=runtime.image_sources,
             selected_product_ids=selected,
             output_path=temp_candidates,
+            source_ids=configured_source_ids,
         )
         os.replace(temp_candidates, task_candidates)
         temp_candidates = None
