@@ -1753,7 +1753,7 @@
       complete: "已完整",
       excluded: "已自动排除",
       abnormal: "异常",
-    })[status] || "需人工确认";
+    })[status] || "待确认";
   }
 
   function completenessExclusionReasons(product) {
@@ -1770,18 +1770,86 @@
     return reasonCodes.map((code) => labels[code] || code);
   }
 
+  function completenessReinspectRequestId() {
+    return `reinspect-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+  }
+
+  async function requestCompletenessReinspection(trigger) {
+    if (
+      !sessionId
+      || currentStageId !== "completeness"
+      || persistenceInFlight
+      || stageLocalActionInFlight
+    ) return;
+    stageLocalActionInFlight = true;
+    trigger.disabled = true;
+    actionMessage.textContent = "正在提交重新巡检请求…";
+    try {
+      const payload = await fetchJson(apiPath("/stages/completeness/reinspect"), {
+        method: "POST",
+        body: JSON.stringify({ request_id: completenessReinspectRequestId() }),
+      });
+      sessionCurrentStageId = payload.target_stage_id || "setup";
+      activateStage(sessionCurrentStageId);
+      actionMessage.textContent =
+        payload.message || "已开始重新巡检，后台会重新采集“搜推高价值”。";
+    } catch (error) {
+      actionMessage.textContent = error.userMessage || error.message;
+      await loadStage();
+    } finally {
+      stageLocalActionInFlight = false;
+      if (trigger.isConnected) trigger.disabled = false;
+      renderStatus();
+    }
+  }
+
+  function createCompletenessReinspectButton(locked) {
+    const button = element("button", "secondary-button inspection-reinspect", "重新巡检");
+    button.type = "button";
+    button.disabled =
+      locked
+      || currentStageId !== "completeness"
+      || persistenceInFlight
+      || stageLocalActionInFlight;
+    button.title = button.disabled
+      ? "当前阶段处理完成或后台处理中时不可重新巡检"
+      : "重新采集“搜推高价值”，并清空后续素材匹配、坑位和上传确认的派生结果";
+    button.addEventListener("click", () => requestCompletenessReinspection(button));
+    return button;
+  }
+
   function renderInspectionMatrix(view) {
-    if (view.mode === "empty") return;
-    const products = Array.isArray(view.result?.data?.products)
-      ? view.result.data.products
-      : [];
-    if (!products.length) return;
     const module = document.querySelector('[data-component="InspectionMatrix"]');
     const content = module?.querySelector("[data-result-content]");
     if (!content) return;
     content.replaceChildren();
 
     const locked = ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
+    const products = Array.isArray(view.result?.data?.products)
+      ? view.result.data.products
+      : [];
+    if (view.mode === "empty" || !products.length) {
+      const empty = element("div", "empty-state inspection-empty");
+      empty.dataset.emptyState = view.mode === "empty" ? view.label : "暂无巡检商品";
+      const mark = document.createElement("span");
+      mark.setAttribute("aria-hidden", "true");
+      mark.textContent = "◎";
+      const label = element(
+        "strong",
+        "",
+        view.mode === "empty" ? view.label : "暂无巡检商品",
+      );
+      const hint = element(
+        "p",
+        "",
+        "可重新巡检“搜推高价值”，系统会重新生成完整度结果。",
+      );
+      empty.append(mark, label, hint, createCompletenessReinspectButton(locked));
+      content.appendChild(empty);
+      return;
+    }
     const selected = completenessSelectedIds();
     const selectableIds = new Set(
       products
@@ -1883,7 +1951,14 @@
     const bulkClear = element("button", "secondary-button", "取消当前筛选结果");
     bulkClear.type = "button";
     bulkClear.disabled = locked;
-    toolbar.append(search, filter, ownerFilter, bulkSelect, bulkClear);
+    toolbar.append(
+      createCompletenessReinspectButton(locked),
+      search,
+      filter,
+      ownerFilter,
+      bulkSelect,
+      bulkClear,
+    );
     content.appendChild(toolbar);
 
     const list = element("div", "inspection-list");

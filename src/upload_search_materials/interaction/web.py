@@ -3330,6 +3330,166 @@ def create_app(
             )
         return jsonify(result)
 
+    @app.post("/api/sessions/<session_id>/stages/completeness/reinspect")
+    def reinspect_completeness(session_id: str):
+        payload = _json_object()
+        state = store.load_session(session_id)
+        if str(state.get("current_stage", "")) != "completeness":
+            return _error(
+                "reinspection is only available on completeness stage",
+                409,
+                reason_code="REINSPECTION_STAGE_NOT_CURRENT",
+                message="请先回到当前的完整度巡检阶段，再重新巡检。",
+            )
+        completeness_status = str(
+            state["stages"]["completeness"].get("status") or ""
+        )
+        if completeness_status in {"ready_for_agent", "processing"}:
+            return _error(
+                "completeness stage is busy",
+                409,
+                reason_code="REINSPECTION_STAGE_BUSY",
+                message="完整度巡检正在处理中，请等待完成后再重新巡检。",
+            )
+        if any(
+            str(stage_state.get("status") or "") == "processing"
+            for stage_state in state.get("stages", {}).values()
+            if isinstance(stage_state, dict)
+        ):
+            return _error(
+                "workflow is processing",
+                409,
+                reason_code="REINSPECTION_WORKFLOW_BUSY",
+                message="工作台后台正在处理当前任务，请等待完成后再重新巡检。",
+            )
+
+        setup_stage = get_stage("setup")
+        setup_input = _current_input(store, session_id, setup_stage, state)
+        if setup_input is None:
+            return _error(
+                "setup input is missing",
+                409,
+                reason_code="REINSPECTION_SETUP_INPUT_MISSING",
+                message="找不到可复用的任务配置，请返回任务配置页重新提交。",
+            )
+        setup_values = _normalize_stage_values(
+            store,
+            session_id,
+            "setup",
+            state,
+            dict(setup_input.get("values") or {}),
+        )
+        field_errors = _unknown_value_errors(
+            setup_stage, setup_values
+        ) | _value_errors(setup_stage, setup_values)
+        if not field_errors:
+            team_index_source = inspect_team_folder_index_root(
+                runtime, setup_values.get("team_folder_index_root")
+            )
+            if team_index_source["status"] != "available":
+                field_errors["team_folder_index_root"] = str(
+                    team_index_source["message"]
+                )
+            labels = setup_values.get("image_source_labels", [])
+            roots = setup_values.get("image_roots", [])
+            submitted_sources = [
+                {"label": str(label), "path": str(root)}
+                for label, root in zip(labels, roots, strict=False)
+            ]
+            try:
+                source_diagnostics = inspect_image_sources(
+                    runtime, submitted_sources
+                )
+            except ValueError as error:
+                field_errors["image_roots"] = str(error)
+            else:
+                unavailable = [
+                    source
+                    for source in source_diagnostics
+                    if source.get("status") != "available"
+                ]
+                if unavailable:
+                    field_errors["image_roots"] = "；".join(
+                        (
+                            f"{source.get('label', '图片源')}："
+                            f"{source.get('message') or source.get('reason_code') or '路径不可访问'}"
+                        )
+                        for source in unavailable
+                    )
+        if field_errors:
+            return _validation_error(
+                field_errors,
+                reason_code="REINSPECTION_SETUP_INVALID",
+                message="重新巡检前，请先返回任务配置修正索引或图片源。",
+            )
+
+        handoff = store.save_input(
+            session_id,
+            "setup",
+            _allowlisted_values(setup_stage, setup_values),
+            "",
+            allowed_current_statuses={
+                "draft",
+                "needs_user_input",
+                "blocked",
+                "completed",
+            },
+            interaction_audit={
+                "source": "workbench",
+                "action": "reinspect_completeness",
+                "from_stage_id": "completeness",
+                "base_setup_revision": setup_input.get("revision"),
+            },
+            request_id=(
+                _persistence_request_id(payload)
+                or f"reinspect-{secrets.token_hex(12)}"
+            ),
+            handoff_data={
+                "reinspection": {
+                    "requested_from_stage": "completeness",
+                    "requested_at": datetime.now().astimezone().isoformat(),
+                }
+            },
+        )
+        invalidation_label = f"reinspect-{secrets.token_hex(6)}"
+        _archive_stage_work_files(
+            store,
+            session_id,
+            "asset_matching",
+            invalidation_label,
+            names=(
+                "gallery-job.json",
+                "gallery-checkpoint.json",
+                "partial-gallery.json",
+                "confirmed-gallery.json",
+                "selection-preflight-cache.json",
+                "selected-asset-preflight.json",
+            ),
+        )
+        _archive_stage_work_files(
+            store,
+            session_id,
+            "slots_copy",
+            invalidation_label,
+            names=(
+                "current-slot-plan.json",
+                "crop-preflight.json",
+                "processed-outputs.json",
+                "slot-plan.snapshot.json",
+                "confirmed-copy-drafts.json",
+            ),
+            directories=("agent-requests",),
+        )
+        notify_workflow_dispatcher(session_id)
+        return jsonify(
+            status="ready_for_agent",
+            target_stage_id="setup",
+            revision=handoff["revision"],
+            input_sha256=handoff["input_sha256"],
+            created_at=handoff["created_at"],
+            message="已开始重新巡检：后台会重新采集“搜推高价值”，完成后回到完整度巡检。",
+        ), 202
+
     @app.get("/api/sessions/<session_id>/stages/<stage_id>/status")
     def status(session_id: str, stage_id: str):
         state = store.load_session(session_id)
@@ -5286,6 +5446,10 @@ def _current_result(
         or context.get("session_id") != session_id
         or context.get("stage_id") != stage_id
     ):
+        if stage_id == "completeness":
+            return _completeness_matrix_fallback_result(
+                store, session_id, state
+            )
         return None
     if stage_id == "image_review" and review_context_is_stale(
         context,
@@ -5318,6 +5482,69 @@ def _current_result(
         stale["data"] = stale_data
         return stale
     return context
+
+
+def _completeness_matrix_fallback_result(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project the stable inspection matrix when editable selection is reopened.
+
+    The product-selection submit result is derived work and is intentionally
+    removed when the user returns from asset matching.  The high-value
+    inspection matrix remains the stable evidence from setup collection, so the
+    completeness page can safely use it to show products and empty-slot counts
+    without reviving downstream folder/image decisions.
+    """
+
+    stage_state = state.get("stages", {}).get("completeness", {})
+    if not isinstance(stage_state, dict):
+        return None
+    status = str(stage_state.get("status") or "")
+    if status in {"", "draft", "ready_for_agent", "processing"}:
+        return None
+    matrix_path = (
+        store._stage_path(session_id, "completeness")
+        / "completeness-matrix.json"
+    )
+    try:
+        matrix = read_json(matrix_path)
+    except (
+        FileNotFoundError,
+        InteractionConflict,
+        OSError,
+        PersistenceAccessDenied,
+        TypeError,
+        ValueError,
+    ):
+        return None
+    if not isinstance(matrix, dict) or not isinstance(
+        matrix.get("products"), list
+    ):
+        return None
+    summary = matrix.get("summary") if isinstance(matrix.get("summary"), dict) else {}
+    product_count = int(summary.get("product_count") or len(matrix["products"]))
+    selectable_count = int(summary.get("selectable_count") or 0)
+    revision = int(stage_state.get("revision") or 0)
+    created_at = datetime.now().astimezone().isoformat()
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "completeness",
+        "revision": revision,
+        "status": status,
+        "summary": (
+            f"已恢复 {product_count} 个巡检商品"
+            + (f"，可选 {selectable_count} 个" if selectable_count else "")
+        ),
+        "blocking_reasons": [],
+        "evidence": [str(matrix_path)],
+        "next_action": "选择商品并提交给工作台",
+        "created_at": created_at,
+        "data": matrix,
+        "fallback_source": "completeness-matrix.json",
+    }
 
 
 def _completeness_owner_options(

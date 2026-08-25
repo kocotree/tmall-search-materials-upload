@@ -72,6 +72,52 @@ def valid_production_confirmation():
     }
 
 
+def valid_setup_values(tmp_path):
+    team_index = tmp_path / "team-index"
+    image_root = tmp_path / "image-root"
+    team_index.mkdir(exist_ok=True)
+    image_root.mkdir(exist_ok=True)
+    return {
+        "store": "测试店铺",
+        "products_csv": str(tmp_path / "products.csv"),
+        "rules_csv": str(tmp_path / "rules.csv"),
+        "team_folder_index_root": str(team_index),
+        "image_source_labels": ["视觉部"],
+        "image_roots": [str(image_root)],
+    }
+
+
+def sample_completeness_matrix():
+    return {
+        "contract_version": 1,
+        "source_filter": "search_recommend_high_value",
+        "products": [
+            {
+                "product_id": "898439684957",
+                "sku": "KQ25051",
+                "product_title": "椰椰小岛两栖泳衣",
+                "owner": "洋葱",
+                "status": "needs_supplement",
+                "selectable": True,
+                "promotion": {
+                    "target_slots": 9,
+                    "current_count": 4,
+                    "missing_count": 5,
+                    "exact_slot_status": "collected",
+                    "empty_slot_indexes": [5, 6, 7, 8, 9],
+                    "evidence": "product=898439684957;target=9;current=4",
+                },
+            }
+        ],
+        "summary": {
+            "product_count": 1,
+            "selectable_count": 1,
+            "excluded_count": 0,
+            "status_counts": {"needs_supplement": 1},
+        },
+    }
+
+
 def test_create_session_returns_timestamp_id(client):
     response = client.post("/api/sessions", json={})
 
@@ -1495,6 +1541,154 @@ def test_returning_to_product_selection_archives_task_work_but_keeps_previews(
     assert len(archived_slots) == 1
 
 
+def test_returning_to_product_selection_restores_inspection_matrix_fallback(
+    client,
+    session_id,
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    setup = store.save_input(session_id, "setup", valid_setup_values(tmp_path))
+    store.write_result(
+        session_id,
+        "setup",
+        setup["revision"],
+        setup["input_sha256"],
+        status="completed",
+        summary="setup completed",
+    )
+    completeness_matrix = sample_completeness_matrix()
+    completeness_path = store._stage_path(session_id, "completeness")
+    store._write_json_atomic(
+        completeness_path / "completeness-matrix.json",
+        completeness_matrix,
+    )
+    completeness = store.save_input(
+        session_id,
+        "completeness",
+        {"selected_product_ids": ["898439684957"]},
+    )
+    store.write_result(
+        session_id,
+        "completeness",
+        completeness["revision"],
+        completeness["input_sha256"],
+        status="completed",
+        summary="product selection completed",
+    )
+    asset_matching = store.save_input(
+        session_id,
+        "asset_matching",
+        {"image_roots": valid_setup_values(tmp_path)["image_roots"]},
+    )
+    state = store.load_session(session_id)
+    state["current_stage"] = "asset_matching"
+    state["stages"]["asset_matching"]["status"] = "needs_user_input"
+    store._write_session_state(session_id, state)
+
+    reopened = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/back",
+        json={"revision": asset_matching["revision"]},
+    )
+
+    assert reopened.status_code == 200
+    assert not (completeness_path / "result.json").exists()
+    assert not (completeness_path / "review-context.json").exists()
+
+    stage = client.get(f"/api/sessions/{session_id}/stages/completeness")
+
+    assert stage.status_code == 200
+    assert stage.json["result"]["fallback_source"] == "completeness-matrix.json"
+    product = stage.json["result"]["data"]["products"][0]
+    assert product["product_id"] == "898439684957"
+    assert product["promotion"]["missing_count"] == 5
+
+
+def test_completeness_reinspect_resubmits_setup_and_archives_downstream_work(
+    client,
+    session_id,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        web_module,
+        "inspect_team_folder_index_root",
+        lambda runtime, path: {"status": "available", "message": "可用"},
+    )
+    monkeypatch.setattr(
+        web_module,
+        "inspect_image_sources",
+        lambda runtime, sources: [
+            {**source, "status": "available", "message": "可用"}
+            for source in sources
+        ],
+    )
+    store = SessionStore(tmp_path)
+    setup_values = valid_setup_values(tmp_path)
+    setup = store.save_input(session_id, "setup", setup_values)
+    store.write_result(
+        session_id,
+        "setup",
+        setup["revision"],
+        setup["input_sha256"],
+        status="completed",
+        summary="setup completed",
+    )
+    completeness_matrix = sample_completeness_matrix()
+    completeness_path = store._stage_path(session_id, "completeness")
+    store._write_json_atomic(
+        completeness_path / "completeness-matrix.json",
+        completeness_matrix,
+    )
+    store.write_review_context(
+        session_id,
+        "completeness",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "completeness",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请选择商品",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "选择商品并提交给工作台",
+            "data": completeness_matrix,
+        },
+    )
+    state = store.load_session(session_id)
+    state["current_stage"] = "completeness"
+    store._write_session_state(session_id, state)
+    asset_path = store._stage_path(session_id, "asset_matching")
+    slots_path = store._stage_path(session_id, "slots_copy")
+    store._write_json_atomic(
+        asset_path / "gallery-job.json",
+        {"schema_version": 1, "status": "completed"},
+    )
+    store._write_json_atomic(
+        slots_path / "current-slot-plan.json",
+        {"schema_version": 1},
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/reinspect",
+        json={"request_id": "reinspect-test-0001"},
+    )
+
+    assert response.status_code == 202
+    assert response.json["target_stage_id"] == "setup"
+    state = store.load_session(session_id)
+    assert state["current_stage"] == "setup"
+    assert state["stages"]["setup"]["status"] == "ready_for_agent"
+    assert state["stages"]["setup"]["revision"] == setup["revision"] + 1
+    assert state["stages"]["completeness"]["status"] == "draft"
+    handoff = store.read_optional_stage_document(session_id, "setup", "handoff")
+    assert handoff["reinspection"]["requested_from_stage"] == "completeness"
+    assert not (asset_path / "gallery-job.json").exists()
+    assert not (slots_path / "current-slot-plan.json").exists()
+    assert list((asset_path / "invalidated").glob("reinspect-*/gallery-job.json"))
+    assert list((slots_path / "invalidated").glob("reinspect-*/current-slot-plan.json"))
+
+
 def test_api_is_json_service_description(client):
     response = client.get("/api")
 
@@ -1562,6 +1756,8 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "筛选负责人",
         "选择当前筛选结果",
         "取消当前筛选结果",
+        "重新巡检",
+        "/stages/completeness/reinspect",
         "选择进入素材匹配",
         "已自动排除",
         "命中自动排除规则",
