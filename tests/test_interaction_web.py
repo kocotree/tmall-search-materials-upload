@@ -2079,6 +2079,16 @@ def test_page_explains_workbench_offline_recovery_without_exposing_task_path(cli
     assert 'class="technical-only" aria-hidden="true"><dt>当前任务目录' in html
     assert "当前阶段" in html
     assert "最近一次提交时间" in html
+    assert 'data-end-current-task' in html
+    assert "结束当前任务" in html
+
+
+def test_end_current_task_uses_managed_shutdown_api_and_preserves_recovery(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert 'apiPath("/end")' in javascript
+    assert "任务记录会保留，之后仍可恢复" in javascript
+    assert 'endCurrentTaskButton?.addEventListener("click", endCurrentTask)' in javascript
 
 
 def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):

@@ -35,6 +35,8 @@ class WorkflowCompletionMonitor:
         self._scheduled_at: str | None = None
         self._shutdown_at: str | None = None
         self._shutdown_requested_at: str | None = None
+        self._shutdown_reason = ""
+        self._shutdown_timer: threading.Timer | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -50,6 +52,9 @@ class WorkflowCompletionMonitor:
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        timer = self._shutdown_timer
+        if timer is not None and timer.is_alive():
+            timer.cancel()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, timeout))
@@ -70,10 +75,20 @@ class WorkflowCompletionMonitor:
                 "scheduled_at": self._scheduled_at,
                 "shutdown_at": self._shutdown_at,
                 "shutdown_requested_at": self._shutdown_requested_at,
+                "shutdown_reason": self._shutdown_reason,
                 "terminal_summary": str(
                     (self._terminal or {}).get("summary", "")
                 ),
             }
+
+    def request_manual_shutdown(self, *, delay_seconds: float = 0.25) -> None:
+        """Close the managed backend after its HTTP response can be delivered."""
+
+        self._request_stop(
+            reason="user_requested",
+            terminal={"summary": "用户主动结束当前任务"},
+            delay_seconds=max(0.0, float(delay_seconds)),
+        )
 
     def _schedule(self, terminal: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc)
@@ -88,13 +103,30 @@ class WorkflowCompletionMonitor:
             ).isoformat()
             self._status = "review_window"
 
-    def _request_stop(self) -> None:
+    def _request_stop(
+        self,
+        *,
+        reason: str = "terminal_completed",
+        terminal: dict[str, Any] | None = None,
+        delay_seconds: float = 0.0,
+    ) -> None:
         with self._lock:
             if self._status == "closing":
                 return
+            if terminal is not None:
+                self._terminal = dict(terminal)
             self._status = "closing"
+            self._shutdown_reason = reason
             self._shutdown_requested_at = datetime.now(timezone.utc).isoformat()
-        self.request_shutdown()
+            timer: threading.Timer | None = None
+            if delay_seconds > 0:
+                timer = threading.Timer(delay_seconds, self.request_shutdown)
+                timer.daemon = True
+                self._shutdown_timer = timer
+        if timer is not None:
+            timer.start()
+        else:
+            self.request_shutdown()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -107,7 +139,7 @@ class WorkflowCompletionMonitor:
                     self._schedule(terminal)
             deadline = self._deadline_monotonic
             if deadline is not None and time.monotonic() >= deadline:
-                self._request_stop()
+                self._request_stop(reason="terminal_completed")
                 return
             wait_seconds = self.poll_seconds
             if deadline is not None:

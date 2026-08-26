@@ -133,6 +133,34 @@ class SessionStore:
             state = self._migrate_legacy_workflow(session_id, state)
         return self._reconcile_pending_stage_transaction(session_id, state)
 
+    def record_workbench_shutdown_request(
+        self,
+        session_id: str,
+        *,
+        requested_by: str = "user",
+    ) -> dict[str, Any]:
+        """Audit a resumable user-requested workbench shutdown."""
+
+        with self._session_lock(session_id):
+            state = self._load_session_file(session_id)
+            requested_at = self._iso_timestamp(datetime.now(timezone.utc))
+            document = {
+                "requested_at": requested_at,
+                "requested_by": requested_by,
+                "reason": "user_requested",
+                "task_data_preserved": True,
+                "resumable": True,
+            }
+            state["workbench_shutdown"] = document
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "workbench_shutdown_requested",
+                session_id=session_id,
+                **document,
+            )
+            return document
+
     def _load_session_file(self, session_id: str) -> dict[str, Any]:
         path = self._session_path(session_id)
         try:

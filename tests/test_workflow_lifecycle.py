@@ -80,6 +80,26 @@ def test_completion_monitor_uses_ten_minute_default_and_requests_shutdown():
         monitor.stop()
 
 
+def test_manual_shutdown_is_delayed_long_enough_to_return_http_response():
+    shutdown = Event()
+    monitor = WorkflowCompletionMonitor(
+        lambda: None,
+        shutdown.set,
+        poll_seconds=0.01,
+    )
+
+    monitor.start()
+    try:
+        monitor.request_manual_shutdown(delay_seconds=0.05)
+        status = monitor.public_status()
+        assert status["status"] == "closing"
+        assert status["shutdown_reason"] == "user_requested"
+        assert status["terminal_summary"] == "用户主动结束当前任务"
+        assert shutdown.wait(1)
+    finally:
+        monitor.stop()
+
+
 def test_only_terminal_upload_schedules_managed_workbench_shutdown(tmp_path):
     runs_root = tmp_path / "runs"
     store = SessionStore(runs_root)
@@ -143,5 +163,72 @@ def test_terminal_upload_is_reported_and_closes_after_review_window(tmp_path):
             "closing",
         }
         assert shutdown.wait(1)
+    finally:
+        app.extensions["tmall_workflow_lifecycle"].stop()
+
+
+def test_managed_workbench_can_end_current_task_without_deleting_data(tmp_path):
+    runs_root = tmp_path / "runs"
+    store = SessionStore(runs_root)
+    session = store.create_session()
+    shutdown = Event()
+    app = create_app(
+        runs_root,
+        runtime_config=_runtime(tmp_path, runs_root),
+        managed_session_id=session.session_id,
+        shutdown_event=shutdown,
+        lifecycle_poll_seconds=0.01,
+    )
+    try:
+        response = app.test_client().post(
+            f"/api/sessions/{session.session_id}/end",
+            json={},
+        )
+
+        assert response.status_code == 202
+        assert response.json["status"] == "closing"
+        assert response.json["task_data_preserved"] is True
+        assert response.json["resumable"] is True
+        assert shutdown.wait(1)
+        state = store.load_session(session.session_id)
+        assert state["workbench_shutdown"]["reason"] == "user_requested"
+        assert state["workbench_shutdown"]["resumable"] is True
+        assert (store._session_path(session.session_id) / "session.json").is_file()
+    finally:
+        app.extensions["tmall_workflow_lifecycle"].stop()
+
+
+def test_managed_workbench_refuses_to_end_while_gallery_job_is_running(tmp_path):
+    runs_root = tmp_path / "runs"
+    store = SessionStore(runs_root)
+    session = store.create_session()
+    store._write_json_atomic(
+        store._stage_path(session.session_id, "asset_matching")
+        / "gallery-job.json",
+        {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "status": "running",
+        },
+    )
+    shutdown = Event()
+    app = create_app(
+        runs_root,
+        runtime_config=_runtime(tmp_path, runs_root),
+        managed_session_id=session.session_id,
+        shutdown_event=shutdown,
+        lifecycle_poll_seconds=0.01,
+    )
+    try:
+        response = app.test_client().post(
+            f"/api/sessions/{session.session_id}/end",
+            json={},
+        )
+
+        assert response.status_code == 409
+        assert response.json["reason_code"] == "TASK_END_BUSY"
+        assert "等待本轮处理结束" in response.json["message"]
+        assert shutdown.wait(0.15) is False
+        assert "workbench_shutdown" not in store.load_session(session.session_id)
     finally:
         app.extensions["tmall_workflow_lifecycle"].stop()

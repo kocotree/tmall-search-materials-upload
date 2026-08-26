@@ -33,6 +33,7 @@
   const taskStatusSummary = document.querySelector("[data-task-status-summary]");
   const taskStageProgress = document.querySelector("[data-task-stage-progress]");
   const taskAutoShutdown = document.querySelector("[data-task-auto-shutdown]");
+  const endCurrentTaskButton = document.querySelector("[data-end-current-task]");
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
   const teamIndexConfig = document.querySelector('[data-component="TeamIndexConfig"]');
   const larkBaseConfig = document.querySelector('[data-component="LarkBaseConfig"]');
@@ -71,6 +72,7 @@
   let larkAuthPollTimer = null;
   let larkActivationInFlight = false;
   let persistenceInFlight = false;
+  let endCurrentTaskInFlight = false;
   let stageLocalActionInFlight = false;
   let pendingBackNavigation = false;
   let pendingPersistenceMode = null;
@@ -1392,6 +1394,15 @@
       + `${Number(taskStatus.total_stage_count || 1)} 阶段 · `
       + `${taskStatus.current_stage_title || "当前阶段"}`;
     const shutdown = taskStatus.auto_shutdown || {};
+    if (endCurrentTaskButton) {
+      endCurrentTaskButton.hidden = !sessionId || shutdown.enabled !== true;
+      if (!endCurrentTaskInFlight) {
+        endCurrentTaskButton.disabled = shutdown.status === "closing";
+        endCurrentTaskButton.textContent = shutdown.status === "review_window"
+          ? "立即关闭工作台"
+          : "结束当前任务";
+      }
+    }
     if (shutdown.status === "review_window") {
       taskAutoShutdown.hidden = false;
       taskAutoShutdown.textContent =
@@ -7273,6 +7284,41 @@
     }
   }
 
+  async function endCurrentTask() {
+    if (!sessionId || endCurrentTaskInFlight) return;
+    const confirmed = window.confirm(
+      "确定结束当前任务吗？工作台后台会关闭，未完成流程将暂停；任务记录会保留，之后仍可恢复。",
+    );
+    if (!confirmed) return;
+    endCurrentTaskInFlight = true;
+    endCurrentTaskButton.disabled = true;
+    endCurrentTaskButton.textContent = "正在结束…";
+    actionMessage.textContent = "正在安全结束当前任务…";
+    let accepted = false;
+    try {
+      const payload = await fetchJson(apiPath("/end"), {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      accepted = payload.status === "closing";
+      taskAwareness.dataset.phase = "completed";
+      taskStatusLabel.textContent = "当前任务正在结束";
+      taskStatusSummary.textContent =
+        "工作台后台正在关闭；任务记录已经保留，之后可以恢复同一个任务。";
+      taskAutoShutdown.hidden = false;
+      taskAutoShutdown.textContent = "关闭后当前页面将停止刷新。";
+      actionMessage.textContent = payload.message || "当前任务正在结束。";
+    } catch (error) {
+      actionMessage.textContent = error.userMessage || error.message;
+    } finally {
+      if (!accepted) {
+        endCurrentTaskInFlight = false;
+        endCurrentTaskButton.disabled = false;
+        endCurrentTaskButton.textContent = "结束当前任务";
+      }
+    }
+  }
+
   backButton.addEventListener("click", async () => {
     await reopenPreviousStage();
   });
@@ -7322,6 +7368,7 @@
   submitButton.addEventListener("click", () => persistStage("submit"));
   recoveryButton.addEventListener("click", copyRecoveryInstruction);
   withdrawButton.addEventListener("click", withdrawSubmission);
+  endCurrentTaskButton?.addEventListener("click", endCurrentTask);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) pollStage();
   });

@@ -425,6 +425,7 @@ def create_app(
             "scheduled_at": None,
             "shutdown_at": None,
             "shutdown_requested_at": None,
+            "shutdown_reason": "",
             "terminal_summary": "",
         }
 
@@ -975,6 +976,55 @@ def create_app(
             revision=state["stages"][state["current_stage"]]["revision"],
             task_status=workflow_task_status(session_id, state),
         )
+
+    @app.post("/api/sessions/<session_id>/end")
+    def end_current_task(session_id: str):
+        """Persist a resumable stop request and close the managed backend."""
+
+        store.load_session(session_id)
+        if (
+            workflow_lifecycle is None
+            or shutdown_event is None
+            or managed_session_id != session_id
+        ):
+            return _error(
+                "managed workbench shutdown is unavailable",
+                409,
+                reason_code="WORKBENCH_SHUTDOWN_UNAVAILABLE",
+                message="当前工作台不是受管任务，无法从页面安全结束。",
+            )
+
+        dispatcher_status = workflow_dispatch_status(session_id)
+        collection = get_collection_status(store.runs_root, session_id)
+        gallery_job = read_gallery_job(store, session_id)
+        busy = (
+            dispatcher_status.get("status") == "running"
+            or collection.get("status") in {"processing", "processing_indeterminate"}
+            or (
+                isinstance(gallery_job, dict)
+                and gallery_job.get("status") in {"queued", "running"}
+            )
+        )
+        if busy:
+            return _error(
+                "current task action is still running",
+                409,
+                reason_code="TASK_END_BUSY",
+                message=(
+                    "系统正在执行当前步骤。为避免产生不完整结果，请等待本轮处理结束后再结束任务。"
+                ),
+            )
+
+        shutdown_request = store.record_workbench_shutdown_request(session_id)
+        workflow_lifecycle.request_manual_shutdown()
+        return jsonify(
+            status="closing",
+            session_id=session_id,
+            task_data_preserved=True,
+            resumable=True,
+            requested_at=shutdown_request["requested_at"],
+            message="当前任务正在结束，任务记录会保留。",
+        ), 202
 
     @app.post(
         "/api/internal/sessions/<session_id>/collection/start"
