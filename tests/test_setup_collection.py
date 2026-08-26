@@ -9,7 +9,11 @@ import pytest
 from upload_search_materials.browser.config import load_selector_profile
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.io_tables import PRODUCT_REQUIRED_COLUMNS
-from upload_search_materials.lark_base_sync import LarkCliResult
+from upload_search_materials.lark_base_sync import (
+    LarkCliResult,
+    product_metadata_snapshot_path,
+    refresh_product_metadata_snapshot,
+)
 from upload_search_materials.runtime_config import LarkBaseConfig, load_runtime_config
 from upload_search_materials.setup_collection import (
     process_setup_collection,
@@ -186,6 +190,33 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     store, session, handoff, runtime, selectors = prepare_session(
         tmp_path, [product_row("886506466908")]
     )
+    runtime = replace(
+        runtime,
+        user_data_root=tmp_path / "user-data",
+        lark_base=LarkBaseConfig(
+            enabled=True,
+            product_base_token="base-token",
+            product_table_id="产品数据表",
+        ),
+    )
+    refresh_product_metadata_snapshot(
+        runtime.lark_base,
+        product_metadata_snapshot_path(runtime.user_data_root),
+        runner=lambda _args, _timeout: LarkCliResult(
+            ok=True,
+            payload={
+                "items": [
+                    {
+                        "fields": {
+                            "商品ID": "886506466908",
+                            "运营": "飞书负责人",
+                        }
+                    }
+                ],
+                "has_more": False,
+            },
+        ),
+    )
     calls = []
 
     def scan(page, selector_values, **kwargs):
@@ -244,6 +275,8 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     )
     assert matrix["products"][0]["promotion"]["missing_count"] == 7
     assert matrix["products"][0]["promotion"]["empty_slot_indexes"] is None
+    assert matrix["products"][0]["owner"] == "飞书负责人"
+    assert matrix["lark_product_sync"]["status"] == "completed"
     page_evidence = json.loads(
         (
             session.path
@@ -315,6 +348,7 @@ def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_pa
     )
     runtime = replace(
         runtime,
+        user_data_root=tmp_path / "user-data",
         lark_base=LarkBaseConfig(
             enabled=True,
             product_base_token="base-token",
@@ -340,11 +374,16 @@ def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_pa
             },
         )
 
+    refresh_product_metadata_snapshot(
+        runtime.lark_base,
+        product_metadata_snapshot_path(runtime.user_data_root),
+        runner=runner,
+    )
+
     result = refresh_completeness_product_metadata(
         runs_root=session.path.parent,
         session_id=session.session_id,
         runtime=runtime,
-        runner=runner,
     )
 
     assert result["status"] == "refreshed"
@@ -362,9 +401,6 @@ def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_pa
         runs_root=session.path.parent,
         session_id=session.session_id,
         runtime=runtime,
-        runner=lambda _args, _timeout: (_ for _ in ()).throw(
-            AssertionError("an applied sync must not call Feishu again")
-        ),
     )
     assert second["status"] == "unchanged"
 

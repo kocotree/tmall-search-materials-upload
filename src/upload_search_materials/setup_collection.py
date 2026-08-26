@@ -40,7 +40,11 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
-from .lark_base_sync import Runner, sync_product_metadata
+from .lark_base_sync import (
+    inspect_product_metadata_snapshot,
+    product_metadata_snapshot_path,
+    sync_product_metadata_from_snapshot,
+)
 from .material_state import build_completeness_matrix
 from .collection_runtime import attempt_path, read_json_object
 from .collection_readiness import merge_default_safe_popup_selectors
@@ -87,9 +91,16 @@ def _public_lark_product_sync(evidence: dict[str, Any]) -> dict[str, Any]:
             "fetched_count",
             "matched_count",
             "updated_owner_count",
+            "snapshot_updated_at",
+            "snapshot_sha256",
             "recorded_at",
         )
     }
+
+
+def _product_metadata_snapshot_path(runtime: RuntimeConfig) -> Path:
+    root = runtime.user_data_root or runtime.runs_root.parent
+    return product_metadata_snapshot_path(root)
 
 
 def refresh_completeness_product_metadata(
@@ -97,13 +108,12 @@ def refresh_completeness_product_metadata(
     runs_root: Path,
     session_id: str,
     runtime: RuntimeConfig,
-    runner: Runner | None = None,
 ) -> dict[str, Any]:
-    """Refresh owners in an existing completeness matrix without recollecting.
+    """Apply the local owner snapshot without recollecting or calling Feishu.
 
     This is intentionally narrower than ``process_setup_collection``: it reads
-    the already published promotion status, overlays the current Feishu owner
-    metadata, and rewrites only the completeness matrix/review context.
+    the already published promotion status, overlays the machine-local owner
+    snapshot, and rewrites only the completeness matrix/review context.
     """
 
     store = SessionStore(runs_root)
@@ -112,7 +122,7 @@ def refresh_completeness_product_metadata(
         return {
             "status": "skipped",
             "reason_code": "LARK_OWNER_REFRESH_STAGE_NOT_CURRENT",
-            "message": "负责人会在进入完整度巡检时自动同步。",
+            "message": "负责人数据会在生成巡检结果时从本机快照读取。",
         }
     stage_state = state.get("stages", {}).get("completeness", {})
     stage_status = str(stage_state.get("status") or "")
@@ -167,27 +177,33 @@ def refresh_completeness_product_metadata(
     prior_evidence = (
         _read_json(evidence_path) if evidence_path.is_file() else {}
     )
+    snapshot_status = inspect_product_metadata_snapshot(
+        _product_metadata_snapshot_path(runtime)
+    )
     applied_sync = existing_matrix.get("lark_product_sync")
     if (
         isinstance(applied_sync, dict)
         and applied_sync.get("status") == "completed"
         and prior_evidence.get("status") == "completed"
         and int(prior_evidence.get("fetched_count") or 0) > 0
+        and snapshot_status.get("status") == "available"
+        and prior_evidence.get("snapshot_sha256")
+        == snapshot_status.get("snapshot_sha256")
         and applied_sync.get("recorded_at") == prior_evidence.get("recorded_at")
     ):
         return {
             "status": "unchanged",
             "reason_code": "LARK_OWNER_REFRESH_ALREADY_CURRENT",
-            "message": "当前巡检已使用本次飞书负责人数据。",
+            "message": "当前巡检已使用最新的本机负责人数据。",
             "lark_product_sync": _public_lark_product_sync(prior_evidence),
         }
 
     products = read_product_csv(products_path)
     collected_rows = read_backend_status(collected_path)
-    sync = sync_product_metadata(
+    sync = sync_product_metadata_from_snapshot(
         products,
-        runtime.lark_base,
-        runner=runner,
+        _product_metadata_snapshot_path(runtime),
+        enabled=runtime.lark_base.enabled,
     )
     sync_evidence = sync.evidence()
     _write_json(evidence_path, sync_evidence)
@@ -269,8 +285,8 @@ def refresh_completeness_product_metadata(
         "status": "refreshed",
         "reason_code": "",
         "message": (
-            f"已从飞书读取 {sync.fetched_count} 条商品记录，"
-            f"匹配当前巡检商品 {sync.matched_count} 个。"
+            f"已从本机负责人数据匹配 {sync.matched_count} 个巡检商品，"
+            f"更新负责人 {sync.updated_owner_count} 个。"
         ),
         "lark_product_sync": public_sync,
     }
@@ -796,18 +812,6 @@ def process_setup_collection(
             attempt_id=attempt_id,
         )
         return {"status": "blocked", "result": result}
-
-    lark_sync_evidence = session_path / "inputs" / "lark-product-sync.json"
-    lark_sync = sync_product_metadata(
-        products,
-        runtime.lark_base,
-        evidence_path=(
-            lark_sync_evidence if runtime.lark_base.enabled else None
-        ),
-    )
-    products = list(lark_sync.records)
-    scan_summary["lark_product_sync"] = lark_sync.evidence()
-    _write_json(session_path / "inputs" / "scan-summary.json", scan_summary)
 
     selected_profile_path = selectors_path or runtime.selectors_file
     if selected_profile_path is None:
@@ -1361,9 +1365,26 @@ def process_setup_collection(
             checkpoint_context=checkpoint_context,
             expected_rows=len(collected_rows),
         )
+    lark_sync_evidence = session_path / "inputs" / "lark-product-sync.json"
+    lark_sync = sync_product_metadata_from_snapshot(
+        products,
+        _product_metadata_snapshot_path(runtime),
+        enabled=runtime.lark_base.enabled,
+        evidence_path=(
+            lark_sync_evidence if runtime.lark_base.enabled else None
+        ),
+    )
+    products = list(lark_sync.records)
+    lark_sync_document = lark_sync.evidence()
+    scan_summary["lark_product_sync"] = lark_sync_document
+    _write_json(session_path / "inputs" / "scan-summary.json", scan_summary)
+
     matrix = build_completeness_matrix(
         collected_rows,
         products=[record.raw for record in products],
+    )
+    matrix["lark_product_sync"] = _public_lark_product_sync(
+        lark_sync_document
     )
     pagination_document = read_json(pagination_evidence)
     pagination_events = pagination_document.get("events", [])
@@ -1444,7 +1465,7 @@ def process_setup_collection(
             "product_row_anomalies": matrix[
                 "product_row_anomalies"
             ],
-            "lark_product_sync": lark_sync.evidence(),
+            "lark_product_sync": lark_sync_document,
         },
         claim_id=claim_id,
         attempt_id=attempt_id,

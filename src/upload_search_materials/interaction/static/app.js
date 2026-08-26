@@ -759,6 +759,7 @@
     const summary = larkBaseConfig.querySelector("[data-lark-base-summary]");
     const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
     const button = larkBaseConfig.querySelector("[data-authorize-lark-base]");
+    const refreshButton = larkBaseConfig.querySelector("[data-refresh-lark-owner-snapshot]");
     const link = larkBaseConfig.querySelector("[data-lark-auth-link]");
     const awaiting = status === "awaiting_user";
     const authorized = status === "authorized";
@@ -781,6 +782,7 @@
             ? "等待授权完成"
             : "授权飞书";
     }
+    if (refreshButton) refreshButton.disabled = !authorized;
     if (link) {
       const url = payload?.verification_url || "";
       link.hidden = !awaiting || !url;
@@ -794,14 +796,21 @@
     larkActivationInFlight = true;
     try {
       const saved = await saveLarkBase({ quiet: true });
-      const ready = saved ? await checkLarkBase() : false;
-      if (ready) await refreshCompletenessLarkOwners();
+      if (!saved) return;
+      await checkLarkBase();
+      await refreshLarkProductOwnerSnapshot();
     } finally {
       larkActivationInFlight = false;
     }
   }
 
-  async function refreshCompletenessLarkOwners() {
+  function larkSnapshotTime(value) {
+    if (!value) return "";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString("zh-CN");
+  }
+
+  async function applyLocalOwnerSnapshotToCompleteness() {
     if (!sessionId) return;
     const feedback = larkBaseConfig?.querySelector("[data-lark-base-feedback]");
     try {
@@ -812,18 +821,48 @@
         body: JSON.stringify({}),
       });
       if (payload.status === "refreshed") {
-        const message = payload.message || "已按飞书数据刷新当前巡检负责人。";
+        const message = payload.message || "已按本机负责人数据刷新当前巡检。";
         if (feedback) feedback.textContent = message;
         actionMessage.textContent = message;
         if (currentStageId === "completeness") await loadStage();
       } else if (payload.status === "unavailable" && feedback) {
         feedback.textContent = payload.message
-          || "负责人暂时无法刷新，本地任务仍可继续。";
+          || "本机负责人数据暂时不可用，本地任务仍可继续。";
       }
     } catch (_error) {
       if (feedback) {
-        feedback.textContent = "飞书数据表已可用；当前任务负责人稍后会自动刷新。";
+        feedback.textContent = "负责人数据已保存在本机，但当前巡检暂时无法更新。";
       }
+    }
+  }
+
+  async function refreshLarkProductOwnerSnapshot() {
+    if (!larkBaseConfig) return false;
+    const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
+    const button = larkBaseConfig.querySelector("[data-refresh-lark-owner-snapshot]");
+    if (button) button.disabled = true;
+    feedback.textContent = "正在把负责人数据更新到本机…";
+    try {
+      const payload = await fetchJson(
+        "/api/runtime/lark-base/product-owner-snapshot/refresh",
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      if (payload.status === "completed") {
+        const updatedAt = larkSnapshotTime(payload.updated_at);
+        feedback.textContent = `负责人数据已更新：${payload.metadata_count || 0} 条${updatedAt ? ` · ${updatedAt}` : ""}。`;
+        await applyLocalOwnerSnapshotToCompleteness();
+        return true;
+      }
+      const previousAt = larkSnapshotTime(payload.previous_updated_at);
+      feedback.textContent = payload.preserved_previous
+        ? `${payload.message || "本次更新未完成。"}${previousAt ? ` 上次更新时间：${previousAt}。` : ""}`
+        : payload.message || "负责人数据更新未完成，请稍后重试。";
+      return false;
+    } catch (_error) {
+      feedback.textContent = "负责人数据更新未完成；已有本机数据不会被覆盖。";
+      return false;
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
@@ -877,6 +916,10 @@
     larkBaseConfig.querySelector("[data-authorize-lark-base]")?.addEventListener(
       "click",
       authorizeLarkBase,
+    );
+    larkBaseConfig.querySelector("[data-refresh-lark-owner-snapshot]")?.addEventListener(
+      "click",
+      refreshLarkProductOwnerSnapshot,
     );
     refreshLarkAuthStatus();
   }

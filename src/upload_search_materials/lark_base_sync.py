@@ -68,6 +68,7 @@ UPLOAD_LOG_FIELDS = {
 }
 SUCCESS_UPLOAD_STATUSES = {"submitted", "under_review", "success"}
 MAX_RECORD_LIST_PAGES = 200
+PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,8 @@ class ProductSyncResult:
     fetched_count: int = 0
     matched_count: int = 0
     updated_owner_count: int = 0
+    snapshot_updated_at: str = ""
+    snapshot_sha256: str = ""
     records: tuple[ProductRecord, ...] = ()
 
     def evidence(self) -> dict[str, Any]:
@@ -112,7 +115,40 @@ class ProductSyncResult:
             "fetched_count": self.fetched_count,
             "matched_count": self.matched_count,
             "updated_owner_count": self.updated_owner_count,
+            "snapshot_updated_at": self.snapshot_updated_at,
+            "snapshot_sha256": self.snapshot_sha256,
             "recorded_at": iso_timestamp(),
+        }
+
+
+@dataclass(frozen=True)
+class ProductMetadataSnapshotResult:
+    status: str
+    reason_code: str = ""
+    message: str = ""
+    table_id: str = ""
+    fetched_count: int = 0
+    metadata_count: int = 0
+    owner_count: int = 0
+    updated_at: str = ""
+    preserved_previous: bool = False
+    previous_updated_at: str = ""
+    previous_metadata_count: int = 0
+
+    def public_status(self) -> dict[str, Any]:
+        return {
+            "schema_version": PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "message": self.message,
+            "table_id": self.table_id,
+            "fetched_count": self.fetched_count,
+            "metadata_count": self.metadata_count,
+            "owner_count": self.owner_count,
+            "updated_at": self.updated_at,
+            "preserved_previous": self.preserved_previous,
+            "previous_updated_at": self.previous_updated_at,
+            "previous_metadata_count": self.previous_metadata_count,
         }
 
 
@@ -337,27 +373,9 @@ def sync_product_metadata(
         return result
 
     metadata = _metadata_by_product_id(records_result.payload)
-    updated_owner_count = 0
-    matched_count = 0
-    enriched: list[ProductRecord] = []
-    for product in products:
-        meta = metadata.get(_normalize_product_id(product.product_id))
-        if meta is None:
-            enriched.append(product)
-            continue
-        matched_count += 1
-        owner = meta.owner.strip()
-        if owner and owner != product.owner.strip():
-            product.owner = owner
-            product.raw["运营"] = owner
-            updated_owner_count += 1
-        if not product.sku and meta.sku:
-            product.sku = meta.sku
-            product.raw["货号（查找引用）"] = meta.sku
-        if not product.title and meta.title:
-            product.title = meta.title
-            product.raw["商品名称（查找引用）"] = meta.title
-        enriched.append(product)
+    enriched, matched_count, updated_owner_count = _overlay_product_metadata(
+        products, metadata
+    )
 
     result = ProductSyncResult(
         status="completed",
@@ -367,6 +385,207 @@ def sync_product_metadata(
         fetched_count=len(records_result.payload),
         matched_count=matched_count,
         updated_owner_count=updated_owner_count,
+        records=tuple(enriched),
+    )
+    _write_optional_evidence(evidence_path, result.evidence())
+    return result
+
+
+def product_metadata_snapshot_path(user_data_root: Path) -> Path:
+    """Return the machine-local owner snapshot path outside task runs."""
+
+    return (
+        Path(user_data_root)
+        / "runtime"
+        / "lark"
+        / "product-owner-snapshot.json"
+    )
+
+
+def inspect_product_metadata_snapshot(path: Path) -> dict[str, Any]:
+    """Return a public, token-free status for the local owner snapshot."""
+
+    document, metadata, reason_code = _read_product_metadata_snapshot(path)
+    if reason_code:
+        return {
+            "schema_version": PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION,
+            "status": (
+                "missing"
+                if reason_code == "LARK_PRODUCT_SNAPSHOT_MISSING"
+                else "invalid"
+            ),
+            "reason_code": reason_code,
+            "message": (
+                "本机尚未下载负责人数据。"
+                if reason_code == "LARK_PRODUCT_SNAPSHOT_MISSING"
+                else "本机负责人数据快照不可用，请重新刷新。"
+            ),
+            "metadata_count": 0,
+            "owner_count": 0,
+            "updated_at": "",
+        }
+    return {
+        "schema_version": PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION,
+        "status": "available",
+        "reason_code": "",
+        "message": "本机负责人数据快照可用。",
+        "table_id": str(document.get("table_id") or ""),
+        "fetched_count": int(document.get("fetched_count") or 0),
+        "metadata_count": len(metadata),
+        "owner_count": sum(1 for item in metadata.values() if item.owner.strip()),
+        "updated_at": str(document.get("updated_at") or ""),
+        "snapshot_sha256": str(document.get("snapshot_sha256") or ""),
+    }
+
+
+def refresh_product_metadata_snapshot(
+    config: LarkBaseConfig,
+    snapshot_path: Path,
+    *,
+    runner: Runner | None = None,
+) -> ProductMetadataSnapshotResult:
+    """Download the configured product table into a durable local snapshot.
+
+    Failed or empty downloads never replace a previously successful snapshot.
+    The snapshot contains only normalized business fields and never stores an
+    authorization token or the resolved Base token.
+    """
+
+    previous = inspect_product_metadata_snapshot(snapshot_path)
+    previous_available = previous.get("status") == "available"
+
+    def unavailable(
+        reason_code: str, message: str
+    ) -> ProductMetadataSnapshotResult:
+        suffix = " 已继续使用上一次成功更新的数据。" if previous_available else ""
+        return ProductMetadataSnapshotResult(
+            status="unavailable",
+            reason_code=reason_code,
+            message=(message.strip() + suffix).strip(),
+            table_id=str(previous.get("table_id") or config.product_table_id),
+            preserved_previous=previous_available,
+            previous_updated_at=str(previous.get("updated_at") or ""),
+            previous_metadata_count=int(previous.get("metadata_count") or 0),
+        )
+
+    if not config.product_sync_configured:
+        return unavailable(
+            "LARK_PRODUCT_TABLE_NOT_CONFIGURED",
+            "负责人数据表尚未启用。",
+        )
+
+    active_runner = runner or default_lark_cli_runner
+    target_result = _resolve_target(
+        config.product_base_url,
+        config.product_base_token,
+        config.product_table_id,
+        config.command_timeout_seconds,
+        active_runner,
+    )
+    if not target_result.ok:
+        return unavailable(target_result.reason_code, target_result.message)
+    target = target_result.payload
+    records_result = _list_all_records(
+        target.base_token,
+        target.table_id,
+        config.command_timeout_seconds,
+        active_runner,
+    )
+    if not records_result.ok:
+        return unavailable(records_result.reason_code, records_result.message)
+    if not records_result.payload:
+        return unavailable(
+            "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE",
+            "飞书商品信息表可以访问，但没有读取到商品记录。",
+        )
+
+    metadata = _metadata_by_product_id(records_result.payload)
+    if not metadata:
+        return unavailable(
+            "LARK_PRODUCT_SNAPSHOT_NO_PRODUCT_IDS",
+            "飞书商品信息表没有可识别的商品 ID，负责人数据未更新。",
+        )
+
+    updated_at = iso_timestamp()
+    records = [
+        {
+            "product_id": item.product_id,
+            "owner": item.owner,
+            "sku": item.sku,
+            "title": item.title,
+        }
+        for item in sorted(metadata.values(), key=lambda item: item.product_id)
+    ]
+    document = {
+        "schema_version": PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION,
+        "integration": "lark_base_product_metadata_snapshot",
+        "status": "completed",
+        "table_id": target.table_id,
+        "fetched_count": len(records_result.payload),
+        "metadata_count": len(records),
+        "owner_count": sum(1 for item in metadata.values() if item.owner.strip()),
+        "updated_at": updated_at,
+        "snapshot_sha256": _stable_json_sha256(records),
+        "records": records,
+    }
+    atomic_write_json(snapshot_path, document)
+    return ProductMetadataSnapshotResult(
+        status="completed",
+        message="负责人数据已下载到本机运行时快照。",
+        table_id=target.table_id,
+        fetched_count=len(records_result.payload),
+        metadata_count=len(records),
+        owner_count=int(document["owner_count"]),
+        updated_at=updated_at,
+    )
+
+
+def sync_product_metadata_from_snapshot(
+    products: Sequence[ProductRecord],
+    snapshot_path: Path,
+    *,
+    enabled: bool = True,
+    evidence_path: Path | None = None,
+) -> ProductSyncResult:
+    """Overlay owners using the local runtime snapshot without calling Feishu."""
+
+    if not enabled:
+        result = ProductSyncResult(
+            status="skipped",
+            reason_code="LARK_BASE_DISABLED",
+            message="未启用飞书负责人数据，使用商品快照中的负责人。",
+            records=tuple(products),
+        )
+        _write_optional_evidence(evidence_path, result.evidence())
+        return result
+
+    document, metadata, reason_code = _read_product_metadata_snapshot(snapshot_path)
+    if reason_code:
+        result = ProductSyncResult(
+            status="skipped",
+            reason_code=reason_code,
+            message=(
+                "本机尚未下载负责人数据，使用商品快照中的负责人。"
+                if reason_code == "LARK_PRODUCT_SNAPSHOT_MISSING"
+                else "本机负责人数据快照不可用，使用商品快照中的负责人。"
+            ),
+            records=tuple(products),
+        )
+        _write_optional_evidence(evidence_path, result.evidence())
+        return result
+
+    enriched, matched_count, updated_owner_count = _overlay_product_metadata(
+        products, metadata
+    )
+    result = ProductSyncResult(
+        status="completed",
+        message="已按本机负责人数据快照同步商品负责人。",
+        table_id=str(document.get("table_id") or ""),
+        fetched_count=int(document.get("fetched_count") or len(metadata)),
+        matched_count=matched_count,
+        updated_owner_count=updated_owner_count,
+        snapshot_updated_at=str(document.get("updated_at") or ""),
+        snapshot_sha256=str(document.get("snapshot_sha256") or ""),
         records=tuple(enriched),
     )
     _write_optional_evidence(evidence_path, result.evidence())
@@ -805,6 +1024,82 @@ def _metadata_by_product_id(records: Sequence[Mapping[str, Any]]) -> dict[str, P
             title=_first_field_text(fields, TITLE_FIELDS),
         )
     return values
+
+
+def _read_product_metadata_snapshot(
+    path: Path,
+) -> tuple[dict[str, Any], dict[str, ProductMetadata], str]:
+    snapshot = Path(path)
+    if not snapshot.is_file():
+        return {}, {}, "LARK_PRODUCT_SNAPSHOT_MISSING"
+    try:
+        document = read_json(snapshot)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version")
+        != PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION
+        or document.get("status") != "completed"
+        or not isinstance(document.get("records"), list)
+    ):
+        return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
+    snapshot_sha256 = str(document.get("snapshot_sha256") or "")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256)
+        or snapshot_sha256 != _stable_json_sha256(document["records"])
+    ):
+        return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
+    try:
+        if int(document.get("fetched_count") or 0) < 1:
+            return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
+    except (TypeError, ValueError):
+        return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
+
+    metadata: dict[str, ProductMetadata] = {}
+    for raw in document["records"]:
+        if not isinstance(raw, Mapping):
+            continue
+        product_id = _normalize_product_id(raw.get("product_id"))
+        if not product_id:
+            continue
+        metadata[product_id] = ProductMetadata(
+            product_id=product_id,
+            owner=str(raw.get("owner") or "").strip(),
+            sku=str(raw.get("sku") or "").strip(),
+            title=str(raw.get("title") or "").strip(),
+        )
+    if not metadata:
+        return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
+    return document, metadata, ""
+
+
+def _overlay_product_metadata(
+    products: Sequence[ProductRecord],
+    metadata: Mapping[str, ProductMetadata],
+) -> tuple[list[ProductRecord], int, int]:
+    updated_owner_count = 0
+    matched_count = 0
+    enriched: list[ProductRecord] = []
+    for product in products:
+        meta = metadata.get(_normalize_product_id(product.product_id))
+        if meta is None:
+            enriched.append(product)
+            continue
+        matched_count += 1
+        owner = meta.owner.strip()
+        if owner and owner != product.owner.strip():
+            product.owner = owner
+            product.raw["运营"] = owner
+            updated_owner_count += 1
+        if not product.sku and meta.sku:
+            product.sku = meta.sku
+            product.raw["货号（查找引用）"] = meta.sku
+        if not product.title and meta.title:
+            product.title = meta.title
+            product.raw["商品名称（查找引用）"] = meta.title
+        enriched.append(product)
+    return enriched, matched_count, updated_owner_count
 
 
 def _first_field_text(fields: Mapping[str, Any], names: Sequence[str]) -> str:

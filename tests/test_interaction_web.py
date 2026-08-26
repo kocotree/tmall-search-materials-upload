@@ -181,6 +181,39 @@ def test_runtime_lark_base_check_is_soft_readiness(
     assert observed["config"].product_base_token == "base-token"
 
 
+def test_runtime_lark_authorization_refreshes_owner_snapshot(
+    client, monkeypatch
+):
+    observed = {}
+
+    class SnapshotResult:
+        def public_status(self):
+            return {
+                "status": "completed",
+                "metadata_count": 12,
+                "owner_count": 8,
+                "updated_at": "2026-08-26T12:00:00+08:00",
+            }
+
+    def fake_refresh(config, path):
+        observed["config"] = config
+        observed["path"] = path
+        return SnapshotResult()
+
+    monkeypatch.setattr(
+        web_module, "refresh_product_metadata_snapshot", fake_refresh
+    )
+
+    response = client.post(
+        "/api/runtime/lark-base/product-owner-snapshot/refresh", json={}
+    )
+
+    assert response.status_code == 200
+    assert response.json["status"] == "completed"
+    assert response.json["metadata_count"] == 12
+    assert observed["path"].name == "product-owner-snapshot.json"
+
+
 def test_authorized_lark_can_refresh_current_completeness_owners(
     client, session_id, monkeypatch
 ):
@@ -268,11 +301,15 @@ def test_setup_page_uses_one_click_lark_authorization(client):
 
     assert response.status_code == 200
     assert "data-authorize-lark-base" in text
+    assert "data-refresh-lark-owner-snapshot" in text
     assert "商品信息表和上传记录表已由团队预设" in text
     assert "data-lark-enabled" not in text
     assert "data-save-lark-base" not in text
     assert "商品信息表缺少飞书 Wiki 读取权限" in script
     assert "/stages/completeness/refresh-lark-owners" in script
+    assert "/api/runtime/lark-base/product-owner-snapshot/refresh" in script
+    assert "正在把负责人数据更新到本机" in script
+    assert "当前任务负责人稍后会自动刷新" not in script
     assert "没有读取到任何商品记录" in script
     assert "已授权 · 需补充权限" in script
     assert "飞书账号已授权，但默认数据表暂时不可用" not in script

@@ -5,7 +5,10 @@ from upload_search_materials.lark_base_sync import (
     LarkCliResult,
     build_upload_log_rows,
     inspect_lark_base_config,
+    inspect_product_metadata_snapshot,
+    refresh_product_metadata_snapshot,
     sync_product_metadata,
+    sync_product_metadata_from_snapshot,
     write_successful_upload_log,
 )
 from upload_search_materials.models import ProductRecord
@@ -121,6 +124,92 @@ def test_sync_product_metadata_does_not_report_empty_table_as_completed(tmp_path
     )
     assert evidence["status"] == "skipped"
     assert evidence["fetched_count"] == 0
+
+
+def test_runtime_product_snapshot_downloads_then_drives_local_owner_sync(tmp_path):
+    snapshot = tmp_path / "runtime" / "lark" / "product-owner-snapshot.json"
+    config = LarkBaseConfig(
+        enabled=True,
+        product_base_token="base-token",
+        product_table_id="产品数据表",
+    )
+
+    result = refresh_product_metadata_snapshot(
+        config,
+        snapshot,
+        runner=lambda args, _timeout: LarkCliResult(
+            ok=True,
+            payload={
+                "items": [
+                    {
+                        "fields": {
+                            "商品ID": "1001",
+                            "运营": "蟹黄",
+                            "货号": "BASE-SKU",
+                            "商品名称": "飞书商品",
+                        }
+                    }
+                ],
+                "has_more": False,
+            },
+        ),
+    )
+
+    assert result.status == "completed"
+    assert result.metadata_count == 1
+    document = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert document["records"][0]["owner"] == "蟹黄"
+    assert "base_token" not in document
+    assert inspect_product_metadata_snapshot(snapshot)["status"] == "available"
+
+    product = ProductRecord(
+        "1001",
+        sku="LOCAL-SKU",
+        title="本地商品",
+        owner="旧负责人",
+        raw=_product_raw("1001", "旧负责人"),
+    )
+    synced = sync_product_metadata_from_snapshot([product], snapshot)
+
+    assert synced.status == "completed"
+    assert synced.records[0].owner == "蟹黄"
+    assert synced.matched_count == 1
+    assert synced.snapshot_updated_at == result.updated_at
+
+
+def test_empty_product_snapshot_refresh_preserves_previous_success(tmp_path):
+    snapshot = tmp_path / "runtime" / "lark" / "product-owner-snapshot.json"
+    config = LarkBaseConfig(
+        enabled=True,
+        product_base_token="base-token",
+        product_table_id="产品数据表",
+    )
+    refresh_product_metadata_snapshot(
+        config,
+        snapshot,
+        runner=lambda _args, _timeout: LarkCliResult(
+            ok=True,
+            payload={
+                "items": [{"fields": {"商品ID": "1001", "运营": "蟹黄"}}],
+                "has_more": False,
+            },
+        ),
+    )
+    previous = snapshot.read_bytes()
+
+    result = refresh_product_metadata_snapshot(
+        config,
+        snapshot,
+        runner=lambda _args, _timeout: LarkCliResult(
+            ok=True,
+            payload={"items": [], "has_more": False},
+        ),
+    )
+
+    assert result.status == "unavailable"
+    assert result.reason_code == "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE"
+    assert result.preserved_previous is True
+    assert snapshot.read_bytes() == previous
 
 
 def test_lark_readiness_requires_product_records_but_allows_empty_upload_log():

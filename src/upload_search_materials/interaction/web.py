@@ -72,7 +72,12 @@ from ..gallery_jobs import (
 from ..material_executor_launcher import MaterialExecutorLaunchError
 from ..io_tables import SchemaError, read_product_csv, validate_product_records
 from ..lark_auth import LarkAuthCoordinator
-from ..lark_base_sync import inspect_lark_base_config
+from ..lark_base_sync import (
+    inspect_lark_base_config,
+    inspect_product_metadata_snapshot,
+    product_metadata_snapshot_path,
+    refresh_product_metadata_snapshot,
+)
 from ..image_review import (
     build_image_review_data,
     normalize_review_decisions,
@@ -372,6 +377,10 @@ def create_app(
     )
     workflow_dispatcher: WorkflowDispatcher | None = None
     workflow_lifecycle: WorkflowCompletionMonitor | None = None
+
+    def lark_product_snapshot_path() -> Path:
+        root = runtime.user_data_root or runtime.runs_root.parent
+        return product_metadata_snapshot_path(root)
 
     def notify_workflow_dispatcher(session_id: str) -> None:
         if (
@@ -1623,6 +1632,9 @@ def create_app(
             upload_log_table_id=config.upload_log_table_id,
             product_sync_configured=config.product_sync_configured,
             upload_log_configured=config.upload_log_configured,
+            product_owner_snapshot=inspect_product_metadata_snapshot(
+                lark_product_snapshot_path()
+            ),
             config_path=str(config_path),
         )
 
@@ -1663,6 +1675,33 @@ def create_app(
             upload_log_configured=config.upload_log_configured,
             config_path=str(runtime.config_path),
         )
+
+    @app.post("/api/runtime/lark-base/product-owner-snapshot/refresh")
+    def refresh_runtime_lark_product_owner_snapshot():
+        try:
+            result = refresh_product_metadata_snapshot(
+                runtime.lark_base,
+                lark_product_snapshot_path(),
+            )
+        except (OSError, PersistenceAccessDenied):
+            previous = inspect_product_metadata_snapshot(
+                lark_product_snapshot_path()
+            )
+            return jsonify(
+                status="unavailable",
+                reason_code="LARK_PRODUCT_SNAPSHOT_WRITE_FAILED",
+                message=(
+                    "负责人数据暂时无法保存，已继续使用上一次成功更新的数据。"
+                    if previous.get("status") == "available"
+                    else "负责人数据暂时无法保存，请稍后重试。"
+                ),
+                preserved_previous=previous.get("status") == "available",
+                previous_updated_at=str(previous.get("updated_at") or ""),
+                previous_metadata_count=int(
+                    previous.get("metadata_count") or 0
+                ),
+            )
+        return jsonify(**result.public_status())
 
     @app.post("/api/runtime/folder-picker")
     def open_runtime_folder_picker():
