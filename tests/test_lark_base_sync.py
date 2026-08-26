@@ -177,6 +177,78 @@ def test_runtime_product_snapshot_downloads_then_drives_local_owner_sync(tmp_pat
     assert synced.snapshot_updated_at == result.updated_at
 
 
+def test_runtime_product_snapshot_supports_columnar_record_pages(tmp_path):
+    snapshot = tmp_path / "runtime" / "lark" / "product-owner-snapshot.json"
+    config = LarkBaseConfig(
+        enabled=True,
+        product_base_token="base-token",
+        product_table_id="产品数据表",
+    )
+    calls = []
+
+    def runner(args, _timeout):
+        calls.append(list(args))
+        offset = int(args[args.index("--offset") + 1])
+        if offset == 0:
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "ok": True,
+                    "data": {
+                        "fields": [
+                            "商品ID",
+                            "运营",
+                            "货号（查找引用）",
+                            "商品名称（查找引用）",
+                        ],
+                        "data": [
+                            ["1001", "蟹黄", ["SKU-1"], ["商品一"]],
+                            ["1002", ["桃酥"], ["SKU-2"], ["商品二"]],
+                        ],
+                        "record_id_list": ["rec1", "rec2"],
+                        "has_more": True,
+                    },
+                },
+            )
+        assert offset == 2
+        return LarkCliResult(
+            ok=True,
+            payload={
+                "ok": True,
+                "data": {
+                    "fields": [
+                        "商品ID",
+                        "运营",
+                        "货号（查找引用）",
+                        "商品名称（查找引用）",
+                    ],
+                    "data": [["1003", "虾米", ["SKU-3"], ["商品三"]]],
+                    "record_id_list": ["rec3"],
+                    "has_more": False,
+                },
+            },
+        )
+
+    result = refresh_product_metadata_snapshot(
+        config,
+        snapshot,
+        runner=runner,
+    )
+
+    assert result.status == "completed"
+    assert result.fetched_count == 3
+    assert result.metadata_count == 3
+    assert result.owner_count == 3
+    assert len(calls) == 2
+    document = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert [item["product_id"] for item in document["records"]] == [
+        "1001",
+        "1002",
+        "1003",
+    ]
+    assert document["records"][1]["owner"] == "桃酥"
+
+
 def test_empty_product_snapshot_refresh_preserves_previous_success(tmp_path):
     snapshot = tmp_path / "runtime" / "lark" / "product-owner-snapshot.json"
     config = LarkBaseConfig(
@@ -241,6 +313,44 @@ def test_lark_readiness_requires_product_records_but_allows_empty_upload_log():
     )
     assert result["upload_log"]["status"] == "available"
     assert sum("+record-list" in call for call in calls) == 1
+
+
+def test_lark_readiness_does_not_treat_columnar_fields_as_records():
+    def runner(args, _timeout):
+        if "+field-list" in args:
+            return LarkCliResult(ok=True, payload={"items": [{"field_id": "f1"}]})
+        if "+record-list" in args:
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "ok": True,
+                    "data": {
+                        "fields": ["商品ID", "运营"],
+                        "data": [],
+                        "record_id_list": [],
+                        "has_more": False,
+                    },
+                },
+            )
+        raise AssertionError(args)
+
+    result = inspect_lark_base_config(
+        LarkBaseConfig(
+            enabled=True,
+            product_base_token="product-base",
+            product_table_id="产品数据表",
+            upload_log_base_token="upload-base",
+            upload_log_table_id="搜推素材上传记录",
+        ),
+        runner=runner,
+    )
+
+    assert result["product_sync"]["status"] == "unavailable"
+    assert (
+        result["product_sync"]["reason_code"]
+        == "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE"
+    )
+    assert result["product_sync"]["record_probe_count"] == 0
 
 
 def test_build_upload_log_rows_keeps_only_successful_uploads(tmp_path):

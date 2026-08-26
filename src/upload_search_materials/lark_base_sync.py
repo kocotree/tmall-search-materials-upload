@@ -877,7 +877,7 @@ def _inspect_target(
                 table_id=coordinates.table_id,
                 field_count=len(fields),
             )
-        if not _extract_items(record_probe.payload):
+        if not _extract_record_items(record_probe.payload):
             return _target_status(
                 "unavailable",
                 "商品信息表可访问，但当前账号没有读取到任何记录。",
@@ -995,8 +995,8 @@ def _list_all_records(
         )
         if not result.ok:
             return result
-        items = _extract_items(result.payload)
-        records.extend(item for item in items if isinstance(item, dict))
+        items = _extract_record_items(result.payload)
+        records.extend(items)
         has_more = _has_more(result.payload)
         if has_more is False:
             break
@@ -1171,6 +1171,62 @@ def _extract_items(payload: Any) -> list[Any]:
             nested = _extract_items(value)
             if nested:
                 return nested
+    return []
+
+
+def _extract_record_items(payload: Any) -> list[dict[str, Any]]:
+    """Extract row objects from legacy and current ``+record-list`` JSON.
+
+    Older lark-cli versions returned ``items``/``records`` objects. Current
+    versions return a columnar envelope whose ``fields`` list names the
+    columns and whose ``data`` list contains row values. Keep record parsing
+    separate from the generic item extractor so a non-empty field list can
+    never be mistaken for non-empty records.
+    """
+
+    if not isinstance(payload, Mapping):
+        return []
+
+    for key in ("items", "records"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, Mapping)]
+
+    rows = payload.get("data")
+    field_names = payload.get("fields")
+    if isinstance(rows, list) and isinstance(field_names, list):
+        record_ids = payload.get("record_id_list")
+        if not isinstance(record_ids, list):
+            record_ids = []
+        records: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            if isinstance(row, Mapping):
+                fields = dict(row)
+            elif isinstance(row, Sequence) and not isinstance(
+                row, (bytes, bytearray, str)
+            ):
+                fields = {
+                    str(field_name): row[column_index]
+                    for column_index, field_name in enumerate(field_names)
+                    if str(field_name).strip() and column_index < len(row)
+                }
+            else:
+                continue
+            record: dict[str, Any] = {"fields": fields}
+            if index < len(record_ids) and str(record_ids[index]).strip():
+                record["record_id"] = str(record_ids[index]).strip()
+            records.append(record)
+        return records
+
+    for key in ("data", "result"):
+        nested = payload.get(key)
+        if not isinstance(nested, Mapping):
+            continue
+        records = _extract_record_items(nested)
+        if records:
+            return records
+        if any(name in nested for name in ("items", "records", "fields")):
+            return []
     return []
 
 
