@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
+from flask import request
 from PIL import Image
 from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
@@ -273,6 +275,80 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
         store._stage_path(session_id, "slots_copy")
         / "current-slot-plan.json"
     ).is_file()
+
+
+def test_team_index_discovery_runs_after_setup_stage_hydration(
+    tmp_path, monkeypatch
+):
+    runs = tmp_path / "runs"
+    candidate = (
+        tmp_path
+        / "mapped-drive"
+        / "浙江酷趣"
+        / "天猫部"
+        / "搜推素材索引-虾米"
+    )
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=runs,
+    )
+    monkeypatch.setattr(
+        web_module,
+        "discover_team_folder_index_root",
+        lambda _runtime: {
+            "status": "discovered",
+            "path": str(candidate),
+            "candidates": [str(candidate)],
+            "auto_fill": True,
+            "message": "已自动找到团队索引文件夹，提交任务时会保存。",
+        },
+    )
+    monkeypatch.setattr(
+        web_module,
+        "discover_image_sources",
+        lambda _runtime: {
+            "status": "not_found",
+            "source": "defaults",
+            "auto_fill": False,
+            "image_sources": [],
+            "message": "未自动找到默认图片文件夹。",
+        },
+    )
+    app = create_app(runs, runtime_config=runtime, enforce_stage_order=False)
+    store = SessionStore(runs)
+    session = store.create_session()
+
+    @app.before_request
+    def delay_setup_stage_hydration():
+        if request.path.endswith("/stages/setup"):
+            time.sleep(0.15)
+
+    with _live_server(app) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 900, "height": 800})
+        page.goto(
+            f"{base_url}/?session_id={session.session_id}",
+            wait_until="networkidle",
+        )
+        team_index_input = page.locator('[name="team_folder_index_root"]')
+        page.wait_for_function(
+            "([expected]) => document.querySelector('[name=team_folder_index_root]')"
+            "?.value === expected",
+            arg=[str(candidate)],
+        )
+
+        assert team_index_input.input_value() == str(candidate)
+        assert "已自动找到" in page.locator(
+            "[data-team-index-summary]"
+        ).inner_text()
+        assert store.load_session(session.session_id)["stages"]["setup"] == {
+            "revision": 0,
+            "status": "draft",
+        }
+        browser.close()
 
 
 def test_restored_asset_selections_use_server_preflight_fallback(tmp_path):

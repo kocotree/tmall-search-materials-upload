@@ -91,6 +91,7 @@
   let setupLoginReady = !setupLoginGate;
   let setupLoginGateStarted = false;
   let imageSourceDiscoveryStarted = false;
+  let teamIndexDiscoveryPromise = null;
   let selectedAssetValidation = null;
   const selectionPreflights = new Map();
   const selectionPreflightCardRefreshers = new Map();
@@ -613,19 +614,37 @@
 
   async function discoverTeamIndex() {
     if (!teamIndexConfig) return;
-    const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
-    const feedback = teamIndexConfig.querySelector("[data-team-index-feedback]");
-    try {
-      const payload = await fetchJson("/api/runtime/team-folder-index/discover");
-      if (payload.auto_fill && payload.path) {
-        input.value = payload.path;
-        teamIndexConfig.dataset.ready = "false";
-        teamIndexConfig.querySelector("[data-team-index-summary]").textContent = "已自动找到";
+    if (teamIndexDiscoveryPromise) return teamIndexDiscoveryPromise;
+    const discoveryPromise = (async () => {
+      const input = teamIndexConfig.querySelector('[name="team_folder_index_root"]');
+      const feedback = teamIndexConfig.querySelector("[data-team-index-feedback]");
+      const initialPath = input.value.trim();
+      feedback.textContent = "正在查找本机映射盘中的团队索引文件夹…";
+      try {
+        const payload = await fetchJson("/api/runtime/team-folder-index/discover");
+        if (
+          payload.auto_fill
+          && payload.path
+          && input.value.trim() === initialPath
+        ) {
+          input.value = payload.path;
+          teamIndexConfig.dataset.ready = "false";
+          teamIndexConfig.querySelector("[data-team-index-summary]").textContent = "已自动找到";
+        }
+        if (payload.message) feedback.textContent = payload.message;
+        return payload;
+      } catch (error) {
+        feedback.textContent = error.userMessage
+          || "暂未自动找到团队索引文件夹，可以手动选择。";
+        return null;
+      } finally {
+        if (teamIndexDiscoveryPromise === discoveryPromise) {
+          teamIndexDiscoveryPromise = null;
+        }
       }
-      if (payload.message) feedback.textContent = payload.message;
-    } catch (_error) {
-      // Keep the existing manual picker available when background discovery fails.
-    }
+    })();
+    teamIndexDiscoveryPromise = discoveryPromise;
+    return discoveryPromise;
   }
 
   function initializeTeamIndexConfig() {
@@ -640,7 +659,6 @@
       teamIndexConfig.querySelector("[data-team-index-feedback]").textContent =
         "路径已修改，请检测或保存。";
     });
-    discoverTeamIndex();
   }
 
   function larkBasePayload() {
@@ -1468,7 +1486,10 @@
     );
     const localBackLockActive = stageLocalActionInFlight
       || pendingBackNavigation
-      || (persistenceInFlight && currentStageId !== "asset_matching");
+      || (
+        persistenceInFlight
+        && !["asset_matching", "slots_copy"].includes(currentStageId)
+      );
     const backEnabled = Boolean(
       backVisible
       && currentBackNavigation?.enabled
@@ -1895,7 +1916,12 @@
     }
     heading.textContent = result.summary || "工作台已返回结果";
     summary.appendChild(heading);
-    if (Array.isArray(result.evidence) && result.evidence.length) {
+    // 素材匹配证据包含本机运行目录，仅供后台诊断与审计，不在用户页展示。
+    if (
+      componentName !== "AssetMatchGallery"
+      && Array.isArray(result.evidence)
+      && result.evidence.length
+    ) {
       const evidence = document.createElement("ul");
       result.evidence.forEach((item) => {
         const row = document.createElement("li");
@@ -6350,7 +6376,12 @@
       renderStatus();
       renderSubmission();
       renderStageResult(stages.get(requestedStageId).component);
-      if (requestedStageId === "setup") await discoverImageSources();
+      if (requestedStageId === "setup") {
+        await Promise.all([
+          discoverImageSources(),
+          discoverTeamIndex(),
+        ]);
+      }
       return;
     }
     try {
@@ -6403,8 +6434,16 @@
             "可在本页继续检查和修改。";
         }
       }
-      if (requestedStageId === "setup" && !payload.input) {
-        await discoverImageSources();
+      if (requestedStageId === "setup") {
+        const setupDiscoveryTasks = [];
+        if (!payload.input) setupDiscoveryTasks.push(discoverImageSources());
+        const teamIndexInput = teamIndexConfig?.querySelector(
+          '[name="team_folder_index_root"]',
+        );
+        if (!payload.input || !teamIndexInput?.value.trim()) {
+          setupDiscoveryTasks.push(discoverTeamIndex());
+        }
+        await Promise.all(setupDiscoveryTasks);
       }
       renderStatus();
       renderHandoffStatus(currentHandoffStatus, currentWorkflowDispatch);

@@ -8,6 +8,7 @@ from upload_search_materials.agent_handoff import (
     claim_agent_request,
     complete_agent_request,
     read_agent_request,
+    supersede_agent_request,
 )
 from upload_search_materials.copy_draft_workflow import (
     _with_remote_slot_occurrences,
@@ -943,6 +944,97 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
     ).json
     assert detail["progress"]["status"] == "completed"
     assert detail["progress"]["completed_count"] == detail["progress"]["total_count"]
+
+
+def test_slots_copy_back_supersedes_active_copy_without_disabling_navigation(
+    tmp_path,
+):
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
+    state = store.load_session(session_id)
+    state["current_stage"] = "slots_copy"
+    state["stages"]["slots_copy"]["status"] = "needs_user_input"
+    store._write_session_state(session_id, state)
+    revision = int(state["stages"]["slots_copy"]["revision"])
+
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/slots_copy/status"
+    )
+    assert status.status_code == 200
+    assert status.json["back_navigation"]["enabled"] is True
+    assert status.json["back_navigation"]["reason_code"] == ""
+
+    stale = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/back",
+        json={"revision": revision + 1},
+    )
+    assert stale.status_code == 409
+    assert read_agent_request(store, session_id, request_id)["status"] == "pending_agent"
+
+    reopened = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/back",
+        json={"revision": revision},
+    )
+
+    assert reopened.status_code == 200, reopened.json
+    assert reopened.json["target_stage_id"] == "asset_matching"
+    assert read_agent_request(store, session_id, request_id)["status"] == "superseded"
+    assert store.load_session(session_id)["current_stage"] == "asset_matching"
+
+
+def test_copy_processor_stops_cleanly_when_slot_plan_is_superseded(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
+
+    def fake_generate(_page, slots, *, material_center_url):
+        assert material_center_url == "https://example.test/materials"
+        supersede_agent_request(
+            store,
+            session_id,
+            request_id,
+            actor="test",
+            reason_code="AGENT_REQUEST_SUPERSEDED",
+        )
+        slot = slots[0]
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "不应保留的旧标题",
+            "description": "坑位方案已变更。",
+            "evidence": [],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert response["status"] == "superseded"
+    assert response["result"]["copy_drafts"] == []
+    assert read_agent_request(store, session_id, request_id)["status"] == "superseded"
+    progress = store._read_json(
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "progress.json",
+        "copy-progress",
+    )
+    assert progress["status"] == "superseded"
+    assert progress["completed_count"] == 0
 
 
 def test_copy_processor_rejects_tampered_authorization_before_browser(

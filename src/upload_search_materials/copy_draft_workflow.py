@@ -464,6 +464,33 @@ def process_copy_draft_request(
         store._write_json_atomic(progress_path, document)
         return document
 
+    def stopped_response() -> dict[str, Any] | None:
+        """Stop cleanly when an edited plan or back action revokes this request."""
+
+        latest = read_agent_request(store, session_id, request_id)
+        status = str(latest.get("status", ""))
+        if status not in {"superseded", "cancelled"}:
+            return None
+        reason_code = str(
+            latest.get("reason_code")
+            or (
+                "AGENT_REQUEST_SUPERSEDED"
+                if status == "superseded"
+                else "AGENT_REQUEST_CANCELLED"
+            )
+        )
+        write_progress(
+            status,
+            current_slot_id=current_slot_id,
+            reason_code=reason_code,
+        )
+        return {
+            "status": status,
+            "request_id": request_id,
+            "kind": "copy_draft",
+            "result": {"copy_drafts": list(completed.values())},
+        }
+
     factory = page_factory or open_cdp_page
     browser_context = (
         nullcontext(page)
@@ -476,6 +503,9 @@ def process_copy_draft_request(
         with browser_context as browser_page:
             for slot in slots:
                 current_slot_id = str(slot.get("slot_id", ""))
+                stopped = stopped_response()
+                if stopped is not None:
+                    return stopped
                 if current_slot_id in completed:
                     continue
                 write_progress("processing", current_slot_id=current_slot_id)
@@ -492,6 +522,9 @@ def process_copy_draft_request(
                         "QIANNIU_COPY_RESPONSE_INVALID",
                         f"坑位 {current_slot_id} 未返回唯一文案",
                     )
+                stopped = stopped_response()
+                if stopped is not None:
+                    return stopped
                 completed[current_slot_id] = dict(drafts[0])
                 write_progress("processing")
         response = complete_agent_request(

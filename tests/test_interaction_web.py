@@ -596,6 +596,15 @@ def test_root_renders_nine_stage_left_rail(client):
     assert html.count('data-stage-id="') == 9
 
 
+def test_root_uses_non_repeating_workbench_brand_name(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert "<title>天猫搜推素材上新工作台</title>" in html
+    assert '<p class="eyebrow">天猫搜推素材</p>' in html
+    assert '<p class="brand-name">上新工作台</p>' in html
+    assert '<p class="brand-name">素材上新工作台</p>' not in html
+
+
 def test_root_displays_current_plugin_version_at_header_center(client):
     manifest = json.loads(
         (Path(__file__).parents[1] / ".codex-plugin" / "plugin.json").read_text(
@@ -1210,7 +1219,7 @@ def test_team_index_discovery_api_returns_read_only_auto_fill_candidate(
     assert response.json["path"] == str(candidate)
 
 
-def test_team_index_frontend_discovers_once_without_marking_user_edit():
+def test_team_index_frontend_discovers_after_stage_hydration_without_user_edit():
     source = (
         Path(__file__).parents[1]
         / "src"
@@ -1226,6 +1235,20 @@ def test_team_index_frontend_discovers_once_without_marking_user_edit():
         "function initializeTeamIndexConfig()", 1
     )[0]
     assert "dispatchEvent" not in discovery
+    assert "teamIndexDiscoveryPromise" in discovery
+    assert "input.value.trim() === initialPath" in discovery
+    assert "暂未自动找到团队索引文件夹，可以手动选择" in discovery
+    initializer = source.split("function initializeTeamIndexConfig()", 1)[1].split(
+        "function larkBasePayload()", 1
+    )[0]
+    assert "discoverTeamIndex()" not in initializer
+    load_stage = source.split("async function loadStage()", 1)[1].split(
+        "async function prepareLocalGallery", 1
+    )[0]
+    assert load_stage.index("hydrateForm(activeForm(), payload.input.values)") < (
+        load_stage.index("const setupDiscoveryTasks = []")
+    )
+    assert "setupDiscoveryTasks.push(discoverTeamIndex())" in load_stage
 
 
 def test_image_source_discovery_api_returns_default_candidates(tmp_path, monkeypatch):
@@ -2260,7 +2283,7 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert back_enabled_expression is not None
     assert "!localBackLockActive" in back_enabled_expression.group(1)
     assert "!selectionCheckActive" not in back_enabled_expression.group(1)
-    assert 'persistenceInFlight && currentStageId !== "asset_matching"' in javascript
+    assert '["asset_matching", "slots_copy"].includes(currentStageId)' in javascript
     assert "pendingBackNavigation" in javascript
     assert "selectionPreflightConcurrency = 3" not in javascript
     assert "2000" in javascript
@@ -2332,6 +2355,12 @@ def test_javascript_selects_result_renderers_by_schema_component(client):
     assert "resultRenderers" in javascript
     for component in {stage.component for stage in STAGES if stage.id != "setup"}:
         assert f'"{component}"' in javascript
+
+
+def test_asset_matching_hides_local_evidence_paths_from_user_result(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert 'componentName !== "AssetMatchGallery"' in javascript
 
 
 def test_results_form_is_hidden_and_has_no_recovery_controls(client):
