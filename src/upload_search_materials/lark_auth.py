@@ -20,6 +20,7 @@ from .lark_base_sync import (
 
 
 REQUIRED_LARK_USER_SCOPES = (
+    "wiki:node:read",
     "base:block:read",
     "base:field:read",
     "base:record:read",

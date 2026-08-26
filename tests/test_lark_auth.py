@@ -57,6 +57,40 @@ def test_auth_start_reuses_login_when_required_scopes_are_present():
     assert calls[0][:2] == ["auth", "status"]
 
 
+def test_auth_start_requests_missing_wiki_scope_for_existing_base_login():
+    calls = []
+    base_only_scopes = tuple(
+        scope for scope in REQUIRED_LARK_USER_SCOPES if scope != "wiki:node:read"
+    )
+
+    def runner(args, _timeout):
+        calls.append(list(args))
+        if args[:2] == ["auth", "status"]:
+            return LarkCliResult(
+                ok=True,
+                payload=_authorized_payload(scopes=base_only_scopes),
+            )
+        if "--no-wait" in args:
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "device_code": "wiki-scope-code",
+                    "verification_url": "https://accounts.feishu.cn/wiki-scope",
+                },
+            )
+        return LarkCliResult(
+            ok=True,
+            payload=_authorized_payload(scopes=REQUIRED_LARK_USER_SCOPES),
+        )
+
+    started = LarkAuthCoordinator(runner=runner).start()
+
+    assert started["status"] == "awaiting_user"
+    login_call = next(args for args in calls if "--no-wait" in args)
+    requested_scopes = login_call[login_call.index("--scope") + 1].split()
+    assert "wiki:node:read" in requested_scopes
+
+
 def test_auth_start_returns_url_without_exposing_device_code_and_completes():
     calls = []
 

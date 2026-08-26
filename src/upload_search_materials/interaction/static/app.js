@@ -651,6 +651,29 @@
     };
   }
 
+  function larkBaseReadinessFeedback(product, uploadLog) {
+    const productReady = product.status === "available";
+    const uploadLogReady = uploadLog.status === "available";
+    const productNeedsPermission = product.reason_code === "LARK_PERMISSION_REQUIRED";
+    const uploadLogNeedsPermission = uploadLog.reason_code === "LARK_PERMISSION_REQUIRED";
+    if (productNeedsPermission && uploadLogReady) {
+      return "上传记录表已可用；商品信息表缺少飞书 Wiki 读取权限。请点击“补充授权”，在飞书页面完成一次授权。";
+    }
+    if (uploadLogNeedsPermission && productReady) {
+      return "商品信息表已可用；上传记录表缺少飞书多维表格权限。请点击“补充授权”，在飞书页面完成一次授权。";
+    }
+    if (productNeedsPermission || uploadLogNeedsPermission) {
+      return "默认数据表缺少必要的飞书读取或写入权限。请点击“补充授权”，在飞书页面完成一次授权。";
+    }
+    if (!productReady && uploadLogReady) {
+      return "上传记录表已可用；商品负责人同步暂时不可用。请稍后重新检测。";
+    }
+    if (productReady && !uploadLogReady) {
+      return "商品负责人同步已可用；上传记录表暂时不可用。请稍后重新检测。";
+    }
+    return "默认数据表暂时无法访问，请稍后重新检测；本地任务流程仍可继续。";
+  }
+
   function renderLarkBaseStatus(payload) {
     if (!larkBaseConfig) return;
     const summary = larkBaseConfig.querySelector("[data-lark-base-summary]");
@@ -662,13 +685,26 @@
       (item) => item.status === "available",
     ).length;
     const ready = status === "available" && readyCount === 2;
+    const permissionRequired = [product, uploadLog].some(
+      (item) => item.reason_code === "LARK_PERMISSION_REQUIRED",
+    );
     larkBaseConfig.dataset.ready = ready ? "true" : "pending";
-    summary.textContent = ready ? "已授权 · 可用" : "已授权 · 待完成";
+    summary.textContent = ready
+      ? "已授权 · 可用"
+      : permissionRequired
+        ? "已授权 · 需补充权限"
+        : "已授权 · 待完成";
     feedback.textContent = ready
       ? "飞书已可用：负责人同步和成功上传记录均已启用。"
-      : "飞书账号已授权，但默认数据表暂时不可用。请点击“补充授权”后重试。";
+      : larkBaseReadinessFeedback(product, uploadLog);
     const authorizeButton = larkBaseConfig.querySelector("[data-authorize-lark-base]");
-    if (authorizeButton) authorizeButton.textContent = ready ? "重新检查授权" : "补充授权";
+    if (authorizeButton) {
+      authorizeButton.textContent = ready
+        ? "重新检查授权"
+        : permissionRequired
+          ? "补充授权"
+          : "重新检测";
+    }
     return ready;
   }
 

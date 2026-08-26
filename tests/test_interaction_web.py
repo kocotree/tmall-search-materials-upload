@@ -231,12 +231,16 @@ def test_runtime_lark_auth_is_owned_by_the_workbench(tmp_path):
 def test_setup_page_uses_one_click_lark_authorization(client):
     response = client.get("/")
     text = response.get_data(as_text=True)
+    script = client.get("/static/app.js").get_data(as_text=True)
 
     assert response.status_code == 200
     assert "data-authorize-lark-base" in text
     assert "商品信息表和上传记录表已由团队预设" in text
     assert "data-lark-enabled" not in text
     assert "data-save-lark-base" not in text
+    assert "商品信息表缺少飞书 Wiki 读取权限" in script
+    assert "已授权 · 需补充权限" in script
+    assert "飞书账号已授权，但默认数据表暂时不可用" not in script
 
 
 def test_bounded_agent_action_processes_product_selection_inside_workbench(
