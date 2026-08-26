@@ -2,8 +2,11 @@ import json
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
+
+import upload_search_materials.runtime_config as runtime_config_module
 
 from upload_search_materials.runtime_config import (
     DEFAULT_IMAGE_SOURCE_PROFILES,
@@ -67,6 +70,35 @@ def test_discovers_unique_tables_from_workspace_relative_docs(tmp_path):
     assert runtime.browser_profile_dir == user_data / "browser-profile"
     assert runtime.user_data_root == user_data
     assert runtime.image_sources == ()
+
+
+def test_legacy_default_unc_team_index_is_treated_as_unsaved(tmp_path):
+    workspace = make_workspace(tmp_path)
+    user_data = tmp_path / "user-data"
+    config = user_data / "config" / "runtime.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps(
+            {"team_folder_index_root": str(DEFAULT_TEAM_FOLDER_INDEX_ROOT)},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = load_runtime_config(
+        environ={"TMALL_USER_DATA_ROOT": str(user_data)},
+        start=workspace,
+    )
+
+    assert runtime.team_folder_index_root == DEFAULT_TEAM_FOLDER_INDEX_ROOT
+    assert runtime.team_folder_index_root_source == "default"
+
+    save_image_sources(
+        runtime,
+        [{"label": "视觉部", "path": r"Y:\视觉部\1-模特图"}],
+    )
+    saved = json.loads(config.read_text(encoding="utf-8"))
+    assert "team_folder_index_root" not in saved
 
 
 def test_ambiguous_table_match_is_not_selected(tmp_path):
@@ -187,13 +219,8 @@ def test_saves_one_or_many_image_sources_to_ignored_machine_config(tmp_path):
     assert updated.config_path == user_data / "config/runtime.json"
     saved = json.loads(updated.config_path.read_text(encoding="utf-8"))
     assert [item["label"] for item in saved["image_sources"]] == ["模特图", "买家秀"]
-    assert saved["team_folder_index_root"] == str(
-        DEFAULT_TEAM_FOLDER_INDEX_ROOT
-    )
-    assert (
-        saved["team_folder_index_nas_source_id"]
-        == DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID
-    )
+    assert "team_folder_index_root" not in saved
+    assert "team_folder_index_nas_source_id" not in saved
     statuses = inspect_image_sources(updated, saved["image_sources"])
     assert [item["status"] for item in statuses] == ["available", "unavailable"]
     assert statuses[0]["reason_code"] == "PATH_AVAILABLE"
@@ -278,6 +305,61 @@ def test_team_folder_index_discovery_checks_only_the_fixed_relative_path(tmp_pat
         expected,
     }
     assert not runtime.config_path.exists()
+
+
+def test_team_folder_index_check_preserves_the_mapped_drive_path(
+    tmp_path, monkeypatch
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+    mapped_path = r"Z:\浙江酷趣\天猫部\搜推素材索引-虾米"
+    monkeypatch.setattr(
+        runtime_config_module,
+        "resolve_asset_root",
+        lambda _path: SimpleNamespace(
+            path=tmp_path / "resolved-unc-location"
+        ),
+    )
+
+    inspection = inspect_team_folder_index_root(runtime, mapped_path)
+
+    assert inspection["status"] == "available"
+    assert inspection["path"] == mapped_path
+
+
+def test_team_folder_index_save_persists_the_selected_drive_binding(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "runtime.json"
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+        config_path=config,
+    )
+    mapped_path = r"Z:\浙江酷趣\天猫部\搜推素材索引-虾米"
+    monkeypatch.setattr(
+        runtime_config_module,
+        "inspect_team_folder_index_root",
+        lambda _runtime, _value: {
+            "status": "available",
+            "message": "可访问",
+            "path": r"\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米",
+        },
+    )
+
+    updated = save_team_folder_index_root(runtime, mapped_path)
+    saved = json.loads(config.read_text(encoding="utf-8"))
+
+    assert saved["team_folder_index_root"] == mapped_path
+    assert str(updated.team_folder_index_root) == mapped_path
 
 
 def test_team_folder_index_discovery_keeps_accessible_saved_path(tmp_path):
@@ -373,7 +455,7 @@ def test_team_folder_index_discovery_has_one_shared_timeout_budget(tmp_path):
     assert discovered["status"] == "not_found"
 
 
-def test_default_image_source_discovery_checks_only_three_exact_paths_per_drive(
+def test_default_image_source_discovery_checks_only_five_exact_paths_per_drive(
     tmp_path,
 ):
     runtime = RuntimeConfig(
@@ -390,6 +472,8 @@ def test_default_image_source_discovery_checks_only_three_exact_paths_per_drive(
         drive_z.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[0][1]),
         drive_z.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[1][1]),
         drive_y.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[2][1]),
+        drive_z.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[3][1]),
+        drive_z.joinpath(*DEFAULT_IMAGE_SOURCE_PROFILES[4][1]),
     }
     probed = []
 
@@ -403,6 +487,46 @@ def test_default_image_source_discovery_checks_only_three_exact_paths_per_drive(
     assert discovered["auto_fill"] is True
     assert {Path(item["path"]) for item in discovered["image_sources"]} == expected
     assert len(probed) == len(DEFAULT_IMAGE_SOURCE_PROFILES) * 3
+
+
+def test_image_source_discovery_adds_new_defaults_to_saved_three_sources(
+    tmp_path,
+):
+    drive_z = tmp_path / "Z"
+    saved_sources = [
+        {
+            "label": label,
+            "path": str(drive_z.joinpath(*relative_parts)),
+        }
+        for label, relative_parts in DEFAULT_IMAGE_SOURCE_PROFILES[:3]
+    ]
+    new_paths = {
+        drive_z.joinpath(*relative_parts)
+        for _label, relative_parts in DEFAULT_IMAGE_SOURCE_PROFILES[3:]
+    }
+    saved_paths = {Path(source["path"]) for source in saved_sources}
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=tuple(saved_sources),
+        runs_root=tmp_path / "runs",
+    )
+
+    discovered = discover_image_sources(
+        runtime,
+        drive_roots=(drive_z,),
+        probe=lambda path: path in saved_paths | new_paths,
+    )
+
+    assert discovered["status"] == "configured"
+    assert discovered["source"] == "saved_and_defaults"
+    assert discovered["auto_fill"] is True
+    assert len(discovered["image_sources"]) == 5
+    assert {
+        Path(item["path"])
+        for item in discovered["image_sources"][3:]
+    } == new_paths
 
 
 def test_image_source_discovery_keeps_accessible_saved_sources_first(tmp_path):
@@ -426,7 +550,14 @@ def test_image_source_discovery_keeps_accessible_saved_sources_first(tmp_path):
     assert discovered["source"] == "saved"
     assert discovered["auto_fill"] is False
     assert discovered["image_sources"] == [dict(runtime.image_sources[0])]
-    assert probed == [saved]
+    expected_probes = {
+        saved,
+        *(
+            (tmp_path / "Z").joinpath(*relative_parts)
+            for _label, relative_parts in DEFAULT_IMAGE_SOURCE_PROFILES
+        ),
+    }
+    assert set(probed) == expected_probes
 
 
 def test_image_source_discovery_rebinds_saved_source_to_current_drive(tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from dataclasses import asdict
 from datetime import datetime
@@ -909,12 +910,15 @@ def create_app(
                 "folder_index_detail": folder_index_detail,
                 "team_folder_index_root": str(
                     runtime.team_folder_index_root or ""
+                    if runtime.team_folder_index_root_source != "default"
+                    else ""
                 ),
                 "team_index_source_available": False,
                 "team_index_source_message": (
                     "已保存本机路径，提交时自动检测。"
-                    if runtime.team_folder_index_root
-                    else "请选择团队索引文件夹。"
+                    if runtime.team_folder_index_root_source
+                    in {"config", "environment"}
+                    else "正在查找本机映射盘中的团队索引文件夹。"
                 ),
                 "image_sources_configured": bool(runtime.image_sources),
                 "image_config_path": str(
@@ -5683,6 +5687,10 @@ def _current_result(
             return _completeness_matrix_fallback_result(
                 store, session_id, state
             )
+        if stage_id == "asset_matching":
+            return _asset_matching_gallery_fallback_result(
+                store, session_id, state
+            )
         return None
     if stage_id == "image_review" and review_context_is_stale(
         context,
@@ -5715,6 +5723,64 @@ def _current_result(
         stale["data"] = stale_data
         return stale
     return context
+
+
+def _asset_matching_gallery_fallback_result(
+    store: SessionStore,
+    session_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Restore the editable gallery after returning from slot composition.
+
+    Completing asset matching replaces its editable review context with a
+    compact completion result.  Returning from the next stage intentionally
+    invalidates that completion result, while the task-local confirmed gallery
+    remains authoritative for the unchanged folder boundary.  Project that
+    gallery back into a review result instead of presenting an empty scan.
+    """
+
+    stage_path = store._stage_path(session_id, "asset_matching")
+    gallery_path = stage_path / "confirmed-gallery.json"
+    if not gallery_path.is_file():
+        return None
+    try:
+        gallery = store._read_json(gallery_path, "confirmed-gallery")
+        input_document = store.read_optional_stage_document(
+            session_id, "asset_matching", "input"
+        )
+    except (InteractionConflict, OSError):
+        return None
+    values = (
+        input_document.get("values")
+        if isinstance(input_document, dict)
+        else None
+    )
+    if not isinstance(values, dict):
+        return None
+    if not gallery_covers_folder_decisions(
+        gallery.get("gallery_identity"),
+        values.get("folder_decisions", []),
+        session_id=session_id,
+    ):
+        return None
+    revision = int(state["stages"]["asset_matching"].get("revision") or 0)
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "stage_id": "asset_matching",
+        "revision": revision,
+        "status": str(
+            state["stages"]["asset_matching"].get("status")
+            or "needs_user_input"
+        ),
+        "summary": "已恢复此前加载的候选文件夹和候选图片",
+        "blocking_reasons": [],
+        "evidence": [str(gallery_path)],
+        "next_action": "可继续调整文件夹和图片选择",
+        "created_at": datetime.now().astimezone().isoformat(),
+        "data": gallery,
+        "fallback_source": "confirmed-gallery.json",
+    }
 
 
 def _completeness_matrix_fallback_result(
@@ -6176,19 +6242,36 @@ def _completeness_selection_errors(
     products = result.get("data", {}).get("products", []) if result else []
     if not isinstance(products, list) or not products:
         return {}
+    full_ids = {
+        str(product.get("product_id", ""))
+        for product in products
+        if isinstance(product, dict)
+        and not _completeness_product_has_open_slots(product)
+    }
     allowed_ids = {
         str(product.get("product_id", ""))
         for product in products
         if isinstance(product, dict)
         and product.get("selectable") is not False
         and product.get("status") != "excluded"
+        and _completeness_product_has_open_slots(product)
     }
     selected_ids = {
         str(product_id).strip()
         for product_id in values.get("selected_product_ids", [])
         if str(product_id).strip()
     }
-    invalid_ids = sorted(selected_ids - allowed_ids)
+    selected_full_ids = sorted(selected_ids & full_ids)
+    invalid_ids = sorted((selected_ids - allowed_ids) - set(selected_full_ids))
+    if selected_full_ids:
+        preview = "、".join(selected_full_ids[:10])
+        suffix = " 等" if len(selected_full_ids) > 10 else ""
+        return {
+            "selected_product_ids": (
+                f"以下商品的搜推素材坑位已经填满，无需进入素材匹配："
+                f"{preview}{suffix}"
+            )
+        }
     if not invalid_ids:
         return {}
     preview = "、".join(invalid_ids[:10])
@@ -6325,6 +6408,34 @@ def _unknown_value_errors(stage: StageDefinition, values: dict[str, Any]) -> dic
         for name in values
         if name not in allowed_names and name not in compatibility_names
     }
+
+
+def _completeness_product_has_open_slots(product: dict[str, Any]) -> bool:
+    """Return whether a completeness row still has a material slot to fill."""
+
+    if str(product.get("status") or "") == "complete":
+        return False
+    promotion = product.get("promotion")
+    if not isinstance(promotion, dict):
+        return True
+
+    def finite_number(value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    missing = finite_number(promotion.get("missing_count"))
+    if missing is not None:
+        return missing > 0
+    current = finite_number(promotion.get("current_count"))
+    target = finite_number(promotion.get("target_slots"))
+    if current is not None and target is not None:
+        return current < target
+    return True
 
 
 def _allowlisted_values(stage: StageDefinition, values: dict[str, Any]) -> dict[str, Any]:

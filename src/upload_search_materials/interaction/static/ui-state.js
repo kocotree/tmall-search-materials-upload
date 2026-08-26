@@ -359,6 +359,29 @@
     };
   }
 
+  function folderSelectionChanged(preparedFolderKeys, decisions) {
+    if (!Array.isArray(preparedFolderKeys)) return true;
+    const keyFor = (item) => (
+      `${String(item?.product_id || "")}\u0000${String(item?.folder_id || "")}`
+    );
+    const prepared = new Set(
+      preparedFolderKeys
+        .filter((item) => item?.product_id && item?.folder_id)
+        .map(keyFor),
+    );
+    const confirmed = new Set(
+      (Array.isArray(decisions) ? decisions : [])
+        .filter(
+          (item) => item?.decision === "confirmed"
+            && item?.product_id
+            && item?.folder_id,
+        )
+        .map(keyFor),
+    );
+    return prepared.size !== confirmed.size
+      || [...prepared].some((key) => !confirmed.has(key));
+  }
+
   function switchStage(state, stageId) {
     return createState(stageId);
   }
@@ -625,6 +648,29 @@
     });
   }
 
+  function completenessProductHasOpenSlots(product) {
+    if (String(product?.status || "") === "complete") return false;
+    const promotion = product?.promotion;
+    if (!promotion || typeof promotion !== "object") return true;
+    const finiteNumber = (value) => {
+      if (value == null || typeof value === "boolean" || value === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    const missing = finiteNumber(promotion.missing_count);
+    if (missing != null) return missing > 0;
+    const current = finiteNumber(promotion.current_count);
+    const target = finiteNumber(promotion.target_slots);
+    if (current != null && target != null) return current < target;
+    return true;
+  }
+
+  function completenessProductSelectable(product) {
+    return product?.selectable !== false
+      && product?.status !== "excluded"
+      && completenessProductHasOpenSlots(product);
+  }
+
   function draftRequestBody(values, revision) {
     return { values, revision };
   }
@@ -636,6 +682,8 @@
   return {
     canonicalJsonValue,
     assetSelectionGuidance,
+    completenessProductHasOpenSlots,
+    completenessProductSelectable,
     connectionView,
     controlPresentation,
     createRequestIdentity,
@@ -644,6 +692,7 @@
     draftRequestBody,
     fifthStagePage,
     filterCompletenessProducts,
+    folderSelectionChanged,
     twoStepFifthStagePage,
     isCurrentRequest,
     jsonSemanticallyEqual,

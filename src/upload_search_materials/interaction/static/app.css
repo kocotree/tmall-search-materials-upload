@@ -857,16 +857,43 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
   grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
   gap: 16px;
   padding: 14px;
-  background: #f7f8f6;
+  background: #ffffff;
   border: 1px solid var(--line);
   border-left: 4px solid var(--line);
   border-radius: 8px;
-  transition: border-color 180ms ease, background-color 180ms ease;
+  cursor: pointer;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+  user-select: none;
 }
-.folder-card:hover { background: #f3f8f4; border-color: #c4d8c9; }
-.folder-card[data-decision="confirmed"] { border-left-color: var(--accent); opacity: 1; }
-.folder-card[data-decision="rejected"] { border-left-color: var(--danger); opacity: 0.55; }
-.folder-card-identity, .folder-card-controls { display: grid; gap: 7px; min-width: 0; }
+.folder-card:hover { border-color: #9fbea7; box-shadow: 0 6px 16px rgba(47, 111, 90, 0.08); }
+.folder-card:focus-visible { outline: 3px solid rgba(47, 111, 90, 0.24); outline-offset: 2px; }
+.folder-card[data-decision="confirmed"] {
+  background: #ffffff;
+  border-color: rgba(47, 111, 90, 0.42);
+  border-left-color: var(--accent);
+  box-shadow: 0 6px 16px rgba(47, 111, 90, 0.08);
+  opacity: 1;
+}
+.folder-card[data-decision="rejected"] {
+  background: #e9ecea;
+  border-color: #d0d5d2;
+  color: #77807a;
+  opacity: 0.68;
+}
+.folder-card[data-decision="rejected"]:hover { opacity: 0.84; }
+.folder-card-identity, .folder-card-status { display: grid; gap: 7px; min-width: 0; }
+.folder-card-status { align-content: start; justify-items: end; text-align: right; }
+.folder-selection-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.folder-card[data-decision="confirmed"] .folder-selection-state { color: #ffffff; background: var(--accent); }
+.folder-card[data-decision="rejected"] .folder-selection-state { color: #69716c; background: #d8ddda; }
 .folder-image-count { color: #2f6f5a; font-weight: 700; }
 .folder-card-identity code {
   color: var(--muted);
@@ -876,7 +903,6 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
   white-space: normal;
 }
 .folder-match-badge { color: var(--accent-dark); font-size: 10px; }
-.folder-card-controls select, .folder-card-controls input { width: 100%; }
 .local-gallery-action {
   display: grid;
   gap: 10px;

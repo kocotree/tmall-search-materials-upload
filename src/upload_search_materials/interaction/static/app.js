@@ -72,6 +72,7 @@
   let larkActivationInFlight = false;
   let persistenceInFlight = false;
   let stageLocalActionInFlight = false;
+  let pendingBackNavigation = false;
   let pendingPersistenceMode = null;
   let localEditVersion = 0;
   const persistenceRequestIds = new Map();
@@ -1464,7 +1465,9 @@
       currentBackNavigation?.visible
       && currentBackNavigation?.target_stage_id,
     );
-    const localBackLockActive = persistenceInFlight || stageLocalActionInFlight;
+    const localBackLockActive = stageLocalActionInFlight
+      || pendingBackNavigation
+      || (persistenceInFlight && currentStageId !== "asset_matching");
     const backEnabled = Boolean(
       backVisible
       && currentBackNavigation?.enabled
@@ -2142,7 +2145,7 @@
     const selected = completenessSelectedIds();
     const selectableIds = new Set(
       products
-        .filter((product) => product.selectable !== false && product.status !== "excluded")
+        .filter((product) => UiState.completenessProductSelectable(product))
         .map((product) => String(product.product_id || "")),
     );
     let selectionChanged = false;
@@ -2270,7 +2273,8 @@
       }
       visible.forEach((product) => {
         const productId = String(product.product_id || "");
-        const selectable = product.selectable !== false && product.status !== "excluded";
+        const selectable = UiState.completenessProductSelectable(product);
+        const slotsFull = !UiState.completenessProductHasOpenSlots(product);
         const card = element("article", "inspection-row");
         card.dataset.status = product.status || "needs_manual_review";
 
@@ -2331,7 +2335,13 @@
         checkbox.setAttribute("aria-label", `选择商品 ${productId} 进入素材匹配`);
         choice.append(
           checkbox,
-          document.createTextNode(selectable ? "选择进入素材匹配" : "已按规则排除"),
+          document.createTextNode(
+            selectable
+              ? "选择进入素材匹配"
+              : slotsFull
+                ? "坑位已满，无需补充"
+                : "已按规则排除",
+          ),
         );
         controls.append(choice);
         checkbox.addEventListener("change", () => {
@@ -2350,7 +2360,7 @@
     ownerFilter.addEventListener("change", draw);
     bulkSelect.addEventListener("click", () => {
       visibleProducts().forEach((product) => {
-        if (product.selectable !== false && product.status !== "excluded") {
+        if (UiState.completenessProductSelectable(product)) {
           selected.add(String(product.product_id));
         }
       });
@@ -2975,6 +2985,7 @@
     if (!content) return;
 
     const review = element("section", "folder-review");
+    let updateLocalGalleryAction = () => {};
     const decisionsByKey = new Map(
       materializeFolderDecisions(allCandidates).map((item) => [
         `${item.product_id}\u0000${item.folder_id}`,
@@ -3030,6 +3041,8 @@
         const key = `${productId}\u0000${candidate.folder_id}`;
         const saved = decisionsByKey.get(key) || {};
         const card = element("article", "folder-card");
+        card.tabIndex = 0;
+        card.setAttribute("role", "checkbox");
         const identity = element("div", "folder-card-identity");
         const countStatus = String(
           candidate.image_count_status || "pending",
@@ -3079,25 +3092,8 @@
           identity.appendChild(element("small", "folder-image-count", countText));
         }
         identity.appendChild(element("code", "", candidate.folder_path || ""));
-        const controls = element("div", "folder-card-controls");
-        const decision = document.createElement("select");
-        decision.setAttribute("aria-label", `${candidate.folder_name} 归属决定`);
-        [
-          ["confirmed", "采用"],
-          ["rejected", "排除该文件夹"],
-        ].forEach(([value, label]) => {
-          const option = document.createElement("option");
-          option.value = value;
-          option.textContent = label;
-          decision.appendChild(option);
-        });
-        decision.value = (
-          saved.decision === "rejected" || candidate.decision === "rejected"
-        ) ? "rejected" : "confirmed";
-        const note = document.createElement("input");
-        note.type = "text";
-        note.placeholder = "备注（可选）";
-        note.value = saved.note || candidate.note || "";
+        const status = element("div", "folder-card-status");
+        const stateBadge = element("span", "folder-selection-state");
         const warning = element(
           "span",
           "asset-warning",
@@ -3113,61 +3109,97 @@
                 ? "粗略名称命中；默认排除，确认属于本商品后再采用"
                 : "名称精确命中；默认采用，可手动排除",
         );
-        controls.append(decision, note, warning);
-        card.append(identity, controls);
+        status.append(stateBadge, warning);
+        card.append(identity, status);
         list.appendChild(card);
 
-        const syncDecision = () => {
-          card.dataset.decision = decision.value;
+        let currentDecision = saved.decision === "rejected"
+          ? "rejected"
+          : "confirmed";
+        const syncDecision = (nextDecision, { persist = true } = {}) => {
+          currentDecision = nextDecision === "rejected"
+            ? "rejected"
+            : "confirmed";
+          const selected = currentDecision === "confirmed";
+          card.dataset.decision = currentDecision;
+          card.setAttribute("aria-checked", String(selected));
+          card.setAttribute(
+            "aria-label",
+            `${candidate.folder_name || "未命名文件夹"}，${selected ? "已采用" : "已排除"}，点击切换`,
+          );
+          stateBadge.textContent = selected ? "已采用" : "已排除";
+          if (!persist) return;
           persistFolderDecision(
             candidate,
-            decision.value,
-            note.value,
+            currentDecision,
+            saved.note || candidate.note || "",
           );
           updateProgress();
+          updateLocalGalleryAction();
           content.dispatchEvent(new CustomEvent("folder-decision-changed", {
             detail: {
               productId,
               folderId: String(candidate.folder_id || ""),
-              decision: decision.value,
+              decision: currentDecision,
             },
           }));
         };
-        decision.addEventListener("change", syncDecision);
-        note.addEventListener("change", () => {
-          persistFolderDecision(candidate, decision.value, note.value);
+        const toggleDecision = () => {
+          syncDecision(
+            currentDecision === "confirmed" ? "rejected" : "confirmed",
+          );
+        };
+        card.addEventListener("click", toggleDecision);
+        card.addEventListener("keydown", (event) => {
+          if (!["Enter", " "].includes(event.key)) return;
+          event.preventDefault();
+          toggleDecision();
         });
-        card.dataset.decision = decision.value;
+        syncDecision(currentDecision, { persist: false });
       });
       updateProgress();
     });
-    if (
-      inferAssetMatchingStep(view.result?.data, uiState.serverStatus)
-      !== "image_selection"
-    ) {
-      const localAction = element("div", "local-gallery-action");
-      const localButton = element(
-        "button",
-        "primary-button",
-        "确认文件夹并加载图片",
+    const localAction = element("div", "local-gallery-action");
+    const localSummary = element("p", "asset-selection-summary");
+    const localButton = element(
+      "button",
+      "primary-button",
+      "确认文件夹并加载图片",
+    );
+    localButton.type = "button";
+    updateLocalGalleryAction = () => {
+      const currentStep = inferAssetMatchingStep(
+        view.result?.data,
+        uiState.serverStatus,
       );
-      localButton.type = "button";
-      localButton.disabled = ["queued", "running"].includes(
+      const galleryAlreadyLoaded = currentStep === "image_selection";
+      const folderSelectionChanged = !galleryAlreadyLoaded
+        || UiState.folderSelectionChanged(
+          view.result?.data?.gallery_identity?.prepared_folder_keys,
+          folderDecisions(),
+        );
+      const galleryActive = ["queued", "running"].includes(
         currentGalleryJob?.status,
       );
-      localButton.addEventListener("click", () => {
-        prepareLocalGallery(localButton);
-      });
-      localAction.append(
-        element(
-          "p",
-          "asset-selection-summary",
-          "这是本机固定操作，只读取已采用文件夹并生成候选图片，不会创建阶段交接。",
-        ),
-        localButton,
-      );
-      review.appendChild(localAction);
-    }
+      localButton.textContent = galleryAlreadyLoaded
+        ? "确认文件夹并重新加载图片"
+        : "确认文件夹并加载图片";
+      localButton.disabled = galleryActive
+        || (galleryAlreadyLoaded && !folderSelectionChanged);
+      localSummary.textContent = galleryActive
+        ? "本机正在按最新文件夹选择加载图片。"
+        : galleryAlreadyLoaded && folderSelectionChanged
+          ? "文件夹选择已变更，请重新加载图片后继续选图。"
+          : galleryAlreadyLoaded
+            ? "当前候选图片与文件夹选择一致；调整文件夹后可重新加载。"
+            : "这是本机固定操作，只读取已采用文件夹并生成候选图片，不会创建阶段交接。";
+    };
+    localButton.addEventListener("click", () => {
+      prepareLocalGallery(localButton);
+    });
+    updateLocalGalleryAction();
+    localAction.append(localSummary, localButton);
+    review.appendChild(localAction);
     content.appendChild(review);
   }
 
@@ -3510,7 +3542,7 @@
             );
           }
           const selectionFeedback = element("span", "asset-selection-check");
-          controls.appendChild(selectionFeedback);
+          controls.append(select, selectionFeedback);
           if (candidate.match_status === "needs_manual_confirmation") {
             controls.appendChild(element("span", "asset-warning", "名称候选来自已采用文件夹"));
           } else if (!candidate.preflight || !candidate.source_inspection) {
@@ -6395,13 +6427,7 @@
       actionMessage.textContent = "保存正在进行，请稍后再次确认文件夹。";
       return;
     }
-    if (
-      currentStageId !== "asset_matching"
-      || inferAssetMatchingStep(
-        uiState.result?.data,
-        uiState.serverStatus,
-      ) === "image_selection"
-    ) return;
+    if (currentStageId !== "asset_matching") return;
     const form = activeForm();
     if (!form) return;
     window.clearTimeout(autoSaveTimer);
@@ -6417,16 +6443,32 @@
       actionMessage.textContent = error.message;
       return;
     }
+    const currentStep = inferAssetMatchingStep(
+      uiState.result?.data,
+      uiState.serverStatus,
+    );
+    if (
+      currentStep === "image_selection"
+      && !UiState.folderSelectionChanged(
+        uiState.result?.data?.gallery_identity?.prepared_folder_keys,
+        values.folder_decisions,
+      )
+    ) {
+      actionMessage.textContent = "文件夹选择没有变化，无需重新加载图片。";
+      return;
+    }
     const requestRevision = Number(revision);
     if (!Number.isInteger(requestRevision)) {
       actionMessage.textContent = "页面状态尚未同步，请刷新当前页面后重试。";
       return;
     }
+    const requestedGeneration = stageGeneration;
+    let finalGeneration = requestedGeneration;
     persistenceInFlight = true;
     button.disabled = true;
+    renderStatus();
     actionMessage.textContent =
       "正在确认文件夹并启动本机图片加载…";
-    const requestedGeneration = stageGeneration;
     try {
       await ensureSession();
       const persistenceIdentity = persistenceRequestId(
@@ -6447,6 +6489,9 @@
         currentStageId !== "asset_matching"
         || requestedGeneration !== stageGeneration
       ) return;
+      resetSelectionPreflightClientState("");
+      stageGeneration += 1;
+      finalGeneration = stageGeneration;
       revision = payload.revision;
       revisionLabel.textContent = String(revision);
       currentGalleryJob = payload.gallery_job || null;
@@ -6479,6 +6524,10 @@
       button.disabled = false;
     } finally {
       persistenceInFlight = false;
+      if (
+        currentStageId === "asset_matching"
+        && finalGeneration === stageGeneration
+      ) renderStatus();
     }
   }
 
@@ -6863,6 +6912,20 @@
       const pending = pendingPersistenceMode;
       pendingPersistenceMode = null;
       if (
+        pendingBackNavigation
+        && completedSuccessfully
+        && requestedStageId === currentStageId
+        && requestedGeneration === stageGeneration
+      ) {
+        pendingBackNavigation = false;
+        await reopenPreviousStage({ alreadyConfirmed: true });
+        return;
+      }
+      if (pendingBackNavigation && !completedSuccessfully) {
+        pendingBackNavigation = false;
+        renderStatus();
+      }
+      if (
         completedSuccessfully
         && requestedStageId === currentStageId
         && requestedGeneration === stageGeneration
@@ -7085,23 +7148,30 @@
   goCurrentStageButton.addEventListener("click", () => {
     if (stages.has(sessionCurrentStageId)) activateStage(sessionCurrentStageId);
   });
-  backButton.addEventListener("click", async () => {
+  async function reopenPreviousStage({ alreadyConfirmed = false } = {}) {
     if (
       !currentBackNavigation?.enabled
       || !currentBackNavigation?.target_stage_id
-      || persistenceInFlight
       || stageLocalActionInFlight
     ) return;
     const unsavedWarning = uiState.dirty
       ? " 当前步骤尚未保存的修改也不会保留。"
       : "";
-    const confirmed = window.confirm(
-      `${currentBackNavigation.message || "返回后，当前步骤以及后面的选择会失效。"}`
-      + `${unsavedWarning}\n\n是否继续？`,
-    );
-    if (!confirmed) return;
+    if (!alreadyConfirmed) {
+      const confirmed = window.confirm(
+        `${currentBackNavigation.message || "返回后，当前步骤以及后面的选择会失效。"}`
+        + `${unsavedWarning}\n\n是否继续？`,
+      );
+      if (!confirmed) return;
+    }
     window.clearTimeout(autoSaveTimer);
     pendingPersistenceMode = null;
+    if (persistenceInFlight) {
+      pendingBackNavigation = true;
+      actionMessage.textContent = "正在完成当前保存，随后自动返回上一步…";
+      renderStatus();
+      return;
+    }
     backButton.disabled = true;
     actionMessage.textContent = "正在返回上一步…";
     try {
@@ -7118,6 +7188,10 @@
       actionMessage.textContent = error.userMessage || error.message;
       await loadStage();
     }
+  }
+
+  backButton.addEventListener("click", async () => {
+    await reopenPreviousStage();
   });
   recoverProcessingButton.addEventListener("click", recoverExpiredProcessing);
   retryGalleryButton.addEventListener("click", async () => {

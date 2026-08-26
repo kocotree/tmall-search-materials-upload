@@ -346,6 +346,54 @@ test("running preflight keeps its cache result but not cancelled selection inten
   assert.equal(scheduler.get("asset-a").desiredSelected, true);
 });
 
+test("products with full material slots cannot enter asset matching", () => {
+  assert.equal(
+    UiState.completenessProductSelectable({
+      product_id: "full",
+      status: "complete",
+      promotion: { current_count: 3, target_slots: 3, missing_count: 0 },
+    }),
+    false,
+  );
+  assert.equal(
+    UiState.completenessProductSelectable({
+      product_id: "open",
+      status: "needs_supplement",
+      promotion: { current_count: 2, target_slots: 3, missing_count: 1 },
+    }),
+    true,
+  );
+  assert.equal(
+    UiState.completenessProductHasOpenSlots({
+      status: "needs_supplement",
+      promotion: { current_count: 3, target_slots: 3 },
+    }),
+    false,
+  );
+});
+
+test("gallery reload detects added and removed selected folders", () => {
+  const prepared = [
+    { product_id: "P1", folder_id: "F1" },
+    { product_id: "P1", folder_id: "F2" },
+  ];
+  assert.equal(UiState.folderSelectionChanged(prepared, [
+    { product_id: "P1", folder_id: "F2", decision: "confirmed" },
+    { product_id: "P1", folder_id: "F1", decision: "confirmed" },
+    { product_id: "P1", folder_id: "F3", decision: "rejected" },
+  ]), false);
+  assert.equal(UiState.folderSelectionChanged(prepared, [
+    { product_id: "P1", folder_id: "F1", decision: "confirmed" },
+    { product_id: "P1", folder_id: "F2", decision: "rejected" },
+  ]), true);
+  assert.equal(UiState.folderSelectionChanged(prepared, [
+    { product_id: "P1", folder_id: "F1", decision: "confirmed" },
+    { product_id: "P1", folder_id: "F2", decision: "confirmed" },
+    { product_id: "P1", folder_id: "F3", decision: "confirmed" },
+  ]), true);
+  assert.equal(UiState.folderSelectionChanged(null, []), true);
+});
+
 test("persisted preflight cache preserves click intent without re-executing", async () => {
   let executions = 0;
   const scheduler = UiState.createSelectionPreflightScheduler({

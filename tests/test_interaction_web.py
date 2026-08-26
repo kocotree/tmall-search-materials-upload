@@ -1144,6 +1144,11 @@ def test_setup_page_exposes_team_index_picker_and_keeps_local_cache_internal(
     assert "data-pick-team-index" in html
     assert "data-save-team-index" in html
     assert 'name="folder_index_root" type="hidden"' in html
+    assert (
+        r"\\192.168.110.20\浙江酷趣\天猫部\搜推素材索引-虾米"
+        not in html
+    )
+    assert "正在查找本机映射盘中的团队索引文件夹" in html
     assert "campaign/current" not in html
 
 
@@ -1793,6 +1798,150 @@ def test_returning_to_product_selection_restores_inspection_matrix_fallback(
     assert product["promotion"]["missing_count"] == 5
 
 
+def test_returning_from_slots_restores_confirmed_asset_gallery(
+    client,
+    session_id,
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    folder_decision = {
+        "product_id": "898439684957",
+        "folder_id": "folder-1",
+        "source_system": "视觉部",
+        "source_id": "source-1",
+        "relative_path": "泳衣/椰椰小岛",
+        "folder_path": "泳衣/椰椰小岛",
+        "decision": "confirmed",
+    }
+    asset = store.save_draft(
+        session_id,
+        "asset_matching",
+        {
+            "folder_decisions": [folder_decision],
+            "asset_decisions": [],
+        },
+        expected_revision=0,
+    )
+    asset_path = store._stage_path(session_id, "asset_matching")
+    store._write_json_atomic(
+        asset_path / "confirmed-gallery.json",
+        {
+            "schema_version": 1,
+            "workflow_step": "image_selection",
+            "gallery_complete": True,
+            "requirements": [
+                {
+                    "product_id": "898439684957",
+                    "product_title": "椰椰小岛两栖泳衣",
+                }
+            ],
+            "folder_candidates": [folder_decision],
+            "asset_candidates": [
+                {
+                    "product_id": "898439684957",
+                    "asset_id": "asset-1",
+                    "folder_id": "folder-1",
+                }
+            ],
+            "gallery_identity": {
+                "session_id": session_id,
+                "stage_id": "asset_matching",
+                "prepared_from_revision": asset["revision"],
+                "prepared_from_input_sha256": hashlib.sha256(
+                    (asset_path / "input.json").read_bytes()
+                ).hexdigest(),
+                "prepared_folder_keys": [
+                    {
+                        "product_id": "898439684957",
+                        "folder_id": "folder-1",
+                    }
+                ],
+            },
+        },
+    )
+    state = store.load_session(session_id)
+    state["current_stage"] = "slots_copy"
+    state["stages"]["asset_matching"]["status"] = "completed"
+    state["stages"]["slots_copy"] = {
+        "revision": 0,
+        "status": "needs_user_input",
+    }
+    store._write_session_state(session_id, state)
+
+    reopened = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/back",
+        json={"revision": 0},
+    )
+    stage = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching"
+    )
+
+    assert reopened.status_code == 200
+    assert stage.status_code == 200
+    assert stage.json["result"]["fallback_source"] == "confirmed-gallery.json"
+    assert stage.json["result"]["data"]["workflow_step"] == "image_selection"
+    assert stage.json["result"]["data"]["asset_candidates"][0]["asset_id"] == "asset-1"
+
+
+def test_completeness_submit_rejects_products_with_full_material_slots(
+    client,
+    session_id,
+    tmp_path,
+):
+    store = SessionStore(tmp_path)
+    state = store.load_session(session_id)
+    state["current_stage"] = "completeness"
+    state["stages"]["completeness"] = {
+        "revision": 0,
+        "status": "needs_user_input",
+    }
+    store._write_session_state(session_id, state)
+    store.write_review_context(
+        session_id,
+        "completeness",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "completeness",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "完整度巡检",
+            "data": {
+                "products": [
+                    {
+                        "product_id": "full-product",
+                        "status": "complete",
+                        "selectable": True,
+                        "promotion": {
+                            "target_slots": 3,
+                            "current_count": 3,
+                            "missing_count": 0,
+                        },
+                    },
+                    {
+                        "product_id": "open-product",
+                        "status": "needs_supplement",
+                        "selectable": True,
+                        "promotion": {
+                            "target_slots": 3,
+                            "current_count": 2,
+                            "missing_count": 1,
+                        },
+                    },
+                ]
+            },
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/submit",
+        json={"values": {"selected_product_ids": ["full-product"]}},
+    )
+
+    assert response.status_code == 422
+    assert "坑位已经填满" in response.json["field_errors"]["selected_product_ids"]
+
+
 def test_completeness_reinspect_resubmits_setup_and_archives_downstream_work(
     client,
     session_id,
@@ -2104,6 +2253,8 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert back_enabled_expression is not None
     assert "!localBackLockActive" in back_enabled_expression.group(1)
     assert "!selectionCheckActive" not in back_enabled_expression.group(1)
+    assert 'persistenceInFlight && currentStageId !== "asset_matching"' in javascript
+    assert "pendingBackNavigation" in javascript
     assert "selectionPreflightConcurrency = 3" not in javascript
     assert "2000" in javascript
     assert "/api/sessions" in javascript
@@ -3753,13 +3904,16 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         / "static"
         / "app.js"
     ).read_text(encoding="utf-8")
+    folder_review_source = source[
+        source.index("function renderFolderOwnershipReview") :
+        source.index("function inferAssetMatchingStep")
+    ]
 
     for expected in (
         "远端去重未完成",
         "asset_decisions",
         "license_decisions",
         "folder_decisions",
-        "排除该文件夹",
         "完整名称片段命中",
         "短名称片段候选",
         "folder-decision-changed",
@@ -3774,6 +3928,9 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "let isHydrating = false" in source
     assert "if (isHydrating) return;" in source
     assert "确认文件夹并加载图片" in source
+    assert "确认文件夹并重新加载图片" in source
+    assert "文件夹选择已变更，请重新加载图片后继续选图。" in source
+    assert "UiState.folderSelectionChanged" in folder_review_source
     assert "确认选图并提交给工作台" in source
     assert "第 1 步：筛选文件夹" in source
     assert "第 2 步：选择图片" in source
@@ -3782,6 +3939,20 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "galleryAutoFocusedFor" in source
     assert "scrollIntoView" in source
     assert 'card.setAttribute("role", "checkbox")' in source
+    assert (
+        'card.setAttribute("aria-checked", String(selected))'
+        in folder_review_source
+    )
+    assert 'card.addEventListener("click", toggleDecision)' in folder_review_source
+    assert 'card.addEventListener("keydown", (event)' in folder_review_source
+    assert (
+        'stateBadge.textContent = selected ? "已采用" : "已排除"'
+        in folder_review_source
+    )
+    assert 'document.createElement("select")' not in folder_review_source
+    assert 'document.createElement("input")' not in folder_review_source
+    assert "备注（可选）" not in folder_review_source
+    assert "排除该文件夹" not in folder_review_source
     assert '"is-unselectable"' in source
     assert "hydrateApproverOptions" in source
     assert "请先筛选候选文件夹" not in source
@@ -3850,6 +4021,8 @@ def test_prepare_local_gallery_materializes_visible_folder_defaults():
     assert "Number.isInteger(requestRevision)" in function_body
     assert "revision: requestRevision" in function_body
     assert "fieldErrors?.folder_decisions" in function_body
+    assert "UiState.folderSelectionChanged" in function_body
+    assert "文件夹选择没有变化，无需重新加载图片。" in function_body
 
 
 def test_asset_matching_internal_decisions_are_hidden_structured_controls(client):

@@ -75,6 +75,14 @@ DEFAULT_IMAGE_SOURCE_PROFILES = (
         ),
     ),
     ("视觉部 · 模特图", ("视觉部", "1-模特图")),
+    (
+        "素材共享库 · 小红书",
+        ("浙江酷趣", "素材共享库", "01 小红书"),
+    ),
+    (
+        "素材共享库 · 天猫买家秀",
+        ("浙江酷趣", "素材共享库", "02 天猫买家秀"),
+    ),
 )
 MAX_IMAGE_SOURCES = 50
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
@@ -108,6 +116,13 @@ def image_source_path_key(value: object) -> str:
     if not normalized_parts:
         raise ValueError("image source path must include a directory below its root")
     return "/".join(normalized_parts)
+
+
+def _same_windows_path(left: object, right: object) -> bool:
+    normalize = lambda value: unicodedata.normalize(
+        "NFC", str(value).strip()
+    ).replace("/", "\\").rstrip("\\").casefold()
+    return bool(normalize(left)) and normalize(left) == normalize(right)
 
 
 def stable_image_source_id(value: object) -> str:
@@ -391,16 +406,28 @@ def load_runtime_config(
     configured_team_folder_index = str(
         document.get("team_folder_index_root") or ""
     ).strip()
+    configured_team_folder_index_is_legacy_default = (
+        bool(configured_team_folder_index)
+        and _same_windows_path(
+            configured_team_folder_index,
+            DEFAULT_TEAM_FOLDER_INDEX_ROOT,
+        )
+    )
+    effective_configured_team_folder_index = (
+        ""
+        if configured_team_folder_index_is_legacy_default
+        else configured_team_folder_index
+    )
     team_folder_index_value = (
         environment_team_folder_index
-        or configured_team_folder_index
+        or effective_configured_team_folder_index
         or str(DEFAULT_TEAM_FOLDER_INDEX_ROOT)
     )
     team_folder_index_root_source = (
         "environment"
         if environment_team_folder_index
         else "config"
-        if configured_team_folder_index
+        if effective_configured_team_folder_index
         else "default"
     )
     team_folder_index_root = _resolve_configured_path(
@@ -544,11 +571,22 @@ def save_image_sources(
     sources = normalize_image_sources(value, runtime.workspace_root)
     document["image_sources"] = list(sources)
     document.pop("image_source_history", None)
-    if runtime.team_folder_index_root is not None:
+    if (
+        runtime.team_folder_index_root is not None
+        and runtime.team_folder_index_root_source == "config"
+    ):
         document.setdefault(
             "team_folder_index_root", str(runtime.team_folder_index_root)
         )
-    if runtime.team_folder_index_nas_source_id:
+    elif _same_windows_path(
+        document.get("team_folder_index_root", ""),
+        DEFAULT_TEAM_FOLDER_INDEX_ROOT,
+    ):
+        document.pop("team_folder_index_root", None)
+    if (
+        runtime.team_folder_index_nas_source_id
+        and runtime.team_folder_index_root_source == "config"
+    ):
         document.setdefault(
             "team_folder_index_nas_source_id",
             runtime.team_folder_index_nas_source_id,
@@ -640,7 +678,9 @@ def inspect_team_folder_index_root(
             if source_count
             else "路径可访问，尚无团队索引快照。"
         ),
-        "path": str(checked.path),
+        # Keep the exact machine-local binding entered or discovered in the UI.
+        # pathlib may resolve a mapped drive to UNC while checking metadata.
+        "path": str(selected),
         "snapshot_source_count": source_count,
     }
 
@@ -795,30 +835,39 @@ def _deduplicate_image_source_candidates(
     return list(records.values())
 
 
-def _default_image_source_discovery(
-    drive_roots: Sequence[Path],
+def _missing_default_image_source_profiles(
+    sources: Sequence[Mapping[str, object]],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    configured_keys: set[str] = set()
+    for source in sources:
+        try:
+            configured_keys.add(image_source_path_key(source.get("path", "")))
+        except ValueError:
+            continue
+    missing: list[tuple[str, tuple[str, ...]]] = []
+    for label, relative_parts in DEFAULT_IMAGE_SOURCE_PROFILES:
+        profile_key = image_source_path_key("\\".join(relative_parts))
+        if any(
+            key == profile_key or key.endswith(f"/{profile_key}")
+            for key in configured_keys
+        ):
+            continue
+        missing.append((label, tuple(relative_parts)))
+    return tuple(missing)
+
+
+def _default_image_source_records(
+    profiles: Sequence[tuple[str, Sequence[str]]],
+    paths_by_profile: Sequence[Sequence[Path]],
+    available: set[Path],
     *,
-    timeout_seconds: float,
-    probe: Callable[[Path], bool] | None,
     canonicalize: Callable[[Path], str] | None,
-) -> dict[str, object]:
-    paths_by_profile = [
-        tuple(Path(root).joinpath(*relative_parts) for root in drive_roots)
-        for _label, relative_parts in DEFAULT_IMAGE_SOURCE_PROFILES
-    ]
-    all_paths = tuple(path for paths in paths_by_profile for path in paths)
-    available = set(
-        _available_directories_with_timeout(
-            all_paths,
-            timeout_seconds=timeout_seconds,
-            probe=probe,
-        )
-    )
+) -> tuple[list[dict[str, object]], int, int]:
     sources: list[dict[str, object]] = []
     discovered_count = 0
     ambiguous_count = 0
     for (label, relative_parts), profile_paths in zip(
-        DEFAULT_IMAGE_SOURCE_PROFILES, paths_by_profile, strict=True
+        profiles, paths_by_profile, strict=True
     ):
         candidates = _deduplicate_image_source_candidates(
             [path for path in profile_paths if path in available],
@@ -837,6 +886,35 @@ def _default_image_source_discovery(
         elif len(candidates) > 1:
             ambiguous_count += 1
         sources.append(source)
+    return sources, discovered_count, ambiguous_count
+
+
+def _default_image_source_discovery(
+    drive_roots: Sequence[Path],
+    *,
+    timeout_seconds: float,
+    probe: Callable[[Path], bool] | None,
+    canonicalize: Callable[[Path], str] | None,
+    profiles: Sequence[tuple[str, Sequence[str]]] = DEFAULT_IMAGE_SOURCE_PROFILES,
+) -> dict[str, object]:
+    paths_by_profile = [
+        tuple(Path(root).joinpath(*relative_parts) for root in drive_roots)
+        for _label, relative_parts in profiles
+    ]
+    all_paths = tuple(path for paths in paths_by_profile for path in paths)
+    available = set(
+        _available_directories_with_timeout(
+            all_paths,
+            timeout_seconds=timeout_seconds,
+            probe=probe,
+        )
+    )
+    sources, discovered_count, ambiguous_count = _default_image_source_records(
+        profiles,
+        paths_by_profile,
+        available,
+        canonicalize=canonicalize,
+    )
 
     if not discovered_count and not ambiguous_count:
         return {
@@ -890,15 +968,66 @@ def discover_image_sources(
     saved_sources = [dict(source) for source in runtime.image_sources]
     if saved_sources:
         saved_paths = tuple(Path(str(source["path"])) for source in saved_sources)
+        missing_profiles = _missing_default_image_source_profiles(saved_sources)
+        missing_paths_by_profile = [
+            tuple(Path(root).joinpath(*relative_parts) for root in roots)
+            for _label, relative_parts in missing_profiles
+        ]
+        missing_candidate_paths = tuple(
+            path for paths in missing_paths_by_profile for path in paths
+        )
         current_timeout = min(total_timeout / 3, 0.5)
         current_available = set(
             _available_directories_with_timeout(
-                saved_paths,
+                tuple(dict.fromkeys((*saved_paths, *missing_candidate_paths))),
                 timeout_seconds=current_timeout,
                 probe=probe,
             )
         )
-        if len(current_available) == len(saved_paths):
+        (
+            added_sources,
+            added_count,
+            added_ambiguous_count,
+        ) = _default_image_source_records(
+            missing_profiles,
+            missing_paths_by_profile,
+            current_available,
+            canonicalize=canonicalize,
+        )
+        all_saved_available = all(
+            path in current_available for path in saved_paths
+        )
+        if all_saved_available and (added_count or added_ambiguous_count):
+            added_missing_count = (
+                len(added_sources) - added_count - added_ambiguous_count
+            )
+            return {
+                "status": (
+                    "ambiguous"
+                    if added_ambiguous_count
+                    else "partial"
+                    if added_missing_count
+                    else "configured"
+                ),
+                "source": "saved_and_defaults",
+                "auto_fill": True,
+                "image_sources": [*saved_sources, *added_sources],
+                "message": (
+                    f"已加载 {len(saved_sources)} 个常用图片源，并自动找到 "
+                    f"{added_count} 个新增来源。"
+                    + (
+                        f"还有 {added_ambiguous_count} 个新增来源需要选择位置。"
+                        if added_ambiguous_count
+                        else ""
+                    )
+                    + (
+                        "未找到的新增来源可手动选择。"
+                        if added_missing_count
+                        else ""
+                    )
+                ),
+            }
+        if all_saved_available:
             return {
                 "status": "configured",
                 "source": "saved",
@@ -917,15 +1046,16 @@ def discover_image_sources(
             paths = tuple(root.joinpath(*relative_parts) for root in roots)
             paths_by_source.append(paths)
             candidate_paths.extend(paths)
+        candidate_paths.extend(missing_candidate_paths)
         remaining = max(0.0, total_timeout - (time.monotonic() - started_at))
-        rebound_available = set(
+        rebound_available = current_available | set(
             _available_directories_with_timeout(
-                tuple(candidate_paths),
+                tuple(dict.fromkeys(candidate_paths)),
                 timeout_seconds=remaining,
                 probe=probe,
             )
         )
-        usable_count = len(current_available)
+        usable_count = sum(path in current_available for path in saved_paths)
         ambiguous_count = 0
         rebound_count = 0
         projected: list[dict[str, object]] = []
@@ -951,15 +1081,51 @@ def discover_image_sources(
                 ambiguous_count += 1
             projected.append(item)
 
-        if usable_count or ambiguous_count:
+        (
+            added_sources,
+            added_count,
+            added_ambiguous_count,
+        ) = _default_image_source_records(
+            missing_profiles,
+            missing_paths_by_profile,
+            rebound_available,
+            canonicalize=canonicalize,
+        )
+        if added_count or added_ambiguous_count:
+            projected.extend(added_sources)
+        added_missing_count = (
+            len(added_sources) - added_count - added_ambiguous_count
+            if added_count or added_ambiguous_count
+            else 0
+        )
+
+        if usable_count or ambiguous_count or added_count or added_ambiguous_count:
             return {
-                "status": "ambiguous" if ambiguous_count else "configured",
-                "source": "saved",
-                "auto_fill": bool(rebound_count or ambiguous_count),
+                "status": (
+                    "ambiguous"
+                    if ambiguous_count or added_ambiguous_count
+                    else "partial"
+                    if added_missing_count
+                    else "configured"
+                ),
+                "source": (
+                    "saved_and_defaults"
+                    if added_count or added_ambiguous_count
+                    else "saved"
+                ),
+                "auto_fill": bool(
+                    rebound_count
+                    or ambiguous_count
+                    or added_count
+                    or added_ambiguous_count
+                ),
                 "image_sources": projected,
                 "message": (
-                    f"已优先加载常用图片源；还有 {ambiguous_count} 个来源需要选择位置。"
-                    if ambiguous_count
+                    f"已优先加载常用图片源；还有 "
+                    f"{ambiguous_count + added_ambiguous_count} 个来源需要选择位置。"
+                    if ambiguous_count or added_ambiguous_count
+                    else f"已优先加载常用图片源，并自动找到 {added_count} 个新增来源。"
+                    if added_count
                     else f"已优先加载常用图片源，并自动恢复 {rebound_count} 个盘符绑定。"
                     if rebound_count
                     else "已优先加载可访问的常用图片源。"
@@ -987,7 +1153,7 @@ def save_team_folder_index_root(
         else runtime.workspace_root / LOCAL_CONFIG_RELATIVE
     )
     document = _read_config(target) if target.is_file() else {}
-    selected = Path(str(inspection["path"]))
+    selected = _resolve_configured_path(value, runtime.workspace_root)
     document["team_folder_index_root"] = str(selected)
     if runtime.team_folder_index_nas_source_id:
         document.setdefault(
