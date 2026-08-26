@@ -271,6 +271,40 @@
       return job.promise;
     }
 
+    function selectCached(candidate, result) {
+      const assetId = String(candidate?.asset_id || "");
+      if (!assetId) return Promise.reject(new Error("候选图片缺少稳定标识"));
+      let job = jobs.get(assetId);
+      if (!job || job.state !== "completed") {
+        if (job) forget(assetId);
+        job = {
+          assetId,
+          candidate,
+          state: "completed",
+          desiredSelected: true,
+          intentVersion: 1,
+          weight: Math.min(maxWeight, selectionPreflightWeight(candidate)),
+          result,
+          error: null,
+          forgotten: false,
+          promise: Promise.resolve(result),
+          resolve: () => {},
+          reject: () => {},
+        };
+        jobs.set(assetId, job);
+      } else {
+        job.candidate = candidate;
+        job.desiredSelected = true;
+        job.intentVersion += 1;
+        job.result = result;
+        job.error = null;
+        job.forgotten = false;
+        job.promise = Promise.resolve(result);
+      }
+      notify(job);
+      return Promise.resolve(result);
+    }
+
     function cancel(assetId) {
       const job = jobs.get(String(assetId || ""));
       if (!job) return null;
@@ -321,6 +355,7 @@
       get: (assetId) => snapshot(jobs.get(String(assetId || ""))),
       reset,
       select,
+      selectCached,
     };
   }
 

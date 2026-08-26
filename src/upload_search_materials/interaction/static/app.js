@@ -2520,8 +2520,7 @@
     if (!assetId) return Promise.reject(new Error("候选图片缺少稳定标识"));
     const existing = selectionPreflightFor(assetId);
     if (existing?.status && existing.status !== "pending") {
-      selectionPreflightScheduler.forget(assetId);
-      return Promise.resolve(existing);
+      return selectionPreflightScheduler.selectCached(candidate, existing);
     }
     const priorJob = selectionPreflightScheduler.get(assetId);
     if (priorJob?.state === "completed") {

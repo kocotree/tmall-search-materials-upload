@@ -346,6 +346,48 @@ test("running preflight keeps its cache result but not cancelled selection inten
   assert.equal(scheduler.get("asset-a").desiredSelected, true);
 });
 
+test("persisted preflight cache preserves click intent without re-executing", async () => {
+  let executions = 0;
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    execute: async () => {
+      executions += 1;
+      return { status: "passed" };
+    },
+  });
+  const candidate = { asset_id: "asset-a", width: 3024, height: 4032 };
+  const cached = { status: "passed", feasible_ratios: ["3:4", "1:1"] };
+
+  assert.deepEqual(await scheduler.selectCached(candidate, cached), cached);
+  assert.equal(executions, 0);
+  assert.equal(scheduler.get("asset-a").state, "completed");
+  assert.equal(scheduler.get("asset-a").desiredSelected, true);
+
+  scheduler.cancel("asset-a");
+  assert.equal(scheduler.get("asset-a").desiredSelected, false);
+  assert.deepEqual(await scheduler.selectCached(candidate, cached), cached);
+  assert.equal(executions, 0);
+  assert.equal(scheduler.get("asset-a").desiredSelected, true);
+});
+
+test("workbench reuses persisted preflight through the intent-aware scheduler", () => {
+  const source = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "src",
+      "upload_search_materials",
+      "interaction",
+      "static",
+      "app.js",
+    ),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /return selectionPreflightScheduler\.selectCached\(candidate, existing\);/,
+  );
+});
+
 test("forgotten completed preflight is executed again instead of reused", async () => {
   let executions = 0;
   const scheduler = UiState.createSelectionPreflightScheduler({
