@@ -71,6 +71,7 @@ from ..gallery_jobs import (
 )
 from ..material_executor_launcher import MaterialExecutorLaunchError
 from ..io_tables import SchemaError, read_product_csv, validate_product_records
+from ..lark_auth import LarkAuthCoordinator
 from ..lark_base_sync import inspect_lark_base_config
 from ..image_review import (
     build_image_review_data,
@@ -355,6 +356,7 @@ def create_app(
     shutdown_event: threading.Event | None = None,
     completion_grace_seconds: float = DEFAULT_COMPLETION_GRACE_SECONDS,
     lifecycle_poll_seconds: float = 2.0,
+    lark_auth_coordinator: LarkAuthCoordinator | None = None,
 ) -> Flask:
     """Create the local interaction UI and JSON API backed by ``runs_root``."""
 
@@ -363,6 +365,7 @@ def create_app(
     runtime = initialize_bundled_selector_profile(
         runtime_config or load_runtime_config()
     )
+    lark_auth = lark_auth_coordinator or LarkAuthCoordinator()
     expected_runtime_identity = (
         (service_identity or {}).get("runtime_identity")
     )
@@ -1621,6 +1624,16 @@ def create_app(
             upload_log_configured=config.upload_log_configured,
             config_path=str(config_path),
         )
+
+    @app.get("/api/runtime/lark-base/auth")
+    def get_runtime_lark_base_auth():
+        return jsonify(**lark_auth.status())
+
+    @app.post("/api/runtime/lark-base/auth/start")
+    def start_runtime_lark_base_auth():
+        status = lark_auth.start()
+        response_status = 202 if status.get("status") == "awaiting_user" else 200
+        return jsonify(**status), response_status
 
     @app.post("/api/runtime/lark-base/check")
     def check_runtime_lark_base():

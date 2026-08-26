@@ -44,6 +44,14 @@ TEAM_FOLDER_INDEX_RELATIVE_PARTS = (
 )
 TEAM_FOLDER_INDEX_DISCOVERY_TIMEOUT_SECONDS = 1.5
 DEFAULT_TEAM_FOLDER_INDEX_NAS_SOURCE_ID = "zhejiang-kuqu"
+DEFAULT_LARK_PRODUCT_BASE_URL = (
+    "https://kocotree.feishu.cn/wiki/A5x4wrZiBimLFWknwk8ccOwznY4"
+)
+DEFAULT_LARK_PRODUCT_TABLE_ID = "tblRr3NI24dvfwZ4"
+DEFAULT_LARK_UPLOAD_LOG_BASE_URL = (
+    "https://kocotree.feishu.cn/base/ILuDbCBBpazXSXsvlbOcivzWnBa"
+)
+DEFAULT_LARK_UPLOAD_LOG_TABLE_ID = "tblwmAmcvqayyt2b"
 IMAGE_SOURCE_DISCOVERY_TIMEOUT_SECONDS = 1.5
 DEFAULT_IMAGE_SOURCE_PROFILES = (
     (
@@ -148,46 +156,74 @@ def normalize_lark_base_config(
     document = value if isinstance(value, Mapping) else {}
     env = os.environ if environ is None else environ
 
-    def configured(name: str, env_name: str, *, limit: int = 2000) -> str:
+    def configured(
+        name: str,
+        env_name: str,
+        *,
+        default: str = "",
+        limit: int = 2000,
+    ) -> str:
         return _bounded_text(
-            env.get(env_name) or document.get(name),
+            env.get(env_name) or document.get(name) or default,
             limit=limit,
             field_name=f"lark_base.{name}",
         )
 
     product_base_url = configured(
-        "product_base_url", "TMALL_LARK_PRODUCT_BASE_URL"
+        "product_base_url",
+        "TMALL_LARK_PRODUCT_BASE_URL",
+        default=DEFAULT_LARK_PRODUCT_BASE_URL,
     )
     product_base_token = configured(
         "product_base_token", "TMALL_LARK_PRODUCT_BASE_TOKEN", limit=200
     )
     product_table_id = configured(
-        "product_table_id", "TMALL_LARK_PRODUCT_TABLE_ID", limit=200
+        "product_table_id",
+        "TMALL_LARK_PRODUCT_TABLE_ID",
+        default=DEFAULT_LARK_PRODUCT_TABLE_ID,
+        limit=200,
     )
     upload_log_base_url = configured(
-        "upload_log_base_url", "TMALL_LARK_UPLOAD_LOG_BASE_URL"
+        "upload_log_base_url",
+        "TMALL_LARK_UPLOAD_LOG_BASE_URL",
+        default=DEFAULT_LARK_UPLOAD_LOG_BASE_URL,
     )
     upload_log_base_token = configured(
         "upload_log_base_token", "TMALL_LARK_UPLOAD_LOG_BASE_TOKEN", limit=200
     )
     upload_log_table_id = configured(
-        "upload_log_table_id", "TMALL_LARK_UPLOAD_LOG_TABLE_ID", limit=200
+        "upload_log_table_id",
+        "TMALL_LARK_UPLOAD_LOG_TABLE_ID",
+        default=DEFAULT_LARK_UPLOAD_LOG_TABLE_ID,
+        limit=200,
     )
     enabled_raw = env.get("TMALL_LARK_BASE_ENABLED")
     enabled_explicit = enabled_raw is not None or "enabled" in document
     enabled = _bool_config_value(
         enabled_raw if enabled_raw is not None else document.get("enabled")
     )
-    if not enabled and not enabled_explicit and any(
-        (
-            product_base_url,
-            product_base_token,
-            product_table_id,
-            upload_log_base_url,
-            upload_log_base_token,
-            upload_log_table_id,
+    configured_explicitly = any(
+        env.get(name)
+        for name in (
+            "TMALL_LARK_PRODUCT_BASE_URL",
+            "TMALL_LARK_PRODUCT_BASE_TOKEN",
+            "TMALL_LARK_PRODUCT_TABLE_ID",
+            "TMALL_LARK_UPLOAD_LOG_BASE_URL",
+            "TMALL_LARK_UPLOAD_LOG_BASE_TOKEN",
+            "TMALL_LARK_UPLOAD_LOG_TABLE_ID",
         )
-    ):
+    ) or any(
+        document.get(name)
+        for name in (
+            "product_base_url",
+            "product_base_token",
+            "product_table_id",
+            "upload_log_base_url",
+            "upload_log_base_token",
+            "upload_log_table_id",
+        )
+    )
+    if not enabled and not enabled_explicit and configured_explicitly:
         enabled = True
     timeout_raw = (
         env.get("TMALL_LARK_COMMAND_TIMEOUT_SECONDS")
@@ -235,9 +271,10 @@ class DiscoveredPath:
 class LarkBaseConfig:
     """Machine-local Feishu Base integration settings.
 
-    The Base URLs/tokens point at team documents and are intentionally kept out
-    of tracked defaults.  Each Windows user stores them in the local runtime
-    config or provides them through environment variables.
+    Team Base URLs and table IDs have tracked defaults.  Credentials and user
+    tokens remain outside the Plugin and are managed by the Feishu CLI login.
+    Environment variables and machine-local config may still override the team
+    defaults for maintainers and isolated test environments.
     """
 
     enabled: bool = False

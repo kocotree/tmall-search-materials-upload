@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -162,6 +163,9 @@ def default_lark_cli_runner(
             message="未找到 lark-cli，跳过飞书多维表格同步。",
         )
     try:
+        environment = os.environ.copy()
+        environment["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
+        environment["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
         completed = subprocess.run(
             [executable, *args],
             capture_output=True,
@@ -170,6 +174,10 @@ def default_lark_cli_runner(
             errors="replace",
             timeout=timeout_seconds,
             check=False,
+            env=environment,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            ),
         )
     except subprocess.TimeoutExpired:
         return LarkCliResult(

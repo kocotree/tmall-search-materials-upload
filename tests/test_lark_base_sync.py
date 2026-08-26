@@ -9,6 +9,10 @@ from upload_search_materials.lark_base_sync import (
 )
 from upload_search_materials.models import ProductRecord
 from upload_search_materials.runtime_config import (
+    DEFAULT_LARK_PRODUCT_BASE_URL,
+    DEFAULT_LARK_PRODUCT_TABLE_ID,
+    DEFAULT_LARK_UPLOAD_LOG_BASE_URL,
+    DEFAULT_LARK_UPLOAD_LOG_TABLE_ID,
     LarkBaseConfig,
     normalize_lark_base_config,
 )
@@ -271,3 +275,13 @@ def test_lark_base_config_respects_explicit_disable():
     )
 
     assert config.enabled is False
+
+
+def test_lark_base_config_uses_team_defaults_for_a_new_user():
+    config = normalize_lark_base_config({}, {})
+
+    assert config.enabled is False
+    assert config.product_base_url == DEFAULT_LARK_PRODUCT_BASE_URL
+    assert config.product_table_id == DEFAULT_LARK_PRODUCT_TABLE_ID
+    assert config.upload_log_base_url == DEFAULT_LARK_UPLOAD_LOG_BASE_URL
+    assert config.upload_log_table_id == DEFAULT_LARK_UPLOAD_LOG_TABLE_ID

@@ -240,36 +240,24 @@
                   <p class="field-error" id="setup-team_folder_index_root-error" data-field-error="team_folder_index_root" aria-live="polite"></p>
                   <p class="field-error" id="setup-folder_index_root-error" data-field-error="folder_index_root" aria-live="polite"></p>
                 </article>
-                <article class="setup-status-card setup-status-card-wide lark-base-config" data-component="LarkBaseConfig" data-ready="{{ 'true' if setup_inputs.lark_base.configured else 'pending' }}">
-                  <span>飞书多维表格</span><strong data-lark-base-summary>{{ "已配置" if setup_inputs.lark_base.configured else "可选配置" }}</strong>
-                  <p class="section-instruction">用于按商品信息表同步负责人，并在上传成功后记录素材上传信息。未配置时继续使用本地商品表。</p>
-                  <label class="inline-checkbox">
-                    <input data-lark-enabled type="checkbox" {% if setup_inputs.lark_base.enabled %}checked{% endif %}>
-                    启用飞书同步与上传记录
-                  </label>
-                  <div class="field-grid">
-                    <label>
-                      商品信息表链接
-                      <input data-lark-product-base-url type="text" value="{{ setup_inputs.lark_base.product_base_url }}" maxlength="2000" placeholder="粘贴飞书多维表格或 Wiki 链接">
-                    </label>
-                    <label>
-                      商品信息表名 / 表 ID
-                      <input data-lark-product-table-id type="text" value="{{ setup_inputs.lark_base.product_table_id }}" maxlength="200" placeholder="例如：产品数据表">
-                    </label>
-                    <label>
-                      上传记录表链接
-                      <input data-lark-upload-log-base-url type="text" value="{{ setup_inputs.lark_base.upload_log_base_url }}" maxlength="2000" placeholder="可与商品信息表链接相同">
-                    </label>
-                    <label>
-                      上传记录表名 / 表 ID
-                      <input data-lark-upload-log-table-id type="text" value="{{ setup_inputs.lark_base.upload_log_table_id }}" maxlength="200" placeholder="例如：搜推素材上传记录">
-                    </label>
+                <article class="setup-status-card setup-status-card-wide lark-base-config" data-component="LarkBaseConfig" data-ready="pending" data-lark-product-base-url="{{ setup_inputs.lark_base.product_base_url }}" data-lark-product-table-id="{{ setup_inputs.lark_base.product_table_id }}" data-lark-upload-log-base-url="{{ setup_inputs.lark_base.upload_log_base_url }}" data-lark-upload-log-table-id="{{ setup_inputs.lark_base.upload_log_table_id }}">
+                  <span>飞书多维表格</span><strong data-lark-base-summary>正在检查授权</strong>
+                  <p class="section-instruction">商品信息表和上传记录表已由团队预设。授权后，系统会同步负责人，并且只记录成功上传的素材。</p>
+                  <div class="lark-default-resources">
+                    <a href="{{ setup_inputs.lark_base.product_base_url }}" target="_blank" rel="noopener">
+                      <b>商品信息表</b>
+                      <small>用于同步负责人并支持筛选</small>
+                    </a>
+                    <a href="{{ setup_inputs.lark_base.upload_log_base_url }}" target="_blank" rel="noopener">
+                      <b>上传记录表</b>
+                      <small>用于记录成功上传的商品与素材</small>
+                    </a>
                   </div>
                   <div class="image-source-actions">
-                    <button class="secondary-button" type="button" data-check-lark-base>检测飞书连接</button>
-                    <button class="secondary-button" type="button" data-save-lark-base>保存飞书配置</button>
+                    <button class="secondary-button" type="button" data-authorize-lark-base>授权飞书</button>
+                    <a class="secondary-button lark-auth-link" data-lark-auth-link target="_blank" rel="noopener" hidden>打开飞书授权页面</a>
                   </div>
-                  <p class="image-source-feedback" data-lark-base-feedback aria-live="polite">首次使用前，请确保当前 Codex 已完成飞书授权。</p>
+                  <p class="image-source-feedback" data-lark-base-feedback aria-live="polite">正在检查当前飞书授权状态…</p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
                   <span>图片文件夹</span><strong data-image-source-summary>{% if image_sources %}已预填 {{ image_sources|length }} 个常用来源{% else %}本次尚未选择{% endif %}</strong>

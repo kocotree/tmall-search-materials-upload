@@ -181,6 +181,64 @@ def test_runtime_lark_base_check_is_soft_readiness(
     assert observed["config"].product_base_token == "base-token"
 
 
+def test_runtime_lark_auth_is_owned_by_the_workbench(tmp_path):
+    workspace = Path(__file__).parents[1]
+
+    class FakeAuthCoordinator:
+        def status(self):
+            return {
+                "status": "authorization_required",
+                "message": "请授权飞书账号。",
+                "verification_url": "",
+                "user_name": "",
+            }
+
+        def start(self):
+            return {
+                "status": "awaiting_user",
+                "message": "请在飞书页面完成授权。",
+                "verification_url": "https://accounts.feishu.cn/device",
+                "user_name": "",
+            }
+
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path,
+        config_path=tmp_path / "config" / "runtime.json",
+        user_data_root=tmp_path / "user-data",
+    )
+    local_client = create_app(
+        tmp_path,
+        runtime_config=runtime,
+        enforce_stage_order=False,
+        lark_auth_coordinator=FakeAuthCoordinator(),
+    ).test_client()
+
+    current = local_client.get("/api/runtime/lark-base/auth")
+    started = local_client.post("/api/runtime/lark-base/auth/start", json={})
+
+    assert current.status_code == 200
+    assert current.json["status"] == "authorization_required"
+    assert started.status_code == 202
+    assert started.json["status"] == "awaiting_user"
+    assert started.json["verification_url"] == "https://accounts.feishu.cn/device"
+    assert "device_code" not in started.json
+
+
+def test_setup_page_uses_one_click_lark_authorization(client):
+    response = client.get("/")
+    text = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "data-authorize-lark-base" in text
+    assert "商品信息表和上传记录表已由团队预设" in text
+    assert "data-lark-enabled" not in text
+    assert "data-save-lark-base" not in text
+
+
 def test_bounded_agent_action_processes_product_selection_inside_workbench(
     client, session_id, tmp_path, monkeypatch
 ):

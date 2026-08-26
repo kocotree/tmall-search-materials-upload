@@ -68,6 +68,8 @@
   let uiState = UiState.createState(currentStageId);
   let stageGeneration = 0;
   let autoSaveTimer = null;
+  let larkAuthPollTimer = null;
+  let larkActivationInFlight = false;
   let persistenceInFlight = false;
   let stageLocalActionInFlight = false;
   let pendingPersistenceMode = null;
@@ -640,15 +642,12 @@
 
   function larkBasePayload() {
     if (!larkBaseConfig) return {};
-    const enabled = Boolean(larkBaseConfig.querySelector("[data-lark-enabled]")?.checked);
-    const productBaseUrl = larkBaseConfig.querySelector("[data-lark-product-base-url]")?.value.trim() || "";
-    const uploadLogBaseUrl = larkBaseConfig.querySelector("[data-lark-upload-log-base-url]")?.value.trim() || productBaseUrl;
     return {
-      enabled,
-      product_base_url: productBaseUrl,
-      product_table_id: larkBaseConfig.querySelector("[data-lark-product-table-id]")?.value.trim() || "",
-      upload_log_base_url: uploadLogBaseUrl,
-      upload_log_table_id: larkBaseConfig.querySelector("[data-lark-upload-log-table-id]")?.value.trim() || "",
+      enabled: true,
+      product_base_url: larkBaseConfig.dataset.larkProductBaseUrl || "",
+      product_table_id: larkBaseConfig.dataset.larkProductTableId || "",
+      upload_log_base_url: larkBaseConfig.dataset.larkUploadLogBaseUrl || "",
+      upload_log_table_id: larkBaseConfig.dataset.larkUploadLogTableId || "",
     };
   }
 
@@ -659,17 +658,18 @@
     const status = payload?.status || "not_configured";
     const product = payload?.product_sync || {};
     const uploadLog = payload?.upload_log || {};
-    const ready = status === "available"
-      || product.status === "available"
-      || uploadLog.status === "available";
-    larkBaseConfig.dataset.ready = ready ? "true" : status;
-    summary.textContent = ready
-      ? `可用 · ${[product, uploadLog].filter((item) => item.status === "available").length} / 2`
-      : larkBasePayload().enabled
-        ? "需要检查"
-        : "未启用";
-    const details = [product.message, uploadLog.message].filter(Boolean).join("；");
-    feedback.textContent = payload?.message || details || "飞书同步未配置。";
+    const readyCount = [product, uploadLog].filter(
+      (item) => item.status === "available",
+    ).length;
+    const ready = status === "available" && readyCount === 2;
+    larkBaseConfig.dataset.ready = ready ? "true" : "pending";
+    summary.textContent = ready ? "已授权 · 可用" : "已授权 · 待完成";
+    feedback.textContent = ready
+      ? "飞书已可用：负责人同步和成功上传记录均已启用。"
+      : "飞书账号已授权，但默认数据表暂时不可用。请点击“补充授权”后重试。";
+    const authorizeButton = larkBaseConfig.querySelector("[data-authorize-lark-base]");
+    if (authorizeButton) authorizeButton.textContent = ready ? "重新检查授权" : "补充授权";
+    return ready;
   }
 
   async function checkLarkBase() {
@@ -681,21 +681,19 @@
         method: "POST",
         body: JSON.stringify({ lark_base: larkBasePayload() }),
       });
-      renderLarkBaseStatus(payload);
-      return payload.status === "available";
+      return renderLarkBaseStatus(payload);
     } catch (error) {
-      renderLarkBaseStatus({
-        status: "unavailable",
-        message: error.fieldErrors?.lark_base || error.userMessage || error.message,
-      });
+      larkBaseConfig.dataset.ready = "pending";
+      larkBaseConfig.querySelector("[data-lark-base-summary]").textContent = "检查未完成";
+      feedback.textContent = "暂时无法检查默认数据表，请稍后重试。";
       return false;
     }
   }
 
-  async function saveLarkBase() {
-    if (!larkBaseConfig) return;
+  async function saveLarkBase({ quiet = false } = {}) {
+    if (!larkBaseConfig) return false;
     const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
-    feedback.textContent = "正在保存飞书配置…";
+    if (!quiet) feedback.textContent = "正在启用团队默认数据表…";
     try {
       const payload = await fetchJson("/api/runtime/lark-base", {
         method: "PUT",
@@ -704,30 +702,115 @@
       larkBaseConfig.dataset.ready = payload.product_sync_configured || payload.upload_log_configured
         ? "true"
         : "pending";
-      larkBaseConfig.querySelector("[data-lark-base-summary]").textContent = payload.enabled
-        ? "已保存"
-        : "未启用";
-      feedback.textContent = payload.enabled
-        ? "已保存。后续任务会自动同步负责人并记录成功上传。"
-        : "已关闭飞书同步；后续任务继续使用本地商品表。";
-    } catch (error) {
-      renderLarkBaseStatus({
-        status: "unavailable",
-        message: error.fieldErrors?.lark_base || error.userMessage || error.message,
+      if (!quiet) feedback.textContent = "团队默认数据表已启用。";
+      return Boolean(payload.enabled);
+    } catch (_error) {
+      larkBaseConfig.dataset.ready = "pending";
+      larkBaseConfig.querySelector("[data-lark-base-summary]").textContent = "保存未完成";
+      feedback.textContent = "授权已完成，但本机配置暂时无法保存，请稍后重试。";
+      return false;
+    }
+  }
+
+  function renderLarkAuthStatus(payload) {
+    if (!larkBaseConfig) return;
+    const status = payload?.status || "authorization_required";
+    const summary = larkBaseConfig.querySelector("[data-lark-base-summary]");
+    const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
+    const button = larkBaseConfig.querySelector("[data-authorize-lark-base]");
+    const link = larkBaseConfig.querySelector("[data-lark-auth-link]");
+    const awaiting = status === "awaiting_user";
+    const authorized = status === "authorized";
+    larkBaseConfig.dataset.ready = authorized ? "pending" : awaiting ? "pending" : "false";
+    summary.textContent = authorized
+      ? "已授权 · 正在检查"
+      : awaiting
+        ? "等待飞书授权"
+        : status === "failed"
+          ? "授权未完成"
+          : "等待授权";
+    feedback.textContent = payload?.message || "请在工作台完成飞书授权。";
+    if (button) {
+      button.disabled = awaiting;
+      button.textContent = authorized
+        ? "重新检查授权"
+        : status === "failed"
+          ? "重新授权飞书"
+          : awaiting
+            ? "等待授权完成"
+            : "授权飞书";
+    }
+    if (link) {
+      const url = payload?.verification_url || "";
+      link.hidden = !awaiting || !url;
+      if (url) link.href = url;
+      else link.removeAttribute("href");
+    }
+  }
+
+  async function activateLarkBase() {
+    if (!larkBaseConfig || larkActivationInFlight) return;
+    larkActivationInFlight = true;
+    try {
+      const saved = await saveLarkBase({ quiet: true });
+      if (saved) await checkLarkBase();
+    } finally {
+      larkActivationInFlight = false;
+    }
+  }
+
+  function scheduleLarkAuthPoll() {
+    if (larkAuthPollTimer) window.clearTimeout(larkAuthPollTimer);
+    larkAuthPollTimer = window.setTimeout(refreshLarkAuthStatus, 2000);
+  }
+
+  async function refreshLarkAuthStatus() {
+    if (!larkBaseConfig) return;
+    try {
+      const payload = await fetchJson("/api/runtime/lark-base/auth");
+      renderLarkAuthStatus(payload);
+      if (payload.status === "awaiting_user") scheduleLarkAuthPoll();
+      else if (payload.status === "authorized") await activateLarkBase();
+    } catch (_error) {
+      renderLarkAuthStatus({
+        status: "failed",
+        message: "暂时无法检查飞书授权，请稍后重试。",
+      });
+    }
+  }
+
+  async function authorizeLarkBase() {
+    if (!larkBaseConfig) return;
+    const popup = window.open("about:blank", "tmallFeishuAuthorization");
+    try {
+      const payload = await fetchJson("/api/runtime/lark-base/auth/start", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      renderLarkAuthStatus(payload);
+      if (payload.verification_url && popup) {
+        popup.location.replace(payload.verification_url);
+      } else if (popup) {
+        popup.close();
+      }
+      if (payload.status === "awaiting_user") scheduleLarkAuthPoll();
+      else if (payload.status === "authorized") await activateLarkBase();
+    } catch (_error) {
+      if (popup) popup.close();
+      renderLarkAuthStatus({
+        status: "failed",
+        message: "飞书授权页面暂时无法打开，请稍后重试。",
       });
     }
   }
 
   function initializeLarkBaseConfig() {
     if (!larkBaseConfig) return;
-    larkBaseConfig.querySelector("[data-check-lark-base]")?.addEventListener("click", checkLarkBase);
-    larkBaseConfig.querySelector("[data-save-lark-base]")?.addEventListener("click", saveLarkBase);
-    larkBaseConfig.addEventListener("input", () => {
-      larkBaseConfig.dataset.ready = "pending";
-      larkBaseConfig.querySelector("[data-lark-base-summary]").textContent = "等待保存";
-      larkBaseConfig.querySelector("[data-lark-base-feedback]").textContent =
-        "配置已修改，请保存后用于下一次任务。";
-    });
+    larkBaseConfig.querySelector("[data-authorize-lark-base]")?.addEventListener(
+      "click",
+      authorizeLarkBase,
+    );
+    refreshLarkAuthStatus();
   }
 
   function renderCollectionRuntime(payload) {
