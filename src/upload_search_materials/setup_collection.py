@@ -40,7 +40,7 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
-from .lark_base_sync import sync_product_metadata
+from .lark_base_sync import Runner, sync_product_metadata
 from .material_state import build_completeness_matrix
 from .collection_runtime import attempt_path, read_json_object
 from .collection_readiness import merge_default_safe_popup_selectors
@@ -72,6 +72,208 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise InteractionConflict(f"{path.name} must contain an object")
     return value
+
+
+def _public_lark_product_sync(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return product-sync evidence safe to expose in workbench stage data."""
+
+    return {
+        key: evidence.get(key)
+        for key in (
+            "status",
+            "reason_code",
+            "message",
+            "table_id",
+            "fetched_count",
+            "matched_count",
+            "updated_owner_count",
+            "recorded_at",
+        )
+    }
+
+
+def refresh_completeness_product_metadata(
+    *,
+    runs_root: Path,
+    session_id: str,
+    runtime: RuntimeConfig,
+    runner: Runner | None = None,
+) -> dict[str, Any]:
+    """Refresh owners in an existing completeness matrix without recollecting.
+
+    This is intentionally narrower than ``process_setup_collection``: it reads
+    the already published promotion status, overlays the current Feishu owner
+    metadata, and rewrites only the completeness matrix/review context.
+    """
+
+    store = SessionStore(runs_root)
+    state = store.load_session(session_id)
+    if str(state.get("current_stage") or "") != "completeness":
+        return {
+            "status": "skipped",
+            "reason_code": "LARK_OWNER_REFRESH_STAGE_NOT_CURRENT",
+            "message": "负责人会在进入完整度巡检时自动同步。",
+        }
+    stage_state = state.get("stages", {}).get("completeness", {})
+    stage_status = str(stage_state.get("status") or "")
+    if stage_status in {"ready_for_agent", "processing", "completed"}:
+        return {
+            "status": "skipped",
+            "reason_code": "LARK_OWNER_REFRESH_STAGE_BUSY",
+            "message": "当前步骤正在处理，负责人将保留本次已确认的数据。",
+        }
+    if any(
+        str(item.get("status") or "") == "processing"
+        for item in state.get("stages", {}).values()
+        if isinstance(item, dict)
+    ):
+        return {
+            "status": "skipped",
+            "reason_code": "LARK_OWNER_REFRESH_WORKFLOW_BUSY",
+            "message": "工作台正在处理当前任务，暂不刷新负责人。",
+        }
+
+    session_path = store._session_path(session_id)
+    completeness_path = (
+        store._stage_path(session_id, "completeness")
+        / "completeness-matrix.json"
+    )
+    existing_matrix = _read_json(completeness_path)
+    inputs_path = session_path / "inputs"
+    products_path = inputs_path / "products.csv"
+    collected_candidates = (
+        session_path
+        / "collected"
+        / "promotion"
+        / "current"
+        / "promotion-material-status.csv",
+        session_path
+        / "collected"
+        / "promotion"
+        / "promotion-material-status.csv",
+    )
+    collected_path = next(
+        (path for path in collected_candidates if path.is_file()),
+        None,
+    )
+    if not products_path.is_file() or collected_path is None:
+        return {
+            "status": "skipped",
+            "reason_code": "LARK_OWNER_REFRESH_INPUT_MISSING",
+            "message": "本次巡检快照尚未准备完成，暂不刷新负责人。",
+        }
+
+    evidence_path = inputs_path / "lark-product-sync.json"
+    prior_evidence = (
+        _read_json(evidence_path) if evidence_path.is_file() else {}
+    )
+    applied_sync = existing_matrix.get("lark_product_sync")
+    if (
+        isinstance(applied_sync, dict)
+        and applied_sync.get("status") == "completed"
+        and prior_evidence.get("status") == "completed"
+        and int(prior_evidence.get("fetched_count") or 0) > 0
+        and applied_sync.get("recorded_at") == prior_evidence.get("recorded_at")
+    ):
+        return {
+            "status": "unchanged",
+            "reason_code": "LARK_OWNER_REFRESH_ALREADY_CURRENT",
+            "message": "当前巡检已使用本次飞书负责人数据。",
+            "lark_product_sync": _public_lark_product_sync(prior_evidence),
+        }
+
+    products = read_product_csv(products_path)
+    collected_rows = read_backend_status(collected_path)
+    sync = sync_product_metadata(
+        products,
+        runtime.lark_base,
+        runner=runner,
+    )
+    sync_evidence = sync.evidence()
+    _write_json(evidence_path, sync_evidence)
+    scan_summary_path = inputs_path / "scan-summary.json"
+    if scan_summary_path.is_file():
+        scan_summary = _read_json(scan_summary_path)
+        scan_summary["lark_product_sync"] = sync_evidence
+        _write_json(scan_summary_path, scan_summary)
+    public_sync = _public_lark_product_sync(sync_evidence)
+    if sync.status != "completed":
+        return {
+            "status": "unavailable",
+            "reason_code": sync.reason_code,
+            "message": sync.message,
+            "lark_product_sync": public_sync,
+        }
+
+    refreshed_matrix = build_completeness_matrix(
+        collected_rows,
+        products=[record.raw for record in sync.records],
+    )
+    for key in ("pagination", "product_row_anomalies"):
+        if key in existing_matrix:
+            refreshed_matrix[key] = existing_matrix[key]
+    refreshed_matrix["lark_product_sync"] = public_sync
+
+    expected_revision = int(stage_state.get("revision") or 0)
+    with store._session_lock(session_id):
+        current_state = store.load_session(session_id)
+        current_stage_state = current_state.get("stages", {}).get(
+            "completeness", {}
+        )
+        if (
+            str(current_state.get("current_stage") or "") != "completeness"
+            or int(current_stage_state.get("revision") or 0)
+            != expected_revision
+            or str(current_stage_state.get("status") or "")
+            in {"ready_for_agent", "processing", "completed"}
+        ):
+            return {
+                "status": "skipped",
+                "reason_code": "LARK_OWNER_REFRESH_STAGE_CHANGED",
+                "message": "任务步骤已经变化，本次未覆盖负责人数据。",
+                "lark_product_sync": public_sync,
+            }
+        _write_json(completeness_path, refreshed_matrix)
+        context = store.read_optional_stage_document(
+            session_id, "completeness", "review-context"
+        ) or {}
+        evidence = [
+            str(item)
+            for item in context.get("evidence", [])
+            if str(item).strip()
+        ]
+        if str(evidence_path) not in evidence:
+            evidence.append(str(evidence_path))
+        store.write_review_context(
+            session_id,
+            "completeness",
+            {
+                "schema_version": 1,
+                "session_id": session_id,
+                "stage_id": "completeness",
+                "revision": expected_revision,
+                "status": "needs_user_input",
+                "summary": (
+                    str(context.get("summary") or "").strip()
+                    or f"已刷新 {len(refreshed_matrix.get('products', []))} 个巡检商品"
+                ),
+                "blocking_reasons": [],
+                "evidence": evidence,
+                "next_action": "按负责人筛选商品并提交给工作台",
+                "created_at": _now_iso(),
+                "data": refreshed_matrix,
+            },
+        )
+
+    return {
+        "status": "refreshed",
+        "reason_code": "",
+        "message": (
+            f"已从飞书读取 {sync.fetched_count} 条商品记录，"
+            f"匹配当前巡检商品 {sync.matched_count} 个。"
+        ),
+        "lark_product_sync": public_sync,
+    }
 
 
 def _archive_prior_attempt_checkpoint(

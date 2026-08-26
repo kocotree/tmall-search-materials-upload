@@ -124,6 +124,7 @@ from ..product_selection_handoff import (
     ProductSelectionProcessingError,
     process_product_selection_handoff,
 )
+from ..setup_collection import refresh_completeness_product_metadata
 from ..runtime_identity import (
     LocalResourceIdentityMismatch,
     require_local_resource_identity,
@@ -3407,6 +3408,30 @@ def create_app(
                 directories=("agent-requests",),
             )
         return jsonify(result)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/completeness/refresh-lark-owners"
+    )
+    def refresh_completeness_lark_owners(session_id: str):
+        try:
+            result = refresh_completeness_product_metadata(
+                runs_root=store.runs_root,
+                session_id=session_id,
+                runtime=runtime,
+            )
+        except (
+            InteractionConflict,
+            OSError,
+            PersistenceAccessDenied,
+            SchemaError,
+            ValueError,
+        ):
+            return jsonify(
+                status="unavailable",
+                reason_code="LARK_OWNER_REFRESH_UNAVAILABLE",
+                message="负责人暂时无法刷新，本地任务数据未被修改。",
+            )
+        return jsonify(**result)
 
     @app.post("/api/sessions/<session_id>/stages/completeness/reinspect")
     def reinspect_completeness(session_id: str):

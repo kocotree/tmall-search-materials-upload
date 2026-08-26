@@ -236,6 +236,7 @@ def inspect_lark_base_config(
         table_id=config.product_table_id,
         runner=active_runner,
         label="负责人同步",
+        require_records=True,
     )
     upload_log = _inspect_target(
         config,
@@ -313,6 +314,21 @@ def sync_product_metadata(
             status="skipped",
             reason_code=records_result.reason_code,
             message=records_result.message,
+            base_token=target.base_token,
+            table_id=target.table_id,
+            records=tuple(products),
+        )
+        _write_optional_evidence(evidence_path, result.evidence())
+        return result
+
+    if not records_result.payload:
+        result = ProductSyncResult(
+            status="skipped",
+            reason_code="LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE",
+            message=(
+                "飞书商品信息表可访问，但当前账号未读取到任何记录，"
+                "已保留商品快照中的负责人。"
+            ),
             base_token=target.base_token,
             table_id=target.table_id,
             records=tuple(products),
@@ -567,6 +583,7 @@ def _inspect_target(
     table_id: str,
     runner: Runner,
     label: str,
+    require_records: bool = False,
 ) -> dict[str, Any]:
     if not (base_url or base_token):
         return _target_status(
@@ -613,12 +630,51 @@ def _inspect_target(
             table_id=coordinates.table_id,
         )
     fields = _extract_items(result.payload)
+    if require_records:
+        record_probe = runner(
+            [
+                "base",
+                "+record-list",
+                "--base-token",
+                coordinates.base_token,
+                "--table-id",
+                coordinates.table_id,
+                "--offset",
+                "0",
+                "--limit",
+                "1",
+                "--json",
+                "--as",
+                "user",
+            ],
+            config.command_timeout_seconds,
+        )
+        if not record_probe.ok:
+            return _target_status(
+                "unavailable",
+                record_probe.message,
+                reason_code=record_probe.reason_code,
+                base_token=coordinates.base_token,
+                table_id=coordinates.table_id,
+                field_count=len(fields),
+            )
+        if not _extract_items(record_probe.payload):
+            return _target_status(
+                "unavailable",
+                "商品信息表可访问，但当前账号没有读取到任何记录。",
+                reason_code="LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE",
+                base_token=coordinates.base_token,
+                table_id=coordinates.table_id,
+                field_count=len(fields),
+                record_probe_count=0,
+            )
     return _target_status(
         "available",
         f"{label}表可访问，已读取 {len(fields)} 个字段。",
         base_token=coordinates.base_token,
         table_id=coordinates.table_id,
         field_count=len(fields),
+        record_probe_count=(1 if require_records else None),
     )
 
 
@@ -630,6 +686,7 @@ def _target_status(
     base_token: str = "",
     table_id: str = "",
     field_count: int | None = None,
+    record_probe_count: int | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": status,
@@ -640,6 +697,8 @@ def _target_status(
     }
     if field_count is not None:
         payload["field_count"] = field_count
+    if record_probe_count is not None:
+        payload["record_probe_count"] = record_probe_count
     return payload
 
 

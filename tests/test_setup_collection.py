@@ -1,4 +1,5 @@
 import csv
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -8,10 +9,15 @@ import pytest
 from upload_search_materials.browser.config import load_selector_profile
 from upload_search_materials.interaction.session import SessionStore
 from upload_search_materials.io_tables import PRODUCT_REQUIRED_COLUMNS
-from upload_search_materials.runtime_config import load_runtime_config
-from upload_search_materials.setup_collection import process_setup_collection
+from upload_search_materials.lark_base_sync import LarkCliResult
+from upload_search_materials.runtime_config import LarkBaseConfig, load_runtime_config
+from upload_search_materials.setup_collection import (
+    process_setup_collection,
+    refresh_completeness_product_metadata,
+)
 from upload_search_materials.supplement_collection import (
     CheckpointIdentityError,
+    write_backend_status,
 )
 
 
@@ -249,6 +255,118 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     assert set(page_evidence["field_results"].values()) == {
         "observed_during_collection"
     }
+
+
+def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_path):
+    store, session, _, runtime, _ = prepare_session(
+        tmp_path, [product_row("886506466908")]
+    )
+    inputs = session.path / "inputs"
+    inputs.mkdir(parents=True, exist_ok=True)
+    write_product_table(
+        inputs / "products.csv", [product_row("886506466908")]
+    )
+    (inputs / "scan-summary.json").write_text(
+        json.dumps({"row_count": 1}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    collected = (
+        session.path
+        / "collected"
+        / "promotion"
+        / "current"
+        / "promotion-material-status.csv"
+    )
+    collected.parent.mkdir(parents=True, exist_ok=True)
+    write_backend_status(collected, [collected_row()])
+    matrix_path = (
+        session.path / "02-completeness" / "completeness-matrix.json"
+    )
+    existing_matrix = {
+        "products": [],
+        "summary": {},
+        "pagination": {"terminal_page": 29},
+        "product_row_anomalies": {"blocked_row_count": 0},
+    }
+    matrix_path.write_text(
+        json.dumps(existing_matrix, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    state = store.load_session(session.session_id)
+    state["current_stage"] = "completeness"
+    state["stages"]["completeness"]["status"] = "needs_user_input"
+    store._write_session_state(session.session_id, state)
+    store.write_review_context(
+        session.session_id,
+        "completeness",
+        {
+            "schema_version": 1,
+            "session_id": session.session_id,
+            "stage_id": "completeness",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "已采集 1 个搜推高价值商品",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "选择商品",
+            "created_at": "2026-08-26T10:00:00+08:00",
+            "data": existing_matrix,
+        },
+    )
+    runtime = replace(
+        runtime,
+        lark_base=LarkBaseConfig(
+            enabled=True,
+            product_base_token="base-token",
+            product_table_id="产品数据表",
+        ),
+    )
+
+    def runner(args, _timeout):
+        assert "+record-list" in args
+        return LarkCliResult(
+            ok=True,
+            payload={
+                "items": [
+                    {
+                        "record_id": "rec1",
+                        "fields": {
+                            "商品ID": "886506466908",
+                            "负责人": "飞书负责人",
+                        },
+                    }
+                ],
+                "has_more": False,
+            },
+        )
+
+    result = refresh_completeness_product_metadata(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        runner=runner,
+    )
+
+    assert result["status"] == "refreshed"
+    refreshed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    assert refreshed["products"][0]["owner"] == "飞书负责人"
+    assert refreshed["pagination"] == {"terminal_page": 29}
+    assert refreshed["product_row_anomalies"] == {"blocked_row_count": 0}
+    assert "base_token" not in refreshed["lark_product_sync"]
+    context = store.read_optional_stage_document(
+        session.session_id, "completeness", "review-context"
+    )
+    assert context["data"]["products"][0]["owner"] == "飞书负责人"
+
+    second = refresh_completeness_product_metadata(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        runner=lambda _args, _timeout: (_ for _ in ()).throw(
+            AssertionError("an applied sync must not call Feishu again")
+        ),
+    )
+    assert second["status"] == "unchanged"
 
 
 def test_setup_processor_checkpoints_human_check_and_auto_resumes(

@@ -656,6 +656,11 @@
     const uploadLogReady = uploadLog.status === "available";
     const productNeedsPermission = product.reason_code === "LARK_PERMISSION_REQUIRED";
     const uploadLogNeedsPermission = uploadLog.reason_code === "LARK_PERMISSION_REQUIRED";
+    const productRecordsUnavailable =
+      product.reason_code === "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE";
+    if (productRecordsUnavailable) {
+      return "商品信息表可以打开，但当前飞书账号没有读取到任何商品记录。请确认该账号能查看默认商品表后重新检测。";
+    }
     if (productNeedsPermission && uploadLogReady) {
       return "上传记录表已可用；商品信息表缺少飞书 Wiki 读取权限。请点击“补充授权”，在飞书页面完成一次授权。";
     }
@@ -789,9 +794,36 @@
     larkActivationInFlight = true;
     try {
       const saved = await saveLarkBase({ quiet: true });
-      if (saved) await checkLarkBase();
+      const ready = saved ? await checkLarkBase() : false;
+      if (ready) await refreshCompletenessLarkOwners();
     } finally {
       larkActivationInFlight = false;
+    }
+  }
+
+  async function refreshCompletenessLarkOwners() {
+    if (!sessionId) return;
+    const feedback = larkBaseConfig?.querySelector("[data-lark-base-feedback]");
+    try {
+      const payload = await fetchJson(apiPath(
+        "/stages/completeness/refresh-lark-owners",
+      ), {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      if (payload.status === "refreshed") {
+        const message = payload.message || "已按飞书数据刷新当前巡检负责人。";
+        if (feedback) feedback.textContent = message;
+        actionMessage.textContent = message;
+        if (currentStageId === "completeness") await loadStage();
+      } else if (payload.status === "unavailable" && feedback) {
+        feedback.textContent = payload.message
+          || "负责人暂时无法刷新，本地任务仍可继续。";
+      }
+    } catch (_error) {
+      if (feedback) {
+        feedback.textContent = "飞书数据表已可用；当前任务负责人稍后会自动刷新。";
+      }
     }
   }
 

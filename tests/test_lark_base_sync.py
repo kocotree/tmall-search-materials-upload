@@ -4,6 +4,7 @@ from pathlib import Path
 from upload_search_materials.lark_base_sync import (
     LarkCliResult,
     build_upload_log_rows,
+    inspect_lark_base_config,
     sync_product_metadata,
     write_successful_upload_log,
 )
@@ -87,6 +88,70 @@ def test_sync_product_metadata_overrides_owner_from_lark(tmp_path):
     assert result.records[0].owner == "新负责人"
     assert result.records[0].raw["运营"] == "新负责人"
     assert json.loads(evidence.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_sync_product_metadata_does_not_report_empty_table_as_completed(tmp_path):
+    product = ProductRecord(
+        "1001",
+        sku="LOCAL-SKU",
+        title="本地商品",
+        owner="本地负责人",
+        raw=_product_raw("1001", "本地负责人"),
+    )
+
+    result = sync_product_metadata(
+        [product],
+        LarkBaseConfig(
+            enabled=True,
+            product_base_token="base-token",
+            product_table_id="产品数据表",
+        ),
+        evidence_path=tmp_path / "lark-product-sync.json",
+        runner=lambda _args, _timeout: LarkCliResult(
+            ok=True,
+            payload={"items": [], "has_more": False},
+        ),
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE"
+    assert result.records[0].owner == "本地负责人"
+    evidence = json.loads(
+        (tmp_path / "lark-product-sync.json").read_text(encoding="utf-8")
+    )
+    assert evidence["status"] == "skipped"
+    assert evidence["fetched_count"] == 0
+
+
+def test_lark_readiness_requires_product_records_but_allows_empty_upload_log():
+    calls = []
+
+    def runner(args, _timeout):
+        calls.append(list(args))
+        if "+field-list" in args:
+            return LarkCliResult(ok=True, payload={"items": [{"field_id": "f1"}]})
+        if "+record-list" in args:
+            return LarkCliResult(ok=True, payload={"items": [], "has_more": False})
+        raise AssertionError(args)
+
+    result = inspect_lark_base_config(
+        LarkBaseConfig(
+            enabled=True,
+            product_base_token="product-base",
+            product_table_id="产品数据表",
+            upload_log_base_token="upload-base",
+            upload_log_table_id="搜推素材上传记录",
+        ),
+        runner=runner,
+    )
+
+    assert result["product_sync"]["status"] == "unavailable"
+    assert (
+        result["product_sync"]["reason_code"]
+        == "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE"
+    )
+    assert result["upload_log"]["status"] == "available"
+    assert sum("+record-list" in call for call in calls) == 1
 
 
 def test_build_upload_log_rows_keeps_only_successful_uploads(tmp_path):
