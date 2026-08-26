@@ -46,6 +46,7 @@ def test_asset_matching_keeps_technical_decisions_out_of_the_visible_form():
         "folder_decisions",
         "license_decisions",
         "asset_decisions",
+        "removed_product_ids",
     ):
         assert components[name] == "hidden_json_list"
 
@@ -66,7 +67,7 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
             "user_notes",
         ),
         "completeness": ("selected_product_ids", "user_notes"),
-        "asset_matching": ("image_roots", "source_types", "folder_decisions", "license_decisions", "asset_decisions", "include_video", "user_notes"),
+        "asset_matching": ("image_roots", "source_types", "folder_decisions", "license_decisions", "asset_decisions", "removed_product_ids", "include_video", "user_notes"),
         "image_review": ("decisions", "user_notes"),
         "slots_copy": ("slot_assignments", "copy_edits", "user_notes"),
         "dry_run": ("decision", "warning_notes"),

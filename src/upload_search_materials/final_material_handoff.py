@@ -53,6 +53,10 @@ def process_final_material_handoff(
         "policy_sha256": package.get("policy_sha256"),
         "assets": package.get("assets", []),
     }
+    if "removed_product_ids" in package:
+        material_identity["removed_product_ids"] = package.get(
+            "removed_product_ids", []
+        )
     material_identity_sha256 = hashlib.sha256(
         json.dumps(
             material_identity,

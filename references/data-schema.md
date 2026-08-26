@@ -199,6 +199,7 @@ gallery Worker 枚举受支持扩展名后，先对每条唯一路径执行一�
 
 - `license_decisions`：`asset_id` 与 `status=confirmed`；由同一批 `asset_decisions` 中的采用项自动生成，不要求用户逐图重复勾选授权。
 - `asset_decisions`：`product_id`、`asset_id`、`sha256`、来源、`decision=selected`、`selection_order`。第三阶段不写 `group_index` 或坑位内 `position`；第五阶段完成编排后再生成。
+- `removed_product_ids`：用户在素材匹配页点击“去掉当前商品”后写入的商品 ID 列表，只能是第二阶段边界内、当前素材匹配结果中的商品。服务端同步把这些商品的文件夹决定规范为 `rejected`，清理其图片与授权决定，并从最终素材包的 `missing_slots_by_product` 中排除；至少保留一个商品。
 
 候选选择在大小合规池中执行任务内稳定伪随机抽样：路径先规范化排序，抽样身份绑定策略版本、任务、商品和稳定文件夹；相同任务输入不变时必须得到相同候选，新任务可以得到不同候选。默认只对当前任务抽中的合规候选计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。
 
@@ -258,7 +259,7 @@ manifest SHA-256 覆盖除自身之外的完整规范化批准信封，不能只
 
 第四阶段 `input.json.values.decisions[]` 使用 `suitability_decision`：`asset_id`、`product_id`、`decision=candidate|excluded`、`candidate_ratios[]`、`crop_candidates.<ratio>`、`requires_compression` 和 `asset_matching_revision`。第四阶段输入不得包含正式 `output`；兼容读取的旧 `action/target_ratio/crop_box` 只用于迁移审计。
 
-第五阶段 `review-context.json.data` 使用 `slot_plan` schema，包含 `image_review_revision`、`policy_sha256`、`products[].assets[]`（一张原图一条规范记录）、`products[].outputs[]`（比例能力候选，不是正式输出）、`blocked_outputs[]`、`slot_image_min=3`、`slot_image_max=9`。规范素材以 `asset_id + source_sha256` 为身份，保存宽高、原始比例、`size_bytes`、显示大小、格式和嵌套的 `ratio_options.1:1/3:4`。新任务不生成 `rule_drafts[]`；历史规则字段仅供只读审计。`slot_assignments[]` 包含 `slot_id`、`product_id`、有序 `asset_ids`、单一 `target_ratio`、来源和 revision 绑定。
+第五阶段 `review-context.json.data` 使用 `slot_plan` schema，包含 `image_review_revision`、`policy_sha256`、`products[].assets[]`（一张原图一条规范记录）、`products[].outputs[]`（比例能力候选，不是正式输出）、`blocked_outputs[]`、`slot_image_min=3`、`slot_image_max=9`。规范素材以 `asset_id + source_sha256` 为身份，保存宽高、原始比例、`size_bytes`、显示大小、格式和嵌套的 `ratio_options.1:1/3:4`。新任务不生成 `rule_drafts[]`；历史规则字段仅供只读审计。`slot_assignments[]` 包含 `slot_id`、`product_id`、有序 `asset_ids`、单一 `target_ratio`、来源和 revision 绑定；“去掉当前坑位”从数组中删除该坑位并提升计划 revision，使旧处理输出、文案和 dry-run 身份失效，不改变其余坑位。
 
 用户确认计划后，`processed-outputs.json` 记录 `plan_sha256`、逐坑位实际输出、源/输出 SHA-256、处理参数和 `workflow_state=outputs_ready`；正式文件只位于 `05-slots-copy/derived/`。`copy_edits[]` 必须逐 `slot_id` 记录标题、描述、人工确认、计划 SHA 和最终输出 SHA 列表。
 

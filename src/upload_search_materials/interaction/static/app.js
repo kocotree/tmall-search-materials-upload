@@ -2615,6 +2615,133 @@
       }));
   }
 
+  function removedProductIdSet() {
+    return new Set(
+      readJsonListControl("removed_product_ids")
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    );
+  }
+
+  function assetMatchingProductIds(data) {
+    const ids = new Set();
+    ["requirements", "folder_candidates", "asset_candidates"].forEach((key) => {
+      (Array.isArray(data?.[key]) ? data[key] : []).forEach((item) => {
+        const productId = String(item?.product_id || "").trim();
+        if (productId) ids.add(productId);
+      });
+    });
+    return ids;
+  }
+
+  function removeProductFromCurrentTask(productId, productTitle, data) {
+    const normalizedProductId = String(productId || "").trim();
+    const removed = removedProductIdSet();
+    const activeProducts = [...assetMatchingProductIds(data)]
+      .filter((value) => !removed.has(value));
+    if (!normalizedProductId || activeProducts.length <= 1) {
+      actionMessage.textContent = "本次任务至少需要保留一个商品。";
+      return false;
+    }
+    const displayTitle = String(productTitle || `商品 ${normalizedProductId}`).trim();
+    if (!window.confirm(
+      `确定从本次任务中去掉“${displayTitle}”（商品 ID ${normalizedProductId}）吗？\n\n该商品的候选文件夹、已选图片和后续坑位会一并移除。`,
+    )) return false;
+
+    const selectedRows = selectedAssetDecisions();
+    const retainedSelectedRows = selectedRows.filter(
+      (item) => String(item.product_id || "") !== normalizedProductId,
+    );
+    const removedProductAssetIds = new Set(
+      selectedRows
+        .filter((item) => String(item.product_id || "") === normalizedProductId)
+        .map((item) => String(item.asset_id || "")),
+    );
+    const retainedAssetIds = new Set(
+      retainedSelectedRows.map((item) => String(item.asset_id || "")),
+    );
+    const exclusivelyRemovedAssetIds = new Set(
+      [...removedProductAssetIds].filter(
+        (assetId) => !retainedAssetIds.has(assetId),
+      ),
+    );
+    exclusivelyRemovedAssetIds.forEach((assetId) => {
+      selectionPreflightScheduler.cancel(assetId);
+      selectionPreflights.delete(assetId);
+    });
+    writeJsonListControl(
+      "asset_decisions",
+      retainedSelectedRows,
+    );
+    writeJsonListControl(
+      "license_decisions",
+      readJsonListControl("license_decisions").filter(
+        (item) => !exclusivelyRemovedAssetIds.has(
+          String(item?.asset_id || ""),
+        ),
+      ),
+    );
+    writeJsonListControl(
+      "folder_decisions",
+      folderDecisions().map((item) => (
+        item.product_id === normalizedProductId
+          ? { ...item, decision: "rejected", note: "本次任务已去掉该商品" }
+          : item
+      )),
+    );
+    removed.add(normalizedProductId);
+    writeJsonListControl(
+      "removed_product_ids",
+      [...removed].sort((left, right) => left.localeCompare(right, "zh-CN")),
+      { notify: true },
+    );
+    if (selectedAssetValidation) {
+      const retainedItems = (selectedAssetValidation.items || []).filter(
+        (item) => String(item.product_id || "") !== normalizedProductId,
+      );
+      selectedAssetValidation = retainedItems.length
+        ? {
+          ...selectedAssetValidation,
+          selected_count: retainedSelectedRows.length,
+          blocking_count: retainedItems.filter(
+            (item) => item.severity === "blocked",
+          ).length,
+          warning_count: retainedItems.filter(
+            (item) => item.severity === "warning",
+          ).length,
+          items: retainedItems,
+        }
+        : null;
+    }
+    actionMessage.textContent = `已从本次任务去掉“${displayTitle}”；其余商品保持不变。`;
+    renderStageResult(stages.get("asset_matching").component);
+    return true;
+  }
+
+  function removeProductButton(productId, productTitle, data) {
+    const button = element(
+      "button",
+      "button-danger-secondary",
+      "去掉当前商品",
+    );
+    button.type = "button";
+    const removed = removedProductIdSet();
+    const activeCount = [...assetMatchingProductIds(data)]
+      .filter((value) => !removed.has(value)).length;
+    button.disabled = activeCount <= 1;
+    button.title = button.disabled
+      ? "本次任务至少需要保留一个商品"
+      : "仅从本次上传任务中去掉该商品";
+    button.setAttribute(
+      "aria-label",
+      `去掉当前商品：${productTitle || productId}`,
+    );
+    button.addEventListener("click", () => {
+      removeProductFromCurrentTask(productId, productTitle, data);
+    });
+    return button;
+  }
+
   function materializeFolderDecisions(candidates) {
     const savedByKey = new Map(
       folderDecisions().map((item) => [
@@ -2766,11 +2893,15 @@
   function renderFolderOwnershipReview(view) {
     if (view.mode === "empty") return;
     const data = view.result?.data;
-    const candidates = Array.isArray(data?.folder_candidates)
+    const allCandidates = Array.isArray(data?.folder_candidates)
       ? data.folder_candidates.filter(
         (candidate) => candidate?.match_type !== "confirmed_alias",
       )
       : [];
+    const removedProducts = removedProductIdSet();
+    const candidates = allCandidates.filter(
+      (candidate) => !removedProducts.has(String(candidate.product_id || "")),
+    );
     if (!candidates.length) return;
     const module = document.querySelector('[data-component="AssetMatchGallery"]');
     const content = module?.querySelector("[data-result-content]");
@@ -2778,7 +2909,7 @@
 
     const review = element("section", "folder-review");
     const decisionsByKey = new Map(
-      materializeFolderDecisions(candidates).map((item) => [
+      materializeFolderDecisions(allCandidates).map((item) => [
         `${item.product_id}\u0000${item.folder_id}`,
         item,
       ]),
@@ -2802,7 +2933,16 @@
         ),
       );
       const progress = element("span", "folder-review-progress");
-      heading.append(headingText, progress);
+      const headingActions = element("div", "asset-product-actions");
+      headingActions.append(
+        progress,
+        removeProductButton(
+          productId,
+          productCandidates[0]?.product_title,
+          data,
+        ),
+      );
+      heading.append(headingText, headingActions);
       group.appendChild(heading);
       const list = element("div", "folder-list");
       group.appendChild(list);
@@ -2983,13 +3123,15 @@
   function renderAssetMatchGallery(view) {
     if (view.mode === "empty") return;
     const data = view.result?.data;
+    const removedProducts = removedProductIdSet();
     const galleryComplete = inferAssetMatchingStep(data, uiState.serverStatus)
       === "image_selection"
       && !["queued", "running"].includes(currentGalleryJob?.status);
     if (galleryComplete) void hydrateSelectionPreflights();
     const folderCandidates = Array.isArray(data?.folder_candidates)
       ? data.folder_candidates.filter(
-        (candidate) => candidate?.match_type !== "confirmed_alias",
+        (candidate) => candidate?.match_type !== "confirmed_alias"
+          && !removedProducts.has(String(candidate.product_id || "")),
       )
       : [];
     const supportedFolderProducts = folderCandidates.length
@@ -3000,6 +3142,7 @@
     const candidates = Array.isArray(data?.asset_candidates)
       ? data.asset_candidates.filter(
         (candidate) => candidate?.match_type !== "confirmed_alias"
+          && !removedProducts.has(String(candidate.product_id || ""))
           && (
             supportedFolderProducts === null
             || supportedFolderProducts.has(String(candidate.product_id || ""))
@@ -3008,8 +3151,12 @@
       : [];
     const requirements = Array.isArray(data?.requirements)
       ? data.requirements.filter(
-        (requirement) => supportedFolderProducts === null
-          || supportedFolderProducts.has(String(requirement.product_id || "")),
+        (requirement) => !removedProducts.has(
+          String(requirement.product_id || ""),
+        ) && (
+          supportedFolderProducts === null
+          || supportedFolderProducts.has(String(requirement.product_id || ""))
+        ),
       )
       : [];
     if (!candidates.length && !requirements.length) return;
@@ -3096,7 +3243,16 @@
         option.textContent = label;
         preflightFilter.appendChild(option);
       });
-      heading.append(title, preflightFilter);
+      const headingActions = element("div", "asset-product-actions");
+      headingActions.append(
+        preflightFilter,
+        removeProductButton(
+          productId,
+          requirement.product_title,
+          data,
+        ),
+      );
+      heading.append(title, headingActions);
       product.appendChild(heading);
 
       const selectionSummary = element("p", "asset-selection-summary");
@@ -5577,8 +5733,16 @@
             ratio.appendChild(option);
           });
           ratio.value = assignment.target_ratio;
-          const remove = element("button", "button-secondary", "删除坑位");
+          const remove = element(
+            "button",
+            "button-danger-secondary",
+            "去掉当前坑位",
+          );
           remove.type = "button";
+          remove.setAttribute(
+            "aria-label",
+            `去掉当前坑位：${assignment.slot_id}`,
+          );
           const count = element("span", "slot-count");
           controls.append(slotId, ratio, count, remove);
           const sourceLabel = {
@@ -5775,10 +5939,16 @@
             draw();
           });
           remove.addEventListener("click", () => {
+            const currentSlotId = slotId.value.trim() || assignment.slot_id;
+            if (!window.confirm(
+              `确定去掉当前坑位“${currentSlotId}”吗？\n\n该坑位的图片编排会移除，已有图片处理结果和文案将失效。`,
+            )) return;
             const assignments = stateByProduct.get(productId);
             assignments.splice(slotIndex, 1);
             persist(true);
             draw();
+            composeStatus.textContent = `已去掉坑位“${currentSlotId}”；请重新确认剩余坑位。`;
+            actionMessage.textContent = `已去掉当前坑位“${currentSlotId}”。`;
           });
           drawAssets();
         });
@@ -6339,7 +6509,17 @@
       && inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
         === "image_selection"
     ) {
-      const decisions = uniqueSelectedAssetDecisions(values.asset_decisions);
+      const removedProducts = new Set(
+        (Array.isArray(values.removed_product_ids)
+          ? values.removed_product_ids
+          : [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      );
+      const decisions = uniqueSelectedAssetDecisions(values.asset_decisions)
+        .filter(
+          (item) => !removedProducts.has(String(item.product_id || "")),
+        );
       values.asset_decisions = decisions;
       const selectedAssetIds = new Set(
         decisions.map((item) => String(item.asset_id || "")),
@@ -6426,7 +6606,7 @@
       const requiredProducts = Array.isArray(uiState.result?.data?.requirements)
         ? uiState.result.data.requirements
           .map((item) => String(item?.product_id || ""))
-          .filter(Boolean)
+          .filter((productId) => productId && !removedProducts.has(productId))
         : [];
       const shortages = requiredProducts
         .filter((productId) => (counts.get(productId) || 0) < 3)

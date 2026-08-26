@@ -1907,6 +1907,11 @@ def create_app(
             and isinstance(current_result.get("data"), dict)
             else {}
         )
+        removed_products, removed_products_error = _removed_product_ids(
+            values, current_data
+        )
+        if removed_products_error:
+            field_errors["removed_product_ids"] = removed_products_error
         candidate_products = {
             str(item.get("product_id", ""))
             for item in current_data.get("folder_candidates", [])
@@ -1919,8 +1924,11 @@ def create_app(
             and item.get("decision") == "confirmed"
             and item.get("product_id")
         }
-        missing_products = sorted(candidate_products - confirmed_products)
-        if candidate_products and missing_products:
+        active_candidate_products = candidate_products - removed_products
+        missing_products = sorted(
+            active_candidate_products - confirmed_products
+        )
+        if active_candidate_products and missing_products:
             field_errors["folder_decisions"] = (
                 f"{ALL_FOLDERS_REJECTED}：以下商品至少采用一个候选文件夹"
                 "后才能加载图片："
@@ -2645,6 +2653,7 @@ def create_app(
         asset_matching_result = None
         asset_matching_data: dict[str, Any] = {}
         asset_matching_step = FOLDER_REVIEW
+        removed_products: set[str] = set()
         if stage_id == "asset_matching":
             asset_matching_result = _current_result(
                 store, session_id, "asset_matching", state
@@ -2656,12 +2665,20 @@ def create_app(
             )
             if isinstance(candidate_data, dict):
                 asset_matching_data = candidate_data
+            removed_products, removed_products_error = _removed_product_ids(
+                values, asset_matching_data
+            )
+            if removed_products_error:
+                field_errors["removed_product_ids"] = (
+                    removed_products_error
+                )
             asset_matching_step = infer_workflow_step(
                 asset_matching_data,
                 status=str(state["stages"]["asset_matching"]["status"]),
             )
             if (
-                asset_matching_step == FOLDER_REVIEW
+                not field_errors
+                and asset_matching_step == FOLDER_REVIEW
                 and (
                     asset_matching_data.get("workflow_step") == FOLDER_REVIEW
                     or asset_matching_data.get("folder_candidates")
@@ -2695,7 +2712,8 @@ def create_app(
                 if item.get("product_id")
             }
             products_without_folder = sorted(
-                candidate_products - confirmed_products
+                (candidate_products - removed_products)
+                - confirmed_products
             )
             if (
                 not field_errors
@@ -2807,6 +2825,8 @@ def create_app(
                     for item in current_data.get("requirements", [])
                     if isinstance(item, dict)
                     and item.get("product_id")
+                    and str(item.get("product_id", ""))
+                    not in removed_products
                 }
                 for item in preflight.get("assets", []):
                     if (
@@ -2885,11 +2905,14 @@ def create_app(
                         )
                         for item in current_data.get("requirements", [])
                         if isinstance(item, dict)
+                        and str(item.get("product_id", ""))
+                        not in removed_products
                     }
                     selected_asset_bundle = {
                         "current_data": current_data,
                         "preflight": preflight,
                         "missing_slots": missing_slots,
+                        "removed_product_ids": sorted(removed_products),
                     }
         elif (
             not field_errors
@@ -3111,6 +3134,9 @@ def create_app(
                 "missing_slots_by_product": selected_asset_bundle[
                     "missing_slots"
                 ],
+                "removed_product_ids": selected_asset_bundle[
+                    "removed_product_ids"
+                ],
                 "policy_sha256": preflight["policy_sha256"],
                 "assets": preflight.get("assets", []),
             }
@@ -3157,6 +3183,9 @@ def create_app(
                     "duplicate_count": preflight["duplicate_count"],
                     "missing_slots_by_product": selected_asset_bundle[
                         "missing_slots"
+                    ],
+                    "removed_product_ids": selected_asset_bundle[
+                        "removed_product_ids"
                     ],
                     "assets": preflight.get("assets", []),
                     "created_at": datetime.now().astimezone().isoformat(),
@@ -3293,6 +3322,9 @@ def create_app(
                 "duplicate_count": preflight["duplicate_count"],
                 "missing_slots_by_product": selected_asset_bundle[
                     "missing_slots"
+                ],
+                "removed_product_ids": selected_asset_bundle[
+                    "removed_product_ids"
                 ],
                 "folder_decisions": values.get("folder_decisions", []),
                 "assets": preflight.get("assets", []),
@@ -5218,6 +5250,39 @@ def create_app(
     return app
 
 
+def _asset_matching_product_ids(data: dict[str, Any]) -> set[str]:
+    product_ids: set[str] = set()
+    for key in ("requirements", "folder_candidates", "asset_candidates"):
+        rows = data.get(key)
+        if not isinstance(rows, list):
+            continue
+        product_ids.update(
+            str(item.get("product_id", "")).strip()
+            for item in rows
+            if isinstance(item, dict) and item.get("product_id")
+        )
+    return {product_id for product_id in product_ids if product_id}
+
+
+def _removed_product_ids(
+    values: dict[str, Any],
+    data: dict[str, Any],
+) -> tuple[set[str], str | None]:
+    raw = values.get("removed_product_ids", [])
+    if not isinstance(raw, list):
+        return set(), "已去掉商品必须是列表"
+    if any(not isinstance(item, str) or not item.strip() for item in raw):
+        return set(), "已去掉商品中包含无效的商品 ID"
+    removed = {item.strip() for item in raw}
+    supported = _asset_matching_product_ids(data)
+    unknown = sorted(removed - supported)
+    if unknown:
+        return set(), "已去掉商品不属于当前任务：" + "、".join(unknown)
+    if supported and not supported - removed:
+        return removed, "本次任务至少需要保留一个商品"
+    return removed, None
+
+
 def _normalize_stage_values(
     store: SessionStore,
     session_id: str,
@@ -5239,6 +5304,16 @@ def _normalize_stage_values(
     if stage_id != "asset_matching":
         return normalized
     normalized.pop("aliases", None)
+    raw_removed_products = normalized.get("removed_product_ids")
+    if raw_removed_products is None:
+        normalized["removed_product_ids"] = []
+    elif isinstance(raw_removed_products, list) and all(
+        isinstance(item, str) and item.strip()
+        for item in raw_removed_products
+    ):
+        normalized["removed_product_ids"] = list(
+            dict.fromkeys(item.strip() for item in raw_removed_products)
+        )
     # The production workflow is image-only.  Older pages exposed this as a
     # required user field and could persist an empty list during hydration.
     prior_input = store.read_optional_stage_document(
@@ -5284,6 +5359,16 @@ def _normalize_stage_values(
     result = _current_result(store, session_id, stage_id, state) or {}
     data = result.get("data") if isinstance(result, dict) else {}
     data = data if isinstance(data, dict) else {}
+    normalized_removed_products = normalized.get("removed_product_ids", [])
+    removed_products = {
+        item
+        for item in (
+            normalized_removed_products
+            if isinstance(normalized_removed_products, list)
+            else []
+        )
+        if isinstance(item, str) and item
+    }
     folders = data.get("folder_candidates")
     supported_folder_keys: set[tuple[str, str]] | None = None
     supported_products: set[str] | None = None
@@ -5320,6 +5405,8 @@ def _normalize_stage_values(
     }
 
     def folder_decision_for(item: dict[str, Any]) -> str:
+        if str(item.get("product_id", "")) in removed_products:
+            return "rejected"
         key = (
             str(item.get("product_id", "")),
             str(item.get("folder_id", "")),
@@ -5372,7 +5459,11 @@ def _normalize_stage_values(
                 "folder_path": str(item.get("folder_path", "")),
                 "decision": (
                     "rejected"
-                    if str(item.get("decision", "")) == "rejected"
+                    if (
+                        str(item.get("decision", "")) == "rejected"
+                        or str(item.get("product_id", ""))
+                        in removed_products
+                    )
                     else "confirmed"
                 ),
                 "note": str(item.get("note", "")),
@@ -5402,6 +5493,7 @@ def _normalize_stage_values(
             if isinstance(item, dict)
             and item.get("asset_id")
             and item.get("match_type") != "confirmed_alias"
+            and str(item.get("product_id", "")) not in removed_products
             and (
                 supported_products is None
                 or str(item.get("product_id", "")) in supported_products
@@ -5432,9 +5524,8 @@ def _normalize_stage_values(
         def candidate_for_decision(item: dict[str, Any]) -> dict[str, Any] | None:
             asset_id = str(item.get("asset_id", ""))
             product_id = str(item.get("product_id", ""))
-            candidate = candidate_by_key.get((product_id, asset_id))
-            if candidate is not None:
-                return candidate
+            if product_id:
+                return candidate_by_key.get((product_id, asset_id))
             matches = candidates_by_asset_id.get(asset_id, [])
             return matches[0] if len(matches) == 1 else None
 
@@ -6293,7 +6384,13 @@ def _field_error(field: FieldDefinition, value: Any, present: bool) -> str | Non
             return "must be a readable path"
         return None
 
-    if field.component in {"multi_select", "path_list", "auto_path_list", "table"}:
+    if field.component in {
+        "multi_select",
+        "path_list",
+        "auto_path_list",
+        "table",
+        "hidden_json_list",
+    }:
         if not isinstance(value, list):
             return "must be a list"
         if field.required and not value:

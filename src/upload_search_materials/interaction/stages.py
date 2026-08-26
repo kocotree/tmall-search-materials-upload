@@ -209,6 +209,11 @@ STAGES: tuple[StageDefinition, ...] = (
                 "hidden_json_list",
             ),
             _field(
+                "removed_product_ids",
+                "本次任务已去掉的商品 ID",
+                "hidden_json_list",
+            ),
+            _field(
                 "include_video",
                 "包含视频",
                 "checkbox",

@@ -25,9 +25,9 @@ dry-run、批准或上传。
 | --- | --- | --- | --- | --- | --- |
 | `setup/task_configuration` | `manual_only`（默认） | 启动页面、自动探测只读路径、校验提交 | 店铺、图片源及店铺一致性确认 | 猜测配置、提前采集或上传 | 保留页面并给恢复指令；setup handoff 校验通过后继续 |
 | `completeness/product_selection` | `rules`（默认）、`manual` | 全量采集搜推高价值、规则排除、生成矩阵 | 选择进入后续阶段的商品 | 扩大实时采集商品范围、替用户选商品 | 采集异常保持人工审查；用户提交非空合法商品集合后继续 |
-| `asset_matching/asset_selection` | `manual`（默认）、`rules` | 规则匹配文件夹、生成预览；提交采用图片时增量预检并同步生成确定性坑位草稿 | 排除错误文件夹、选择及授权图片 | 用别名猜测归属、检查未采用共享盘图片、生成派生图片 | 1–2 张可保存草稿但不得提交；每个商品至少 3 张可用唯一图后继续 |
+| `asset_matching/asset_selection` | `manual`（默认）、`rules` | 规则匹配文件夹、生成预览；提交采用图片时增量预检并同步生成确定性坑位草稿 | 排除错误文件夹、选择及授权图片，或显式去掉当前商品 | 用别名猜测归属、检查未采用共享盘图片、生成派生图片、自动去掉商品 | 1–2 张可保存草稿但不得提交；已去掉商品同步清理决定且任务至少保留一个商品；其余每个商品至少 3 张可用唯一图后继续 |
 | `image_review/suitability_review` | 历史兼容 | 只读恢复旧适用性快照 | 仅旧任务保留原决定 | 新任务显示或提交独立适用性页面 | 迁移到素材选择内的 selected-asset preflight |
-| `slots_copy/slot_plan` | `deterministic`（默认）、`manual`；历史 `agent_assisted` 只读 | 按缺失坑位、选择顺序、来源轮询和比例评分生成唯一初始草稿 | 审核或人工修改坑位、确认计划、可视化裁剪压缩、确认文案 | 创建新坑位 AI 请求、自动确认、自动处理图片、进入 dry-run 或上传 | 自动编排失败保留当前草稿或空状态；用户人工编排，确认合法 3–9 张同一比例坑位后处理 |
+| `slots_copy/slot_plan` | `deterministic`（默认）、`manual`；历史 `agent_assisted` 只读 | 按缺失坑位、选择顺序、来源轮询和比例评分生成唯一初始草稿 | 审核、人工修改或去掉当前坑位、确认计划、可视化裁剪压缩、确认文案 | 创建新坑位 AI 请求、自动确认、自动处理图片、进入 dry-run 或上传 | 自动编排失败保留当前草稿或空状态；去掉坑位使旧输出失效；用户确认剩余合法 3–9 张同一比例坑位后处理 |
 | `dry_run/dry_run_review` | `rules`（默认）、`manual_only` | 生成只读 dry-run 和差异报告 | 审查全部商品与阻断项 | 把 dry-run 当发布授权 | 阻断项回到对应阶段；人工通过后才进入授权 |
 | `approval/exact_authorization` | `manual_only`（默认） | 生成精确不可变批准清单并通过唯一入口执行发布 | 当前批次 task ID、店铺和内容哈希的一次显式批准兼发布授权 | 推断批准、沿用内容变化前批准、要求第二次生产确认 | 未批准保持等待；授权身份完整后运行 `process-publish-authorization` |
 | `production_confirmation/production_write` | 历史只读 | 不执行新任务动作 | 无 | 新任务进入此阶段或再次索要授权 | 返回当前 approval/results；不得发布 |

@@ -252,6 +252,110 @@ def test_selected_assets_submit_creates_one_final_handoff_then_codex_plans(
     )
 
 
+def test_removed_product_is_excluded_from_final_material_requirements(
+    client, session_id, tmp_path
+):
+    sources = tmp_path / "remove-product"
+    sources.mkdir()
+    candidates = []
+    for index in range(3):
+        source = sources / f"p1-{index}.jpg"
+        Image.effect_noise((1440, 1920), 100).convert("RGB").save(
+            source, quality=94
+        )
+        candidates.append(
+            {
+                "asset_id": f"P1-A{index}",
+                "product_id": "P1",
+                "product_title": "保留商品",
+                "source_path": str(source),
+                "source_system": "folder-p1",
+                "match_type": "exact_product_name",
+                "validation_status": "valid",
+                "preflight": {"selectable": True, "status": "direct"},
+                "source_inspection": {
+                    "size_bytes": source.stat().st_size,
+                    "width": 1440,
+                    "height": 1920,
+                },
+            }
+        )
+    first = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(sources)],
+                "source_types": ["image"],
+            }
+        },
+    )
+    store = SessionStore(tmp_path)
+    store.write_result(
+        session_id,
+        "asset_matching",
+        first.json["revision"],
+        first.json["input_sha256"],
+        status="needs_user_input",
+        summary="请选择素材",
+        data={
+            "requirements": [
+                {"product_id": "P1", "missing_materials": 1},
+                {"product_id": "P2", "missing_materials": 1},
+            ],
+            "asset_candidates": candidates,
+        },
+    )
+    for candidate in candidates:
+        checked = client.post(
+            f"/api/sessions/{session_id}/stages/asset_matching/assets/"
+            f"{candidate['asset_id']}/selection-preflight",
+            json={"product_id": "P1"},
+        )
+        assert checked.status_code == 200
+
+    submitted = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/submit",
+        json={
+            "values": {
+                "image_roots": [str(sources)],
+                "source_types": ["image"],
+                "removed_product_ids": ["P2"],
+                "asset_decisions": [
+                    {
+                        "product_id": "P2",
+                        "asset_id": candidates[0]["asset_id"],
+                        "decision": "selected",
+                    },
+                    *[
+                        {
+                            "product_id": "P1",
+                            "asset_id": candidate["asset_id"],
+                            "decision": "selected",
+                        }
+                        for candidate in candidates
+                    ],
+                ],
+            }
+        },
+    )
+
+    assert submitted.status_code == 202, submitted.json
+    package = SessionStore._read_json(
+        store._stage_path(session_id, "asset_matching")
+        / "final-material-package.json",
+        "final-material-package",
+    )
+    assert package["removed_product_ids"] == ["P2"]
+    assert package["missing_slots_by_product"] == {"P1": 1}
+    assert {item["product_id"] for item in package["assets"]} == {"P1"}
+    persisted = store.read_optional_stage_document(
+        session_id, "asset_matching", "input"
+    )
+    assert {
+        item["product_id"] for item in persisted["values"]["asset_decisions"]
+    } == {"P1"}
+
+
 def test_preflight_cache_is_image_scoped_and_selection_rows_use_product_identity(
     client, session_id, tmp_path
 ):

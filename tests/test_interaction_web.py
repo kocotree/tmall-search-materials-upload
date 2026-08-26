@@ -3087,6 +3087,114 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
     assert state["stages"]["asset_matching"]["status"] == "draft"
 
 
+def test_prepare_gallery_excludes_removed_product_and_keeps_remaining_product(
+    client, session_id, tmp_path
+):
+    store = SessionStore(tmp_path)
+    store.write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "F1",
+                        "folder_path": str(tmp_path / "p1"),
+                        "product_id": "P1",
+                        "match_type": "exact_product_id",
+                    },
+                    {
+                        "folder_id": "F2",
+                        "folder_path": str(tmp_path / "p2"),
+                        "product_id": "P2",
+                        "match_type": "exact_product_id",
+                    },
+                ],
+            },
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
+        json={
+            "revision": 0,
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "folder_decisions": [],
+                "removed_product_ids": ["P2"],
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    persisted = store.read_optional_stage_document(
+        session_id, "asset_matching", "input"
+    )
+    assert persisted["values"]["removed_product_ids"] == ["P2"]
+    decisions = {
+        item["product_id"]: item["decision"]
+        for item in persisted["values"]["folder_decisions"]
+    }
+    assert decisions == {"P1": "confirmed", "P2": "rejected"}
+
+
+def test_prepare_gallery_rejects_removing_every_product(
+    client, session_id, tmp_path
+):
+    SessionStore(tmp_path).write_review_context(
+        session_id,
+        "asset_matching",
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "revision": 0,
+            "status": "needs_user_input",
+            "summary": "请确认候选文件夹",
+            "blocking_reasons": [],
+            "evidence": [],
+            "next_action": "确认文件夹并加载图片",
+            "data": {
+                "workflow_step": "folder_review",
+                "folder_candidates": [
+                    {
+                        "folder_id": "F1",
+                        "product_id": "P1",
+                        "match_type": "exact_product_id",
+                    }
+                ],
+            },
+        },
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/asset_matching/prepare-gallery",
+        json={
+            "revision": 0,
+            "values": {
+                "image_roots": [str(tmp_path)],
+                "folder_decisions": [],
+                "removed_product_ids": ["P1"],
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json["field_errors"]["removed_product_ids"] == (
+        "本次任务至少需要保留一个商品"
+    )
+
+
 def test_prepare_gallery_inherits_setup_image_roots_when_stage_payload_is_empty(
     client, session_id, tmp_path
 ):
@@ -3808,6 +3916,7 @@ def test_stage_read_returns_only_allowlisted_current_input_values(
             "image_roots": roots,
             "source_types": ["image"],
             "include_video": False,
+            "removed_product_ids": [],
         },
     }
 
@@ -4156,6 +4265,21 @@ def test_fifth_stage_uses_ai_manual_shared_pool_and_visual_crop():
     assert "@media (max-width: 760px)" in stylesheet
     assert "@media (max-width: 480px)" in stylesheet
     assert ".crop-overlay:focus-visible" in stylesheet
+
+
+def test_asset_and_slot_editors_expose_scoped_remove_actions(client):
+    html = client.get("/").get_data(as_text=True)
+    source = client.get("/static/app.js").get_data(as_text=True)
+
+    assert re.search(
+        r'<input[^>]+name="removed_product_ids"[^>]+type="hidden"',
+        html,
+    )
+    assert "去掉当前商品" in source
+    assert "去掉当前坑位" in source
+    assert "本次任务至少需要保留一个商品" in source
+    assert "该商品的候选文件夹、已选图片和后续坑位会一并移除" in source
+    assert "该坑位的图片编排会移除" in source
 
 
 def test_collection_ui_prompts_for_human_check_and_auto_resume():
