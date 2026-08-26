@@ -105,7 +105,6 @@
         method: "POST",
         body: JSON.stringify({ product_id: String(candidate.product_id || "") }),
       });
-      selectionPreflights.set(assetId, entry);
       return entry;
     },
     onChange: (job) => {
@@ -114,7 +113,9 @@
     },
   });
   let selectionPreflightHydrationKey = "";
-  let selectionPreflightHydrationInFlight = false;
+  let selectionPreflightHydrationInFlightFor = "";
+  let selectionPreflightActiveContextKey = "";
+  let selectionPreflightContextGeneration = 0;
   let galleryAutoFocusedFor = "";
 
   const statusCopy = UiState.statusLabels;
@@ -2449,18 +2450,52 @@
     return selectionPreflights.get(String(assetId || "")) || null;
   }
 
+  function selectionPreflightContextKey(data = uiState.result?.data) {
+    const identity = data?.gallery_identity;
+    if (!identity || !sessionId) return "";
+    return [
+      sessionId,
+      String(data?.gallery_job_id || ""),
+      String(data?.sampling_identity_sha256 || ""),
+      String(identity.prepared_from_revision || ""),
+      String(identity.prepared_from_input_sha256 || ""),
+      String(identity.folder_decisions_sha256 || ""),
+    ].join("|");
+  }
+
+  function resetSelectionPreflightClientState(nextContextKey = "") {
+    selectionPreflightContextGeneration += 1;
+    selectionPreflightScheduler.reset();
+    selectionPreflights.clear();
+    selectionPreflightCardRefreshers.clear();
+    appliedSelectionPreflightIntents.clear();
+    selectedAssetValidation = null;
+    selectionPreflightHydrationKey = "";
+    selectionPreflightHydrationInFlightFor = "";
+    selectionPreflightActiveContextKey = nextContextKey;
+    galleryAutoFocusedFor = "";
+  }
+
   async function hydrateSelectionPreflights() {
-    const key = `${sessionId}:${revision}`;
+    const key = selectionPreflightContextKey();
     if (
-      !sessionId
+      !key
       || selectionPreflightHydrationKey === key
-      || selectionPreflightHydrationInFlight
+      || selectionPreflightHydrationInFlightFor === key
     ) return;
-    selectionPreflightHydrationInFlight = true;
+    if (selectionPreflightActiveContextKey !== key) {
+      resetSelectionPreflightClientState(key);
+    }
+    const contextGeneration = selectionPreflightContextGeneration;
+    selectionPreflightHydrationInFlightFor = key;
     try {
       const payload = await fetchJson(apiPath(
         "/stages/asset_matching/selection-preflights",
       ));
+      if (
+        contextGeneration !== selectionPreflightContextGeneration
+        || selectionPreflightActiveContextKey !== key
+      ) return;
       selectionPreflights.clear();
       (payload.entries || []).forEach((entry) => {
         if (entry?.asset_id) {
@@ -2472,9 +2507,11 @@
         renderStageResult(stages.get(currentStageId).component);
       }
     } catch (_error) {
-      selectionPreflightHydrationKey = key;
+      // A temporary read failure must remain retryable on the next refresh.
     } finally {
-      selectionPreflightHydrationInFlight = false;
+      if (selectionPreflightHydrationInFlightFor === key) {
+        selectionPreflightHydrationInFlightFor = "";
+      }
     }
   }
 
@@ -2483,11 +2520,27 @@
     if (!assetId) return Promise.reject(new Error("候选图片缺少稳定标识"));
     const existing = selectionPreflightFor(assetId);
     if (existing?.status && existing.status !== "pending") {
-      return selectionPreflightScheduler.get(assetId)
-        ? selectionPreflightScheduler.select(candidate)
-        : Promise.resolve(existing);
+      selectionPreflightScheduler.forget(assetId);
+      return Promise.resolve(existing);
     }
-    return selectionPreflightScheduler.select(candidate);
+    const priorJob = selectionPreflightScheduler.get(assetId);
+    if (priorJob?.state === "completed") {
+      selectionPreflightScheduler.forget(assetId);
+    }
+    const contextGeneration = selectionPreflightContextGeneration;
+    const contextKey = selectionPreflightActiveContextKey;
+    return selectionPreflightScheduler.select(candidate).then((entry) => {
+      if (
+        entry
+        && !entry.cancelled
+        && entry.status !== "cancelled"
+        && contextGeneration === selectionPreflightContextGeneration
+        && contextKey === selectionPreflightActiveContextKey
+      ) {
+        selectionPreflights.set(assetId, entry);
+      }
+      return entry;
+    });
   }
 
   function candidateIsSelectable(candidate) {
@@ -2532,10 +2585,19 @@
   }
 
   function persistSelectedCandidates(productId, selected) {
-    const otherProducts = selectedAssetDecisions()
+    const currentDecisions = selectedAssetDecisions();
+    const previousForProduct = new Map(
+      currentDecisions
+        .filter((item) => String(item.product_id) === String(productId))
+        .map((item) => [String(item.asset_id || ""), item]),
+    );
+    const otherProducts = currentDecisions
       .filter((item) => String(item.product_id) !== String(productId));
     const selectedRows = selected.map((candidate, index) => {
       const selectionPreflight = selectionPreflightFor(candidate.asset_id);
+      const previous = previousForProduct.get(String(candidate.asset_id || ""));
+      const canRetainPrevious = previous
+        && String(previous.sha256 || "") === String(candidate.sha256 || "");
       return {
         product_id: String(productId),
         asset_id: String(candidate.asset_id),
@@ -2547,9 +2609,15 @@
         decision: "selected",
         selection_order: index + 1,
         selection_preflight_identity: String(
-          selectionPreflight?.identity_sha256 || "",
+          selectionPreflight?.identity_sha256
+          || (canRetainPrevious ? previous.selection_preflight_identity : "")
+          || "",
         ),
-        feasible_ratios: [...(selectionPreflight?.feasible_ratios || [])],
+        feasible_ratios: [...(
+          selectionPreflight?.feasible_ratios
+          || (canRetainPrevious ? previous.feasible_ratios : [])
+          || []
+        )],
       };
     });
     const nextDecisions = [...otherProducts, ...selectedRows];
@@ -6274,6 +6342,7 @@
       );
       isHydrating = true;
       try {
+        activeForm()?.reset();
         if (payload.input) {
           hydrateForm(activeForm(), payload.input.values);
         }
@@ -6591,6 +6660,19 @@
         persistenceInFlight = false;
         return;
       }
+      values.asset_decisions = decisions.map((item) => {
+        const result = selectionPreflightFor(item.asset_id);
+        return {
+          ...item,
+          selection_preflight_identity: String(
+            result?.identity_sha256 || item.selection_preflight_identity || "",
+          ),
+          feasible_ratios: [...(
+            result?.feasible_ratios || item.feasible_ratios || []
+          )],
+        };
+      });
+      writeJsonListControl("asset_decisions", values.asset_decisions);
       const counts = new Map();
       const ratioCounts = new Map();
       decisions.forEach((item) => {
@@ -6954,6 +7036,9 @@
 
   function activateStage(stageId) {
     if (!stages.has(stageId)) return;
+    if (currentStageId === "asset_matching" || stageId === "asset_matching") {
+      resetSelectionPreflightClientState();
+    }
     stageGeneration += 1;
     window.clearTimeout(autoSaveTimer);
     pendingPersistenceMode = null;

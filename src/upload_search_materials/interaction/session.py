@@ -2318,7 +2318,7 @@ class SessionStore:
         *,
         remove_current_handoff: bool = False,
     ) -> None:
-        """Remove results derived from an edited input and all later handoffs."""
+        """Remove work derived from an edited input and all later stage inputs."""
 
         stage_index = self._stage_index(stage_id)
         session_path = self._session_path(session_id)
@@ -2328,7 +2328,11 @@ class SessionStore:
             if stage.id != stage_id or remove_current_handoff:
                 artifact_names = ("handoff.json", *artifact_names)
             if stage.id != stage_id:
-                artifact_names = ("review-context.json", *artifact_names)
+                artifact_names = (
+                    "input.json",
+                    "review-context.json",
+                    *artifact_names,
+                )
                 state["stages"][stage.id]["status"] = "draft"
             stage_path = self._stage_path(session_id, stage.id)
             for artifact_name in artifact_names:

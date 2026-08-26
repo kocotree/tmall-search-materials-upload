@@ -199,11 +199,21 @@
         Promise.resolve()
           .then(() => execute(job.candidate))
           .then((result) => {
+            if (job.forgotten) {
+              job.state = "cancelled";
+              job.resolve({ status: "cancelled", cancelled: true });
+              return;
+            }
             job.state = "completed";
             job.result = result;
             job.resolve(result);
           })
           .catch((error) => {
+            if (job.forgotten) {
+              job.state = "cancelled";
+              job.resolve({ status: "cancelled", cancelled: true });
+              return;
+            }
             job.state = "failed";
             job.error = error;
             job.reject(error);
@@ -211,7 +221,7 @@
           .finally(() => {
             activeCount -= 1;
             activeWeight -= job.weight;
-            notify(job);
+            if (!job.forgotten) notify(job);
             drain();
           });
       }
@@ -234,6 +244,7 @@
         weight: Math.min(maxWeight, selectionPreflightWeight(candidate)),
         result: null,
         error: null,
+        forgotten: false,
         promise,
         resolve,
         reject,
@@ -276,6 +287,27 @@
       return snapshot(job);
     }
 
+    function forget(assetId) {
+      const job = jobs.get(String(assetId || ""));
+      if (!job) return null;
+      jobs.delete(job.assetId);
+      job.desiredSelected = false;
+      job.intentVersion += 1;
+      job.forgotten = true;
+      if (job.state === "queued") {
+        const index = queue.indexOf(job);
+        if (index >= 0) queue.splice(index, 1);
+        job.state = "cancelled";
+        job.resolve({ status: "cancelled", cancelled: true });
+      }
+      drain();
+      return snapshot(job);
+    }
+
+    function reset() {
+      [...jobs.keys()].forEach((assetId) => forget(assetId));
+    }
+
     function desiredPendingCount() {
       return [...jobs.values()].filter(
         (job) => job.desiredSelected && ["queued", "running"].includes(job.state),
@@ -285,7 +317,9 @@
     return {
       cancel,
       desiredPendingCount,
+      forget,
       get: (assetId) => snapshot(jobs.get(String(assetId || ""))),
+      reset,
       select,
     };
   }

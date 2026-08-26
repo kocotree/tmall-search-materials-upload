@@ -1105,11 +1105,18 @@ def test_reopen_previous_stage_retains_target_input_and_invalidates_later_work(
     assert not (asset_path / "handoff.json").exists()
     assert not (asset_path / "result.json").exists()
     assert not (asset_path / "review-context.json").exists()
+    assert not (asset_path / "input.json").exists()
     assert not (slots_path / "review-context.json").exists()
     assert (
         completeness_path
         / "revisions"
         / f"{completeness['revision']:04d}"
+        / "input.json"
+    ).is_file()
+    assert (
+        asset_path
+        / "revisions"
+        / f"{asset['revision']:04d}"
         / "input.json"
     ).is_file()
     assert _events(session.path)[-1]["event"] == "stage_reopened_for_edit"

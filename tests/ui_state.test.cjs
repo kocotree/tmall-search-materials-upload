@@ -346,6 +346,52 @@ test("running preflight keeps its cache result but not cancelled selection inten
   assert.equal(scheduler.get("asset-a").desiredSelected, true);
 });
 
+test("forgotten completed preflight is executed again instead of reused", async () => {
+  let executions = 0;
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    execute: async () => {
+      executions += 1;
+      return { status: "passed", execution: executions };
+    },
+  });
+
+  assert.equal((await scheduler.select({ asset_id: "asset-a" })).execution, 1);
+  scheduler.forget("asset-a");
+  assert.equal(scheduler.get("asset-a"), null);
+  assert.equal((await scheduler.select({ asset_id: "asset-a" })).execution, 2);
+});
+
+test("reset detaches running and queued preflights from the next gallery", async () => {
+  let releaseFirst;
+  let executions = 0;
+  const scheduler = UiState.createSelectionPreflightScheduler({
+    maxConcurrent: 1,
+    maxWeight: 1,
+    execute: (candidate) => new Promise((resolve) => {
+      executions += 1;
+      if (candidate.asset_id === "first" && executions === 1) {
+        releaseFirst = resolve;
+      } else {
+        resolve({ status: "passed", execution: executions });
+      }
+    }),
+  });
+
+  const first = scheduler.select({ asset_id: "first", width: 1, height: 1 });
+  const second = scheduler.select({ asset_id: "second", width: 1, height: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  scheduler.reset();
+  assert.equal(scheduler.get("first"), null);
+  assert.equal(scheduler.get("second"), null);
+  assert.deepEqual(await second, { status: "cancelled", cancelled: true });
+  releaseFirst({ status: "passed", execution: 1 });
+  assert.deepEqual(await first, { status: "cancelled", cancelled: true });
+
+  const refreshed = await scheduler.select({ asset_id: "first", width: 1, height: 1 });
+  assert.equal(refreshed.status, "passed");
+  assert.equal(executions, 2);
+});
+
 test("stage switch clears recovery cache and ignores the prior request", () => {
   assert.equal(typeof UiState.switchStage, "function");
   let state = UiState.createState("setup");
