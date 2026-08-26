@@ -115,6 +115,7 @@
   });
   let selectionPreflightHydrationKey = "";
   let selectionPreflightHydrationInFlightFor = "";
+  let selectionPreflightHydrationPromise = null;
   let selectionPreflightActiveContextKey = "";
   let selectionPreflightContextGeneration = 0;
   let galleryAutoFocusedFor = "";
@@ -2482,47 +2483,56 @@
     selectedAssetValidation = null;
     selectionPreflightHydrationKey = "";
     selectionPreflightHydrationInFlightFor = "";
+    selectionPreflightHydrationPromise = null;
     selectionPreflightActiveContextKey = nextContextKey;
     galleryAutoFocusedFor = "";
   }
 
   async function hydrateSelectionPreflights() {
     const key = selectionPreflightContextKey();
+    if (!key || selectionPreflightHydrationKey === key) return true;
     if (
-      !key
-      || selectionPreflightHydrationKey === key
-      || selectionPreflightHydrationInFlightFor === key
-    ) return;
+      selectionPreflightHydrationInFlightFor === key
+      && selectionPreflightHydrationPromise
+    ) return selectionPreflightHydrationPromise;
     if (selectionPreflightActiveContextKey !== key) {
       resetSelectionPreflightClientState(key);
     }
     const contextGeneration = selectionPreflightContextGeneration;
     selectionPreflightHydrationInFlightFor = key;
-    try {
-      const payload = await fetchJson(apiPath(
-        "/stages/asset_matching/selection-preflights",
-      ));
-      if (
-        contextGeneration !== selectionPreflightContextGeneration
-        || selectionPreflightActiveContextKey !== key
-      ) return;
-      selectionPreflights.clear();
-      (payload.entries || []).forEach((entry) => {
-        if (entry?.asset_id) {
-          selectionPreflights.set(String(entry.asset_id), entry);
+    const hydrationPromise = (async () => {
+      try {
+        const payload = await fetchJson(apiPath(
+          "/stages/asset_matching/selection-preflights",
+        ));
+        if (
+          contextGeneration !== selectionPreflightContextGeneration
+          || selectionPreflightActiveContextKey !== key
+        ) return false;
+        selectionPreflights.clear();
+        (payload.entries || []).forEach((entry) => {
+          if (entry?.asset_id) {
+            selectionPreflights.set(String(entry.asset_id), entry);
+          }
+        });
+        selectionPreflightHydrationKey = key;
+        if (currentStageId === "asset_matching") {
+          renderStageResult(stages.get(currentStageId).component);
         }
-      });
-      selectionPreflightHydrationKey = key;
-      if (currentStageId === "asset_matching") {
-        renderStageResult(stages.get(currentStageId).component);
+        return true;
+      } catch (_error) {
+        // A temporary read failure remains retryable and the submit endpoint
+        // performs the same deterministic safety check as a final fallback.
+        return false;
+      } finally {
+        if (selectionPreflightHydrationPromise === hydrationPromise) {
+          selectionPreflightHydrationInFlightFor = "";
+          selectionPreflightHydrationPromise = null;
+        }
       }
-    } catch (_error) {
-      // A temporary read failure must remain retryable on the next refresh.
-    } finally {
-      if (selectionPreflightHydrationInFlightFor === key) {
-        selectionPreflightHydrationInFlightFor = "";
-      }
-    }
+    })();
+    selectionPreflightHydrationPromise = hydrationPromise;
+    return hydrationPromise;
   }
 
   function runSelectionPreflight(candidate) {
@@ -6565,6 +6575,31 @@
       persistenceInFlight = false;
       return;
     }
+    if (
+      mode === "submit"
+      && requestedStageId === "asset_matching"
+      && inferAssetMatchingStep(
+        uiState.result?.data,
+        uiState.serverStatus,
+      ) === "image_selection"
+    ) {
+      const hydrationKey = selectionPreflightContextKey();
+      if (
+        selectedAssetDecisions().length
+        && hydrationKey
+        && selectionPreflightHydrationKey !== hydrationKey
+      ) {
+        actionMessage.textContent = "正在恢复已选图片的预裁剪检查状态…";
+      }
+      await hydrateSelectionPreflights();
+      if (
+        requestedStageId !== currentStageId
+        || requestedGeneration !== stageGeneration
+      ) {
+        persistenceInFlight = false;
+        return;
+      }
+    }
     const form = activeForm();
     if (!form) {
       persistenceInFlight = false;
@@ -6702,11 +6737,8 @@
         return;
       }
       if (unchecked.length) {
-        const message = `有 ${unchecked.length} 张已选图片的预裁剪结果无法确认，请取消后重新选择。`;
-        showFieldErrors(form, { asset_decisions: message });
-        actionMessage.textContent = message;
-        persistenceInFlight = false;
-        return;
+        actionMessage.textContent =
+          `正在由工作台重新核验 ${unchecked.length} 张已选图片；已选内容不会丢失。`;
       }
       values.asset_decisions = decisions.map((item) => {
         const result = selectionPreflightFor(item.asset_id);
@@ -6723,11 +6755,21 @@
       writeJsonListControl("asset_decisions", values.asset_decisions);
       const counts = new Map();
       const ratioCounts = new Map();
+      const ratioKnowledgeCounts = new Map();
       decisions.forEach((item) => {
         const productId = String(item.product_id || "");
         counts.set(productId, (counts.get(productId) || 0) + 1);
         const current = ratioCounts.get(productId) || { "3:4": 0, "1:1": 0 };
-        (selectionPreflightFor(item.asset_id)?.feasible_ratios || [])
+        const feasibleRatios = selectionPreflightFor(item.asset_id)?.feasible_ratios
+          || item.feasible_ratios
+          || [];
+        if (feasibleRatios.length) {
+          ratioKnowledgeCounts.set(
+            productId,
+            (ratioKnowledgeCounts.get(productId) || 0) + 1,
+          );
+        }
+        feasibleRatios
           .forEach((ratio) => {
             if (Object.hasOwn(current, ratio)) current[ratio] += 1;
           });
@@ -6745,7 +6787,9 @@
         ));
       const incompatibleRatios = requiredProducts.filter((productId) => {
         const current = ratioCounts.get(productId) || { "3:4": 0, "1:1": 0 };
-        return Math.max(current["3:4"], current["1:1"]) < 3;
+        return (ratioKnowledgeCounts.get(productId) || 0)
+          === (counts.get(productId) || 0)
+          && Math.max(current["3:4"], current["1:1"]) < 3;
       });
       if (!requiredProducts.length || shortages.length || incompatibleRatios.length) {
         const message = !decisions.length

@@ -275,6 +275,102 @@ def test_deterministic_two_page_browser_acceptance(tmp_path):
     ).is_file()
 
 
+def test_restored_asset_selections_use_server_preflight_fallback(tmp_path):
+    app, store, session_id = _prepared_browser_session(tmp_path)
+    stage_path = store._stage_path(session_id, "asset_matching")
+    current_result = store._read_json(stage_path / "result.json", "result")
+    current_input = store._read_json(stage_path / "input.json", "input")
+    candidates = current_result["data"]["asset_candidates"][:3]
+    decisions = [
+        {
+            "product_id": candidate["product_id"],
+            "asset_id": candidate["asset_id"],
+            "sha256": candidate["sha256"],
+            "source_system": candidate["source_system"],
+            "source_path": candidate["source_path"],
+            "decision": "selected",
+            "selection_order": index,
+            "selection_preflight_identity": "",
+            "feasible_ratios": [],
+        }
+        for index, candidate in enumerate(candidates, start=1)
+    ]
+    restored_input = store.save_input(
+        session_id,
+        "asset_matching",
+        {
+            **current_input["values"],
+            "asset_decisions": decisions,
+            "license_decisions": [
+                {"asset_id": candidate["asset_id"], "status": "confirmed"}
+                for candidate in candidates
+            ],
+        },
+    )
+    gallery_data = {
+        **current_result["data"],
+        "workflow_step": "image_selection",
+        "gallery_complete": True,
+        "gallery_identity": {
+            "session_id": session_id,
+            "stage_id": "asset_matching",
+            "prepared_from_revision": restored_input["revision"],
+            "prepared_from_input_sha256": restored_input["input_sha256"],
+            "folder_decisions_sha256": "restored-gallery",
+        },
+    }
+    store.write_result(
+        session_id,
+        "asset_matching",
+        restored_input["revision"],
+        restored_input["input_sha256"],
+        status="needs_user_input",
+        summary="恢复已选图片",
+        data=gallery_data,
+    )
+
+    with _live_server(app) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 900, "height": 800})
+
+        def reject_client_preflight(route):
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"message": "temporary client recovery failure"}),
+            )
+
+        page.route("**/selection-preflights", reject_client_preflight)
+        page.route(
+            "**/stages/asset_matching/assets/*/selection-preflight",
+            reject_client_preflight,
+        )
+        page.goto(
+            f"{base_url}/?session_id={session_id}",
+            wait_until="networkidle",
+        )
+        page.locator(".asset-card").first.wait_for()
+        assert page.locator(".asset-card.is-selected").count() == 3
+
+        with page.expect_response(
+            lambda response: response.url.endswith(
+                f"/api/sessions/{session_id}/stages/asset_matching/submit"
+            )
+        ) as submit_response:
+            page.locator("[data-submit-stage]").click()
+
+        response = submit_response.value
+        assert response.status == 202, response.text()
+        assert "取消后重新选择" not in page.locator(
+            "[data-action-message]"
+        ).inner_text()
+        assert (
+            store.load_session(session_id)["stages"]["asset_matching"]["status"]
+            == "ready_for_agent"
+        )
+        browser.close()
+
+
 def test_approval_missing_identity_scrolls_to_field_without_submitting(
     tmp_path,
 ):

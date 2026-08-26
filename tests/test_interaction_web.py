@@ -2243,6 +2243,13 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "maxWeight: 8" in javascript
     assert "排队中，可再次点击取消" in javascript
     assert "已取消选择；后台结果仅用于缓存" in javascript
+    assert "await hydrateSelectionPreflights();" in javascript
+    assert "正在恢复已选图片的预裁剪检查状态" in javascript
+    assert "已选图片的预裁剪结果无法确认，请取消后重新选择" not in javascript
+    hydration_wait = javascript.index("await hydrateSelectionPreflights();")
+    assert hydration_wait < javascript.index(
+        "const form = activeForm();", hydration_wait
+    )
     assert "backNavigationChanged" in javascript
     assert "仍有图片检测在后台进行；返回上一步会放弃当前素材选择。" in javascript
     back_enabled_expression = re.search(
