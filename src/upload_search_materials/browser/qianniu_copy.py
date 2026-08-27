@@ -13,7 +13,9 @@ import re
 import uuid
 from typing import Any, Mapping, Sequence
 
+from ..collection_readiness import merge_default_safe_popup_selectors
 from ..io_tables import sha256_file
+from .material_page import _settle_safe_popups
 
 
 MATERIAL_RECOMMEND_QUERY = "?tab=recommend"
@@ -33,6 +35,49 @@ COPY_UPLOAD_TIMEOUT_MS = 120_000
 COPY_UPLOAD_CARD_ATTEMPTS = 100
 AI_COPY_TIMEOUT_MS = 180_000
 AI_COPY_POLL_MS = 500
+COPY_POPUP_SETTLE_DELAY_MS = 250
+COPY_LATE_POPUP_QUIET_CHECKS = 8
+COPY_BLOCKING_OVERLAY_SELECTOR = (
+    ".next-overlay-wrapper.opened, "
+    ".ant-modal-wrap:visible, "
+    ".ant-drawer:visible, "
+    '[role="dialog"]:visible'
+)
+
+COPY_LIST_SAFE_POPUP_SELECTORS = merge_default_safe_popup_selectors({})
+_FORM_POPUP_UNSAFE_SELECTOR_PARTS = (
+    ".next-overlay-wrapper",
+    "button.ant-modal-close",
+    'button:has-text("关闭")',
+    '[aria-label*="关闭"]',
+)
+
+
+def _form_safe_popup_selectors() -> dict[str, str]:
+    """Keep only controls that cannot close the active publish form."""
+
+    def is_safe(part: str) -> bool:
+        if any(
+            marker in part
+            for marker in _FORM_POPUP_UNSAFE_SELECTOR_PARTS
+        ):
+            return False
+        if (
+            '[aria-label="close"]' in part
+            and "AiImageGenerationOfflinePushModal" not in part
+        ):
+            return False
+        return True
+
+    output: dict[str, str] = {}
+    for field, selector in COPY_LIST_SAFE_POPUP_SELECTORS.items():
+        parts = [part.strip() for part in str(selector).split(",")]
+        safe_parts = [part for part in parts if part and is_safe(part)]
+        output[field] = ", ".join(safe_parts)
+    return output
+
+
+COPY_FORM_SAFE_POPUP_SELECTORS = _form_safe_popup_selectors()
 
 
 class QianniuCopyError(RuntimeError):
@@ -43,6 +88,88 @@ class QianniuCopyError(RuntimeError):
         self.detail = detail
         message = reason_code if not detail else f"{reason_code}: {detail}"
         super().__init__(message)
+
+
+def _popup_scopes(page) -> list[Any]:
+    scopes = [page]
+    for frame in list(getattr(page, "frames", ()) or ()):
+        if frame is not None and all(frame is not scope for scope in scopes):
+            scopes.append(frame)
+    return scopes
+
+
+def _visible_popup_control_count(
+    page,
+    selectors: Mapping[str, str],
+) -> int:
+    visible = 0
+    for scope in _popup_scopes(page):
+        for selector in selectors.values():
+            value = str(selector).strip()
+            if not value:
+                continue
+            try:
+                candidates = scope.locator(value)
+                for index in range(candidates.count()):
+                    if candidates.nth(index).is_visible():
+                        visible += 1
+            except Exception:
+                # Frames can disappear while Qianniu re-renders the SPA.
+                continue
+    return visible
+
+
+def _visible_list_overlay_count(page) -> int:
+    try:
+        overlays = page.locator(COPY_BLOCKING_OVERLAY_SELECTOR)
+        return sum(
+            1
+            for index in range(overlays.count())
+            if overlays.nth(index).is_visible()
+        )
+    except Exception:
+        return 0
+
+
+def _settle_copy_popups(
+    page,
+    *,
+    publish_form_open: bool = False,
+    watch_for_late_popup: bool = False,
+    require_clear_surface: bool = True,
+) -> int:
+    """Close only known-safe overlays before a copy workflow action."""
+
+    selectors = (
+        COPY_FORM_SAFE_POPUP_SELECTORS
+        if publish_form_open
+        else COPY_LIST_SAFE_POPUP_SELECTORS
+    )
+    closed = _settle_safe_popups(
+        page,
+        selectors,
+        delay_ms=(
+            COPY_POPUP_SETTLE_DELAY_MS if watch_for_late_popup else 0
+        ),
+        quiet_checks_required=(
+            COPY_LATE_POPUP_QUIET_CHECKS if watch_for_late_popup else 1
+        ),
+    )
+    remaining_controls = _visible_popup_control_count(page, selectors)
+    remaining_overlays = (
+        0
+        if publish_form_open or not require_clear_surface
+        else _visible_list_overlay_count(page)
+    )
+    if remaining_controls or remaining_overlays:
+        raise QianniuCopyError(
+            "QIANNIU_COPY_POPUP_BLOCKED",
+            (
+                "千牛页面仍有未关闭的引导或弹窗，文案抓取已安全停止；"
+                "请关闭弹窗后重试"
+            ),
+        )
+    return closed
 
 
 @dataclass(frozen=True)
@@ -292,24 +419,6 @@ def _wait_for_frame(
     )
 
 
-def _dismiss_guides(page) -> None:
-    for _ in range(8):
-        clicked = False
-        for label in ("下一步", "完成", "知道了"):
-            candidates = page.get_by_text(label, exact=True)
-            for index in range(candidates.count() - 1, -1, -1):
-                item = candidates.nth(index)
-                if item.is_visible():
-                    item.click(force=True)
-                    page.wait_for_timeout(400)
-                    clicked = True
-                    break
-            if clicked:
-                break
-        if not clicked:
-            break
-
-
 def _recommend_url(material_center_url: str) -> str:
     base = str(material_center_url).split("?", 1)[0].rstrip("/")
     return f"{base}{MATERIAL_RECOMMEND_QUERY}"
@@ -321,7 +430,7 @@ def _open_recommend_list(page, material_center_url: str) -> None:
         wait_until="domcontentloaded",
         timeout=NAVIGATION_TIMEOUT_MS,
     )
-    _dismiss_guides(page)
+    _settle_copy_popups(page, watch_for_late_popup=True)
 
 
 def _recommend_list_is_current(page, material_center_url: str) -> bool:
@@ -339,6 +448,7 @@ def _ensure_recommend_list(page, material_center_url: str) -> bool:
     """Open the list only when the preceding slot did not already return there."""
 
     if _recommend_list_is_current(page, material_center_url):
+        _settle_copy_popups(page)
         return False
     _open_recommend_list(page, material_center_url)
     return True
@@ -383,7 +493,9 @@ def _product_search_candidate(scope):
 
 def _wait_for_product_scope(page):
     observations: dict[str, dict[str, Any]] = {}
-    for _ in range(PRODUCT_SCOPE_ATTEMPTS):
+    for attempt in range(PRODUCT_SCOPE_ATTEMPTS):
+        if attempt % 10 == 0:
+            _settle_copy_popups(page, require_clear_surface=False)
         ready = []
         for index, scope in enumerate(_page_scopes(page)):
             label = _scope_url(scope, index)
@@ -418,11 +530,15 @@ def _wait_for_product_scope(page):
 
 def _find_product_row(page, product_id: str):
     product_id = str(product_id).strip()
+    _settle_copy_popups(page)
     scope, search = _wait_for_product_scope(page)
+    _settle_copy_popups(page)
     search.fill(product_id)
     search.press("Enter")
     last_count = 0
-    for _ in range(PRODUCT_ROW_ATTEMPTS):
+    for attempt in range(PRODUCT_ROW_ATTEMPTS):
+        if attempt and attempt % 10 == 0:
+            _settle_copy_popups(page, require_clear_surface=False)
         try:
             rows = scope.locator("tbody tr").filter(
                 has_text=product_id
@@ -545,6 +661,7 @@ def _open_slot_publish_form(
 
     saw_unique_action = False
     for _ in range(4):
+        _settle_copy_popups(page)
         slot, publish = resolve_live_slot()
         slot.hover(force=True)
         publish.click(force=True)
@@ -725,6 +842,7 @@ def _select_seed_image(
     seed_path: str,
     expected_sha256: str,
 ) -> str:
+    _settle_copy_popups(page, publish_form_open=True)
     path = Path(seed_path)
     if (
         not path.is_file()
@@ -801,6 +919,7 @@ def _select_seed_image(
 def _generate_copy(page, publish_frame) -> tuple[str, str, float]:
     import time
 
+    _settle_copy_popups(page, publish_form_open=True)
     assistant = publish_frame.get_by_text("AI生成文案", exact=True)
     if assistant.count() != 1 or not assistant.is_visible():
         raise QianniuCopyError(

@@ -1,13 +1,19 @@
 import pytest
 
 from upload_search_materials.browser.qianniu_copy import (
+    COPY_FORM_SAFE_POPUP_SELECTORS,
+    COPY_LATE_POPUP_QUIET_CHECKS,
+    COPY_LIST_SAFE_POPUP_SELECTORS,
+    COPY_POPUP_SETTLE_DELAY_MS,
     QianniuCopyError,
     _click_visible_image_text_action,
     _ensure_recommend_list,
     _find_product_row_with_recovery,
     _generate_copy,
+    _open_recommend_list,
     _read_ai_result_panel,
     _reset_material_selector_to_all_images,
+    _settle_copy_popups,
     _wait_for_product_scope,
     parse_qianniu_ai_copy,
 )
@@ -135,7 +141,7 @@ class _FakeScope:
             return _FakeCollection(self.inputs)
         if selector == "tbody tr":
             return _FakeCollection([object()] if self.table_ready else [])
-        raise AssertionError(selector)
+        return _FakeCollection([])
 
 
 class _FakePage:
@@ -148,6 +154,107 @@ class _FakePage:
         self.wait_count += 1
         if self.on_wait is not None:
             self.on_wait(self.wait_count)
+
+
+def test_copy_popup_settlement_reuses_collection_safe_controls(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    calls = []
+    monkeypatch.setattr(
+        copy_module,
+        "_settle_safe_popups",
+        lambda page, selectors, **kwargs: calls.append(
+            (page, dict(selectors), kwargs)
+        )
+        or 2,
+    )
+    page = _FakePage([])
+
+    closed = _settle_copy_popups(page, watch_for_late_popup=True)
+
+    assert closed == 2
+    assert calls == [
+        (
+            page,
+            COPY_LIST_SAFE_POPUP_SELECTORS,
+            {
+                "delay_ms": COPY_POPUP_SETTLE_DELAY_MS,
+                "quiet_checks_required": COPY_LATE_POPUP_QUIET_CHECKS,
+            },
+        )
+    ]
+    assert "GuideModal_dialog" in calls[0][1]["safe_popup_progress"]
+
+
+def test_copy_form_popup_controls_cannot_close_active_publish_form():
+    priority = COPY_FORM_SAFE_POPUP_SELECTORS[
+        "safe_popup_close_priority"
+    ]
+    fallback = COPY_FORM_SAFE_POPUP_SELECTORS["safe_popup_close"]
+
+    assert "GuideModal_dialog" in priority
+    assert "AiImageGenerationOfflinePushModal" in priority
+    assert ".next-overlay-wrapper" not in priority
+    assert "button.ant-modal-close" not in priority
+    assert '.ant-modal-wrap.ant-modal-centered [aria-label="close"]' not in (
+        priority
+    )
+    assert 'button:has-text("关闭")' not in fallback
+    assert '[aria-label*="关闭"]' not in fallback
+
+
+def test_copy_popup_settlement_blocks_when_safe_control_remains(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    class VisibleControl:
+        def is_visible(self):
+            return True
+
+    class PopupPage(_FakePage):
+        def locator(self, selector):
+            if "GuideModal_dialog" in selector:
+                return _FakeCollection([VisibleControl()])
+            return _FakeCollection([])
+
+    monkeypatch.setattr(
+        copy_module,
+        "_settle_safe_popups",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    with pytest.raises(
+        QianniuCopyError,
+        match="QIANNIU_COPY_POPUP_BLOCKED",
+    ):
+        _settle_copy_popups(PopupPage([]))
+
+
+def test_recommend_navigation_waits_for_late_safe_popup(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    calls = []
+
+    class NavigationPage:
+        def goto(self, url, **kwargs):
+            calls.append(("goto", url, kwargs))
+
+    monkeypatch.setattr(
+        copy_module,
+        "_settle_copy_popups",
+        lambda page, **kwargs: calls.append(("settle", page, kwargs)),
+    )
+    page = NavigationPage()
+
+    _open_recommend_list(page, "https://example.test/material-center")
+
+    assert calls[0][0] == "goto"
+    assert calls[1] == (
+        "settle",
+        page,
+        {"watch_for_late_popup": True},
+    )
 
 
 class _FakeMenuAction:
@@ -246,6 +353,24 @@ def test_generate_copy_waits_until_both_fields_are_committed():
     assert page.wait_count == 2
     assert title == "KK树儿童遮阳帽"
     assert description == "轻盈透气，适合夏日出行。"
+
+
+def test_generate_copy_settles_form_popups_before_ai_action(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    page = _FakePage([])
+    frame = _FakeCopyFrame(page)
+    calls = []
+    monkeypatch.setattr(
+        copy_module,
+        "_settle_copy_popups",
+        lambda target, **kwargs: calls.append((target, kwargs)),
+    )
+
+    _generate_copy(page, frame)
+
+    assert calls == [(page, {"publish_form_open": True})]
+    assert frame.assistant.clicked is True
 
 
 class _FakeResultPanelAction:

@@ -1533,6 +1533,11 @@ def create_app(
                 cdp_url=runtime.cdp_url,
                 material_center_url=runtime.material_center_url,
             )
+            with open_cdp_page(
+                runtime.cdp_url,
+                runtime.material_center_url,
+            ) as page:
+                page.bring_to_front()
         except CdpUnavailable as error:
             return _error(
                 "login browser unavailable",
@@ -1540,6 +1545,14 @@ def create_app(
                 reason_code=str(error).split(":", 1)[0],
                 message=str(error),
                 next_action="请检查 Chrome 或 Edge 是否已安装，然后重试。",
+            )
+        except Exception:
+            return _error(
+                "login browser focus failed",
+                503,
+                reason_code="BROWSER_FOCUS_FAILED",
+                message="暂时无法自动显示千牛窗口。",
+                next_action="请从任务栏打开千牛 Chrome 窗口。",
             )
         return jsonify(
             status=result.get("status", "connected"),

@@ -851,6 +851,7 @@ def test_setup_login_browser_route_reuses_or_opens_visible_browser(
     client, monkeypatch
 ):
     calls = []
+    focused = []
 
     def ensure(**kwargs):
         calls.append(kwargs)
@@ -863,6 +864,16 @@ def test_setup_login_browser_route_reuses_or_opens_visible_browser(
 
     monkeypatch.setattr(web_module, "ensure_cdp_browser", ensure)
 
+    class Page:
+        def bring_to_front(self):
+            focused.append(True)
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    monkeypatch.setattr(web_module, "open_cdp_page", open_page)
+
     response = client.post(
         "/api/runtime/collection/login-browser",
         json={},
@@ -872,6 +883,7 @@ def test_setup_login_browser_route_reuses_or_opens_visible_browser(
     assert response.json["connected"] is True
     assert response.json["page_count"] == 1
     assert calls[0]["material_center_url"].startswith("https://")
+    assert focused == [True]
 
 
 def test_collection_runtime_panel_validates_and_saves_local_profile(

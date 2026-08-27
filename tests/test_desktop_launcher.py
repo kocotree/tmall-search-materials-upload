@@ -343,7 +343,7 @@ def test_login_gate_detects_authenticated_store_without_target_store(
         url = "https://example.test/material-center"
 
         def bring_to_front(self):
-            return None
+            raise AssertionError("authenticated status must stay in background")
 
         def wait_for_timeout(self, _milliseconds):
             return None
@@ -410,7 +410,7 @@ def test_login_gate_detects_authenticated_store_inside_child_frame(
         frames = [Frame()]
 
         def bring_to_front(self):
-            return None
+            raise AssertionError("authenticated status must stay in background")
 
         def wait_for_timeout(self, _milliseconds):
             return None
@@ -468,8 +468,11 @@ def test_login_gate_blocks_visible_textless_human_check_inside_frame(
         url = "https://example.test/material-center"
         frames = [Frame()]
 
+        def __init__(self):
+            self.focused = False
+
         def bring_to_front(self):
-            return None
+            self.focused = True
 
         def wait_for_timeout(self, _milliseconds):
             return None
@@ -477,9 +480,11 @@ def test_login_gate_blocks_visible_textless_human_check_inside_frame(
         def locator(self, _selector):
             return Locator(False)
 
+    page = Page()
+
     @contextmanager
     def open_page(*_args, **_kwargs):
-        yield Page()
+        yield page
 
     monkeypatch.setattr(
         "upload_search_materials.desktop_launcher.ensure_login_browser",
@@ -494,30 +499,39 @@ def test_login_gate_blocks_visible_textless_human_check_inside_frame(
     assert result["ready"] is False
     assert result["login_state"] == "human_check"
     assert result["reason_code"] == "HUMAN_CHECK"
+    assert page.focused is True
 
 
 @pytest.mark.parametrize(
-    ("url", "login_state", "reason_code"),
+    ("url", "login_state", "reason_code", "expected_focus"),
     (
         (
             "https://login.taobao.com/member/login.jhtml",
             "interaction_required",
             "LOGIN_INTERACTION_REQUIRED",
+            True,
         ),
         (
             "https://myseller.taobao.com/material-center/index",
             "store_unrecognized",
             "STORE_IDENTITY_NOT_FOUND",
+            False,
         ),
         (
             "https://myseller.taobao.com/workbench",
             "opening_material_center",
             "MATERIAL_CENTER_OPENING",
+            False,
         ),
     ),
 )
 def test_login_gate_distinguishes_page_and_login_states(
-    monkeypatch, tmp_path, url, login_state, reason_code
+    monkeypatch,
+    tmp_path,
+    url,
+    login_state,
+    reason_code,
+    expected_focus,
 ):
     runtime = RuntimeConfig(
         workspace_root=tmp_path,
@@ -534,9 +548,10 @@ def test_login_gate_distinguishes_page_and_login_states(
     class Page:
         def __init__(self):
             self.url = url
+            self.focused = False
 
         def bring_to_front(self):
-            return None
+            self.focused = True
 
         def wait_for_timeout(self, _milliseconds):
             return None
@@ -544,9 +559,11 @@ def test_login_gate_distinguishes_page_and_login_states(
         def locator(self, _selector):
             return Locator()
 
+    page = Page()
+
     @contextmanager
     def open_page(*_args, **_kwargs):
-        yield Page()
+        yield page
 
     monkeypatch.setattr(
         "upload_search_materials.desktop_launcher.ensure_login_browser",
@@ -561,3 +578,4 @@ def test_login_gate_distinguishes_page_and_login_states(
     assert result["ready"] is False
     assert result["login_state"] == login_state
     assert result["reason_code"] == reason_code
+    assert page.focused is expected_focus

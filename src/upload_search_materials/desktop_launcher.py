@@ -180,12 +180,24 @@ def ensure_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
     return login_browser
 
 
+def _request_login_browser_attention(page: Any) -> None:
+    """Best-effort foregrounding reserved for required user interaction."""
+
+    try:
+        page.bring_to_front()
+    except Exception:
+        # Login state remains authoritative even when Windows refuses focus.
+        pass
+
+
 def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
     """Ensure the visible browser exists and return a safe login gate state.
 
     This check deliberately does not need the target store, which is a business
     value entered later.  It only proves that the material-center page exposes
-    a visible authenticated store identity and no human challenge.
+    a visible authenticated store identity and no human challenge. Normal
+    authenticated checks stay in the background; only a login or human check
+    asks Windows to foreground the user-controlled browser.
     """
 
     browser = ensure_login_browser(runtime)
@@ -212,7 +224,6 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
             runtime.cdp_url,
             runtime.material_center_url,
         ) as page:
-            page.bring_to_front()
             try:
                 page.wait_for_timeout(500)
             except Exception:
@@ -227,6 +238,7 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                 for scope in scopes
             )
             if challenge_visible:
+                _request_login_browser_attention(page)
                 return {
                     **browser,
                     "ready": False,
@@ -255,6 +267,7 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                 }
             observed_url = str(page.url)
             if _is_login_url(observed_url):
+                _request_login_browser_attention(page)
                 return {
                     **browser,
                     "ready": False,
