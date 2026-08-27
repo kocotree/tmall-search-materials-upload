@@ -704,6 +704,44 @@ test("poll refreshes only when authoritative revision or status changes", () => 
   assert.equal(UiState.stagePollChanged(4, "draft", 4, "processing"), true);
 });
 
+test("editable review stages retry hydration when their durable result is missing", () => {
+  assert.equal(
+    UiState.stageNeedsResultHydration(
+      "completeness",
+      "needs_user_input",
+      null,
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    UiState.stageNeedsResultHydration(
+      "asset_matching",
+      "blocked",
+      null,
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    UiState.stageNeedsResultHydration(
+      "completeness",
+      "needs_user_input",
+      { data: { products: [] } },
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    UiState.stageNeedsResultHydration("setup", "draft", null, true),
+    false,
+  );
+  assert.equal(
+    UiState.stageNeedsResultHydration("setup", "draft", null, false),
+    true,
+  );
+});
+
 test("legacy fifth-stage states map to three progressive pages", () => {
   assert.equal(typeof UiState.fifthStagePage, "function");
   assert.equal(UiState.fifthStagePage("analysing"), "compose");

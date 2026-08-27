@@ -2721,6 +2721,24 @@ def test_frontend_keeps_request_id_across_retry_and_reloads_conflict(client):
     assert "budget_remaining_seconds" in script
 
 
+def test_frontend_back_navigation_awaits_stage_hydration_without_empty_render(client):
+    script = client.get("/static/app.js").get_data(as_text=True)
+    activate = script.split("async function activateStage(stageId)", 1)[1].split(
+        'railButtons.forEach((button) => {\n    button.addEventListener', 1
+    )[0]
+    reopen = script.split("async function reopenPreviousStage", 1)[1].split(
+        "async function endCurrentTask", 1
+    )[0]
+    poll = script.split("async function pollStage()", 1)[1].split(
+        "async function activateStage", 1
+    )[0]
+
+    assert "renderStageResult(stage.component)" not in activate
+    assert "await loadStage();" in activate
+    assert "await activateStage(payload.target_stage_id);" in reopen
+    assert "UiState.stageNeedsResultHydration" in poll
+
+
 def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/draft",

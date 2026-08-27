@@ -552,6 +552,18 @@
     return previousRevision !== nextRevision || previousStatus !== nextStatus;
   }
 
+  function stageNeedsResultHydration(
+    stageId,
+    status,
+    result,
+    inputLoaded = true,
+  ) {
+    if (!inputLoaded) return true;
+    return ["completeness", "asset_matching"].includes(String(stageId || ""))
+      && ["needs_user_input", "blocked"].includes(String(status || ""))
+      && (!result || typeof result !== "object");
+  }
+
   function fifthStagePage(workflowState) {
     if (["plan_confirmed", "processing"].includes(workflowState)) return "process";
     if ([
@@ -817,6 +829,7 @@
     resultView,
     resultSections,
     statusLabels,
+    stageNeedsResultHydration,
     stagePollChanged,
     stageSnapshot,
     submissionView,

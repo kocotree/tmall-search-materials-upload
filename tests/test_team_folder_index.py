@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 
+import upload_search_materials.team_folder_index as team_folder_index_module
 from upload_search_materials.runtime_config import stable_image_source_id
 from upload_search_materials.team_folder_index import (
     TeamFolderIndexError,
@@ -74,6 +75,39 @@ def make_products(path: Path) -> None:
                 "货号（查找引用）": "SKU1",
                 "产品等级": "A",
                 "链接": "https://example.test/1001",
+                "运营": "测试",
+                "组别": "测试",
+                "品类-公司维度划分": "测试",
+            }
+        )
+
+
+def append_product(
+    path: Path,
+    *,
+    product_id: str,
+    title: str,
+    sku: str,
+) -> None:
+    headers = [
+        "商品ID",
+        "商品名称（查找引用）",
+        "货号（查找引用）",
+        "产品等级",
+        "链接",
+        "运营",
+        "组别",
+        "品类-公司维度划分",
+    ]
+    with path.open("a", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=headers)
+        writer.writerow(
+            {
+                "商品ID": product_id,
+                "商品名称（查找引用）": title,
+                "货号（查找引用）": sku,
+                "产品等级": "A",
+                "链接": f"https://example.test/{product_id}",
                 "运营": "测试",
                 "组别": "测试",
                 "品类-公司维度划分": "测试",
@@ -363,6 +397,149 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
     after = sorted((shared / "sources" / "source-a" / "snapshots").iterdir())
     assert offline_summary["sources"][0]["origin"] == "local_cache"
     assert before == after
+
+
+def test_sync_reuses_verified_local_snapshot_without_rehashing_shared_csv(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    local = tmp_path / "local"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    published = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+    )
+    binding = {"source_id": "source-a", "path": str(tmp_path / "media")}
+    sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        image_sources=(binding,),
+    )
+    shared_csv = (
+        shared
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / published["snapshot_id"]
+        / "folders.csv"
+    )
+    original_sha256 = team_folder_index_module._sha256
+
+    def reject_shared_csv(path):
+        if Path(path) == shared_csv:
+            pytest.fail("an unchanged shared folders.csv must not be rehashed")
+        return original_sha256(path)
+
+    monkeypatch.setattr(team_folder_index_module, "_sha256", reject_shared_csv)
+
+    summary = sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        image_sources=(binding,),
+    )
+
+    assert summary["complete"] is True
+    assert summary["sources"][0]["origin"] == "local_cache"
+
+
+def test_verified_local_snapshot_rehashes_and_blocks_after_file_change(tmp_path):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    local = tmp_path / "local"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    published = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+    )
+    binding = {"source_id": "source-a", "path": str(tmp_path / "media")}
+    sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        image_sources=(binding,),
+        source_ids=("source-a",),
+    )
+    cached_csv = (
+        local
+        / "team-cache"
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / published["snapshot_id"]
+        / "folders.csv"
+    )
+    cached_csv.write_bytes(cached_csv.read_bytes() + b"tampered")
+
+    with pytest.raises(
+        TeamFolderIndexError,
+        match="TEAM_INDEX_SNAPSHOT_HASH_MISMATCH",
+    ):
+        sync_snapshots(
+            shared_root=shared,
+            local_root=local,
+            image_sources=(binding,),
+            source_ids=("source-a",),
+        )
+
+
+def test_task_materialization_builds_matcher_only_for_selected_products(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    local = tmp_path / "local"
+    products = tmp_path / "products.csv"
+    make_products(products)
+    append_product(
+        products,
+        product_id="1002",
+        title="另一个商品",
+        sku="SKU2",
+    )
+    make_database(
+        database,
+        [
+            ("folder-1", "source-a", "season/SKU1"),
+            ("folder-2", "source-a", "season/SKU2"),
+        ],
+    )
+    publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+    )
+    binding = {"source_id": "source-a", "path": str(tmp_path / "media")}
+    sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        image_sources=(binding,),
+    )
+    captured_product_ids = []
+    original_from_products = team_folder_index_module.ProductPathMatcher.from_products
+
+    def capture_from_products(records, validation_report):
+        captured_product_ids.extend(record.product_id for record in records)
+        return original_from_products(records, validation_report)
+
+    monkeypatch.setattr(
+        team_folder_index_module.ProductPathMatcher,
+        "from_products",
+        staticmethod(capture_from_products),
+    )
+
+    result = materialize_task_folder_candidates(
+        local_root=local,
+        products_path=products,
+        image_sources=(binding,),
+        selected_product_ids=("1001",),
+        output_path=tmp_path / "run" / "folder-candidates.csv",
+    )
+
+    assert captured_product_ids == ["1001"]
+    assert result["requested_products"] == 1
+    assert result["candidate_rows"] == 1
 
 
 def test_requested_sync_blocks_when_local_binding_is_missing(tmp_path):

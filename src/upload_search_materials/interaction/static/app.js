@@ -7174,7 +7174,18 @@
             currentGalleryJob?.progress?.published_batch_count || 0,
           )
         );
-      if (stageChanged || galleryChanged || backNavigationChanged) {
+      const resultHydrationRequired = UiState.stageNeedsResultHydration(
+        requestedStageId,
+        stageState.status,
+        uiState.result,
+        currentStageInputLoaded,
+      );
+      if (
+        stageChanged
+        || galleryChanged
+        || backNavigationChanged
+        || resultHydrationRequired
+      ) {
         renderStatus();
         await loadStage();
       } else {
@@ -7204,7 +7215,7 @@
     }
   }
 
-  function activateStage(stageId) {
+  async function activateStage(stageId) {
     if (!stages.has(stageId)) return;
     if (currentStageId === "asset_matching" || stageId === "asset_matching") {
       resetSelectionPreflightClientState();
@@ -7241,13 +7252,14 @@
     const stage = stages.get(stageId);
     titleLabel.textContent = stage.title;
     currentStageLabel.textContent = stage.title;
-    actionMessage.textContent = "填写完成后可保存草稿，或提交给工作台后台处理。";
+    actionMessage.textContent = sessionId
+      ? "正在恢复当前阶段数据…"
+      : "填写完成后可保存草稿，或提交给工作台后台处理。";
     renderStatus();
     renderSubmission();
-    renderStageResult(stage.component);
     if (stageId === "setup") initializeSetupLoginGate();
     window.scrollTo({ top: 0, behavior: "smooth" });
-    loadStage();
+    await loadStage();
     if (sessionId) loadRecoveryInstruction(stageId);
   }
 
@@ -7292,7 +7304,7 @@
       });
       sessionCurrentStageId = payload.target_stage_id;
       currentBackNavigation = null;
-      activateStage(payload.target_stage_id);
+      await activateStage(payload.target_stage_id);
     } catch (error) {
       actionMessage.textContent = error.userMessage || error.message;
       await loadStage();

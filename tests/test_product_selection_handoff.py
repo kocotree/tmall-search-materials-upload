@@ -17,6 +17,7 @@ from upload_search_materials.product_selection_handoff import (
     process_product_selection_handoff,
 )
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
+from upload_search_materials.team_folder_index import TeamFolderIndexError
 
 
 def _write_shared_index(root: Path) -> None:
@@ -518,12 +519,12 @@ def test_product_selection_syncs_configured_team_index_before_snapshot(
 
     assert result["status"] == "completed"
     assert len(calls) == 1
-    assert len(ensured) == 1
+    assert ensured == []
     assert calls[0]["shared_root"] == team_root
     assert calls[0]["local_root"] == index_root
     assert calls[0]["source_ids"] == ("source-a",)
     assert "products_path" not in calls[0]
-    assert ensured[0]["products_path"] == products_snapshot
+    assert products_snapshot.is_file()
 
 
 def test_product_selection_bootstraps_missing_snapshots_before_sync(
@@ -539,8 +540,16 @@ def test_product_selection_bootstraps_missing_snapshots_before_sync(
         events.append(("ensure", kwargs))
         return {"created": [{"source_id": "source-a"}]}
 
+    sync_attempts = 0
+
     def fake_sync(**kwargs):
+        nonlocal sync_attempts
+        sync_attempts += 1
         events.append(("sync", kwargs))
+        if sync_attempts == 1:
+            raise TeamFolderIndexError(
+                "TEAM_INDEX_NO_VALID_SNAPSHOT: source-a"
+            )
         _write_shared_index(kwargs["local_root"])
         return {"complete": True}
 
@@ -577,8 +586,8 @@ def test_product_selection_bootstraps_missing_snapshots_before_sync(
     )
 
     assert result["status"] == "completed"
-    assert [event[0] for event in events] == ["ensure", "sync"]
-    assert events[1][1]["source_ids"] == ("source-a",)
+    assert [event[0] for event in events] == ["sync", "ensure", "sync"]
+    assert events[2][1]["source_ids"] == ("source-a",)
 
 
 def test_product_selection_uses_local_cache_when_shared_smb_login_fails(

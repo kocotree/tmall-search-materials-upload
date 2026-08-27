@@ -42,6 +42,7 @@ CANDIDATE_FIELDS = (
     "match_status",
 )
 DEFAULT_LEASE_SECONDS = 120.0
+CACHE_VERIFICATION_SCHEMA_VERSION = 1
 
 
 class TeamFolderIndexError(ValueError):
@@ -357,7 +358,7 @@ def ensure_missing_snapshots(
     }
 
 
-def validate_snapshot(
+def _read_snapshot_manifest(
     snapshot_path: Path,
     *,
     expected_source_id: str | None = None,
@@ -383,13 +384,103 @@ def validate_snapshot(
     file_info = files.get("folders.csv")
     if not isinstance(file_info, dict):
         raise TeamFolderIndexError("TEAM_INDEX_MANIFEST_INVALID")
+    folder_count = manifest.get("folder_count")
+    if not isinstance(folder_count, int) or folder_count < 0:
+        raise TeamFolderIndexError("TEAM_INDEX_MANIFEST_INVALID")
     folders_path = path / "folders.csv"
-    if not folders_path.is_file() or file_info.get("sha256") != _sha256(folders_path):
+    if not folders_path.is_file() or not str(file_info.get("sha256", "")).strip():
+        raise TeamFolderIndexError("TEAM_INDEX_MANIFEST_INVALID")
+    return manifest
+
+
+def validate_snapshot(
+    snapshot_path: Path,
+    *,
+    expected_source_id: str | None = None,
+    expected_snapshot_id: str | None = None,
+) -> dict[str, object]:
+    path = Path(snapshot_path)
+    manifest = _read_snapshot_manifest(
+        path,
+        expected_source_id=expected_source_id,
+        expected_snapshot_id=expected_snapshot_id,
+    )
+    file_info = manifest["files"]["folders.csv"]
+    folders_path = path / "folders.csv"
+    if file_info.get("sha256") != _sha256(folders_path):
         raise TeamFolderIndexError("TEAM_INDEX_SNAPSHOT_HASH_MISMATCH")
     return manifest
 
 
-def _snapshot_for_source(root: Path, source_id: str) -> tuple[Path, dict[str, object]]:
+def _cache_verification_facts(
+    snapshot_path: Path,
+    manifest: Mapping[str, object],
+) -> dict[str, object]:
+    path = Path(snapshot_path)
+    folders = path / "folders.csv"
+    manifest_path = path / "manifest.json"
+    folders_stat = folders.stat()
+    manifest_stat = manifest_path.stat()
+    return {
+        "schema_version": CACHE_VERIFICATION_SCHEMA_VERSION,
+        "source_id": str(manifest["source_id"]),
+        "snapshot_id": str(manifest["snapshot_id"]),
+        "folders_sha256": str(manifest["files"]["folders.csv"]["sha256"]),
+        "folders_size": folders_stat.st_size,
+        "folders_mtime_ns": folders_stat.st_mtime_ns,
+        "folders_ctime_ns": folders_stat.st_ctime_ns,
+        "folders_file_id": folders_stat.st_ino,
+        "manifest_size": manifest_stat.st_size,
+        "manifest_mtime_ns": manifest_stat.st_mtime_ns,
+        "manifest_ctime_ns": manifest_stat.st_ctime_ns,
+        "manifest_file_id": manifest_stat.st_ino,
+    }
+
+
+def _write_cache_verification(
+    snapshot_path: Path,
+    manifest: Mapping[str, object],
+) -> None:
+    atomic_write_json(
+        Path(snapshot_path) / ".verified.json",
+        _cache_verification_facts(snapshot_path, manifest),
+        sort_keys=True,
+    )
+
+
+def _validate_cached_snapshot(
+    snapshot_path: Path,
+    *,
+    expected_source_id: str | None = None,
+    expected_snapshot_id: str | None = None,
+) -> dict[str, object]:
+    path = Path(snapshot_path)
+    manifest = _read_snapshot_manifest(
+        path,
+        expected_source_id=expected_source_id,
+        expected_snapshot_id=expected_snapshot_id,
+    )
+    try:
+        verification = read_json(path / ".verified.json")
+        if verification == _cache_verification_facts(path, manifest):
+            return manifest
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    manifest = validate_snapshot(
+        path,
+        expected_source_id=expected_source_id,
+        expected_snapshot_id=expected_snapshot_id,
+    )
+    _write_cache_verification(path, manifest)
+    return manifest
+
+
+def _snapshot_for_source(
+    root: Path,
+    source_id: str,
+    *,
+    cached: bool = False,
+) -> tuple[Path, dict[str, object]]:
     source_root = Path(root) / "sources" / source_id
     candidates: list[Path] = []
     try:
@@ -406,9 +497,10 @@ def _snapshot_for_source(root: Path, source_id: str) -> tuple[Path, dict[str, ob
             if path.is_dir() and not path.name.startswith(".") and path not in candidates
         )
     errors = []
+    validator = _validate_cached_snapshot if cached else validate_snapshot
     for candidate in candidates:
         try:
-            return candidate, validate_snapshot(candidate, expected_source_id=source_id)
+            return candidate, validator(candidate, expected_source_id=source_id)
         except TeamFolderIndexError as error:
             errors.append(str(error))
     detail = "; ".join(errors[:3])
@@ -426,12 +518,40 @@ def _snapshot_by_id(
     root: Path,
     source_id: str,
     snapshot_id: str,
+    *,
+    cached: bool = False,
 ) -> tuple[Path, dict[str, object]]:
     source_id = _safe_source_id(source_id)
     if not snapshot_id or Path(snapshot_id).name != snapshot_id:
         raise TeamFolderIndexError("TEAM_INDEX_SNAPSHOT_ID_MISMATCH")
     path = Path(root) / "sources" / source_id / "snapshots" / snapshot_id
-    return path, validate_snapshot(
+    validator = _validate_cached_snapshot if cached else validate_snapshot
+    return path, validator(
+        path,
+        expected_source_id=source_id,
+        expected_snapshot_id=snapshot_id,
+    )
+
+
+def _pointed_snapshot_manifest(
+    root: Path,
+    source_id: str,
+) -> tuple[Path, dict[str, object]]:
+    source_id = _safe_source_id(source_id)
+    source_root = Path(root) / "sources" / source_id
+    try:
+        pointer = read_json(source_root / "current.json")
+        snapshot_id = str(pointer.get("snapshot_id", ""))
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        raise TeamFolderIndexError(
+            f"TEAM_INDEX_CURRENT_POINTER_INVALID: {source_id}"
+        ) from error
+    if not snapshot_id or Path(snapshot_id).name != snapshot_id:
+        raise TeamFolderIndexError(
+            f"TEAM_INDEX_CURRENT_POINTER_INVALID: {source_id}"
+        )
+    path = source_root / "snapshots" / snapshot_id
+    return path, _read_snapshot_manifest(
         path,
         expected_source_id=source_id,
         expected_snapshot_id=snapshot_id,
@@ -487,10 +607,20 @@ def _copy_snapshot_to_cache(snapshot_path: Path, manifest: Mapping[str, object],
                 expected_snapshot_id=snapshot_id,
             )
             os.replace(staging, target)
+            _write_cache_verification(target, manifest)
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
-    validate_snapshot(target, expected_source_id=source_id)
+    cached_manifest = _validate_cached_snapshot(
+        target,
+        expected_source_id=source_id,
+        expected_snapshot_id=snapshot_id,
+    )
+    if (
+        cached_manifest["files"]["folders.csv"]["sha256"]
+        != manifest["files"]["folders.csv"]["sha256"]
+    ):
+        raise TeamFolderIndexError("TEAM_INDEX_CACHE_SNAPSHOT_CONFLICT")
     atomic_write_json(Path(cache_root) / "sources" / source_id / "current.json", {
         "schema_version": 1,
         "source_id": source_id,
@@ -551,19 +681,63 @@ def sync_snapshots(
 
     for source_id in selected_ids:
         try:
-            snapshot_path, manifest = _snapshot_for_source(discovery_root, source_id)
+            origin = "local_cache"
+            if shared_available:
+                try:
+                    shared_snapshot, shared_manifest = _pointed_snapshot_manifest(
+                        discovery_root, source_id
+                    )
+                    local_snapshot = (
+                        cache_root
+                        / "sources"
+                        / source_id
+                        / "snapshots"
+                        / str(shared_manifest["snapshot_id"])
+                    )
+                    if local_snapshot.is_dir():
+                        local_manifest = _validate_cached_snapshot(
+                            local_snapshot,
+                            expected_source_id=source_id,
+                            expected_snapshot_id=str(
+                                shared_manifest["snapshot_id"]
+                            ),
+                        )
+                        if (
+                            local_manifest["files"]["folders.csv"]["sha256"]
+                            != shared_manifest["files"]["folders.csv"]["sha256"]
+                        ):
+                            raise TeamFolderIndexError(
+                                "TEAM_INDEX_CACHE_SNAPSHOT_CONFLICT"
+                            )
+                        snapshot_path, manifest = local_snapshot, local_manifest
+                    else:
+                        manifest = validate_snapshot(
+                            shared_snapshot,
+                            expected_source_id=source_id,
+                            expected_snapshot_id=str(
+                                shared_manifest["snapshot_id"]
+                            ),
+                        )
+                        snapshot_path = _copy_snapshot_to_cache(
+                            shared_snapshot, manifest, cache_root
+                        )
+                        origin = "shared"
+                except TeamFolderIndexError:
+                    shared_snapshot, manifest = _snapshot_for_source(
+                        discovery_root, source_id
+                    )
+                    snapshot_path = _copy_snapshot_to_cache(
+                        shared_snapshot, manifest, cache_root
+                    )
+                    origin = "shared"
+            else:
+                snapshot_path, manifest = _snapshot_for_source(
+                    discovery_root, source_id, cached=True
+                )
         except TeamFolderIndexError as error:
             errors.append({"source_id": source_id, "error": str(error)})
             continue
-        origin = "shared" if shared_available else "local_cache"
-        if shared_available:
-            snapshot_path = _copy_snapshot_to_cache(
-                snapshot_path, manifest, cache_root
-            )
-        portable_folders = _read_portable_folders(snapshot_path, source_id)
-        if len(portable_folders) != manifest.get("folder_count"):
-            raise TeamFolderIndexError("TEAM_INDEX_FOLDER_COUNT_MISMATCH")
-        folder_rows += len(portable_folders)
+        folder_rows += int(manifest["folder_count"])
         synced.append(
             {
                 "source_id": source_id,
@@ -628,11 +802,6 @@ def materialize_task_folder_candidates(
     """Match cached folder metadata for one task using the current matcher."""
 
     products_path = Path(products_path)
-    products = read_product_csv(products_path)
-    validation = validate_product_records(products)
-    if not products or validation.batch_blocking:
-        raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_INVALID")
-    matcher = ProductPathMatcher.from_products(products, validation)
     selected = sorted(
         {
             str(product_id).strip()
@@ -643,6 +812,14 @@ def materialize_task_folder_candidates(
     if not selected:
         raise TeamFolderIndexError("TEAM_INDEX_SELECTED_PRODUCTS_REQUIRED")
     selected_set = set(selected)
+    products = read_product_csv(products_path)
+    validation = validate_product_records(products)
+    if not products or validation.batch_blocking:
+        raise TeamFolderIndexError("TEAM_INDEX_PRODUCTS_INVALID")
+    selected_products = tuple(
+        product for product in products if product.product_id in selected_set
+    )
+    matcher = ProductPathMatcher.from_products(selected_products, validation)
 
     cache_root = Path(local_root) / "team-cache"
     requested_sources = sorted({_safe_source_id(value) for value in source_ids})
@@ -683,10 +860,15 @@ def materialize_task_folder_candidates(
         try:
             if selection["snapshot_id"]:
                 snapshot_path, manifest = _snapshot_by_id(
-                    cache_root, source_id, selection["snapshot_id"]
+                    cache_root,
+                    source_id,
+                    selection["snapshot_id"],
+                    cached=True,
                 )
             else:
-                snapshot_path, manifest = _snapshot_for_source(cache_root, source_id)
+                snapshot_path, manifest = _snapshot_for_source(
+                    cache_root, source_id, cached=True
+                )
         except TeamFolderIndexError as error:
             if requested_sources:
                 raise

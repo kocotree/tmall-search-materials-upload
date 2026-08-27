@@ -314,18 +314,28 @@ def process_product_selection_handoff(
             raise TeamFolderIndexError("TEAM_INDEX_IMAGE_SOURCES_REQUIRED")
         if runtime.team_folder_index_root is not None:
             if _directory_is_available(runtime.team_folder_index_root):
-                ensure_missing_snapshots(
-                    shared_root=runtime.team_folder_index_root,
-                    local_root=folder_index_root,
-                    products_path=products_snapshot,
-                    image_sources=runtime.image_sources,
-                )
-                sync_snapshots(
-                    shared_root=runtime.team_folder_index_root,
-                    local_root=folder_index_root,
-                    image_sources=runtime.image_sources,
-                    source_ids=configured_source_ids,
-                )
+                try:
+                    sync_snapshots(
+                        shared_root=runtime.team_folder_index_root,
+                        local_root=folder_index_root,
+                        image_sources=runtime.image_sources,
+                        source_ids=configured_source_ids,
+                    )
+                except TeamFolderIndexError as error:
+                    if "TEAM_INDEX_NO_VALID_SNAPSHOT" not in str(error):
+                        raise
+                    ensure_missing_snapshots(
+                        shared_root=runtime.team_folder_index_root,
+                        local_root=folder_index_root,
+                        products_path=products_snapshot,
+                        image_sources=runtime.image_sources,
+                    )
+                    sync_snapshots(
+                        shared_root=runtime.team_folder_index_root,
+                        local_root=folder_index_root,
+                        image_sources=runtime.image_sources,
+                        source_ids=configured_source_ids,
+                    )
             else:
                 try:
                     sync_snapshots(
