@@ -29,6 +29,11 @@ from .confirmed_assets import (
 from .image_compliance import default_image_policy
 from .interaction.session import InteractionConflict, SessionStore
 from .io_tables import SchemaError, read_product_csv
+from .lark_base_sync import (
+    inspect_upload_history_snapshot,
+    read_upload_history_fingerprints,
+    upload_history_snapshot_path,
+)
 from .runtime_identity import (
     LocalResourceIdentityMismatch,
     current_runtime_identity,
@@ -797,6 +802,11 @@ def process_gallery_job(
                         "gallery_final_candidate_count": int(
                             allocation.get("final_candidate_count", 0)
                         ),
+                        "gallery_uploaded_history_duplicate_count": int(
+                            allocation.get(
+                                "uploaded_history_duplicate_count", 0
+                            )
+                        ),
                         "image_count_reason_code": str(
                             allocation.get("zero_allocation_reason", "")
                         ),
@@ -941,6 +951,18 @@ def process_gallery_job(
             pending_progress.clear()
             last_progress_write = time.monotonic()
 
+        history_path = (
+            upload_history_snapshot_path(
+                runtime.user_data_root or runtime.runs_root.parent
+            )
+            if runtime is not None
+            else None
+        )
+        history_status = (
+            inspect_upload_history_snapshot(history_path)
+            if history_path is not None and runtime.lark_base.enabled
+            else {"status": "unavailable"}
+        )
         data = build_confirmed_folder_gallery(
             products,
             status_rows,
@@ -954,6 +976,17 @@ def process_gallery_job(
             checkpoint_path=stage_path / "gallery-checkpoint.json",
             checkpoint_identity_sha256=str(
                 job["identity"]["identity_sha256"]
+            ),
+            uploaded_source_sha256=(
+                read_upload_history_fingerprints(
+                    history_path,
+                    enabled=runtime.lark_base.enabled,
+                )
+                if history_path is not None
+                else None
+            ),
+            uploaded_history_checked=(
+                history_status.get("status") == "available"
             ),
         )
         persist_progress(force=True)
@@ -1058,6 +1091,11 @@ def process_gallery_job(
                 "content_duplicate_count": int(
                     data.get("scan_summary", {}).get(
                         "content_duplicate_count", 0
+                    )
+                ),
+                "uploaded_history_duplicate_count": int(
+                    data.get("scan_summary", {}).get(
+                        "uploaded_history_duplicate_count", 0
                     )
                 ),
                 "final_candidate_count": len(

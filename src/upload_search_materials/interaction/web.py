@@ -76,8 +76,11 @@ from ..lark_auth import LarkAuthCoordinator
 from ..lark_base_sync import (
     inspect_lark_base_config,
     inspect_product_metadata_snapshot,
+    inspect_upload_history_snapshot,
     product_metadata_snapshot_path,
     refresh_product_metadata_snapshot,
+    refresh_upload_history_snapshot,
+    upload_history_snapshot_path,
 )
 from ..image_review import (
     build_image_review_data,
@@ -382,6 +385,10 @@ def create_app(
     def lark_product_snapshot_path() -> Path:
         root = runtime.user_data_root or runtime.runs_root.parent
         return product_metadata_snapshot_path(root)
+
+    def lark_upload_snapshot_path() -> Path:
+        root = runtime.user_data_root or runtime.runs_root.parent
+        return upload_history_snapshot_path(root)
 
     def notify_workflow_dispatcher(session_id: str) -> None:
         if (
@@ -1689,6 +1696,9 @@ def create_app(
             product_owner_snapshot=inspect_product_metadata_snapshot(
                 lark_product_snapshot_path()
             ),
+            upload_history_snapshot=inspect_upload_history_snapshot(
+                lark_upload_snapshot_path()
+            ),
             config_path=str(config_path),
         )
 
@@ -1756,6 +1766,75 @@ def create_app(
                 ),
             )
         return jsonify(**result.public_status())
+
+    @app.post("/api/runtime/lark-base/snapshots/refresh")
+    def refresh_runtime_lark_snapshots():
+        try:
+            product_result = refresh_product_metadata_snapshot(
+                runtime.lark_base,
+                lark_product_snapshot_path(),
+            ).public_status()
+        except (OSError, PersistenceAccessDenied):
+            previous = inspect_product_metadata_snapshot(
+                lark_product_snapshot_path()
+            )
+            product_result = {
+                "status": "unavailable",
+                "reason_code": "LARK_PRODUCT_SNAPSHOT_WRITE_FAILED",
+                "message": (
+                    "负责人数据暂时无法保存，已继续使用上一次成功更新的数据。"
+                    if previous.get("status") == "available"
+                    else "负责人数据暂时无法保存，请稍后重试。"
+                ),
+                "preserved_previous": previous.get("status") == "available",
+                "previous_updated_at": str(previous.get("updated_at") or ""),
+                "previous_metadata_count": int(
+                    previous.get("metadata_count") or 0
+                ),
+            }
+        try:
+            upload_result = refresh_upload_history_snapshot(
+                runtime.lark_base,
+                lark_upload_snapshot_path(),
+            ).public_status()
+        except (OSError, PersistenceAccessDenied):
+            previous = inspect_upload_history_snapshot(
+                lark_upload_snapshot_path()
+            )
+            upload_result = {
+                "status": "unavailable",
+                "reason_code": "LARK_UPLOAD_HISTORY_SNAPSHOT_WRITE_FAILED",
+                "message": (
+                    "成功上传记录暂时无法保存，已继续使用上一次成功更新的数据。"
+                    if previous.get("status") == "available"
+                    else "成功上传记录暂时无法保存，请稍后重试。"
+                ),
+                "preserved_previous": previous.get("status") == "available",
+                "previous_updated_at": str(previous.get("updated_at") or ""),
+                "previous_fingerprint_count": int(
+                    previous.get("fingerprint_count") or 0
+                ),
+            }
+        completed_count = sum(
+            result.get("status") == "completed"
+            for result in (product_result, upload_result)
+        )
+        return jsonify(
+            status=(
+                "completed"
+                if completed_count == 2
+                else "partial"
+                if completed_count
+                else "unavailable"
+            ),
+            message=(
+                "飞书负责人和成功上传记录已更新。"
+                if completed_count == 2
+                else "飞书数据仅部分更新，已有本机快照不会被覆盖。"
+            ),
+            product_owner_snapshot=product_result,
+            upload_history_snapshot=upload_result,
+        )
 
     @app.post("/api/runtime/folder-picker")
     def open_runtime_folder_picker():

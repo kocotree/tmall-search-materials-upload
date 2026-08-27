@@ -151,7 +151,7 @@ def test_confirmed_gallery_samples_proportionally_across_folders(tmp_path):
 
     assert data["candidate_strategy"] == "proportional_task_sample"
     assert data["candidate_strategy_version"] == CANDIDATE_STRATEGY_VERSION
-    assert CANDIDATE_STRATEGY_VERSION == 4
+    assert CANDIDATE_STRATEGY_VERSION == 5
     assert len(data["sampling_identity_sha256"]) == 64
     assert data["requirements"][0]["candidate_count"] == 10
     assert "required_images" not in data["requirements"][0]
@@ -176,6 +176,52 @@ def test_confirmed_gallery_samples_proportionally_across_folders(tmp_path):
         item["proportional_allocation"]
         for item in summary["folder_allocations"]
     ) == 7
+
+
+def test_confirmed_gallery_excludes_successful_uploads_and_fills_replacements(
+    tmp_path,
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    for index in range(4):
+        _image(folder / f"{index}.png", (index + 1, index + 2, index + 3))
+    args = (
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [
+            {
+                "decision": "confirmed",
+                "folder_path": str(folder),
+                "product_id": "123",
+                "source_system": "model",
+            }
+        ],
+    )
+    baseline = build_confirmed_folder_gallery(
+        *args,
+        candidate_limit=3,
+        sampling_seed="history-dedupe",
+    )
+    uploaded = baseline["asset_candidates"][0]["sha256"]
+
+    filtered = build_confirmed_folder_gallery(
+        *args,
+        candidate_limit=3,
+        sampling_seed="history-dedupe",
+        uploaded_source_sha256={uploaded},
+    )
+
+    assert len(filtered["asset_candidates"]) == 3
+    assert uploaded not in {
+        item["sha256"] for item in filtered["asset_candidates"]
+    }
+    summary = filtered["scan_summary"]
+    assert summary["uploaded_history_duplicate_count"] == 1
+    assert summary["planned_inspection_count"] == 4
+    assert summary["final_candidate_count"] == 3
+    assert filtered["remote_dedupe_status"] == "checked"
+    product = summary["per_product"][0]
+    assert product["history_replacement_count"] == 1
 
 
 def test_confirmed_gallery_shows_all_fourteen_without_declaring_a_shortage(tmp_path):

@@ -172,7 +172,7 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 ## Asset Record
 
-字段：`asset_id`、`product_id`、`sku`、`asset_type`、`source_system`、`source_path`、`license_status`、`sha256`、`width`、`height`、`duration`、`validation_status`、`reason_codes`。
+字段：`asset_id`、`product_id`、`sku`、`asset_type`、`source_system`、`source_path`、`original_source_path`、`original_sha256`、`license_status`、`sha256`、`width`、`height`、`size_bytes`、`duration`、`validation_status`、`reason_codes`。第五阶段的派生输出以 `source_path/sha256` 保存实际上传文件身份，同时用 `original_source_path/original_sha256` 保留来源原图身份，供成功上传记录和跨任务历史排重使用；该字段不得改变 NAS 原图只读边界。
 
 目录型素材默认只在 `<asset-root>/<商品ID>/` 查找，其次在 `<asset-root>/<货号>/` 查找。逐文件授权必须由素材清单表示；批次级 `--license-status confirmed` 只能用于该目录内所有文件已由用户确认同一授权状态的情形。
 
@@ -182,16 +182,16 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 gallery Worker 枚举受支持扩展名后，先对每条唯一路径执行一次只读 `stat`；只有 200KiB–20MiB（含边界）的图片进入硬合规池，超限或元数据不可读的路径不读取、不哈希、不解码。每商品目标数为硬合规图片数与 100 的较小值。分配先覆盖非空采用文件夹，文件夹内依次选择 500KiB–15MiB 优先层、200KiB–不足 500KiB 小图补充层、大于 15MiB–20MiB 大图补充层；其余名额先从优先层按各文件夹剩余数量比例分配，只对缺口依次使用小图和大图补充层。合规候选使用最多 8 个线程的固定并发队列，每张统一占用一个工作槽；同一原图只读取、哈希和解码一次，预览直接复用该解码结果。异步完成项按原抽样序号合并，保证重复内容的保留归属不受线程完成顺序影响。每累计 10 张有序结果把累计只读结果写入 `partial-gallery.json`，并通过 `gallery-job.json.progress.available_candidate_count/published_batch_count` 触发前端渐进刷新；页面仍按每批最多 30 张分页。此时仍为 `gallery_preparing`，不能采用、预裁剪或提交。全部候选完成后才发布 `confirmed-gallery.json` 并切换为 `image_selection`。
 
-`gallery-checkpoint.json` 是当前时间戳任务专用的可重建断点，绑定 gallery identity。每条完成项保存源路径、大小、mtime、完整 SHA-256、检查结果和任务预览路径；同任务重试只在身份、大小、mtime 与预览文件均匹配时复用。身份或源事实变化会重新读取，损坏文件会被安全重建。该文件、`partial-gallery.json` 和 `preview-cache/` 均不得提升为用户级或跨任务缓存。
+`gallery-checkpoint.json` 是当前时间戳任务专用的可重建断点，绑定 gallery identity。每条完成项保存源路径、大小、mtime、完整 SHA-256、检查结果和任务预览路径；同任务重试只在身份、大小、mtime 与预览文件均匹配时复用。身份或源事实变化会重新读取，损坏文件会被安全重建。该文件、`partial-gallery.json` 和 `preview-cache/` 均不得提升为用户级或跨任务缓存。跨任务成功上传排重只允许读取用户数据目录中的 `runtime/lark/upload-history-snapshot.json`；快照只保存合法原图 SHA-256，不保存图片内容、任务页面状态或 NAS 凭据。
 
 素材匹配阶段的 `result.json.data` 包含：
 
 - `requirements`：逐商品 `product_id`、`product_title`、后台 `missing_materials`、本阶段实际 `candidate_count`、`slot_image_min=3`、`slot_image_max=9` 和 `slot_planning_stage=slots_copy`。第三阶段不得生成 `required_images`，因为后台缺失篇数不等于本次必须创建的篇数。
 - `asset_candidates`：逐候选 `asset_id`、商品、稳定 `folder_id`、可审计 `folder_path`、来源、绝对只读路径、SHA-256、尺寸、匹配类型、匹配状态、授权状态、校验状态与远端重复标记。
-- `candidate_strategy`：默认覆盖优先、500KiB–15MiB 优先、仅按缺口依次补充小图和大图、层内按文件夹剩余图片数比例抽样时为 `proportional_task_sample`；`candidate_strategy_version=4` 表示该分层策略，只有显式离线审计流程才从全量图片索引生成。
+- `candidate_strategy`：默认覆盖优先、500KiB–15MiB 优先、仅按缺口依次补充小图和大图、层内按文件夹剩余图片数比例抽样时为 `proportional_task_sample`；`candidate_strategy_version=5` 在该分层策略上增加成功上传指纹排除和确定性候补补足，只有显式离线审计流程才从全量图片索引生成。
 - `candidate_limit` 默认按商品独立限制为 100，`page_size` 默认 30；`sampling_seed` 使用当前任务 ID，`sampling_identity_sha256` 记录策略 ID、版本与任务身份的稳定摘要。
 - `candidate_size_preference`：记录硬门槛与优先层的字节边界、`fallback_order=[below_preferred, above_preferred]` 和文件夹覆盖开关，供任务恢复和审计解释分层选择。
-- `scan_summary`：记录采用文件夹总数，以及明确区分的 `discovered_path_count`、`size_eligible_count`、`size_filtered_count`、`size_below_minimum_count`、`size_exceeded_count`、`source_stat_failure_count`、`preferred_size_count`、`fallback_below_preferred_count`、`fallback_above_preferred_count`、三层实际抽样数、`fallback_sampled_count`、`planned_inspection_count`、`inspected_count`、`inspection_failure_count`、`content_duplicate_count`、`final_candidate_count` 和 `pending_count`。不变量为 `planned=inspected+failures`、`inspected=final+duplicates`、`asset_candidates.length=final`；逐商品保存同口径字段。兼容字段 `discovered_count`、`prepared_count` 仍可读取，但新页面不能用它们表达最终候选数。逐商品还包含 `nonempty_folders`、`represented_folders`、`uncovered_folders`、`complete_folder_coverage` 和 `reason_codes`。每个采用文件夹都必须保留分配行，包含 `folder_id`、路径、来源、原始发现数、唯一发现数、硬合规数、三层图片数、三类预筛排除数、`base_allocation`、`proportional_allocation`、三层实际分配数、`fallback_allocation`、`sampled_images`、`final_candidate_count` 和 `zero_allocation_reason`。任务级按需候选不得把“发现路径数”表述成“已完成全量图片索引”；父子文件夹的原始递归计数允许重叠。
+- `scan_summary`：记录采用文件夹总数，以及明确区分的 `discovered_path_count`、`size_eligible_count`、`size_filtered_count`、`size_below_minimum_count`、`size_exceeded_count`、`source_stat_failure_count`、`preferred_size_count`、`fallback_below_preferred_count`、`fallback_above_preferred_count`、三层实际抽样数、`fallback_sampled_count`、`planned_inspection_count`、`inspected_count`、`inspection_failure_count`、`content_duplicate_count`、`uploaded_history_duplicate_count`、`final_candidate_count` 和 `pending_count`。不变量为 `planned=inspected+failures`、`inspected=final+content_duplicates+uploaded_history_duplicates`、`asset_candidates.length=final`；逐商品保存同口径字段。兼容字段 `discovered_count`、`prepared_count` 仍可读取，但新页面不能用它们表达最终候选数。逐商品还包含 `nonempty_folders`、`represented_folders`、`uncovered_folders`、`complete_folder_coverage`、`history_replacement_count` 和 `reason_codes`。每个采用文件夹都必须保留分配行，包含 `folder_id`、路径、来源、原始发现数、唯一发现数、硬合规数、三层图片数、三类预筛排除数、`base_allocation`、`proportional_allocation`、三层实际分配数、`fallback_allocation`、`sampled_images`、`uploaded_history_duplicate_count`、`history_replacement_allocation`、`final_candidate_count` 和 `zero_allocation_reason`。任务级按需候选不得把“发现路径数”表述成“已完成全量图片索引”；父子文件夹的原始递归计数允许重叠。
 - `remote_dedupe_status`：仅在提供可信远端内容指纹并完成比对时为 `checked`；后台只有素材 ID 时为 `not_available`。
 - `reason_codes`：包含远端指纹不可用等批次级原因。
 

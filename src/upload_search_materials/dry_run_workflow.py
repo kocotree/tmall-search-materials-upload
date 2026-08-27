@@ -130,6 +130,10 @@ def prepare_publish_run_from_authorization(
                 AssetRecord(
                     product_id=str(task.get("product_id", "")),
                     source_path=str(path),
+                    original_source_path=str(
+                        media.get("original_source_path", "")
+                    ),
+                    original_sha256=str(media.get("original_sha256", "")),
                     asset_id=f"{task_id}-{int(media['order'])}",
                     asset_type="image",
                     source_system="derived",
@@ -601,6 +605,12 @@ def build_dry_run_document(
                     "order": int(output.get("order", len(media) + 1)),
                     "output_path": str(output_path),
                     "output_sha256": digest,
+                    "original_source_path": str(
+                        output.get("source_path", "")
+                    ),
+                    "original_sha256": str(
+                        output.get("source_sha256", "")
+                    ),
                     "width": int(output.get("output_width", 0)),
                     "height": int(output.get("output_height", 0)),
                     "size_bytes": int(output.get("output_size_bytes", 0)),

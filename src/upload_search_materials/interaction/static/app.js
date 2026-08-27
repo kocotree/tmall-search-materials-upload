@@ -682,6 +682,8 @@
     const uploadLogNeedsPermission = uploadLog.reason_code === "LARK_PERMISSION_REQUIRED";
     const productRecordsUnavailable =
       product.reason_code === "LARK_PRODUCT_TABLE_EMPTY_OR_INVISIBLE";
+    const uploadHistoryFieldMissing =
+      uploadLog.reason_code === "LARK_UPLOAD_LOG_SCHEMA_INCOMPLETE";
     if (productRecordsUnavailable) {
       return "商品信息表可以打开，但当前飞书账号没有读取到任何商品记录。请确认该账号能查看默认商品表后重新检测。";
     }
@@ -693,6 +695,9 @@
     }
     if (productNeedsPermission || uploadLogNeedsPermission) {
       return "默认数据表缺少必要的飞书读取或写入权限。请点击“补充授权”，在飞书页面完成一次授权。";
+    }
+    if (uploadHistoryFieldMissing) {
+      return "上传记录表缺少“原图 SHA-256”字段，暂时不能排除历史重复素材。";
     }
     if (!productReady && uploadLogReady) {
       return "上传记录表已可用；商品负责人同步暂时不可用。请稍后重新检测。";
@@ -865,25 +870,42 @@
     const feedback = larkBaseConfig.querySelector("[data-lark-base-feedback]");
     const button = larkBaseConfig.querySelector("[data-refresh-lark-owner-snapshot]");
     if (button) button.disabled = true;
-    feedback.textContent = "正在把负责人数据更新到本机…";
+    feedback.textContent = "正在把负责人和成功上传记录更新到本机…";
     try {
       const payload = await fetchJson(
-        "/api/runtime/lark-base/product-owner-snapshot/refresh",
+        "/api/runtime/lark-base/snapshots/refresh",
         { method: "POST", body: JSON.stringify({}) },
       );
-      if (payload.status === "completed") {
-        const updatedAt = larkSnapshotTime(payload.updated_at);
-        feedback.textContent = `负责人数据已更新：${payload.metadata_count || 0} 条${updatedAt ? ` · ${updatedAt}` : ""}。`;
+      const owner = payload.product_owner_snapshot || {};
+      const history = payload.upload_history_snapshot || {};
+      if (owner.status === "completed") {
         await applyLocalOwnerSnapshotToCompleteness();
+      }
+      const updatedAt = larkSnapshotTime(
+        owner.updated_at || history.updated_at,
+      );
+      const ownerCount = Number(
+        owner.metadata_count || owner.previous_metadata_count || 0,
+      );
+      const fingerprintCount = Number(
+        history.fingerprint_count || history.previous_fingerprint_count || 0,
+      );
+      if (payload.status === "completed") {
+        feedback.textContent = (
+          `飞书数据已更新：负责人 ${ownerCount} 条，`
+          + `成功上传原图指纹 ${fingerprintCount} 条`
+          + `${updatedAt ? ` · ${updatedAt}` : ""}。`
+        );
         return true;
       }
-      const previousAt = larkSnapshotTime(payload.previous_updated_at);
-      feedback.textContent = payload.preserved_previous
-        ? `${payload.message || "本次更新未完成。"}${previousAt ? ` 上次更新时间：${previousAt}。` : ""}`
-        : payload.message || "负责人数据更新未完成，请稍后重试。";
-      return false;
+      feedback.textContent = (
+        `${payload.message || "本次更新未全部完成。"}`
+        + ` 当前可用负责人 ${ownerCount} 条，`
+        + `成功上传原图指纹 ${fingerprintCount} 条。`
+      );
+      return payload.status === "partial";
     } catch (_error) {
-      feedback.textContent = "负责人数据更新未完成；已有本机数据不会被覆盖。";
+      feedback.textContent = "飞书数据更新未完成；已有本机数据不会被覆盖。";
       return false;
     } finally {
       if (button) button.disabled = false;
@@ -1584,6 +1606,9 @@
     }
     const failures = Number(progress.inspection_failure_count || 0);
     const duplicates = Number(progress.content_duplicate_count || 0);
+    const uploadedHistory = Number(
+      progress.uploaded_history_duplicate_count || 0,
+    );
     const inspected = Number(progress.inspected_count || 0);
     const available = Number(progress.available_candidate_count || 0);
     const discovered = Number(progress.discovered_path_count || 0);
@@ -1613,6 +1638,7 @@
       + `，检查成功 ${inspected} 张`
       + `${failures ? `，检查失败 ${failures} 张` : ""}`
       + `${duplicates ? `，内容重复 ${duplicates} 张` : ""}。`
+      + `${uploadedHistory ? ` 已排除历史成功上传 ${uploadedHistory} 张。` : ""}`
       + `${available ? ` 已渐进展示 ${available} 张候选。` : ""}`
     );
   }
@@ -1638,7 +1664,8 @@
       + `${sizeEligible} 张${sizeFiltered ? `、跳过 ${sizeFiltered} 张` : ""}；检查 `
       + `成功 ${Number(progress.inspected_count || 0)} 张，失败 `
       + `${Number(progress.inspection_failure_count || 0)} 张，内容重复 `
-      + `${Number(progress.content_duplicate_count || 0)} 张，可展示候选 `
+      + `${Number(progress.content_duplicate_count || 0)} 张，历史成功上传 `
+      + `${Number(progress.uploaded_history_duplicate_count || 0)} 张，可展示候选 `
       + `${Number(progress.final_candidate_count || 0)} 张。`
     );
   }
@@ -3133,6 +3160,11 @@
             + `${Number(candidate.gallery_sampled_inspection_count || 0)} 张`
             + ` · 最终可选素材 `
             + `${Number(candidate.gallery_final_candidate_count || 0)} 张`
+            + (
+              Number(candidate.gallery_uploaded_history_duplicate_count || 0)
+                ? ` · 排除历史成功上传 ${Number(candidate.gallery_uploaded_history_duplicate_count || 0)} 张`
+                : ""
+            )
           );
         }
         identity.append(

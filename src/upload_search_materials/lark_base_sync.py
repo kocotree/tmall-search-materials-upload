@@ -64,11 +64,13 @@ UPLOAD_LOG_FIELDS = {
     "product_title": "商品名称",
     "uploaded_at": "上传时间",
     "asset_filenames": "上传图片文件名",
+    "source_sha256": "原图 SHA-256",
     "title": "标题",
 }
 SUCCESS_UPLOAD_STATUSES = {"submitted", "under_review", "success"}
 MAX_RECORD_LIST_PAGES = 200
 PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION = 1
+UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,35 @@ class ProductMetadataSnapshotResult:
             "preserved_previous": self.preserved_previous,
             "previous_updated_at": self.previous_updated_at,
             "previous_metadata_count": self.previous_metadata_count,
+        }
+
+
+@dataclass(frozen=True)
+class UploadHistorySnapshotResult:
+    status: str
+    reason_code: str = ""
+    message: str = ""
+    table_id: str = ""
+    fetched_count: int = 0
+    fingerprint_count: int = 0
+    updated_at: str = ""
+    preserved_previous: bool = False
+    previous_updated_at: str = ""
+    previous_fingerprint_count: int = 0
+
+    def public_status(self) -> dict[str, Any]:
+        return {
+            "schema_version": UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "message": self.message,
+            "table_id": self.table_id,
+            "fetched_count": self.fetched_count,
+            "fingerprint_count": self.fingerprint_count,
+            "updated_at": self.updated_at,
+            "preserved_previous": self.preserved_previous,
+            "previous_updated_at": self.previous_updated_at,
+            "previous_fingerprint_count": self.previous_fingerprint_count,
         }
 
 
@@ -281,6 +312,7 @@ def inspect_lark_base_config(
         table_id=config.upload_log_table_id,
         runner=active_runner,
         label="上传记录",
+        required_fields=(UPLOAD_LOG_FIELDS["source_sha256"],),
     )
     ready_count = sum(
         1 for item in (product, upload_log) if item["status"] == "available"
@@ -402,6 +434,17 @@ def product_metadata_snapshot_path(user_data_root: Path) -> Path:
     )
 
 
+def upload_history_snapshot_path(user_data_root: Path) -> Path:
+    """Return the machine-local successful-upload fingerprint snapshot path."""
+
+    return (
+        Path(user_data_root)
+        / "runtime"
+        / "lark"
+        / "upload-history-snapshot.json"
+    )
+
+
 def inspect_product_metadata_snapshot(path: Path) -> dict[str, Any]:
     """Return a public, token-free status for the local owner snapshot."""
 
@@ -433,6 +476,40 @@ def inspect_product_metadata_snapshot(path: Path) -> dict[str, Any]:
         "fetched_count": int(document.get("fetched_count") or 0),
         "metadata_count": len(metadata),
         "owner_count": sum(1 for item in metadata.values() if item.owner.strip()),
+        "updated_at": str(document.get("updated_at") or ""),
+        "snapshot_sha256": str(document.get("snapshot_sha256") or ""),
+    }
+
+
+def inspect_upload_history_snapshot(path: Path) -> dict[str, Any]:
+    """Return a public, token-free status for uploaded source fingerprints."""
+
+    document, fingerprints, reason_code = _read_upload_history_snapshot(path)
+    if reason_code:
+        return {
+            "schema_version": UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION,
+            "status": (
+                "missing"
+                if reason_code == "LARK_UPLOAD_HISTORY_SNAPSHOT_MISSING"
+                else "invalid"
+            ),
+            "reason_code": reason_code,
+            "message": (
+                "本机尚未下载成功上传记录。"
+                if reason_code == "LARK_UPLOAD_HISTORY_SNAPSHOT_MISSING"
+                else "本机成功上传记录快照不可用，请重新刷新。"
+            ),
+            "fingerprint_count": 0,
+            "updated_at": "",
+        }
+    return {
+        "schema_version": UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION,
+        "status": "available",
+        "reason_code": "",
+        "message": "本机成功上传记录快照可用。",
+        "table_id": str(document.get("table_id") or ""),
+        "fetched_count": int(document.get("fetched_count") or 0),
+        "fingerprint_count": len(fingerprints),
         "updated_at": str(document.get("updated_at") or ""),
         "snapshot_sha256": str(document.get("snapshot_sha256") or ""),
     }
@@ -540,6 +617,132 @@ def refresh_product_metadata_snapshot(
     )
 
 
+def refresh_upload_history_snapshot(
+    config: LarkBaseConfig,
+    snapshot_path: Path,
+    *,
+    runner: Runner | None = None,
+) -> UploadHistorySnapshotResult:
+    """Download successful-upload source fingerprints into a local snapshot.
+
+    An empty upload table is a valid snapshot. Failed downloads preserve the
+    previous successful snapshot, so a temporary Feishu outage never turns an
+    unknown history into a false assertion that no image was uploaded before.
+    """
+
+    previous = inspect_upload_history_snapshot(snapshot_path)
+    previous_available = previous.get("status") == "available"
+
+    def unavailable(
+        reason_code: str, message: str
+    ) -> UploadHistorySnapshotResult:
+        suffix = " 已继续使用上一次成功更新的数据。" if previous_available else ""
+        return UploadHistorySnapshotResult(
+            status="unavailable",
+            reason_code=reason_code,
+            message=(message.strip() + suffix).strip(),
+            table_id=str(previous.get("table_id") or config.upload_log_table_id),
+            preserved_previous=previous_available,
+            previous_updated_at=str(previous.get("updated_at") or ""),
+            previous_fingerprint_count=int(
+                previous.get("fingerprint_count") or 0
+            ),
+        )
+
+    if not config.upload_log_configured:
+        return unavailable(
+            "LARK_UPLOAD_LOG_TABLE_NOT_CONFIGURED",
+            "成功上传记录表尚未启用。",
+        )
+
+    active_runner = runner or default_lark_cli_runner
+    target_result = _resolve_target(
+        config.upload_log_base_url,
+        config.upload_log_base_token,
+        config.upload_log_table_id,
+        config.command_timeout_seconds,
+        active_runner,
+    )
+    if not target_result.ok:
+        return unavailable(target_result.reason_code, target_result.message)
+    target = target_result.payload
+    fields_result = active_runner(
+        [
+            "base",
+            "+field-list",
+            "--base-token",
+            target.base_token,
+            "--table-id",
+            target.table_id,
+            "--limit",
+            "200",
+            "--json",
+            "--as",
+            "user",
+        ],
+        config.command_timeout_seconds,
+    )
+    if not fields_result.ok:
+        return unavailable(fields_result.reason_code, fields_result.message)
+    if UPLOAD_LOG_FIELDS["source_sha256"] not in _base_field_names(
+        _extract_items(fields_result.payload)
+    ):
+        return unavailable(
+            "LARK_UPLOAD_LOG_SCHEMA_INCOMPLETE",
+            "上传记录表缺少“原图 SHA-256”字段。",
+        )
+    records_result = _list_all_records(
+        target.base_token,
+        target.table_id,
+        config.command_timeout_seconds,
+        active_runner,
+    )
+    if not records_result.ok:
+        return unavailable(records_result.reason_code, records_result.message)
+
+    fingerprints = sorted(
+        _upload_history_fingerprints(records_result.payload)
+    )
+    updated_at = iso_timestamp()
+    document = {
+        "schema_version": UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION,
+        "integration": "lark_base_upload_history_snapshot",
+        "status": "completed",
+        "table_id": target.table_id,
+        "fetched_count": len(records_result.payload),
+        "fingerprint_count": len(fingerprints),
+        "updated_at": updated_at,
+        "snapshot_sha256": _stable_json_sha256(fingerprints),
+        "fingerprints": fingerprints,
+    }
+    atomic_write_json(snapshot_path, document)
+    return UploadHistorySnapshotResult(
+        status="completed",
+        message="成功上传记录已下载到本机运行时快照。",
+        table_id=target.table_id,
+        fetched_count=len(records_result.payload),
+        fingerprint_count=len(fingerprints),
+        updated_at=updated_at,
+    )
+
+
+def read_upload_history_fingerprints(
+    snapshot_path: Path,
+    *,
+    enabled: bool = True,
+) -> frozenset[str]:
+    """Read successful-upload fingerprints without making a Feishu request."""
+
+    if not enabled:
+        return frozenset()
+    _document, fingerprints, reason_code = _read_upload_history_snapshot(
+        snapshot_path
+    )
+    if reason_code:
+        return frozenset()
+    return frozenset(fingerprints)
+
+
 def sync_product_metadata_from_snapshot(
     products: Sequence[ProductRecord],
     snapshot_path: Path,
@@ -629,19 +832,59 @@ def write_successful_upload_log(
         _write_optional_evidence(evidence_path, result.evidence())
         return result
     rows_sha256 = _stable_json_sha256(rows)
+    row_sha256s = [_stable_json_sha256(row) for row in rows]
+    upload_keys = _successful_upload_keys(task_records)
+    if len(upload_keys) != len(rows):
+        result = UploadLogResult(
+            status="failed",
+            reason_code="UPLOAD_LOG_RECORD_ALIGNMENT_INVALID",
+            message="成功上传任务与待记录数据无法一一对应。",
+            attempted_count=len(rows),
+            rows=tuple(rows),
+        )
+        _write_optional_evidence(evidence_path, result.evidence())
+        return result
     existing = _read_object_json(evidence_path) if evidence_path else {}
-    if (
-        existing.get("status") == "completed"
-        and existing.get("rows_sha256") == rows_sha256
-    ):
+    recorded_upload_keys = {
+        str(value)
+        for value in existing.get("recorded_upload_keys", [])
+        if re.fullmatch(r"[0-9a-f]{64}", str(value))
+    }
+    recorded_row_sha256s = {
+        str(value)
+        for value in existing.get("recorded_row_sha256s", [])
+        if re.fullmatch(r"[0-9a-f]{64}", str(value))
+    }
+    if not recorded_row_sha256s:
+        recorded_row_sha256s.update(
+            _stable_json_sha256(row)
+            for row in existing.get("rows", [])
+            if isinstance(row, Mapping)
+        )
+    pending_indexes = [
+        index
+        for index, (upload_key, row_sha256) in enumerate(
+            zip(upload_keys, row_sha256s, strict=True)
+        )
+        if upload_key not in recorded_upload_keys
+        and row_sha256 not in recorded_row_sha256s
+    ]
+    if not pending_indexes:
         return UploadLogResult(
             status="completed",
             reason_code="LARK_UPLOAD_LOG_ALREADY_RECORDED",
             message="本批成功上传记录已写入飞书，本次跳过重复追加。",
-            attempted_count=len(rows),
+            attempted_count=0,
             created_count=int(existing.get("created_count") or len(rows)),
             rows=tuple(rows),
         )
+    pending_rows = [rows[index] for index in pending_indexes]
+    pending_upload_keys = [upload_keys[index] for index in pending_indexes]
+    pending_row_sha256s = [row_sha256s[index] for index in pending_indexes]
+    preserved_evidence = {
+        "recorded_upload_keys": sorted(recorded_upload_keys),
+        "recorded_row_sha256s": sorted(recorded_row_sha256s),
+    }
     if not config.upload_log_configured:
         result = UploadLogResult(
             status="skipped",
@@ -651,12 +894,17 @@ def write_successful_upload_log(
                 else "LARK_UPLOAD_LOG_TABLE_NOT_CONFIGURED"
             ),
             message="未配置飞书上传记录表，已跳过记录写入。",
-            attempted_count=len(rows),
-            rows=tuple(rows),
+            attempted_count=len(pending_rows),
+            rows=tuple(pending_rows),
         )
         _write_optional_evidence(
             evidence_path,
-            {**result.evidence(), "rows_sha256": rows_sha256, "rows": rows},
+            {
+                **result.evidence(),
+                "rows_sha256": rows_sha256,
+                "rows": rows,
+                **preserved_evidence,
+            },
         )
         return result
 
@@ -673,17 +921,22 @@ def write_successful_upload_log(
             status="failed",
             reason_code=target_result.reason_code,
             message=target_result.message,
-            attempted_count=len(rows),
-            rows=tuple(rows),
+            attempted_count=len(pending_rows),
+            rows=tuple(pending_rows),
         )
         _write_optional_evidence(
             evidence_path,
-            {**result.evidence(), "rows_sha256": rows_sha256, "rows": rows},
+            {
+                **result.evidence(),
+                "rows_sha256": rows_sha256,
+                "rows": rows,
+                **preserved_evidence,
+            },
         )
         return result
 
     target = target_result.payload
-    payload = {"create_records": rows}
+    payload = {"create_records": pending_rows}
     command = [
         "base",
         "+record-batch-create",
@@ -704,29 +957,46 @@ def write_successful_upload_log(
             message=create_result.message,
             base_token=target.base_token,
             table_id=target.table_id,
-            attempted_count=len(rows),
-            rows=tuple(rows),
+            attempted_count=len(pending_rows),
+            rows=tuple(pending_rows),
         )
         _write_optional_evidence(
             evidence_path,
-            {**result.evidence(), "rows_sha256": rows_sha256, "rows": rows},
+            {
+                **result.evidence(),
+                "rows_sha256": rows_sha256,
+                "rows": rows,
+                **preserved_evidence,
+            },
         )
         return result
 
-    created_count = _created_record_count(create_result.payload, len(rows))
+    created_count = _created_record_count(
+        create_result.payload, len(pending_rows)
+    )
     result = UploadLogResult(
         status="completed",
         message="已记录成功上传的素材信息。",
         base_token=target.base_token,
         table_id=target.table_id,
-        attempted_count=len(rows),
+        attempted_count=len(pending_rows),
         created_count=created_count,
-        rows=tuple(rows),
+        rows=tuple(pending_rows),
         response=create_result.payload if isinstance(create_result.payload, Mapping) else {},
     )
+    recorded_upload_keys.update(pending_upload_keys)
+    recorded_row_sha256s.update(pending_row_sha256s)
+    cumulative_created_count = int(existing.get("created_count") or 0) + created_count
     _write_optional_evidence(
         evidence_path,
-        {**result.evidence(), "rows_sha256": rows_sha256, "rows": rows},
+        {
+            **result.evidence(),
+            "created_count": cumulative_created_count,
+            "rows_sha256": rows_sha256,
+            "rows": rows,
+            "recorded_upload_keys": sorted(recorded_upload_keys),
+            "recorded_row_sha256s": sorted(recorded_row_sha256s),
+        },
     )
     return result
 
@@ -779,19 +1049,45 @@ def build_upload_log_rows(
         fallback_owner = product.owner if product else ""
         upload_owner = str(confirmed_by or fallback_owner).strip()
         filenames = _asset_filenames(item)
+        source_sha256 = _asset_source_sha256(item)
         uploaded_at = _display_timestamp(record.get("updated_at"))
-        rows.append(
-            {
-                UPLOAD_LOG_FIELDS["upload_owner"]: upload_owner,
-                UPLOAD_LOG_FIELDS["product_id"]: product_id,
-                UPLOAD_LOG_FIELDS["sku"]: product.sku if product else "",
-                UPLOAD_LOG_FIELDS["product_title"]: product.title if product else "",
-                UPLOAD_LOG_FIELDS["uploaded_at"]: uploaded_at,
-                UPLOAD_LOG_FIELDS["asset_filenames"]: filenames,
-                UPLOAD_LOG_FIELDS["title"]: item.title if item else str(entry.get("title", "")),
-            }
-        )
+        row = {
+            UPLOAD_LOG_FIELDS["upload_owner"]: upload_owner,
+            UPLOAD_LOG_FIELDS["product_id"]: product_id,
+            UPLOAD_LOG_FIELDS["sku"]: product.sku if product else "",
+            UPLOAD_LOG_FIELDS["product_title"]: product.title if product else "",
+            UPLOAD_LOG_FIELDS["uploaded_at"]: uploaded_at,
+            UPLOAD_LOG_FIELDS["asset_filenames"]: filenames,
+            UPLOAD_LOG_FIELDS["title"]: (
+                item.title if item else str(entry.get("title", ""))
+            ),
+        }
+        if source_sha256:
+            row[UPLOAD_LOG_FIELDS["source_sha256"]] = source_sha256
+        rows.append(row)
     return rows
+
+
+def _successful_upload_keys(
+    task_records: Sequence[Mapping[str, Any] | None],
+) -> list[str]:
+    keys: list[str] = []
+    for record in task_records:
+        if not record:
+            continue
+        status = str(record.get("status", "")).strip()
+        remote_material_id = str(record.get("remote_material_id") or "").strip()
+        if status not in SUCCESS_UPLOAD_STATUSES or not remote_material_id:
+            continue
+        keys.append(
+            _stable_json_sha256(
+                {
+                    "task_id": str(record.get("task_id", "")).strip(),
+                    "remote_material_id": remote_material_id,
+                }
+            )
+        )
+    return keys
 
 
 def _inspect_target(
@@ -803,6 +1099,7 @@ def _inspect_target(
     runner: Runner,
     label: str,
     require_records: bool = False,
+    required_fields: Sequence[str] = (),
 ) -> dict[str, Any]:
     if not (base_url or base_token):
         return _target_status(
@@ -849,6 +1146,19 @@ def _inspect_target(
             table_id=coordinates.table_id,
         )
     fields = _extract_items(result.payload)
+    field_names = _base_field_names(fields)
+    missing_fields = [
+        name for name in required_fields if name not in field_names
+    ]
+    if missing_fields:
+        return _target_status(
+            "unavailable",
+            f"{label}表缺少字段：{'、'.join(missing_fields)}。",
+            reason_code="LARK_UPLOAD_LOG_SCHEMA_INCOMPLETE",
+            base_token=coordinates.base_token,
+            table_id=coordinates.table_id,
+            field_count=len(fields),
+        )
     if require_records:
         record_probe = runner(
             [
@@ -1074,6 +1384,69 @@ def _read_product_metadata_snapshot(
     return document, metadata, ""
 
 
+def _read_upload_history_snapshot(
+    path: Path,
+) -> tuple[dict[str, Any], set[str], str]:
+    snapshot = Path(path)
+    if not snapshot.is_file():
+        return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_MISSING"
+    try:
+        document = read_json(snapshot)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_INVALID"
+    fingerprints = document.get("fingerprints") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version")
+        != UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION
+        or document.get("status") != "completed"
+        or not isinstance(fingerprints, list)
+    ):
+        return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_INVALID"
+    normalized = {
+        str(value).strip().casefold()
+        for value in fingerprints
+        if re.fullmatch(r"[0-9a-fA-F]{64}", str(value).strip())
+    }
+    if len(normalized) != len(fingerprints):
+        return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_INVALID"
+    snapshot_sha256 = str(document.get("snapshot_sha256") or "")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256)
+        or snapshot_sha256 != _stable_json_sha256(sorted(normalized))
+    ):
+        return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_INVALID"
+    try:
+        if int(document.get("fingerprint_count") or 0) != len(normalized):
+            return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_INVALID"
+    except (TypeError, ValueError):
+        return {}, set(), "LARK_UPLOAD_HISTORY_SNAPSHOT_INVALID"
+    return document, normalized, ""
+
+
+def _upload_history_fingerprints(
+    records: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    fingerprints: set[str] = set()
+    for record in records:
+        fields = (
+            record.get("fields")
+            if isinstance(record.get("fields"), Mapping)
+            else record
+        )
+        if not isinstance(fields, Mapping):
+            continue
+        value = _first_field_text(
+            fields,
+            (UPLOAD_LOG_FIELDS["source_sha256"],),
+        )
+        for candidate in re.split(r"[\s,;；]+", value):
+            digest = candidate.strip().casefold()
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                fingerprints.add(digest)
+    return fingerprints
+
+
 def _overlay_product_metadata(
     products: Sequence[ProductRecord],
     metadata: Mapping[str, ProductMetadata],
@@ -1172,6 +1545,19 @@ def _extract_items(payload: Any) -> list[Any]:
             if nested:
                 return nested
     return []
+
+
+def _base_field_names(fields: Sequence[Any]) -> set[str]:
+    return {
+        str(
+            field.get("name")
+            or field.get("field_name")
+            or field.get("fieldName")
+            or ""
+        ).strip()
+        for field in fields
+        if isinstance(field, Mapping)
+    }
 
 
 def _extract_record_items(payload: Any) -> list[dict[str, Any]]:
@@ -1288,6 +1674,17 @@ def _asset_filenames(item: Any) -> str:
         if name and name not in names:
             names.append(name)
     return "；".join(names)
+
+
+def _asset_source_sha256(item: Any) -> str:
+    if item is None:
+        return ""
+    fingerprints = []
+    for asset in item.assets:
+        digest = str(getattr(asset, "original_sha256", "") or "").strip().casefold()
+        if re.fullmatch(r"[0-9a-f]{64}", digest) and digest not in fingerprints:
+            fingerprints.append(digest)
+    return "；".join(fingerprints)
 
 
 def _display_timestamp(value: Any) -> str:

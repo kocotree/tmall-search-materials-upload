@@ -87,6 +87,8 @@ def material_item_from_dict(value: dict) -> MaterialItem:
         AssetRecord(
             product_id=asset.get("product_id", value.get("product_id", "")),
             source_path=asset.get("source_path", ""),
+            original_source_path=asset.get("original_source_path", ""),
+            original_sha256=asset.get("original_sha256", ""),
             asset_id=asset.get("asset_id", ""),
             sku=asset.get("sku", ""),
             asset_type=asset.get("asset_type", ""),
@@ -95,6 +97,7 @@ def material_item_from_dict(value: dict) -> MaterialItem:
             sha256=asset.get("sha256", ""),
             width=asset.get("width"),
             height=asset.get("height"),
+            size_bytes=asset.get("size_bytes"),
             duration=asset.get("duration"),
             validation_status=asset.get("validation_status", "pending_validation"),
             reason_codes=list(asset.get("reason_codes", [])),

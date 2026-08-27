@@ -75,6 +75,8 @@ class ProductRecord:
 class AssetRecord:
     product_id: str | int
     source_path: str
+    original_source_path: str = ""
+    original_sha256: str = ""
     asset_id: str = ""
     sku: str = ""
     asset_type: str = ""

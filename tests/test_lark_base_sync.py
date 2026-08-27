@@ -6,7 +6,10 @@ from upload_search_materials.lark_base_sync import (
     build_upload_log_rows,
     inspect_lark_base_config,
     inspect_product_metadata_snapshot,
+    inspect_upload_history_snapshot,
+    read_upload_history_fingerprints,
     refresh_product_metadata_snapshot,
+    refresh_upload_history_snapshot,
     sync_product_metadata,
     sync_product_metadata_from_snapshot,
     write_successful_upload_log,
@@ -290,7 +293,22 @@ def test_lark_readiness_requires_product_records_but_allows_empty_upload_log():
     def runner(args, _timeout):
         calls.append(list(args))
         if "+field-list" in args:
-            return LarkCliResult(ok=True, payload={"items": [{"field_id": "f1"}]})
+            base_token = args[args.index("--base-token") + 1]
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "items": [
+                        {
+                            "field_id": "f1",
+                            "name": (
+                                "原图 SHA-256"
+                                if base_token == "upload-base"
+                                else "商品ID"
+                            ),
+                        }
+                    ]
+                },
+            )
         if "+record-list" in args:
             return LarkCliResult(ok=True, payload={"items": [], "has_more": False})
         raise AssertionError(args)
@@ -318,7 +336,22 @@ def test_lark_readiness_requires_product_records_but_allows_empty_upload_log():
 def test_lark_readiness_does_not_treat_columnar_fields_as_records():
     def runner(args, _timeout):
         if "+field-list" in args:
-            return LarkCliResult(ok=True, payload={"items": [{"field_id": "f1"}]})
+            base_token = args[args.index("--base-token") + 1]
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "items": [
+                        {
+                            "field_id": "f1",
+                            "name": (
+                                "原图 SHA-256"
+                                if base_token == "upload-base"
+                                else "商品ID"
+                            ),
+                        }
+                    ]
+                },
+            )
         if "+record-list" in args:
             return LarkCliResult(
                 ok=True,
@@ -373,6 +406,8 @@ def test_build_upload_log_rows_keeps_only_successful_uploads(tmp_path):
                         {
                             "product_id": "1001",
                             "source_path": str(image),
+                            "original_source_path": str(image),
+                            "original_sha256": "a" * 64,
                             "asset_type": "image",
                             "sha256": "abc",
                             "validation_status": "valid",
@@ -425,6 +460,7 @@ def test_build_upload_log_rows_keeps_only_successful_uploads(tmp_path):
             "商品名称": "本地商品",
             "上传时间": "2026-08-26 09:30:00",
             "上传图片文件名": "素材图.jpg",
+            "原图 SHA-256": "a" * 64,
             "标题": "上传标题",
         }
     ]
@@ -450,6 +486,8 @@ def test_write_successful_upload_log_uses_batch_create(tmp_path):
                         {
                             "product_id": "1001",
                             "source_path": str(image),
+                            "original_source_path": str(image),
+                            "original_sha256": "a" * 64,
                             "asset_type": "image",
                             "sha256": "abc",
                             "validation_status": "valid",
@@ -471,6 +509,7 @@ def test_write_successful_upload_log_uses_batch_create(tmp_path):
         assert "+record-batch-create" in args
         submitted = json.loads(args[args.index("--json") + 1])
         assert submitted["create_records"][0]["上传负责人"] == "上传人"
+        assert submitted["create_records"][0]["原图 SHA-256"] == "a" * 64
         return LarkCliResult(
             ok=True,
             payload={"record_id_list": ["rec1"]},
@@ -526,6 +565,154 @@ def test_write_successful_upload_log_uses_batch_create(tmp_path):
     )
 
     assert duplicate.reason_code == "LARK_UPLOAD_LOG_ALREADY_RECORDED"
+
+
+def test_upload_log_retry_appends_only_new_successful_tasks(tmp_path, monkeypatch):
+    evidence = tmp_path / "lark-upload-log.json"
+    submitted_batches = []
+
+    def fake_rows(**kwargs):
+        return [
+            {"商品 ID": str(record["task_id"]), "上传时间": "固定时间"}
+            for record in kwargs["task_records"]
+            if record
+            and record.get("status") in {"submitted", "under_review", "success"}
+            and record.get("remote_material_id")
+        ]
+
+    def runner(args, _timeout):
+        assert "+record-batch-create" in args
+        payload = json.loads(args[args.index("--json") + 1])
+        submitted_batches.append(payload["create_records"])
+        return LarkCliResult(
+            ok=True,
+            payload={
+                "record_id_list": [
+                    f"rec-{index}"
+                    for index in range(len(payload["create_records"]))
+                ]
+            },
+        )
+
+    monkeypatch.setattr(
+        "upload_search_materials.lark_base_sync.build_upload_log_rows",
+        fake_rows,
+    )
+    config = LarkBaseConfig(
+        enabled=True,
+        upload_log_base_token="base-token",
+        upload_log_table_id="上传记录表",
+    )
+    first = {
+        "task_id": "MAT-1",
+        "status": "submitted",
+        "remote_material_id": "remote-1",
+    }
+    second = {
+        "task_id": "MAT-2",
+        "status": "success",
+        "remote_material_id": "remote-2",
+    }
+
+    initial = write_successful_upload_log(
+        run_dir=tmp_path,
+        session_inputs_dir=tmp_path,
+        task_records=[first],
+        config=config,
+        evidence_path=evidence,
+        runner=runner,
+    )
+    resumed = write_successful_upload_log(
+        run_dir=tmp_path,
+        session_inputs_dir=tmp_path,
+        task_records=[{**first, "status": "under_review"}, second],
+        config=config,
+        evidence_path=evidence,
+        runner=runner,
+    )
+
+    assert initial.created_count == 1
+    assert resumed.created_count == 1
+    assert submitted_batches == [
+        [{"商品 ID": "MAT-1", "上传时间": "固定时间"}],
+        [{"商品 ID": "MAT-2", "上传时间": "固定时间"}],
+    ]
+    persisted = json.loads(evidence.read_text(encoding="utf-8"))
+    assert persisted["created_count"] == 2
+    assert len(persisted["recorded_upload_keys"]) == 2
+
+
+def test_runtime_upload_history_snapshot_downloads_only_valid_fingerprints(
+    tmp_path,
+):
+    snapshot = tmp_path / "runtime" / "lark" / "upload-history-snapshot.json"
+    first = "a" * 64
+    second = "B" * 64
+
+    def runner(args, _timeout):
+        if "+field-list" in args:
+            return LarkCliResult(
+                ok=True,
+                payload={"items": [{"name": "原图 SHA-256"}]},
+            )
+        assert "+record-list" in args
+        return LarkCliResult(
+            ok=True,
+            payload={
+                "items": [
+                    {"fields": {"原图 SHA-256": f"{first}；{second}"}},
+                    {"fields": {"原图 SHA-256": "not-a-fingerprint"}},
+                ],
+                "has_more": False,
+            },
+        )
+
+    result = refresh_upload_history_snapshot(
+        LarkBaseConfig(
+            enabled=True,
+            upload_log_base_token="base-token",
+            upload_log_table_id="上传记录表",
+        ),
+        snapshot,
+        runner=runner,
+    )
+
+    assert result.status == "completed"
+    assert result.fingerprint_count == 2
+    assert read_upload_history_fingerprints(snapshot) == frozenset(
+        {first, second.casefold()}
+    )
+    inspected = inspect_upload_history_snapshot(snapshot)
+    assert inspected["status"] == "available"
+    assert inspected["fingerprint_count"] == 2
+
+
+def test_empty_upload_history_is_a_valid_snapshot(tmp_path):
+    snapshot = tmp_path / "runtime" / "lark" / "upload-history-snapshot.json"
+
+    def runner(args, _timeout):
+        if "+field-list" in args:
+            return LarkCliResult(
+                ok=True,
+                payload={"items": [{"name": "原图 SHA-256"}]},
+            )
+        assert "+record-list" in args
+        return LarkCliResult(ok=True, payload={"items": [], "has_more": False})
+
+    result = refresh_upload_history_snapshot(
+        LarkBaseConfig(
+            enabled=True,
+            upload_log_base_token="base-token",
+            upload_log_table_id="上传记录表",
+        ),
+        snapshot,
+        runner=runner,
+    )
+
+    assert result.status == "completed"
+    assert result.fingerprint_count == 0
+    assert inspect_upload_history_snapshot(snapshot)["status"] == "available"
+    assert read_upload_history_fingerprints(snapshot) == frozenset()
 
 
 def test_lark_base_config_respects_explicit_disable():

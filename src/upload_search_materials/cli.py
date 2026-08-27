@@ -1750,18 +1750,16 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
     )
     results_path = Path(prepared["run_dir"]) / "upload-results.json"
     upload_log_path = store._stage_path(args.session, "approval") / "lark-upload-log.json"
-    upload_log = None
-    if completed:
-        upload_log = write_successful_upload_log(
-            run_dir=Path(prepared["run_dir"]),
-            session_inputs_dir=store._session_path(args.session) / "inputs",
-            task_records=records,
-            config=runtime.lark_base,
-            confirmed_by=str(prepared.get("confirmed_by", "")),
-            evidence_path=(
-                upload_log_path if runtime.lark_base.enabled else None
-            ),
-        )
+    upload_log = write_successful_upload_log(
+        run_dir=Path(prepared["run_dir"]),
+        session_inputs_dir=store._session_path(args.session) / "inputs",
+        task_records=records,
+        config=runtime.lark_base,
+        confirmed_by=str(prepared.get("confirmed_by", "")),
+        evidence_path=(
+            upload_log_path if runtime.lark_base.enabled else None
+        ),
+    )
     store.write_result(
         args.session,
         "approval",
@@ -1796,11 +1794,6 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
             "tasks": records,
             "lark_upload_log": (
                 upload_log.evidence()
-                if upload_log is not None
-                else {
-                    "status": "skipped",
-                    "reason_code": "PUBLISH_BATCH_INCOMPLETE",
-                }
             ),
         },
         claim_id=str(claim.get("claim_id", "")) or None,

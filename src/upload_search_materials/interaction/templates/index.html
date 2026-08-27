@@ -243,7 +243,7 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide lark-base-config" data-component="LarkBaseConfig" data-ready="pending" data-lark-product-base-url="{{ setup_inputs.lark_base.product_base_url }}" data-lark-product-table-id="{{ setup_inputs.lark_base.product_table_id }}" data-lark-upload-log-base-url="{{ setup_inputs.lark_base.upload_log_base_url }}" data-lark-upload-log-table-id="{{ setup_inputs.lark_base.upload_log_table_id }}">
                   <span>飞书多维表格</span><strong data-lark-base-summary>正在检查授权</strong>
-                  <p class="section-instruction">商品信息表和上传记录表已由团队预设。授权后，系统会先把负责人数据更新到本机，并且只记录成功上传的素材。</p>
+                  <p class="section-instruction">商品信息表和上传记录表已由团队预设。授权后，系统会把负责人和成功上传记录更新到本机；素材加载时自动排除已经成功上传的原图。</p>
                   <div class="lark-default-resources">
                     <a href="{{ setup_inputs.lark_base.product_base_url }}" target="_blank" rel="noopener">
                       <b>商品信息表</b>
@@ -256,7 +256,7 @@
                   </div>
                   <div class="image-source-actions">
                     <button class="secondary-button" type="button" data-authorize-lark-base>授权飞书</button>
-                    <button class="secondary-button" type="button" data-refresh-lark-owner-snapshot disabled>刷新负责人数据</button>
+                    <button class="secondary-button" type="button" data-refresh-lark-owner-snapshot disabled>刷新飞书数据</button>
                     <a class="secondary-button lark-auth-link" data-lark-auth-link target="_blank" rel="noopener" hidden>打开飞书授权页面</a>
                   </div>
                   <p class="image-source-feedback" data-lark-base-feedback aria-live="polite">正在检查当前飞书授权状态…</p>

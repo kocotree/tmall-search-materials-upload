@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from collections import deque
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -20,7 +21,7 @@ from .models import ProductRecord
 
 
 CANDIDATE_STRATEGY_ID = "proportional_task_sample"
-CANDIDATE_STRATEGY_VERSION = 4
+CANDIDATE_STRATEGY_VERSION = 5
 COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
 NO_SIZE_ELIGIBLE_IMAGES = "NO_SIZE_ELIGIBLE_IMAGES"
 PREFERRED_MIN_SIZE_BYTES = 500 * 1024
@@ -386,6 +387,25 @@ def _sample_paths(
     return sorted(selected, key=lambda path: str(path).casefold())
 
 
+def _sample_and_reserve_paths(
+    paths: Sequence[Path],
+    count: int,
+    *,
+    seed: str,
+) -> tuple[list[Path], list[Path]]:
+    """Return the stable primary sample and a deterministic replacement queue."""
+
+    sampled = _sample_paths(paths, count, seed=seed)
+    sampled_keys = {_path_key(path) for path in sampled}
+    reserves = [
+        path
+        for path in sorted(paths, key=lambda path: str(path).casefold())
+        if _path_key(path) not in sampled_keys
+    ]
+    random.Random(f"{seed}\0reserve").shuffle(reserves)
+    return sampled, reserves
+
+
 def _decision_folder_id(decision: Mapping[str, Any]) -> str:
     existing = str(decision.get("folder_id", "")).strip()
     if existing:
@@ -696,12 +716,17 @@ def _build_gallery_document(
     inspected: int,
     inspection_failures: int,
     content_duplicates: int,
+    uploaded_history_duplicates: int,
+    uploaded_history_checked: bool,
     final_candidates: int,
     per_product: Sequence[Mapping[str, Any]],
     gallery_complete: bool,
     performance: Mapping[str, float | int],
 ) -> dict[str, Any]:
     data = build_gallery_data(records, status_rows)
+    data["remote_dedupe_status"] = (
+        "checked" if uploaded_history_checked else "not_available"
+    )
     data["requirements"] = [
         item
         for item in data["requirements"]
@@ -787,6 +812,7 @@ def _build_gallery_document(
         "inspected_count": inspected,
         "inspection_failure_count": inspection_failures,
         "content_duplicate_count": content_duplicates,
+        "uploaded_history_duplicate_count": uploaded_history_duplicates,
         "final_candidate_count": final_candidates,
         "pending_count": max(
             planned_inspections - inspected - inspection_failures,
@@ -821,6 +847,8 @@ def build_confirmed_folder_gallery(
     batch_callback: Callable[[dict[str, Any]], None] | None = None,
     checkpoint_path: Path | None = None,
     checkpoint_identity_sha256: str = "",
+    uploaded_source_sha256: Iterable[str] | None = None,
+    uploaded_history_checked: bool | None = None,
 ) -> dict[str, Any]:
     """Build a coverage-first tiered sample with task-local batch resume."""
 
@@ -872,9 +900,20 @@ def build_confirmed_folder_gallery(
     inspected = 0
     inspection_failures = 0
     content_duplicates = 0
+    uploaded_history_duplicates = 0
     final_candidates = 0
     completed_inspections = 0
     completed_inspection_failures = 0
+    uploaded_fingerprints = {
+        str(value).strip().casefold()
+        for value in (uploaded_source_sha256 or ())
+        if len(str(value).strip()) == 64
+    }
+    history_checked = (
+        uploaded_source_sha256 is not None
+        if uploaded_history_checked is None
+        else bool(uploaded_history_checked)
+    )
     per_product: list[dict[str, Any]] = []
     performance: dict[str, float | int] = {
         "enumeration_ms": 0.0,
@@ -957,6 +996,9 @@ def build_confirmed_folder_gallery(
                     "inspected_count": inspected,
                     "inspection_failure_count": inspection_failures,
                     "content_duplicate_count": content_duplicates,
+                    "uploaded_history_duplicate_count": (
+                        uploaded_history_duplicates
+                    ),
                     "final_candidate_count": final_candidates,
                     "pending_count": max(
                         planned_inspections - inspected - inspection_failures,
@@ -1121,6 +1163,13 @@ def build_confirmed_folder_gallery(
         )
         complete_folder_coverage = uncovered_folder_count == 0
         selected: list[tuple[dict[str, Any], Path]] = []
+        reserve_groups: dict[
+            str, list[deque[tuple[dict[str, Any], Path, str]]]
+        ] = {
+            "preferred": [],
+            "fallback_below": [],
+            "fallback_above": [],
+        }
         per_folder = []
         for (
             (
@@ -1155,17 +1204,23 @@ def build_confirmed_folder_gallery(
                     f"{sampling_seed}\0{product_id}\0{folder_id}"
                 ).encode("utf-8")
             ).hexdigest()
-            sampled_preferred = _sample_paths(
+            sampled_preferred, reserve_preferred = _sample_and_reserve_paths(
                 preferred_paths,
                 preferred_allocation,
                 seed=f"{folder_seed}\0preferred",
             )
-            sampled_fallback_below = _sample_paths(
+            (
+                sampled_fallback_below,
+                reserve_fallback_below,
+            ) = _sample_and_reserve_paths(
                 fallback_below_paths,
                 fallback_below_allocation,
                 seed=f"{folder_seed}\0fallback-below",
             )
-            sampled_fallback_above = _sample_paths(
+            (
+                sampled_fallback_above,
+                reserve_fallback_above,
+            ) = _sample_and_reserve_paths(
                 fallback_above_paths,
                 fallback_above_allocation,
                 seed=f"{folder_seed}\0fallback-above",
@@ -1176,6 +1231,24 @@ def build_confirmed_folder_gallery(
                 *sampled_fallback_above,
             ]
             selected.extend((decision, path) for path in sampled_paths)
+            reserve_groups["preferred"].append(
+                deque(
+                    (decision, path, "preferred")
+                    for path in reserve_preferred
+                )
+            )
+            reserve_groups["fallback_below"].append(
+                deque(
+                    (decision, path, "fallback_below")
+                    for path in reserve_fallback_below
+                )
+            )
+            reserve_groups["fallback_above"].append(
+                deque(
+                    (decision, path, "fallback_above")
+                    for path in reserve_fallback_above
+                )
+            )
             filter_stats = filter_stats_by_folder[folder_id]
             zero_allocation_reason = ""
             if filter_stats["unique_discovered_images"] == 0:
@@ -1246,10 +1319,18 @@ def build_confirmed_folder_gallery(
                 ).encode("utf-8")
             ).hexdigest()
         ).shuffle(selected)
+        reserves: deque[tuple[dict[str, Any], Path, str]] = deque()
+        for tier in ("preferred", "fallback_below", "fallback_above"):
+            groups = reserve_groups[tier]
+            while any(groups):
+                for group in groups:
+                    if group:
+                        reserves.append(group.popleft())
         planned_inspections += len(selected)
         product_inspected = 0
         product_failures = 0
         product_duplicates = 0
+        product_uploaded_history_duplicates = 0
         product_final_candidates = 0
         valid = 0
         seen_product_sha256: set[str] = set()
@@ -1258,6 +1339,8 @@ def build_confirmed_folder_gallery(
         }
         for item in per_folder:
             item["final_candidate_count"] = 0
+            item["uploaded_history_duplicate_count"] = 0
+            item["history_replacement_allocation"] = 0
         product_summary = {
             "product_id": product_id,
             "confirmed_folders": len(folder_decisions),
@@ -1291,6 +1374,9 @@ def build_confirmed_folder_gallery(
             "inspected_count": product_inspected,
             "inspection_failure_count": product_failures,
             "content_duplicate_count": product_duplicates,
+            "uploaded_history_duplicate_count": (
+                product_uploaded_history_duplicates
+            ),
             "final_candidate_count": product_final_candidates,
             "valid_candidates": valid,
             "reason_codes": (
@@ -1327,6 +1413,9 @@ def build_confirmed_folder_gallery(
                     "inspected_count": reported_inspections,
                     "inspection_failure_count": reported_failures,
                     "content_duplicate_count": content_duplicates,
+                    "uploaded_history_duplicate_count": (
+                        uploaded_history_duplicates
+                    ),
                     "final_candidate_count": final_candidates,
                     "available_candidate_count": len(records),
                     "pending_count": max(
@@ -1392,10 +1481,12 @@ def build_confirmed_folder_gallery(
             nonlocal inspected
             nonlocal inspection_failures
             nonlocal content_duplicates
+            nonlocal uploaded_history_duplicates
             nonlocal final_candidates
             nonlocal product_inspected
             nonlocal product_failures
             nonlocal product_duplicates
+            nonlocal product_uploaded_history_duplicates
             nonlocal product_final_candidates
             nonlocal valid
             for (_, decision, _), result in zip(
@@ -1415,15 +1506,33 @@ def build_confirmed_folder_gallery(
                 inspected += 1
                 product_inspected += 1
                 inspected_asset = result.record
-                fingerprint = str(inspected_asset.sha256 or "")
+                fingerprint = str(inspected_asset.sha256 or "").casefold()
                 duplicate = bool(
                     fingerprint and fingerprint in seen_product_sha256
+                )
+                uploaded_before = bool(
+                    fingerprint and fingerprint in uploaded_fingerprints
                 )
                 if fingerprint:
                     seen_product_sha256.add(fingerprint)
                 if duplicate:
                     content_duplicates += 1
                     product_duplicates += 1
+                elif uploaded_before:
+                    uploaded_history_duplicates += 1
+                    product_uploaded_history_duplicates += 1
+                    folder_summary = folder_summary_by_id.get(
+                        inspected_asset.folder_id
+                    )
+                    if folder_summary is not None:
+                        folder_summary["uploaded_history_duplicate_count"] = (
+                            int(
+                                folder_summary.get(
+                                    "uploaded_history_duplicate_count", 0
+                                )
+                            )
+                            + 1
+                        )
                 else:
                     final_candidates += 1
                     product_final_candidates += 1
@@ -1450,6 +1559,9 @@ def build_confirmed_folder_gallery(
                     "inspected_count": product_inspected,
                     "inspection_failure_count": product_failures,
                     "content_duplicate_count": product_duplicates,
+                    "uploaded_history_duplicate_count": (
+                        product_uploaded_history_duplicates
+                    ),
                     "final_candidate_count": product_final_candidates,
                     "valid_candidates": valid,
                 }
@@ -1472,6 +1584,10 @@ def build_confirmed_folder_gallery(
                     inspected=inspected,
                     inspection_failures=inspection_failures,
                     content_duplicates=content_duplicates,
+                    uploaded_history_duplicates=(
+                        uploaded_history_duplicates
+                    ),
+                    uploaded_history_checked=history_checked,
                     final_candidates=final_candidates,
                     per_product=[*per_product, product_summary],
                     gallery_complete=False,
@@ -1493,6 +1609,80 @@ def build_confirmed_folder_gallery(
             ordered_batch_callback=merge_ready_batch,
             batch_size=min(page_size, GALLERY_PROGRESSIVE_PUBLISH_SIZE),
         )
+        next_index = len(indexed_selected)
+        while product_final_candidates < sample_size and reserves:
+            needed = min(
+                sample_size - product_final_candidates,
+                len(reserves),
+            )
+            replacement_batch = [reserves.popleft() for _ in range(needed)]
+            indexed_replacements = []
+            for decision, path, tier in replacement_batch:
+                index = next_index
+                next_index += 1
+                indexed_replacements.append((index, decision, path))
+                decision_by_index[index] = decision
+                folder_summary = folder_summary_by_id.get(
+                    _decision_folder_id(decision)
+                )
+                if folder_summary is not None:
+                    folder_summary["sampled_images"] = (
+                        int(folder_summary.get("sampled_images", 0)) + 1
+                    )
+                    folder_summary["history_replacement_allocation"] = (
+                        int(
+                            folder_summary.get(
+                                "history_replacement_allocation", 0
+                            )
+                        )
+                        + 1
+                    )
+                    if tier == "preferred":
+                        field = "preferred_allocation"
+                        summary_field = "preferred_sampled_count"
+                    elif tier == "fallback_below":
+                        field = "fallback_below_preferred_allocation"
+                        summary_field = (
+                            "fallback_below_preferred_sampled_count"
+                        )
+                    else:
+                        field = "fallback_above_preferred_allocation"
+                        summary_field = (
+                            "fallback_above_preferred_sampled_count"
+                        )
+                    folder_summary[field] = int(folder_summary.get(field, 0)) + 1
+                    product_summary[summary_field] = int(
+                        product_summary.get(summary_field, 0)
+                    ) + 1
+                    if tier != "preferred":
+                        folder_summary["fallback_allocation"] = (
+                            int(folder_summary.get("fallback_allocation", 0))
+                            + 1
+                        )
+                        product_summary["fallback_sampled_count"] = int(
+                            product_summary.get("fallback_sampled_count", 0)
+                        ) + 1
+            planned_inspections += len(indexed_replacements)
+            product_summary["prepared_candidates"] = (
+                int(product_summary.get("prepared_candidates", 0))
+                + len(indexed_replacements)
+            )
+            product_summary["planned_inspection_count"] = int(
+                product_summary.get("planned_inspection_count", 0)
+            ) + len(indexed_replacements)
+            product_summary["history_replacement_count"] = int(
+                product_summary.get("history_replacement_count", 0)
+            ) + len(indexed_replacements)
+            _run_concurrent_window(
+                indexed_replacements,
+                worker,
+                completion_callback=checkpoint_completion,
+                ordered_batch_callback=merge_ready_batch,
+                batch_size=min(
+                    page_size,
+                    GALLERY_PROGRESSIVE_PUBLISH_SIZE,
+                ),
+            )
         flush_checkpoint(force=True)
         per_product.append(product_summary)
 
@@ -1513,12 +1703,18 @@ def build_confirmed_folder_gallery(
         inspected=inspected,
         inspection_failures=inspection_failures,
         content_duplicates=content_duplicates,
+        uploaded_history_duplicates=uploaded_history_duplicates,
+        uploaded_history_checked=history_checked,
         final_candidates=final_candidates,
         per_product=per_product,
         gallery_complete=True,
         performance=performance,
     )
-    if inspected != final_candidates + content_duplicates:
+    if inspected != (
+        final_candidates
+        + content_duplicates
+        + uploaded_history_duplicates
+    ):
         raise ValueError("gallery candidate count invariant failed")
     if planned_inspections != inspected + inspection_failures:
         raise ValueError("gallery inspection count invariant failed")

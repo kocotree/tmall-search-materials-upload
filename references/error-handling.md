@@ -130,6 +130,8 @@
 | `PUBLISH_RUN_PARTIAL_STATE` | 交互任务到发布任务的持久化文件只存在一部分 | 禁止覆盖；保留现场并人工恢复 |
 | `PUBLISH_RUN_IDENTITY_MISMATCH` | 已有发布批次与当前 session/store/task IDs 不一致 | 禁止复用或覆盖 |
 | `REMOTE_EVIDENCE_MISMATCH` | 远端记录与批准指纹/坑位/时间不一致 | 保持不确定并转人工 |
+| `LARK_UPLOAD_LOG_SCHEMA_INCOMPLETE` | 团队上传记录表缺少“原图 SHA-256”字段 | 保留上一次有效上传历史快照；主上传流程继续，维护者补齐文本字段后刷新飞书数据 |
+| `UPLOAD_LOG_RECORD_ALIGNMENT_INVALID` | 已成功的上传任务与待写入飞书的记录无法一一对应 | 保留逐任务发布结果，不写入不确定记录；按原任务证据诊断并重试记录同步 |
 | `MODERATION_FAILED` | 平台审核失败 | 记录平台原因，转人工处理 |
 | `STATE_MISSING` | `run.sqlite3`、任务状态行或状态证据缺失/损坏 | 禁止自动上传，先做可信远端核验 |
 
