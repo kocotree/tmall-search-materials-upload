@@ -9,7 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from upload_search_materials.cli import build_parser, main
-from upload_search_materials.interaction.session import SessionStore
+from upload_search_materials.interaction.session import (
+    InteractionConflict,
+    SessionStore,
+)
 from upload_search_materials.product_selection_handoff import (
     ProductSelectionProcessingError,
     _ensure_team_index_mount,
@@ -338,6 +341,133 @@ def test_one_processor_prepares_folder_review_and_advances_stage(tmp_path):
     )
     assert repeated["status"] == "completed"
     assert repeated["idempotent"] is True
+
+
+def test_reselected_product_clears_late_removed_product_draft(tmp_path):
+    store = SessionStore(tmp_path / "runs")
+    session = store.create_session()
+    setup = store.save_input(
+        session.session_id, "setup", {"store": "shop"}
+    )
+    store.write_result(
+        session.session_id,
+        "setup",
+        setup["revision"],
+        setup["input_sha256"],
+        status="completed",
+        summary="setup complete",
+    )
+    store.save_input(
+        session.session_id,
+        "completeness",
+        {"selected_product_ids": ["1", "2"]},
+    )
+    _write_products(
+        store._session_path(session.session_id)
+        / "inputs"
+        / "products.csv"
+    )
+    index_root = tmp_path / "shared-folder-index"
+    _write_shared_index(index_root)
+    runtime = _runtime(store, index_root)
+
+    process_product_selection_handoff(
+        store,
+        session.session_id,
+        folder_index_root=index_root,
+        claimant_id="test-codex",
+        runtime=runtime,
+    )
+    first_asset_revision = int(
+        store.load_session(session.session_id)["stages"]["asset_matching"][
+            "revision"
+        ]
+    )
+    removed_values = {
+        "image_roots": [str(index_root.parent / "media")],
+        "source_types": ["image"],
+        "removed_product_ids": ["1"],
+        "folder_decisions": [
+            {
+                "folder_id": "folder-1",
+                "product_id": "1",
+                "decision": "rejected",
+                "note": "本次任务已去掉该商品",
+            }
+        ],
+        "asset_decisions": [],
+        "license_decisions": [],
+    }
+    removed = store.save_local_input(
+        session.session_id,
+        "asset_matching",
+        removed_values,
+        expected_revision=first_asset_revision,
+    )
+
+    store.reopen_previous_stage(
+        session.session_id,
+        "asset_matching",
+        expected_revision=removed["revision"],
+    )
+    store.save_input(
+        session.session_id,
+        "completeness",
+        {"selected_product_ids": ["1", "2"]},
+    )
+
+    # Model a delayed autosave from the old asset-matching page. Before the
+    # fresh review context is published this request still has the old stage
+    # revision and can recreate the removed-product input.
+    late_draft = store.save_local_input(
+        session.session_id,
+        "asset_matching",
+        removed_values,
+        expected_revision=removed["revision"],
+    )
+    state = store.load_session(session.session_id)
+    state["current_stage"] = "completeness"
+    store._write_session_state(session.session_id, state)
+    assert store.read_optional_stage_document(
+        session.session_id, "asset_matching", "input"
+    )["values"]["removed_product_ids"] == ["1"]
+
+    process_product_selection_handoff(
+        store,
+        session.session_id,
+        folder_index_root=index_root,
+        claimant_id="test-codex",
+        runtime=runtime,
+    )
+
+    state = store.load_session(session.session_id)
+    context = store.read_optional_stage_document(
+        session.session_id, "asset_matching", "review-context"
+    )
+    assert state["current_stage"] == "asset_matching"
+    assert state["stages"]["asset_matching"]["revision"] > int(
+        late_draft["revision"]
+    )
+    assert store.read_optional_stage_document(
+        session.session_id, "asset_matching", "input"
+    ) is None
+    assert context["revision"] == state["stages"]["asset_matching"][
+        "revision"
+    ]
+    assert context["data"]["product_selection_identity"][
+        "selected_product_ids"
+    ] == ["1", "2"]
+    assert {
+        item["product_id"]
+        for item in context["data"]["folder_candidates"]
+    } == {"1", "2"}
+    with pytest.raises(InteractionConflict, match="expected revision is stale"):
+        store.save_local_input(
+            session.session_id,
+            "asset_matching",
+            removed_values,
+            expected_revision=int(late_draft["revision"]),
+        )
 
 
 def test_product_selection_ignores_stale_global_candidates_and_rematches_split_title(

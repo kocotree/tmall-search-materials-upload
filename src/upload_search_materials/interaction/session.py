@@ -856,6 +856,99 @@ class SessionStore:
             )
             return document
 
+    def replace_review_context_from_upstream(
+        self,
+        session_id: str,
+        stage_id: str,
+        document: dict[str, Any],
+        *,
+        upstream_stage_id: str,
+        upstream_revision: int,
+        upstream_input_sha256: str,
+    ) -> dict[str, Any]:
+        """Start a fresh downstream review epoch for one upstream revision.
+
+        Returning to an earlier stage invalidates the downstream input, but a
+        delayed browser request can still arrive with the old downstream
+        revision. Advancing the review revision here both discards any such
+        late input and makes still-open old pages fail their revision check.
+        """
+
+        stage_index = self._stage_index(stage_id)
+        upstream_index = self._stage_index(upstream_stage_id)
+        if upstream_index >= stage_index:
+            raise InteractionConflict("UPSTREAM_STAGE_ORDER_INVALID")
+        if not isinstance(document, dict):
+            raise InteractionConflict("review context must be an object")
+        if not isinstance(upstream_revision, int) or upstream_revision < 0:
+            raise InteractionConflict("UPSTREAM_REVISION_INVALID")
+        if not upstream_input_sha256:
+            raise InteractionConflict("UPSTREAM_INPUT_IDENTITY_MISSING")
+
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            stage_path = self._stage_path(session_id, stage_id)
+            stage_state = state["stages"][stage_id]
+            active_claim = state.get("processing_claim")
+            if (
+                isinstance(active_claim, dict)
+                and str(active_claim.get("stage_id", "")) == stage_id
+                and not self._claim_is_expired(active_claim)
+            ):
+                raise InteractionConflict("DOWNSTREAM_STAGE_PROCESSING")
+
+            next_revision = int(stage_state["revision"]) + 1
+            replacement = dict(document)
+            replacement["revision"] = next_revision
+            if (
+                replacement.get("session_id") != session_id
+                or replacement.get("stage_id") != stage_id
+            ):
+                raise InteractionConflict(
+                    "review context identity does not match current stage"
+                )
+
+            for artifact_name in (
+                "input.json",
+                "handoff.json",
+                "result.json",
+                "approval.json",
+                "review-context.json",
+            ):
+                artifact_path = stage_path / artifact_name
+                if not artifact_path.is_file():
+                    continue
+                metadata = self._artifact_metadata(
+                    artifact_path, artifact_name
+                )
+                artifact_path.unlink()
+                self._append_event(
+                    self._session_path(session_id),
+                    "artifact_invalidated",
+                    session_id=session_id,
+                    stage_id=stage_id,
+                    artifact=artifact_name,
+                    **metadata,
+                )
+
+            self._write_json_atomic(
+                stage_path / "review-context.json", replacement
+            )
+            stage_state["revision"] = next_revision
+            stage_state["status"] = "needs_user_input"
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "review_context_replaced_from_upstream",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=next_revision,
+                upstream_stage_id=upstream_stage_id,
+                upstream_revision=upstream_revision,
+                upstream_input_sha256=upstream_input_sha256,
+            )
+            return replacement
+
     def _next_interaction_history(
         self,
         stage_path: Path,

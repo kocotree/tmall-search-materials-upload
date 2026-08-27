@@ -390,6 +390,21 @@ def create_app(
         root = runtime.user_data_root or runtime.runs_root.parent
         return upload_history_snapshot_path(root)
 
+    def reject_noncurrent_stage_edit(
+        state: dict[str, Any], stage_id: str
+    ):
+        if not enforce_stage_order or state.get("current_stage") == stage_id:
+            return None
+        return _error(
+            "stage is not current",
+            409,
+            reason_code="STAGE_NOT_CURRENT",
+            message=(
+                "当前步骤已经变化，旧页面的操作未保存。"
+                "请继续工作台当前显示的步骤。"
+            ),
+        )
+
     def lark_upload_identity(*, refresh: bool) -> dict[str, str]:
         """Return the trusted Feishu identity used for upload attribution."""
 
@@ -2044,6 +2059,11 @@ def create_app(
     def prepare_asset_gallery(session_id: str):
         payload = _json_object()
         state = store.load_session(session_id)
+        stage_conflict = reject_noncurrent_stage_edit(
+            state, "asset_matching"
+        )
+        if stage_conflict is not None:
+            return stage_conflict
         stage = get_stage("asset_matching")
         values = _normalize_stage_values(
             store,
@@ -2666,6 +2686,9 @@ def create_app(
         payload = _json_object()
         values = _values(payload)
         state = store.load_session(session_id)
+        stage_conflict = reject_noncurrent_stage_edit(state, stage_id)
+        if stage_conflict is not None:
+            return stage_conflict
         stage = get_stage(stage_id)
         if stage.read_only:
             raise InteractionConflict("read-only stage does not accept submissions")
@@ -2777,6 +2800,9 @@ def create_app(
             return _validation_error(
                 {"stage": f"complete previous stage '{stage.previous_stage}' first"}
             )
+        stage_conflict = reject_noncurrent_stage_edit(state, stage_id)
+        if stage_conflict is not None:
+            return stage_conflict
         field_errors = _unknown_value_errors(stage, values) | _value_errors(stage, values)
         if not field_errors and stage_id == "completeness":
             field_errors |= _completeness_selection_errors(

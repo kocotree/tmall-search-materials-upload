@@ -26,7 +26,7 @@ from .team_folder_index import (
 
 
 PROCESSOR_NAME = "product-selection-to-folder-review"
-PROCESSOR_VERSION = 2
+PROCESSOR_VERSION = 3
 
 
 class ProductSelectionProcessingError(RuntimeError):
@@ -429,10 +429,6 @@ def process_product_selection_handoff(
         store._write_json_atomic(folder_review_path, review_data)
 
         phase = "publish_review_context"
-        asset_state = store.load_session(session_id)
-        asset_revision = int(
-            asset_state["stages"]["asset_matching"]["revision"]
-        )
         unmatched = int(snapshot["requested_products"]) - int(
             snapshot["matched_products"]
         )
@@ -440,7 +436,6 @@ def process_product_selection_handoff(
             "schema_version": 1,
             "session_id": session_id,
             "stage_id": "asset_matching",
-            "revision": asset_revision,
             "status": "needs_user_input",
             "summary": (
                 f"已为 {snapshot['requested_products']} 个商品准备 "
@@ -460,8 +455,13 @@ def process_product_selection_handoff(
             "created_at": _now_iso(),
             "data": review_data,
         }
-        store.write_review_context(
-            session_id, "asset_matching", review_context
+        review_context = store.replace_review_context_from_upstream(
+            session_id,
+            "asset_matching",
+            review_context,
+            upstream_stage_id="completeness",
+            upstream_revision=int(handoff["revision"]),
+            upstream_input_sha256=str(handoff["input_sha256"]),
         )
 
         phase = "complete_source_stage"

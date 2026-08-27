@@ -141,6 +141,56 @@ def test_create_session_returns_timestamp_id(client):
     assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{2})?", response.json["session_id"])
 
 
+def test_noncurrent_asset_requests_cannot_restore_stale_removed_products(
+    tmp_path,
+):
+    runtime = RuntimeConfig(
+        workspace_root=Path(__file__).parents[1],
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path,
+        config_path=tmp_path / "config" / "runtime.json",
+        user_data_root=tmp_path / "user-data",
+    )
+    strict_client = create_app(
+        tmp_path, runtime_config=runtime
+    ).test_client()
+    strict_session_id = strict_client.post(
+        "/api/sessions", json={}
+    ).json["session_id"]
+    stale_values = {
+        "image_roots": [str(tmp_path / "images")],
+        "source_types": ["image"],
+        "removed_product_ids": ["P1"],
+        "folder_decisions": [],
+    }
+
+    responses = [
+        strict_client.post(
+            f"/api/sessions/{strict_session_id}/stages/asset_matching/draft",
+            json={"revision": 0, "values": stale_values},
+        ),
+        strict_client.post(
+            f"/api/sessions/{strict_session_id}/stages/asset_matching/submit",
+            json={"values": stale_values},
+        ),
+        strict_client.post(
+            f"/api/sessions/{strict_session_id}/stages/asset_matching/prepare-gallery",
+            json={"revision": 0, "values": stale_values},
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [409, 422, 409]
+    assert {
+        response.json["reason_code"] for response in (responses[0], responses[2])
+    } == {"STAGE_NOT_CURRENT"}
+    assert "stage" in responses[1].json["field_errors"]
+    assert SessionStore(tmp_path).read_optional_stage_document(
+        strict_session_id, "asset_matching", "input"
+    ) is None
+
+
 def test_runtime_lark_base_config_can_be_saved(client):
     response = client.put(
         "/api/runtime/lark-base",
