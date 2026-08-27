@@ -2641,6 +2641,14 @@
     });
   }
 
+  function resetFormForAuthoritativeHydration(form) {
+    if (!form) return;
+    form.reset();
+    form.querySelectorAll('[data-value-kind="json-list"]').forEach((control) => {
+      control.value = "[]";
+    });
+  }
+
   function selectedAssetDecisions() {
     return uniqueSelectedAssetDecisions(readJsonListControl("asset_decisions"));
   }
@@ -6761,9 +6769,10 @@
       );
       isHydrating = true;
       try {
-        activeForm()?.reset();
+        const form = activeForm();
+        resetFormForAuthoritativeHydration(form);
         if (payload.input) {
-          hydrateForm(activeForm(), payload.input.values);
+          hydrateForm(form, payload.input.values);
         }
         if (requestedStageId === "approval" && payload.upload_identity) {
           currentApprovalUploadIdentity = payload.upload_identity;

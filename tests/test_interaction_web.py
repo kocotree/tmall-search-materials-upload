@@ -1364,7 +1364,7 @@ def test_team_index_frontend_discovers_after_stage_hydration_without_user_edit()
     load_stage = source.split("async function loadStage()", 1)[1].split(
         "async function prepareLocalGallery", 1
     )[0]
-    assert load_stage.index("hydrateForm(activeForm(), payload.input.values)") < (
+    assert load_stage.index("hydrateForm(form, payload.input.values)") < (
         load_stage.index("const setupDiscoveryTasks = []")
     )
     assert "setupDiscoveryTasks.push(discoverTeamIndex())" in load_stage
@@ -2925,6 +2925,13 @@ def test_frontend_discards_stale_stage_loads_and_bypasses_dynamic_cache(client):
     assert "requestedLoadSequence = ++stageLoadSequence" in load_stage
     assert "requestedGeneration !== stageGeneration" in load_stage
     assert "requestedLoadSequence !== stageLoadSequence" in load_stage
+    assert "resetFormForAuthoritativeHydration(form);" in load_stage
+    reset_helper = script.split(
+        "function resetFormForAuthoritativeHydration(form)", 1
+    )[1].split("function selectedAssetDecisions", 1)[0]
+    assert "form.reset();" in reset_helper
+    assert "data-value-kind=\"json-list\"" in reset_helper
+    assert 'control.value = "[]";' in reset_helper
 
 
 def test_completeness_status_filter_includes_selected_products(client):
