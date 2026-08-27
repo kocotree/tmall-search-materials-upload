@@ -157,6 +157,58 @@ def _prepared_browser_session(tmp_path):
     return app, store, session.session_id
 
 
+def test_workbench_confirmation_modal_controls_image_source_removal(tmp_path):
+    runs = tmp_path / "runs"
+    first_source = tmp_path / "source-one"
+    second_source = tmp_path / "source-two"
+    first_source.mkdir()
+    second_source.mkdir()
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(
+            {"label": "图片源一", "path": str(first_source)},
+            {"label": "图片源二", "path": str(second_source)},
+        ),
+        runs_root=runs,
+    )
+    app = create_app(
+        runs,
+        runtime_config=runtime,
+        enforce_stage_order=False,
+        lark_auth_coordinator=_AuthorizedLarkAuthCoordinator(),
+    )
+    session = SessionStore(runs).create_session()
+
+    with _live_server(app) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 900, "height": 800})
+        page.goto(
+            f"{base_url}/?session_id={session.session_id}",
+            wait_until="networkidle",
+        )
+        rows = page.locator(
+            "[data-image-source-list] [data-image-source-row]"
+        )
+        initial_count = rows.count()
+        assert initial_count > 1
+
+        rows.first.get_by_role("button", name="删除").click()
+        dialog = page.get_by_role("dialog", name="删除图片源")
+        assert dialog.is_visible()
+        assert "不会删除共享盘中的文件" in dialog.inner_text()
+        dialog.get_by_role("button", name="取消").click()
+        assert rows.count() == initial_count
+
+        rows.first.get_by_role("button", name="删除").click()
+        page.get_by_role("dialog", name="删除图片源").get_by_role(
+            "button", name="确认删除"
+        ).click()
+        assert rows.count() == initial_count - 1
+        browser.close()
+
+
 def test_deterministic_two_page_browser_acceptance(tmp_path):
     app, store, session_id = _prepared_browser_session(tmp_path)
     evidence_root = Path(

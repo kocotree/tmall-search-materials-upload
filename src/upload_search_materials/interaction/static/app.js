@@ -34,6 +34,14 @@
   const taskStageProgress = document.querySelector("[data-task-stage-progress]");
   const taskAutoShutdown = document.querySelector("[data-task-auto-shutdown]");
   const endCurrentTaskButton = document.querySelector("[data-end-current-task]");
+  const confirmationModal = document.querySelector("[data-confirmation-modal]");
+  const confirmationCard = confirmationModal?.querySelector("[data-confirmation-card]");
+  const confirmationTitle = confirmationModal?.querySelector("[data-confirmation-title]");
+  const confirmationMessage = confirmationModal?.querySelector("[data-confirmation-message]");
+  const confirmationAccept = confirmationModal?.querySelector("[data-confirmation-accept]");
+  const confirmationCancel = confirmationModal?.querySelector(
+    ".confirmation-modal-card [data-confirmation-cancel]",
+  );
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
   const teamIndexConfig = document.querySelector('[data-component="TeamIndexConfig"]');
   const larkBaseConfig = document.querySelector('[data-component="LarkBaseConfig"]');
@@ -76,6 +84,8 @@
   let currentApprovalUploadIdentity = null;
   let persistenceInFlight = false;
   let endCurrentTaskInFlight = false;
+  let confirmationResolver = null;
+  let confirmationReturnFocus = null;
   let stageLocalActionInFlight = false;
   let pendingBackNavigation = false;
   let pendingPersistenceMode = null;
@@ -144,6 +154,75 @@
   function apiPath(suffix = "") {
     return `/api/sessions/${encodeURIComponent(sessionId)}${suffix}`;
   }
+
+  function closeConfirmation(confirmed) {
+    if (!confirmationModal || confirmationModal.hidden) return;
+    confirmationModal.hidden = true;
+    document.body.classList.remove("confirmation-modal-open");
+    const resolve = confirmationResolver;
+    const returnFocus = confirmationReturnFocus;
+    confirmationResolver = null;
+    confirmationReturnFocus = null;
+    if (returnFocus instanceof HTMLElement && returnFocus.isConnected) {
+      returnFocus.focus({ preventScroll: true });
+    }
+    resolve?.(Boolean(confirmed));
+  }
+
+  function confirmAction({
+    title = "确认操作",
+    message = "确定继续吗？",
+    confirmLabel = "确认",
+    danger = false,
+  } = {}) {
+    if (
+      !confirmationModal
+      || !confirmationCard
+      || !confirmationTitle
+      || !confirmationMessage
+      || !confirmationAccept
+      || !confirmationCancel
+    ) return Promise.resolve(false);
+    if (!confirmationModal.hidden) closeConfirmation(false);
+    confirmationReturnFocus = document.activeElement;
+    confirmationTitle.textContent = title;
+    confirmationMessage.textContent = message;
+    confirmationAccept.textContent = confirmLabel;
+    confirmationCard.dataset.danger = danger ? "true" : "false";
+    confirmationModal.hidden = false;
+    document.body.classList.add("confirmation-modal-open");
+    window.requestAnimationFrame(() => confirmationCancel.focus());
+    return new Promise((resolve) => {
+      confirmationResolver = resolve;
+    });
+  }
+
+  confirmationModal?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-confirmation-accept]")) {
+      closeConfirmation(true);
+      return;
+    }
+    if (event.target.closest("[data-confirmation-cancel]")) {
+      closeConfirmation(false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (!confirmationModal || confirmationModal.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeConfirmation(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [confirmationCancel, confirmationAccept].filter(Boolean);
+    if (!focusable.length) return;
+    const currentIndex = focusable.indexOf(document.activeElement);
+    const nextIndex = event.shiftKey
+      ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+      : (currentIndex >= focusable.length - 1 ? 0 : currentIndex + 1);
+    event.preventDefault();
+    focusable[nextIndex].focus();
+  });
 
   function formatBytes(value) {
     if (value == null || value === "") return "大小未知";
@@ -482,7 +561,7 @@
       renderStatus();
       scheduleAutoSave();
     });
-    imageSourceConfig.querySelector("[data-image-source-list]").addEventListener("click", (event) => {
+    imageSourceConfig.querySelector("[data-image-source-list]").addEventListener("click", async (event) => {
       const picker = event.target.closest("[data-pick-image-source]");
       if (picker) {
         pickImageSource(picker.closest("[data-image-source-row]"));
@@ -504,7 +583,17 @@
       }
       const button = event.target.closest("[data-remove-image-source]");
       if (!button || imageSourceRows().length <= 1) return;
-      button.closest("[data-image-source-row]").remove();
+      const row = button.closest("[data-image-source-row]");
+      const label = row.querySelector('[name="image_source_labels"]')?.value.trim()
+        || "这个图片源";
+      const confirmed = await confirmAction({
+        title: "删除图片源",
+        message: `确定从本次配置中删除“${label}”吗？\n\n只会移除当前配置，不会删除共享盘中的文件。`,
+        confirmLabel: "确认删除",
+        danger: true,
+      });
+      if (!confirmed) return;
+      row.remove();
       updateImageSourceConfig();
       uiState = UiState.markDirty(uiState);
       renderStatus();
@@ -2875,7 +2964,7 @@
     return ids;
   }
 
-  function removeProductFromCurrentTask(productId, productTitle, data) {
+  async function removeProductFromCurrentTask(productId, productTitle, data) {
     if (galleryJobIsActive()) return false;
     const normalizedProductId = String(productId || "").trim();
     const removed = removedProductIdSet();
@@ -2886,9 +2975,13 @@
       return false;
     }
     const displayTitle = String(productTitle || `商品 ${normalizedProductId}`).trim();
-    if (!window.confirm(
-      `确定从本次任务中去掉“${displayTitle}”（商品 ID ${normalizedProductId}）吗？\n\n该商品的候选文件夹、已选图片和后续坑位会一并移除。`,
-    )) return false;
+    const confirmed = await confirmAction({
+      title: "去掉当前商品",
+      message: `确定从本次任务中去掉“${displayTitle}”（商品 ID ${normalizedProductId}）吗？\n\n该商品的候选文件夹、已选图片和后续坑位会一并移除。`,
+      confirmLabel: "确认去掉",
+      danger: true,
+    });
+    if (!confirmed) return false;
 
     const selectedRows = selectedAssetDecisions();
     const retainedSelectedRows = selectedRows.filter(
@@ -2980,8 +3073,8 @@
       "aria-label",
       `去掉当前商品：${productTitle || productId}`,
     );
-    button.addEventListener("click", () => {
-      removeProductFromCurrentTask(productId, productTitle, data);
+    button.addEventListener("click", async () => {
+      await removeProductFromCurrentTask(productId, productTitle, data);
     });
     return button;
   }
@@ -4599,7 +4692,12 @@
         reject.type = "button";
         const actionStatus = element("small", "", "采用只会更新坑位草稿，仍需点击“确认计划并处理图片”。");
         adopt.addEventListener("click", async () => {
-          if (!window.confirm(`${difference}\n确认采用为草稿吗？此操作不会处理图片或上传。`)) {
+          const confirmed = await confirmAction({
+            title: "采用该方案",
+            message: `${difference}\n\n确认采用为草稿吗？此操作不会处理图片或上传。`,
+            confirmLabel: "确认采用",
+          });
+          if (!confirmed) {
             actionStatus.textContent = "已取消采用，当前草稿保持不变。";
             return;
           }
@@ -4689,14 +4787,17 @@
       const hasDraft = [...stateByProduct.values()].some(
         (assignments) => assignments.length > 0,
       );
-      if (
-        hasDraft
-        && !window.confirm(
-          "重新 AI 编排会在返回成功后替换当前未确认坑位草稿。是否继续？",
-        )
-      ) {
-        agentStatus.textContent = "已取消 AI 重新编排，当前草稿保持不变。";
-        return;
+      if (hasDraft) {
+        const confirmed = await confirmAction({
+          title: "重新 AI 编排",
+          message: "返回成功后会替换当前未确认的坑位草稿。是否继续？",
+          confirmLabel: "继续编排",
+          danger: true,
+        });
+        if (!confirmed) {
+          agentStatus.textContent = "已取消 AI 重新编排，当前草稿保持不变。";
+          return;
+        }
       }
       agentButton.disabled = true;
       agentStatus.textContent = "正在生成受控缩略图并写入 Agent 请求…";
@@ -4769,9 +4870,13 @@
         "会按当前已选图片重新生成全部未确认坑位，并使旧裁剪输出与文案失效。",
       );
       replanButton.addEventListener("click", async () => {
-        if (!window.confirm(
-          "重新自动编排会替换当前坑位草稿，并使已有裁剪输出和文案失效。是否继续？",
-        )) return;
+        const confirmed = await confirmAction({
+          title: "重新自动编排",
+          message: "会替换当前坑位草稿，并使已有裁剪输出和文案失效。是否继续？",
+          confirmLabel: "继续编排",
+          danger: true,
+        });
+        if (!confirmed) return;
         replanButton.disabled = true;
         replanStatus.textContent = "正在按当前选择重新编排…";
         try {
@@ -6268,11 +6373,15 @@
             persist(true);
             draw();
           });
-          remove.addEventListener("click", () => {
+          remove.addEventListener("click", async () => {
             const currentSlotId = slotId.value.trim() || assignment.slot_id;
-            if (!window.confirm(
-              `确定去掉当前坑位“${currentSlotId}”吗？\n\n该坑位的图片编排会移除，已有图片处理结果和文案将失效。`,
-            )) return;
+            const confirmed = await confirmAction({
+              title: "去掉当前坑位",
+              message: `确定去掉当前坑位“${currentSlotId}”吗？\n\n该坑位的图片编排会移除，已有图片处理结果和文案将失效。`,
+              confirmLabel: "确认去掉",
+              danger: true,
+            });
+            if (!confirmed) return;
             const assignments = stateByProduct.get(productId);
             assignments.splice(slotIndex, 1);
             persist(true);
@@ -7482,10 +7591,13 @@
       ? " 当前步骤尚未保存的修改也不会保留。"
       : "";
     if (!alreadyConfirmed) {
-      const confirmed = window.confirm(
-        `${currentBackNavigation.message || "返回后，当前步骤以及后面的选择会失效。"}`
-        + `${unsavedWarning}\n\n是否继续？`,
-      );
+      const confirmed = await confirmAction({
+        title: "返回上一步",
+        message: `${currentBackNavigation.message || "返回后，当前步骤以及后面的选择会失效。"}`
+          + `${unsavedWarning}\n\n是否继续？`,
+        confirmLabel: "确认返回",
+        danger: true,
+      });
       if (!confirmed) return;
     }
     window.clearTimeout(autoSaveTimer);
@@ -7516,9 +7628,12 @@
 
   async function endCurrentTask() {
     if (!sessionId || endCurrentTaskInFlight) return;
-    const confirmed = window.confirm(
-      "确定结束当前任务吗？未完成流程将暂停，任务记录会保留，之后仍可恢复。",
-    );
+    const confirmed = await confirmAction({
+      title: "结束当前任务",
+      message: "确定结束当前任务吗？未完成流程将暂停，任务记录会保留，之后仍可恢复。",
+      confirmLabel: "确认结束",
+      danger: true,
+    });
     if (!confirmed) return;
     endCurrentTaskInFlight = true;
     endCurrentTaskButton.disabled = true;

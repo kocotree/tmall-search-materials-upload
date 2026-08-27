@@ -46,7 +46,11 @@ from .lark_base_sync import (
     sync_product_metadata_from_snapshot,
 )
 from .material_state import build_completeness_matrix
-from .collection_runtime import attempt_path, read_json_object
+from .collection_runtime import (
+    CollectionRuntimeError,
+    attempt_path,
+    read_json_object,
+)
 from .collection_readiness import merge_default_safe_popup_selectors
 from .persistence import atomic_write_bytes, atomic_write_json, read_json
 from .runtime_config import RuntimeConfig
@@ -301,23 +305,47 @@ def _archive_prior_attempt_checkpoint(
 ) -> Path | None:
     if not attempt_id or not checkpoint.is_file():
         return None
-    prior = validate_checkpoint_identity(
-        checkpoint,
-        {
-            "scan_mode": "high-value",
-            **{
-                key: value
-                for key, value in checkpoint_context.items()
-                if key != "attempt_id"
-            },
-        },
-        compatible_missing_fields=frozenset({"attempt_id"}),
-    )
+    prior = read_json_object(checkpoint)
     if not prior:
         return None
     prior_attempt_id = str(prior.get("attempt_id", "")).strip()
-    if not prior_attempt_id or prior_attempt_id == attempt_id:
+    if not prior_attempt_id:
+        # Legacy checkpoints without an attempt identity can only be resumed
+        # when they belong to the exact current handoff.  Keep the existing
+        # fail-closed behavior for those ambiguous files.
+        validate_checkpoint_identity(
+            checkpoint,
+            {
+                "scan_mode": "high-value",
+                **{
+                    key: value
+                    for key, value in checkpoint_context.items()
+                    if key != "attempt_id"
+                },
+            },
+            compatible_missing_fields=frozenset({"attempt_id"}),
+        )
         return None
+    if prior_attempt_id == attempt_id:
+        validate_checkpoint_identity(
+            checkpoint,
+            {"scan_mode": "high-value", **checkpoint_context},
+        )
+        return None
+    # A published checkpoint from an earlier immutable attempt is historical
+    # evidence, not a resumable checkpoint for the new attempt.  Validate its
+    # own stable identity without comparing the old revision/input to the new
+    # handoff, then preserve a copy in the old attempt directory.  The current
+    # projection stays intact until a new attempt has been fully validated and
+    # atomically published.
+    validate_checkpoint_identity(
+        checkpoint,
+        {
+            "scan_mode": "high-value",
+            "session_id": checkpoint_context["session_id"],
+            "attempt_id": prior_attempt_id,
+        },
+    )
     archive = (
         checkpoint.parent
         / "attempts"
@@ -333,10 +361,176 @@ def _archive_prior_attempt_checkpoint(
                 raise CheckpointIdentityError(
                     f"CHECKPOINT_ARCHIVE_CONFLICT:{destination.name}"
                 )
-            source.unlink()
         else:
-            source.replace(destination)
+            atomic_write_bytes(destination, source.read_bytes())
     return archive
+
+
+def _reuse_published_collection(
+    session_path: Path,
+    setup_path: Path,
+    setup_input: dict[str, Any],
+    *,
+    attempt_id: str | None,
+    artifact_root: Path,
+    output: Path,
+    checkpoint: Path,
+    page_evidence: Path,
+    pagination_evidence: Path,
+    checkpoint_context: dict[str, Any],
+) -> list[dict[str, str]] | None:
+    """Clone a verified completed collection for an identical setup input.
+
+    The previous immutable attempt remains untouched.  The cloned checkpoint
+    is rebound to the current handoff and records its provenance, so later
+    stage/result identity checks still refer to the current revision.
+    """
+
+    if not attempt_id:
+        return None
+    promotion_root = session_path / "collected" / "promotion"
+    current_root = promotion_root / "current"
+    try:
+        publication = read_json_object(current_root / "publication.json")
+        if not publication:
+            return None
+        prior_attempt_id = str(publication.get("attempt_id", "")).strip()
+        if not prior_attempt_id or prior_attempt_id == attempt_id:
+            return None
+        prior_revision = int(publication.get("revision", -1))
+        prior_input_sha256 = str(
+            publication.get("input_sha256", "")
+        ).strip()
+        prior_input = read_json_object(
+            setup_path
+            / "revisions"
+            / f"{prior_revision:04d}"
+            / "input.json"
+        )
+        if (
+            not prior_input
+            or prior_input.get("values") != setup_input.get("values")
+            or publication.get("session_id")
+            != checkpoint_context["session_id"]
+            or publication.get("selector_profile_sha256")
+            != checkpoint_context["selector_profile_sha256"]
+            or publication.get("target_store")
+            != checkpoint_context["target_store"]
+        ):
+            return None
+
+        source_output = current_root / output.name
+        source_checkpoint = current_root / checkpoint.name
+        source_page_evidence = current_root / page_evidence.name
+        source_pagination_evidence = (
+            current_root / pagination_evidence.name
+        )
+        required = (
+            source_output,
+            source_checkpoint,
+            source_page_evidence,
+            source_pagination_evidence,
+        )
+        if any(not path.is_file() for path in required):
+            return None
+        prior_checkpoint = validate_checkpoint_identity(
+            source_checkpoint,
+            {
+                "scan_mode": "high-value",
+                "session_id": checkpoint_context["session_id"],
+                "revision": prior_revision,
+                "input_sha256": prior_input_sha256,
+                "selector_profile_sha256": checkpoint_context[
+                    "selector_profile_sha256"
+                ],
+                "attempt_id": prior_attempt_id,
+                "target_store": checkpoint_context["target_store"],
+            },
+        )
+        if not prior_checkpoint or prior_checkpoint.get("status") != "complete":
+            return None
+        if (
+            sha256_file(source_output)
+            != prior_checkpoint.get("output_sha256")
+            or sha256_file(source_checkpoint)
+            != publication.get("checkpoint_sha256")
+            or sha256_file(source_pagination_evidence)
+            != prior_checkpoint.get("pagination_evidence_sha256")
+            or sha256_file(source_pagination_evidence)
+            != publication.get("pagination_evidence_sha256")
+        ):
+            return None
+        rows = read_backend_status(source_output)
+        product_ids = [
+            str(row.get("商品ID", "")).strip() for row in rows
+        ]
+        if (
+            publication.get("row_count") != len(rows)
+            or prior_checkpoint.get("row_count") != len(rows)
+            or any(not product_id for product_id in product_ids)
+            or len(set(product_ids)) != len(product_ids)
+        ):
+            return None
+        pagination_document = read_json(source_pagination_evidence)
+        pagination_events = (
+            pagination_document.get("events", [])
+            if isinstance(pagination_document, dict)
+            else []
+        )
+        if not any(
+            isinstance(event, dict)
+            and event.get("event_type") == "origin"
+            and event.get("current_page") == 1
+            for event in pagination_events
+        ) or not any(
+            isinstance(event, dict)
+            and event.get("event_type") == "terminal"
+            and event.get("current_page") == event.get("terminal_page")
+            and event.get("next_enabled") is False
+            for event in pagination_events
+        ):
+            return None
+    except (
+        CheckpointIdentityError,
+        CollectionRuntimeError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    atomic_write_bytes(output, source_output.read_bytes())
+    atomic_write_bytes(
+        page_evidence,
+        source_page_evidence.read_bytes(),
+    )
+    atomic_write_bytes(
+        pagination_evidence,
+        source_pagination_evidence.read_bytes(),
+    )
+    rebound_checkpoint = dict(prior_checkpoint)
+    rebound_checkpoint.update(checkpoint_context)
+    rebound_checkpoint["reused_from_attempt_id"] = prior_attempt_id
+    rebound_checkpoint["reused_from_revision"] = prior_revision
+    rebound_checkpoint["reused_from_input_sha256"] = prior_input_sha256
+    rebound_checkpoint["reused_at"] = _now_iso()
+    atomic_write_json(checkpoint, rebound_checkpoint)
+    atomic_write_json(
+        artifact_root / "collection-reuse.json",
+        {
+            "schema_version": 1,
+            **checkpoint_context,
+            "reused_from_attempt_id": prior_attempt_id,
+            "reused_from_revision": prior_revision,
+            "reused_from_input_sha256": prior_input_sha256,
+            "output_sha256": rebound_checkpoint.get("output_sha256"),
+            "pagination_evidence_sha256": rebound_checkpoint.get(
+                "pagination_evidence_sha256"
+            ),
+            "reused_at": rebound_checkpoint["reused_at"],
+        },
+    )
+    return rows
 
 
 def _claim_setup(
@@ -868,6 +1062,7 @@ def process_setup_collection(
     output = artifact_root / "promotion-material-status.csv"
     checkpoint = artifact_root / "promotion-material-status.checkpoint.json"
     human_checkpoint = artifact_root / "human-checkpoint.json"
+    page_evidence_path = artifact_root / "store-page-evidence.json"
     pagination_evidence = artifact_root / "pagination-evidence.json"
     collected_at = _now_iso()
     collected_rows: list[dict[str, str]] = []
@@ -1083,7 +1278,7 @@ def process_setup_collection(
                 next_recovery="修复选择器后恢复同一 session",
             )
         wait_on_main_page(0, "before_collection_validation")
-        page_evidence = validate_collection_page(
+        validated_page = validate_collection_page(
             live_page,
             collection_selectors,
             expected_store=str(
@@ -1094,15 +1289,12 @@ def process_setup_collection(
             profile_sha256=profile.sha256,
         )
         evidence_document = {
-            **page_evidence,
+            **validated_page,
             "session_id": session_id,
             "stage_id": "setup",
             "revision": handoff["revision"],
             "input_sha256": handoff["input_sha256"],
         }
-        page_evidence_path = (
-            artifact_root / "store-page-evidence.json"
-        )
         _write_json(page_evidence_path, evidence_document)
         if progress_callback is not None:
             progress_callback(
@@ -1187,8 +1379,32 @@ def process_setup_collection(
         _write_json(page_evidence_path, evidence_document)
         return rows
 
+    reused_collection = False
     try:
-        if page is not None:
+        reused_rows = _reuse_published_collection(
+            session_path,
+            setup_path,
+            setup_input,
+            attempt_id=attempt_id,
+            artifact_root=artifact_root,
+            output=output,
+            checkpoint=checkpoint,
+            page_evidence=page_evidence_path,
+            pagination_evidence=pagination_evidence,
+            checkpoint_context=checkpoint_context,
+        )
+        if reused_rows is not None:
+            collected_rows = reused_rows
+            reused_collection = True
+            if progress_callback is not None:
+                progress_callback(
+                    "building_completeness",
+                    action="reuse_completed_collection",
+                    target="stage:completeness",
+                    retry_count=0,
+                    next_recovery="继续生成当前完整度巡检结果",
+                )
+        elif page is not None:
             collected_rows = collect(page)
         elif page_factory is not None:
             collected_rows = collect(
@@ -1349,7 +1565,7 @@ def process_setup_collection(
         "promotion_status": str(output),
         "checkpoint": str(checkpoint),
         "selector_evidence": str(selector_evidence),
-        "page_evidence": str(artifact_root / "store-page-evidence.json"),
+        "page_evidence": str(page_evidence_path),
         "pagination_evidence": str(pagination_evidence),
     }
     if attempt_id:
@@ -1360,7 +1576,7 @@ def process_setup_collection(
             checkpoint=checkpoint,
             output=output,
             selector_evidence=selector_evidence,
-            page_evidence=artifact_root / "store-page-evidence.json",
+            page_evidence=page_evidence_path,
             pagination_evidence=pagination_evidence,
             checkpoint_context=checkpoint_context,
             expected_rows=len(collected_rows),
@@ -1501,7 +1717,7 @@ def process_setup_collection(
     store._write_session_state(session_id, state)
     return {
         "status": "completed",
-        "reused": False,
+        "reused": reused_collection,
         "result": result,
         "completeness": matrix,
     }

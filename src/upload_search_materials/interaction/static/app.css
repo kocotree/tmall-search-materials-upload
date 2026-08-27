@@ -1877,10 +1877,78 @@ summary:focus-visible {
 .upload-material-row[data-status="success"] .upload-material-status { color: #17623d; }
 .upload-material-row[data-status="uncertain"] .upload-material-status { color: #83530a; }
 
+.confirmation-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.confirmation-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 28, 16, 0.48);
+  backdrop-filter: blur(3px);
+}
+
+.confirmation-modal-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: min(460px, 100%);
+  gap: 12px;
+  padding: 24px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(8, 28, 16, 0.24);
+}
+
+.confirmation-modal-kicker {
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.confirmation-modal-card h2 { margin: 0; font-size: 20px; }
+.confirmation-modal-card p {
+  margin: 0;
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+.confirmation-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.confirmation-modal-card[data-danger="true"] [data-confirmation-accept] {
+  color: white;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.confirmation-modal-card[data-danger="true"] [data-confirmation-accept]:hover:not(:disabled) {
+  color: white;
+  background: #8f2e22;
+  border-color: #8f2e22;
+}
+
+body.confirmation-modal-open { overflow: hidden; }
+
 @media (max-width: 760px) {
   .upload-confirmation-summary { grid-template-columns: repeat(2, 1fr); }
   .upload-result-header { align-items: flex-start; flex-direction: column; }
   .upload-result-outcome { justify-items: start; text-align: left; }
   .upload-material-row { grid-template-columns: 1fr; gap: 5px; }
   .upload-material-status { justify-self: start; }
+  .confirmation-modal { padding: 16px; }
+  .confirmation-modal-card { padding: 20px; }
+  .confirmation-modal-actions { flex-direction: column-reverse; }
+  .confirmation-modal-actions button { width: 100%; }
 }

@@ -2185,6 +2185,28 @@ def test_end_current_task_uses_managed_shutdown_api_and_preserves_recovery(clien
     assert 'endCurrentTaskButton?.addEventListener("click", endCurrentTask)' in javascript
 
 
+def test_destructive_actions_use_workbench_confirmation_modal(client):
+    html = client.get("/").get_data(as_text=True)
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+    stylesheet = client.get("/static/app.css").get_data(as_text=True)
+
+    assert 'data-confirmation-modal' in html
+    assert 'role="dialog"' in html
+    assert 'aria-modal="true"' in html
+    assert "function confirmAction" in javascript
+    assert "window.confirm(" not in javascript
+    for label in (
+        "删除图片源",
+        "去掉当前商品",
+        "去掉当前坑位",
+        "返回上一步",
+        "结束当前任务",
+    ):
+        assert label in javascript
+    assert ".confirmation-modal" in stylesheet
+    assert "body.confirmation-modal-open" in stylesheet
+
+
 def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
     html = client.get("/").get_data(as_text=True)
     components = {

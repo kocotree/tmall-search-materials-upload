@@ -290,6 +290,132 @@ def test_setup_processor_collects_with_maintained_scanner_and_is_idempotent(
     }
 
 
+def test_setup_processor_reuses_verified_collection_after_unchanged_back_submit(
+    tmp_path, monkeypatch
+):
+    store, session, first_handoff, runtime, selectors = prepare_session(
+        tmp_path, [product_row("886506466908")]
+    )
+    calls = []
+
+    def scan(page, selector_values, **kwargs):
+        calls.append(kwargs["filter_selector_key"])
+        rows = [collected_row()]
+        emit_verified_single_page(kwargs, rows)
+        return rows
+
+    monkeypatch.setattr(
+        "upload_search_materials.supplement_collection."
+        "scan_recommended_material_status",
+        scan,
+    )
+    first = process_setup_collection(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        page=Page(),
+    )
+    state = store.load_session(session.session_id)
+    store.reopen_previous_stage(
+        session.session_id,
+        "completeness",
+        expected_revision=state["stages"]["completeness"]["revision"],
+    )
+    second_handoff = store.save_input(
+        session.session_id,
+        "setup",
+        {
+            "store": "测试店铺",
+            "products_csv": str(tmp_path / "products.csv"),
+            "rules_csv": str(tmp_path / "rules.csv"),
+        },
+    )
+
+    second = process_setup_collection(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        page=Page(),
+    )
+
+    assert second["status"] == "completed", second
+    assert second["reused"] is True
+    assert calls == ["high_value_filter"]
+    assert second_handoff["revision"] == first_handoff["revision"] + 1
+    assert second["result"]["revision"] == second_handoff["revision"]
+    assert second["result"]["attempt_id"] != first["result"]["attempt_id"]
+    checkpoint = json.loads(
+        (
+            session.path
+            / "collected"
+            / "promotion"
+            / "promotion-material-status.checkpoint.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert checkpoint["revision"] == second_handoff["revision"]
+    assert checkpoint["input_sha256"] == second_handoff["input_sha256"]
+    assert checkpoint["attempt_id"] == second["result"]["attempt_id"]
+    assert checkpoint["reused_from_attempt_id"] == first["result"]["attempt_id"]
+
+
+def test_setup_processor_starts_isolated_collection_after_changed_back_submit(
+    tmp_path, monkeypatch
+):
+    store, session, _, runtime, selectors = prepare_session(
+        tmp_path, [product_row("886506466908")]
+    )
+    calls = []
+
+    def scan(page, selector_values, **kwargs):
+        calls.append(kwargs["filter_selector_key"])
+        rows = [collected_row()]
+        emit_verified_single_page(kwargs, rows)
+        return rows
+
+    monkeypatch.setattr(
+        "upload_search_materials.supplement_collection."
+        "scan_recommended_material_status",
+        scan,
+    )
+    first = process_setup_collection(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        page=Page(),
+    )
+    state = store.load_session(session.session_id)
+    store.reopen_previous_stage(
+        session.session_id,
+        "completeness",
+        expected_revision=state["stages"]["completeness"]["revision"],
+    )
+    store.save_input(
+        session.session_id,
+        "setup",
+        {
+            "store": "变更店铺",
+            "products_csv": str(tmp_path / "products.csv"),
+            "rules_csv": str(tmp_path / "rules.csv"),
+        },
+    )
+
+    second = process_setup_collection(
+        runs_root=session.path.parent,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        page=Page("变更店铺"),
+    )
+
+    assert second["status"] == "completed", second
+    assert second["reused"] is False
+    assert calls == ["high_value_filter", "high_value_filter"]
+    assert second["result"]["attempt_id"] != first["result"]["attempt_id"]
+
+
 def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_path):
     store, session, _, runtime, _ = prepare_session(
         tmp_path, [product_row("886506466908")]

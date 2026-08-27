@@ -449,6 +449,27 @@
     </main>
   </div>
 
+  <div class="confirmation-modal" data-confirmation-modal hidden>
+    <div class="confirmation-modal-backdrop" data-confirmation-cancel></div>
+    <section
+      class="confirmation-modal-card"
+      data-confirmation-card
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirmation-modal-title"
+      aria-describedby="confirmation-modal-message"
+      tabindex="-1"
+    >
+      <span class="confirmation-modal-kicker">请确认</span>
+      <h2 id="confirmation-modal-title" data-confirmation-title>确认操作</h2>
+      <p id="confirmation-modal-message" data-confirmation-message></p>
+      <div class="confirmation-modal-actions">
+        <button type="button" class="secondary-button" data-confirmation-cancel>取消</button>
+        <button type="button" class="button-danger-secondary" data-confirmation-accept>确认</button>
+      </div>
+    </section>
+  </div>
+
   <script id="stage-registry" type="application/json">{{ stage_registry|tojson }}</script>
   <script src="{{ url_for('static', filename='ui-state.js', v=static_asset_version) }}" defer></script>
   <script src="{{ url_for('static', filename='app.js', v=static_asset_version) }}" defer></script>
