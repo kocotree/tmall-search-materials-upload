@@ -71,7 +71,7 @@ def test_each_stage_declares_its_exact_fields_and_dependency():
         "image_review": ("decisions", "user_notes"),
         "slots_copy": ("slot_assignments", "copy_edits", "user_notes"),
         "dry_run": ("decision", "warning_notes"),
-        "approval": ("task_ids", "confirmed_by"),
+        "approval": ("task_ids",),
         "production_confirmation": ("store", "product_ids", "task_ids", "slot_ids", "max_products", "approval_manifest_sha256", "final_confirmation", "notes"),
         "results": (),
     }

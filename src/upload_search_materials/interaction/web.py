@@ -390,6 +390,41 @@ def create_app(
         root = runtime.user_data_root or runtime.runs_root.parent
         return upload_history_snapshot_path(root)
 
+    def lark_upload_identity(*, refresh: bool) -> dict[str, str]:
+        """Return the trusted Feishu identity used for upload attribution."""
+
+        try:
+            status = lark_auth.status(refresh=refresh)
+        except (OSError, TypeError, ValueError):
+            return {
+                "status": "unavailable",
+                "reason_code": "LARK_UPLOAD_IDENTITY_UNAVAILABLE",
+                "message": "暂时无法确认飞书上传账号，请重新检查飞书授权后重试。",
+                "user_name": "",
+            }
+        auth_status = str(status.get("status") or "").strip()
+        user_name = str(status.get("user_name") or "").strip()
+        if auth_status == "authorized" and user_name:
+            return {
+                "status": "authorized",
+                "reason_code": "",
+                "message": f"上传负责人：{user_name}（飞书账号）",
+                "user_name": user_name,
+            }
+        if auth_status == "authorized":
+            return {
+                "status": "unavailable",
+                "reason_code": "LARK_UPLOAD_IDENTITY_NAME_MISSING",
+                "message": "飞书账号已授权，但未取得账号名称；请重新检查飞书授权后重试。",
+                "user_name": "",
+            }
+        return {
+            "status": "authorization_required",
+            "reason_code": "LARK_UPLOAD_IDENTITY_REQUIRED",
+            "message": "请先在任务配置中完成飞书授权，再提交上传任务。",
+            "user_name": "",
+        }
+
     def notify_workflow_dispatcher(session_id: str) -> None:
         if (
             workflow_dispatcher is not None
@@ -2000,9 +2035,7 @@ def create_app(
                 store, session_id
             )
         elif stage_id == "approval":
-            response["approver_options"] = _completeness_owner_options(
-                store, session_id, state
-            )
+            response["upload_identity"] = lark_upload_identity(refresh=True)
         return jsonify(response)
 
     @app.post(
@@ -3086,11 +3119,23 @@ def create_app(
                 ),
             )
 
+        approval_user_name = ""
         expected_revision = payload.get("revision")
         if "revision" in payload and (
             isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
         ):
             return _validation_error({"revision": "must be an integer"})
+
+        if stage_id == "approval":
+            upload_identity = lark_upload_identity(refresh=True)
+            if upload_identity["status"] != "authorized":
+                return _error(
+                    "upload identity unavailable",
+                    422,
+                    reason_code=upload_identity["reason_code"],
+                    message=upload_identity["message"],
+                )
+            approval_user_name = upload_identity["user_name"]
 
         if stage_id == "setup":
             submitted_sources = [
@@ -3336,7 +3381,8 @@ def create_app(
             approval_authorization.update(
                 {
                     "action": "approve_and_publish_exact_tasks",
-                    "confirmed_by": values.get("confirmed_by"),
+                    "confirmed_by": approval_user_name,
+                    "confirmed_by_source": "lark_authorized_user",
                     "final_confirmation": True,
                 }
             )
@@ -5973,30 +6019,6 @@ def _completeness_matrix_fallback_result(
         "data": matrix,
         "fallback_source": "completeness-matrix.json",
     }
-
-
-def _completeness_owner_options(
-    store: SessionStore,
-    session_id: str,
-    state: dict[str, Any],
-) -> list[str]:
-    result = _current_result(store, session_id, "completeness", state)
-    data = result.get("data") if isinstance(result, dict) else None
-    products = data.get("products") if isinstance(data, dict) else None
-    if not isinstance(products, list):
-        return []
-    owners: list[str] = []
-    seen: set[str] = set()
-    for product in products:
-        owner = (
-            str(product.get("owner", "")).strip()
-            if isinstance(product, dict)
-            else ""
-        )
-        if owner and owner not in seen:
-            seen.add(owner)
-            owners.append(owner)
-    return owners
 
 
 def _completed_approval_result(

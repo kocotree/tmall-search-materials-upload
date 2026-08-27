@@ -53,7 +53,6 @@
     <main class="workspace" id="main-workspace">
       <header class="workspace-header">
         <div>
-          <p class="eyebrow">按页面步骤完成即可</p>
           <h1 data-current-title>{{ stages[0].title }}</h1>
         </div>
         <div
@@ -62,10 +61,14 @@
           title="当前插件版本：{{ plugin_version }}"
           aria-label="当前插件版本：{{ plugin_version }}"
         >
-          <span>Plugin</span>
+          <span>版本</span>
           <strong>v{{ plugin_version }}</strong>
         </div>
         <dl class="header-meta">
+          <div class="header-lark-user" data-header-lark-user data-status="checking">
+            <dt>飞书账号</dt>
+            <dd data-header-lark-user-name>检查中</dd>
+          </div>
           <div><dt>状态</dt><dd><span class="status-badge" data-current-status>编辑中</span></dd></div>
           <div class="technical-only" aria-hidden="true"><dt>任务 ID</dt><dd data-session-label>{{ session_id or "尚未创建" }}</dd></div>
           <div class="technical-only" aria-hidden="true"><dt>Revision</dt><dd data-revision>0</dd></div>
@@ -76,7 +79,7 @@
         <div class="task-awareness-copy">
           <span class="task-awareness-kicker">整个任务</span>
           <strong data-task-status-label>正在读取任务状态</strong>
-          <p data-task-status-summary>页面会持续显示当前进度，需要解释或恢复时可让 Codex 读取同一状态。</p>
+          <p data-task-status-summary>这里会持续显示当前进度和下一步操作。</p>
         </div>
         <div class="task-awareness-meta">
           <span data-task-stage-progress>正在确认当前阶段</span>
@@ -105,50 +108,50 @@
 
           {% if stage.id == "completeness" %}
           <section class="result-module" data-component="InspectionMatrix">
-            <div class="module-heading"><div><p class="eyebrow">PROMOTION MATERIAL MATRIX</p><h3>搜推素材完整度</h3></div><span>目标 / 已有 / 缺失 / 证据</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>工作台后台返回真实巡检结果后，这里会展示完整度与缺口。</p></div></div>
+            <div class="module-heading"><h3>搜推素材完整度</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong></div></div>
           </section>
           {% elif stage.id == "asset_matching" %}
           <section class="result-module" data-component="AssetMatchGallery">
-            <div class="module-heading"><div><p class="eyebrow">ASSET MATCH</p><h3>文件夹归属与素材候选</h3></div><span>先确认文件夹，再读取图片</span></div>
+            <div class="module-heading"><h3>文件夹归属与素材候选</h3></div>
             <div class="match-legend" aria-label="匹配标签">
               <span>商品 ID 命中</span><span>SKU 命中</span><span class="is-pending">完整商品名称命中 · 待确认</span>
             </div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>工作台后台会先返回候选文件夹；确认归属后才读取图片候选。</p></div></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong></div></div>
           </section>
           {% elif stage.id == "image_review" %}
           <section class="result-module" data-component="CropDecision">
-            <div class="module-heading"><div><p class="eyebrow">CROP DECISION</p><h3>适用性与裁剪预览</h3></div><span>原图 / 目标比例</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>图片元数据和裁剪建议会从真实结果载入。</p></div></div>
+            <div class="module-heading"><h3>适用性与裁剪预览</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong></div></div>
           </section>
           {% elif stage.id == "slots_copy" %}
           <section class="result-module" data-component="SlotBoard">
-            <div class="module-heading"><div><p class="eyebrow">SLOT BOARD</p><h3>坑位编排</h3></div></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>坑位和素材组将根据真实任务数据生成。</p></div></div>
+            <div class="module-heading"><h3>坑位编排</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong></div></div>
           </section>
           <section class="result-module" data-component="CopyEditor">
-            <div class="module-heading"><div><p class="eyebrow">COPY EDITOR</p><h3>文案编辑</h3></div><span>标题 / 描述 / 校验</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>文案草稿和规则校验结果尚未生成。</p></div></div>
+            <div class="module-heading"><h3>文案编辑</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未生成</strong></div></div>
           </section>
           {% elif stage.id == "dry_run" %}
           <section class="result-module" data-component="DryRunSummary">
-            <div class="module-heading"><div><p class="eyebrow">DRY-RUN</p><h3>全量审查摘要</h3></div><span>任务 / 阻塞 / 证据</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>不预填数量；真实任务汇总会随工作台结果更新。</p></div></div>
+            <div class="module-heading"><h3>全量审查摘要</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong></div></div>
           </section>
           {% elif stage.id == "approval" %}
           <section class="result-module" data-component="ApprovalChecklist">
-            <div class="module-heading"><div><p class="eyebrow">UPLOAD CONFIRMATION</p><h3>上传任务确认</h3></div><span>任务明细 / 警告 / 一次提交</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>第四阶段提交后会自动预检；选择任务并提交后即授权自动上传。</p></div></div>
+            <div class="module-heading"><h3>上传任务确认</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未生成</strong></div></div>
           </section>
           {% elif stage.id == "production_confirmation" %}
           <section class="result-module" data-component="ProductionConfirmation">
-            <div class="module-heading"><div><p class="eyebrow">PRODUCTION</p><h3>生产确认摘要</h3></div><span>范围 / 数量 / 哈希</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未扫描</strong><p>这里仅核对交接内容，不在浏览器执行生产动作。</p></div></div>
+            <div class="module-heading"><h3>生产确认摘要</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>尚未生成</strong></div></div>
           </section>
           {% elif stage.id == "results" %}
           <section class="result-module" data-component="UploadResults">
-            <div class="module-heading"><div><p class="eyebrow">RESULTS</p><h3>上传结果</h3></div><span>商品 / 状态</span></div>
-            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>暂无上传结果</strong><p>完成上传后，这里会显示每个商品是否上传成功。</p></div></div>
+            <div class="module-heading"><h3>上传结果</h3></div>
+            <div class="result-content" data-result-content><div class="empty-state" data-empty-state="尚未扫描"><span aria-hidden="true">◎</span><strong>暂无上传结果</strong></div></div>
           </section>
           {% endif %}
 
@@ -156,7 +159,6 @@
           <section class="setup-login-gate" data-setup-login-gate aria-live="polite">
             <div class="setup-login-gate-spinner" aria-hidden="true"></div>
             <div>
-              <p class="eyebrow">QIANNIU</p>
               <h3 data-setup-login-title>正在准备千牛</h3>
               <p data-setup-login-message>系统会自动检查登录状态；如果需要登录，请在自动打开的千牛窗口中完成操作。</p>
             </div>
@@ -179,30 +181,27 @@
             <section class="setup-auto-section" aria-labelledby="setup-auto-title">
               <div class="form-heading compact-heading">
                 <div><p class="eyebrow">系统自动准备</p><h3 id="setup-auto-title">任务所需内容</h3></div>
-                <span>这些内容无需手动配置</span>
               </div>
               <div class="setup-status-grid">
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.products_available else 'false' }}">
                   <span>商品表</span><strong>{{ "已找到" if setup_inputs.products_available else "未找到" }}</strong>
-                  <p>系统已自动准备，无需操作。</p>
                   <input name="products_csv" type="hidden" value="{{ setup_inputs.products_csv }}" aria-describedby="setup-products_csv-error">
                   {% set quality = setup_inputs.input_quality %}
                   <p data-input-quality-summary>
-                    共 {{ quality.total }} 行；有效 {{ quality.valid }}；重复 ID {{ quality.duplicate_id }}；
-                    缺失 ID {{ quality.missing_id }}；非法 ID {{ quality.invalid_id }}；
-                    排除 {{ quality.excluded }}；可继续 {{ quality.processable }}。
+                    已加载 {{ quality.processable }} 个可用商品。
+                    {% if quality.duplicate_id or quality.missing_id or quality.invalid_id %}
+                    另有 {{ quality.duplicate_id }} 个重复、{{ quality.missing_id }} 个缺少 ID、{{ quality.invalid_id }} 个 ID 无效，需要检查。
+                    {% endif %}
                   </p>
                   <p class="field-error" id="setup-products_csv-error" data-field-error="products_csv" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.rules_available else 'false' }}">
                   <span>规则表</span><strong>{{ "已找到" if setup_inputs.rules_available else "未找到" }}</strong>
-                  <p>系统已自动准备，无需操作。</p>
                   <input name="rules_csv" type="hidden" value="{{ setup_inputs.rules_csv }}" aria-describedby="setup-rules_csv-error">
                   <p class="field-error" id="setup-rules_csv-error" data-field-error="rules_csv" aria-live="polite"></p>
                 </article>
                 <article class="setup-status-card" data-ready="pending">
                   <span>搜推素材</span><strong>全量自动采集</strong>
-                  <p>提交后由系统自动采集，无需操作。</p>
                 </article>
                 <article class="setup-status-card setup-status-card-wide collection-runtime-config" data-component="CollectionRuntimeConfig" data-ready="pending" hidden aria-hidden="true">
                   <span>采集运行环境</span><strong data-collection-runtime-summary>正在检测</strong>
@@ -226,7 +225,7 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide team-index-config" data-component="TeamIndexConfig" data-machine-runtime-control data-ready="{{ 'true' if setup_inputs.team_index_source_available else 'false' }}">
                   <span>团队索引文件夹</span><strong data-team-index-summary>{{ "可使用" if setup_inputs.team_index_source_available else "需要选择" }}</strong>
-                  <p class="section-instruction">系统会从当前可见盘符自动查找团队索引文件夹；未找到或存在多个时，可以手动选择。</p>
+                  <p class="section-instruction">未自动找到时，可以手动选择索引文件夹。</p>
                   <label>
                     索引文件夹
                     <input name="team_folder_index_root" type="text" value="{{ setup_inputs.team_folder_index_root }}" maxlength="1000" required placeholder="选择包含 sources 文件夹的团队索引目录" aria-describedby="setup-team_folder_index_root-error">
@@ -243,15 +242,12 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide lark-base-config" data-component="LarkBaseConfig" data-ready="pending" data-lark-product-base-url="{{ setup_inputs.lark_base.product_base_url }}" data-lark-product-table-id="{{ setup_inputs.lark_base.product_table_id }}" data-lark-upload-log-base-url="{{ setup_inputs.lark_base.upload_log_base_url }}" data-lark-upload-log-table-id="{{ setup_inputs.lark_base.upload_log_table_id }}">
                   <span>飞书多维表格</span><strong data-lark-base-summary>正在检查授权</strong>
-                  <p class="section-instruction">商品信息表和上传记录表已由团队预设。授权后，系统会把负责人和成功上传记录更新到本机；素材加载时自动排除已经成功上传的原图。</p>
                   <div class="lark-default-resources">
                     <a href="{{ setup_inputs.lark_base.product_base_url }}" target="_blank" rel="noopener">
                       <b>商品信息表</b>
-                      <small>用于同步负责人并支持筛选</small>
                     </a>
                     <a href="{{ setup_inputs.lark_base.upload_log_base_url }}" target="_blank" rel="noopener">
                       <b>上传记录表</b>
-                      <small>用于记录成功上传的商品与素材</small>
                     </a>
                   </div>
                   <div class="image-source-actions">
@@ -263,15 +259,13 @@
                 </article>
                 <article class="setup-status-card setup-status-card-wide image-source-config" data-component="ImageSourceConfig" data-ready="{{ 'true' if setup_inputs.image_sources_configured else 'false' }}">
                   <span>图片文件夹</span><strong data-image-source-summary>{% if image_sources %}已预填 {{ image_sources|length }} 个常用来源{% else %}本次尚未选择{% endif %}</strong>
-                  <p class="section-instruction">系统优先加载常用图片源；尚未保存时，会自动查找常用业务文件夹。提交时系统会自动检测。</p>
-                  <p>未自动找到时，可以直接粘贴本机能打开的文件夹路径，也可以点击“选择文件夹”。</p>
+                  <p class="section-instruction">确认本次图片源；未自动找到时，可粘贴路径或选择文件夹。</p>
                   <section class="source-section source-section-selected" aria-labelledby="selected-source-heading">
                     <div class="source-section-heading">
                       <div>
                         <span class="source-section-kicker">本次使用</span>
                         <h4 id="selected-source-heading">本次图片源</h4>
                       </div>
-                      <p>直接添加本机、映射盘或 UNC 文件夹；点击“选择文件夹”时可从 Y 盘、Z 盘等已挂载位置选择。</p>
                     </div>
                     <div class="image-source-list" data-image-source-list>
                       {% for source in image_sources %}
@@ -323,21 +317,13 @@
                   <p class="field-error" id="setup-image_source_labels-error" data-field-error="image_source_labels" aria-live="polite"></p>
                   <p class="field-error" id="setup-image_roots-error" data-field-error="image_roots" aria-live="polite"></p>
                 </article>
-                <article class="setup-status-card">
-                  <span>运行目录</span><strong>自动隔离</strong>
-                  <code class="technical-only" aria-hidden="true" data-setup-task-directory>{{ task_directory }}</code>
-                  <p>系统会自动保存本次任务记录，无需操作。</p>
-                </article>
-                <article class="setup-status-card">
-                  <span>视频</span><strong>本轮延期</strong>
-                  <p>不阻断当前图片测试。</p>
-                </article>
+                <code class="technical-only" aria-hidden="true" data-setup-task-directory>{{ task_directory }}</code>
               </div>
             </section>
 
             <details class="setup-advanced">
               <summary>高级设置 · 导入已有文件</summary>
-              <p>日常任务保持为空；仅用于人工清单、历史恢复或离线测试。</p>
+              <p>非日常使用，可保持为空。</p>
               <div class="field-grid">
                 <div class="field field-wide" data-field="asset_manifest">
                   <label for="setup-asset-manifest">人工图片素材清单</label>
@@ -417,12 +403,10 @@
                   id="{{ stage.id }}-{{ field.name }}"
                   name="{{ field.name }}"
                   type="{{ 'text' if field.component == 'path' else ('datetime-local' if field.component == 'datetime' else field.component) }}"
-                  {% if stage.id == "approval" and field.name == "confirmed_by" %}list="approval-confirmed-by-options" autocomplete="name"{% endif %}
                   aria-describedby="{{ stage.id }}-{{ field.name }}-error"
                   {% if field.component == "number" %}step="any" data-value-kind="number"{% endif %}
                   {% if field.required %}required{% endif %}{% if field.disabled %} disabled{% endif %}
                 >
-                {% if stage.id == "approval" and field.name == "confirmed_by" %}<datalist id="approval-confirmed-by-options" data-approver-options></datalist>{% endif %}
                 {% endif %}
                 {% endif %}
 
@@ -440,27 +424,30 @@
       </div>
 
       <section class="offline-panel" data-offline-panel aria-live="polite">
-        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong data-connection-label>工作台后台未连接</strong></div>
-        <p>工作台后台暂时不可用。页面中的草稿和已提交交接不会丢失；恢复服务后会继续处理。只有异常持续存在时才需要复制诊断说明并交给 Codex。</p>
-        <dl>
-          <div class="technical-only" aria-hidden="true"><dt>当前任务目录</dt><dd data-task-directory>{{ runs_root }}{{ '\\' if session_id else '' }}{{ session_id }}</dd></div>
-          <div><dt>当前阶段</dt><dd data-current-stage-label>{{ stages[0].title }}</dd></div>
-          <div><dt>最近一次提交时间</dt><dd data-last-submitted>尚未提交</dd></div>
-        </dl>
-        <button type="button" class="secondary-button" data-copy-recovery disabled>复制异常诊断说明</button>
+        <div class="offline-title"><span class="connection-dot" aria-hidden="true"></span><strong data-connection-label>当前任务暂时无法连接</strong></div>
+        <p>任务记录已保存，连接恢复后可以继续。</p>
+        <details class="diagnostic-details">
+          <summary>查看排查信息</summary>
+          <dl>
+            <div class="technical-only" aria-hidden="true"><dt>当前任务目录</dt><dd data-task-directory>{{ runs_root }}{{ '\\' if session_id else '' }}{{ session_id }}</dd></div>
+            <div><dt>当前阶段</dt><dd data-current-stage-label>{{ stages[0].title }}</dd></div>
+            <div><dt>最近一次提交时间</dt><dd data-last-submitted>尚未提交</dd></div>
+          </dl>
+          <button type="button" class="secondary-button" data-copy-recovery disabled>复制异常诊断说明</button>
+        </details>
       </section>
 
       <div class="handoff-spacer" aria-hidden="true"></div>
       <footer class="handoff-bar" data-component="HandoffBar">
         <div class="handoff-state">
           <span class="connection-dot" aria-hidden="true"></span>
-          <div><small>交接状态</small><strong data-handoff-status>编辑中</strong></div>
+          <div><small>任务状态</small><strong data-handoff-status>编辑中</strong></div>
         </div>
-        <p class="action-message" data-action-message aria-live="polite">填写完成后可保存草稿，或提交给工作台后台处理。</p>
+        <p class="action-message" data-action-message aria-live="polite">填写完成后，可以保存进度或提交。</p>
         <div class="handoff-actions">
           <button type="button" class="secondary-button" data-go-back hidden>上一步</button>
           <button type="button" class="secondary-button" data-withdraw-submission hidden>撤回提交并修改</button>
-          <button type="button" class="secondary-button" data-save-draft title="仅保存到当前任务，不触发后台处理">保存草稿</button>
+          <button type="button" class="secondary-button" data-save-draft title="保存本次进度，不开始下一步">保存草稿</button>
           <span class="submit-validation-hint" data-setup-image-source-incomplete role="status" aria-live="polite" hidden></span>
           <button type="button" class="primary-button" data-submit-stage>提交给工作台</button>
         </div>

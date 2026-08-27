@@ -102,7 +102,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="setup",
         title="任务配置",
-        description="确认索引和素材来源；后台自动识别店铺并全量采集“搜推高价值”，商品在第二阶段选择。",
+        description="确认团队索引和本次图片源。",
         component="setup_form",
         interaction_policy="frontend_preferred",
         fields=(
@@ -166,7 +166,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="completeness",
         title="完整度巡检",
-        description="展示“搜推高价值”全量商品，自动排除 uvno、积分、清仓、好物体验和会员日商品；用户选择其余商品后直接进入素材匹配。",
+        description="选择需要补充素材的商品。",
         component="inspection_matrix",
         previous_stage="setup",
         fields=(
@@ -177,7 +177,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="asset_matching",
         title="素材匹配",
-        description="候选文件夹默认采用；排除文件夹会立即同步候选和已选图片，再选择本次发布素材。",
+        description="确认候选文件夹并选择本次使用的素材。",
         component="asset_match_gallery",
         previous_stage="completeness",
         fields=(
@@ -226,7 +226,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="image_review",
         title="图片适用性检测",
-        description="审查第三阶段已选图片，同时比较 1:1 / 3:4 的可行性；本阶段不确定最终坑位比例，也不生成正式派生文件。",
+        description="检查图片是否适合使用。",
         component="image_review",
         previous_stage="asset_matching",
         visible=False,
@@ -244,7 +244,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="slots_copy",
         title="坑位编排、图片处理与文案",
-        description="先确认每个坑位的图片、顺序和唯一比例，再执行裁剪/压缩；输出校验通过后核对并填写完整文案。",
+        description="完成坑位编排、图片处理和文案确认。",
         component="slots_copy_editor",
         previous_stage="asset_matching",
         fields=(
@@ -268,19 +268,18 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="approval",
         title="上传任务确认",
-        description="查看自动预检结果并选择任务；提交即授权系统自动上传所选任务。",
+        description="确认需要上传的任务；提交后开始上传。",
         component="approval_table",
         interaction_policy="frontend_preferred",
         previous_stage="dry_run",
         fields=(
             _field("task_ids", "待授权上传任务", "multi_select", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
-            _field("confirmed_by", "授权人", "text", required=True, interaction_policy="frontend_preferred", fallback_reason_codes=UI_FALLBACK_REASONS),
         ),
     ),
     StageDefinition(
         id="production_confirmation",
         title="生产确认",
-        description="核对店铺、商品、坑位、任务和批准清单哈希并生成交接。",
+        description="查看历史生产确认信息。",
         component="production_confirmation",
         interaction_policy="frontend_preferred",
         previous_stage="approval",
@@ -299,7 +298,7 @@ STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         id="results",
         title="结果",
-        description="按商品展示本次上传是否成功。",
+        description="查看本次上传结果。",
         component="upload_results",
         previous_stage="approval",
         read_only=True,

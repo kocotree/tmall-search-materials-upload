@@ -37,6 +37,8 @@
   const imageSourceConfig = document.querySelector('[data-component="ImageSourceConfig"]');
   const teamIndexConfig = document.querySelector('[data-component="TeamIndexConfig"]');
   const larkBaseConfig = document.querySelector('[data-component="LarkBaseConfig"]');
+  const headerLarkUser = document.querySelector("[data-header-lark-user]");
+  const headerLarkUserName = document.querySelector("[data-header-lark-user-name]");
   const collectionRuntimeConfig = document.querySelector(
     '[data-component="CollectionRuntimeConfig"]',
   );
@@ -71,6 +73,7 @@
   let autoSaveTimer = null;
   let larkAuthPollTimer = null;
   let larkActivationInFlight = false;
+  let currentApprovalUploadIdentity = null;
   let persistenceInFlight = false;
   let endCurrentTaskInFlight = false;
   let stageLocalActionInFlight = false;
@@ -792,6 +795,18 @@
     const link = larkBaseConfig.querySelector("[data-lark-auth-link]");
     const awaiting = status === "awaiting_user";
     const authorized = status === "authorized";
+    const userName = String(payload?.user_name || "").trim();
+    if (headerLarkUser && headerLarkUserName) {
+      headerLarkUser.dataset.status = authorized
+        ? userName ? "authorized" : "checking"
+        : awaiting ? "awaiting" : "required";
+      headerLarkUserName.textContent = authorized
+        ? userName || "已授权"
+        : awaiting ? "等待授权" : "未授权";
+      headerLarkUser.title = authorized && userName
+        ? `当前飞书账号：${userName}`
+        : "可在任务配置中完成飞书授权";
+    }
     larkBaseConfig.dataset.ready = authorized ? "pending" : awaiting ? "pending" : "false";
     summary.textContent = authorized
       ? "已授权 · 正在检查"
@@ -893,7 +908,7 @@
       if (payload.status === "completed") {
         feedback.textContent = (
           `飞书数据已更新：负责人 ${ownerCount} 条，`
-          + `成功上传原图指纹 ${fingerprintCount} 条`
+          + `成功上传记录 ${fingerprintCount} 条`
           + `${updatedAt ? ` · ${updatedAt}` : ""}。`
         );
         return true;
@@ -901,7 +916,7 @@
       feedback.textContent = (
         `${payload.message || "本次更新未全部完成。"}`
         + ` 当前可用负责人 ${ownerCount} 条，`
-        + `成功上传原图指纹 ${fingerprintCount} 条。`
+        + `成功上传记录 ${fingerprintCount} 条。`
       );
       return payload.status === "partial";
     } catch (_error) {
@@ -1522,7 +1537,7 @@
       || (currentStageId === "slots_copy" && localCopyRequestInFlight)
       || (
         persistenceInFlight
-        && !["asset_matching", "slots_copy"].includes(currentStageId)
+        && !["completeness", "asset_matching", "slots_copy"].includes(currentStageId)
       );
     const backEnabled = Boolean(
       backVisible
@@ -1545,8 +1560,8 @@
     if (lockedByServer) {
       const reason = {
         completed: "该阶段已完成，不能再次保存或提交。",
-        ready_for_agent: "该阶段已提交，工作台后台正在排队处理。",
-        processing: "工作台后台正在处理该阶段，当前输入已锁定。",
+        ready_for_agent: "已提交，正在排队处理。",
+        processing: "正在处理，当前内容暂时不能修改。",
       }[uiState.serverStatus] || "该阶段当前不可编辑。";
       actionMessage.textContent = goCurrentStageButton.hidden
         ? reason
@@ -1708,12 +1723,12 @@
           ? "尚无完整页"
           : `已保存到第 ${worker.last_completed_page} 页`;
         actionMessage.textContent =
-          `检测到滑动验证，${savedPage}。请在 CDP Chrome 中完成验证；` +
+          `检测到滑动验证，${savedPage}。请在千牛窗口中完成验证；` +
           `验证通过后会自动继续采集。等待 ${Math.floor(Number(worker.elapsed_ms || 0) / 1000)} 秒。`;
         return;
       }
       const page = worker.last_completed_page == null
-        ? "首个 checkpoint 尚未完成"
+        ? "第一页尚未保存"
         : `已完成第 ${worker.last_completed_page} 页 · ${worker.row_count} 行`;
       const pagination = worker.pagination_origin_page == null
         ? "分页起点尚未验证"
@@ -1731,34 +1746,32 @@
     }
     if (currentCollectionStatus?.status === "processing_indeterminate") {
       actionMessage.textContent =
-        "Worker 归属或存活状态暂时无法确认；为避免误杀其他进程，将等待租约过期后再恢复。";
+        "暂时无法确认采集程序状态；系统会等待安全恢复，不会强行中断。";
       return;
     }
     if (recoverable) {
       actionMessage.textContent =
-        "已确认本任务拥有的采集 Worker 退出；可以立即从同一任务 checkpoint 恢复。";
+        "采集已经停止，可以从已保存的进度继续。";
       return;
     }
     if (!currentProcessingClaim) {
       actionMessage.textContent =
-        "该阶段处于处理中，但没有有效租约；工作台后台会校验并恢复原任务。";
+        "处理状态需要恢复，系统正在检查；任务数据已保留。";
       return;
     }
     if (currentProcessingClaim.expired) {
       if (specializedRecovery) {
         actionMessage.textContent =
-          "商品选择已经保留，工作台后台将通过唯一处理入口继续。";
+          "商品选择已保存，系统正在继续处理。";
         return;
       }
       actionMessage.textContent =
-        `工作台后台的处理租约已于 ` +
-        `${formatClaimTime(currentProcessingClaim.lease_expires_at)} 过期；` +
-        "可以恢复原任务并从已验证断点继续。";
+        `处理等待已于 ${formatClaimTime(currentProcessingClaim.lease_expires_at)} 超时；` +
+        "可以从已保存的进度继续。";
       return;
     }
     actionMessage.textContent =
-      `工作台后台正在处理，租约有效至 ` +
-      `${formatClaimTime(currentProcessingClaim.lease_expires_at)}；当前输入保持锁定。`;
+      "正在处理，请稍候；完成前当前内容暂时不能修改。";
   }
 
   function persistenceRequestId(stageId, mode) {
@@ -1779,14 +1792,14 @@
         workflowDispatch.stage_id === currentStageId
         && workflowDispatch.status === "queued"
       ) {
-        actionMessage.textContent = "提交已持久化，工作台后台已接收并正在排队。";
+        actionMessage.textContent = "已提交，正在排队处理。";
         return;
       }
       if (
         workflowDispatch.stage_id === currentStageId
         && workflowDispatch.status === "running"
       ) {
-        actionMessage.textContent = "工作台后台正在处理本阶段，页面会自动刷新结果。";
+        actionMessage.textContent = "正在处理，完成后页面会自动更新。";
         return;
       }
       if (
@@ -1794,20 +1807,17 @@
         && workflowDispatch.status === "failed"
       ) {
         actionMessage.textContent =
-          "工作台后台未能完成本阶段，诊断信息已保留；请按页面提示处理异常。";
+          "本步骤没有完成。排查信息已保留，请按页面提示处理。";
         return;
       }
       if (currentHandoffStatus.base_status === "ready") {
-        actionMessage.textContent = "工作台后台已接收提交，正在准备处理。";
+        actionMessage.textContent = "已提交，正在准备处理。";
         return;
       }
     }
     const wait = currentHandoffStatus.agent_wait;
     if (currentHandoffStatus.status === "waiting" && wait) {
-      actionMessage.textContent =
-        `兼容监听已连接（心跳租约约 ${Math.max(0, Number(wait.remaining_seconds || 0))} 秒）；` +
-        `本轮最长等待还剩约 ${Math.max(0, Number(wait.budget_remaining_seconds || 0))} 秒。` +
-        `表单仍可正常编辑。`;
+      actionMessage.textContent = "等待处理期间仍可继续编辑。";
       return;
     }
     if (currentHandoffStatus.resume_prompt) {
@@ -1822,7 +1832,7 @@
       && currentCollectionStatus?.status !== "recoverable"
     ) return;
     recoverProcessingButton.disabled = true;
-    actionMessage.textContent = "正在校验并恢复过期处理租约…";
+    actionMessage.textContent = "正在恢复当前任务…";
     try {
       const payload = await fetchJson(
         apiPath(`/stages/${currentStageId}/recover-processing`),
@@ -2344,7 +2354,11 @@
         const selectable = UiState.completenessProductSelectable(product);
         const slotsFull = !UiState.completenessProductHasOpenSlots(product);
         const card = element("article", "inspection-row");
+        const selectionDisabled = locked || !selectable;
         card.dataset.status = product.status || "needs_manual_review";
+        card.tabIndex = selectionDisabled ? -1 : 0;
+        card.setAttribute("role", "checkbox");
+        card.setAttribute("aria-disabled", String(selectionDisabled));
 
         const identity = element("div", "inspection-identity");
         identity.append(
@@ -2394,32 +2408,45 @@
         }
 
         const controls = element("div", "inspection-controls");
-        const choice = document.createElement("label");
-        choice.className = "inspection-choice";
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = selectable && selected.has(productId);
-        checkbox.disabled = locked || !selectable;
-        checkbox.setAttribute("aria-label", `选择商品 ${productId} 进入素材匹配`);
-        choice.append(
-          checkbox,
-          document.createTextNode(
-            selectable
-              ? "选择进入素材匹配"
-              : slotsFull
-                ? "坑位已满，无需补充"
-                : "已按规则排除",
-          ),
-        );
-        controls.append(choice);
-        checkbox.addEventListener("change", () => {
-          if (checkbox.checked) selected.add(productId);
-          else selected.delete(productId);
-          writeCompletenessSelectedIds(selected);
-          if (selectedCount) selectedCount.textContent = String(selected.size);
-        });
+        const stateBadge = element("span", "inspection-selection-state");
+        controls.append(stateBadge);
         card.append(identity, promotion, controls);
         list.appendChild(card);
+
+        const syncSelection = (nextSelected, { persist = true } = {}) => {
+          const isSelected = selectable && Boolean(nextSelected);
+          if (isSelected) selected.add(productId);
+          else selected.delete(productId);
+          card.dataset.selected = String(isSelected);
+          card.setAttribute("aria-checked", String(isSelected));
+          stateBadge.textContent = selectable
+            ? isSelected ? "已选择" : "未选择"
+            : slotsFull ? "坑位已满" : "已排除";
+          card.setAttribute(
+            "aria-label",
+            `${product.product_title || `商品 ${productId}`}，${stateBadge.textContent}`
+              + (selectionDisabled ? "，不可选择" : "，点击切换"),
+          );
+          if (!persist) return;
+          writeCompletenessSelectedIds(selected);
+          if (selectedCount) selectedCount.textContent = String(selected.size);
+        };
+        const toggleSelection = () => {
+          if (selectionDisabled) return;
+          syncSelection(!selected.has(productId));
+        };
+        card.addEventListener("click", (event) => {
+          if (event.target.closest("details, summary, a, button, input, select, textarea, label")) {
+            return;
+          }
+          toggleSelection();
+        });
+        card.addEventListener("keydown", (event) => {
+          if (!['Enter', ' '].includes(event.key)) return;
+          event.preventDefault();
+          toggleSelection();
+        });
+        syncSelection(selected.has(productId), { persist: false });
       });
     };
 
@@ -2750,6 +2777,54 @@
     return node;
   }
 
+  function renderProductNavigator(
+    mount,
+    items,
+    { label = "商品导航" } = {},
+  ) {
+    if (!mount) return;
+    const targets = (items || []).filter((item) => item?.target);
+    if (targets.length < 2) {
+      mount.replaceChildren();
+      return;
+    }
+    const existing = mount.querySelector("details");
+    const wasOpen = existing ? existing.open : true;
+    const details = element("details", "product-jump-nav");
+    details.open = wasOpen;
+    const summary = document.createElement("summary");
+    summary.append(
+      element("strong", "", label),
+      element("span", "", `${targets.length} 个商品`),
+    );
+    const links = element("nav", "product-jump-list");
+    links.setAttribute("aria-label", label);
+    targets.forEach((item) => {
+      const productId = String(item.productId || "");
+      const productTitle = String(item.productTitle || "").trim();
+      const button = element("button", "product-jump-button");
+      button.type = "button";
+      button.title = productTitle || `商品 ${productId}`;
+      button.append(
+        element("span", "", productTitle || `商品 ${productId}`),
+        element("small", "", `ID ${productId}`),
+      );
+      button.addEventListener("click", () => {
+        const reduceMotion = window.matchMedia?.(
+          "(prefers-reduced-motion: reduce)",
+        )?.matches;
+        item.target.scrollIntoView({
+          behavior: reduceMotion ? "auto" : "smooth",
+          block: "start",
+        });
+        item.target.focus({ preventScroll: true });
+      });
+      links.appendChild(button);
+    });
+    details.append(summary, links);
+    mount.replaceChildren(details);
+  }
+
   function folderDecisions() {
     return readJsonListControl("folder_decisions")
       .filter(
@@ -3076,6 +3151,9 @@
     if (!content) return;
 
     const review = element("section", "folder-review");
+    const productNavigator = element("div", "product-jump-mount");
+    const productTargets = [];
+    review.appendChild(productNavigator);
     let updateLocalGalleryAction = () => {};
     const decisionsByKey = new Map(
       materializeFolderDecisions(allCandidates).map((item) => [
@@ -3091,6 +3169,12 @@
         (item) => String(item.product_id || "") === productId,
       );
       const group = element("section", "folder-product");
+      group.tabIndex = -1;
+      productTargets.push({
+        productId,
+        productTitle: productCandidates[0]?.product_title,
+        target: group,
+      });
       const heading = element("div", "asset-product-heading");
       const headingText = element("div");
       headingText.append(
@@ -3258,6 +3342,7 @@
       });
       updateProgress();
     });
+    renderProductNavigator(productNavigator, productTargets);
     const localAction = element("div", "local-gallery-action");
     const localSummary = element("p", "asset-selection-summary");
     const localButton = element(
@@ -3291,7 +3376,7 @@
           ? "文件夹选择已变更，请重新加载图片后继续选图。"
           : galleryAlreadyLoaded
             ? "当前候选图片与文件夹选择一致；调整文件夹后可重新加载。"
-            : "这是本机固定操作，只读取已采用文件夹并生成候选图片，不会创建阶段交接。";
+            : "确认文件夹后加载候选图片。";
     };
     localButton.addEventListener("click", () => {
       prepareLocalGallery(localButton);
@@ -3393,11 +3478,14 @@
         "span",
         "",
         remoteChecked
-          ? "已知远端指纹会从候选中排除。"
-          : "后台仅有素材 ID，尚无图片指纹；最终上传前必须再次核对。",
+          ? "已排除上传记录中重复的图片。"
+          : "暂无可用的历史上传记录；上传前请核对是否重复。",
       ),
     );
     content.appendChild(safety);
+    const productNavigator = element("div", "product-jump-mount");
+    const productTargets = [];
+    content.appendChild(productNavigator);
 
     requirements.forEach((requirement) => {
       const productId = String(requirement.product_id || "");
@@ -3418,6 +3506,12 @@
       let pageCount = 1;
       let pageIndex = 0;
       const product = element("section", "asset-product");
+      product.tabIndex = -1;
+      productTargets.push({
+        productId,
+        productTitle: requirement.product_title,
+        target: product,
+      });
       const heading = element("div", "asset-product-heading");
       const title = element("div");
       const candidateSummary = element("span");
@@ -3964,6 +4058,7 @@
       });
       draw();
     });
+    renderProductNavigator(productNavigator, productTargets);
     if (galleryComplete) {
       const focusIdentity = [
         sessionId,
@@ -4269,7 +4364,7 @@
     if (copyModule) copyModule.hidden = true;
     handoffActions?.classList.add("is-stage-managed");
     if (actionMessage) {
-      actionMessage.textContent = "当前阶段由子页面主按钮推进；修改仍会自动保存到任务目录。";
+      actionMessage.textContent = "请使用页面中的主按钮继续；修改会自动保存。";
     }
     content.replaceChildren();
     const blockingReasons = Array.isArray(view.result?.blocking_reasons)
@@ -4642,7 +4737,6 @@
           (item) => `${item.product_id}：${(item.slot_sizes || []).join("+") || "0 个完整坑位"}；未使用 ${item.unused_count || 0} 张`,
         ).join(" · "),
       ),
-      element("span", "", `未确认坑位前不会生成正式图片。已阻止 ${data.blocked_outputs?.length || 0} 张图片。`),
     );
     const planningPage = subpages.compose || subpages.process;
     planningPage.appendChild(overview);
@@ -4685,8 +4779,9 @@
       });
       planningPage.append(replanButton, replanStatus);
     }
+    const composeProductNavigator = element("div", "product-jump-mount");
     const board = element("div", "slot-board-products");
-    planningPage.appendChild(board);
+    planningPage.append(composeProductNavigator, board);
     const composeActionPanel = element("section", "slot-primary-action");
     const composeStatus = element(
       "span",
@@ -4716,6 +4811,7 @@
         "比例按坑位统一选择；每张图片只调整当前比例的裁剪框。",
       ),
     );
+    const processProductNavigator = element("div", "product-jump-mount");
     const processWorkspace = element("div", "slot-process-workspace");
     const processStatus = element(
       "span",
@@ -4753,7 +4849,12 @@
       cropPreflightButton,
       processPlanButton,
     );
-    processPanel.append(processHeading, processWorkspace, processActions);
+    processPanel.append(
+      processHeading,
+      processProductNavigator,
+      processWorkspace,
+      processActions,
+    );
     subpages.process.appendChild(processPanel);
     const normalizedCropBox = (output) => {
       const value = output?.crop_box?.normalized || output?.crop_box;
@@ -4985,12 +5086,22 @@
     };
     const renderProcessingPage = () => {
       processWorkspace.replaceChildren();
+      const productTargets = new Map();
       let blockedReason = "";
       [...stateByProduct.values()].flat().forEach((assignment) => {
         const product = products.find(
           (item) => String(item.product_id) === String(assignment.product_id),
         );
         const card = element("article", "slot-process-card");
+        card.tabIndex = -1;
+        const productId = String(assignment.product_id || "");
+        if (!productTargets.has(productId)) {
+          productTargets.set(productId, {
+            productId,
+            productTitle: product?.product_title,
+            target: card,
+          });
+        }
         const heading = element("div", "slot-product-heading");
         const recommendationSource = {
           agent_assisted: "AI 建议",
@@ -5123,6 +5234,11 @@
         card.append(heading, grid);
         processWorkspace.appendChild(card);
       });
+      renderProductNavigator(
+        processProductNavigator,
+        [...productTargets.values()],
+        { label: "图片裁剪商品导航" },
+      );
       const needsCompression = [...stateByProduct.values()]
         .flat()
         .some((assignment) => {
@@ -5418,7 +5534,7 @@
         element(
           "span",
           "",
-          "系统校验并本地上传当前坑位第 1 张最终图片，唤起千牛文案；只读取草稿、不填充、不发布，全部完成后请核对标题和描述。",
+          "系统会为每个坑位生成文案；全部完成后，请核对标题和描述。",
         ),
       );
       const finish = element(
@@ -5468,7 +5584,7 @@
         writeJsonListControl("copy_edits", merged, { notify: true });
         copyStatus.textContent = drafts.length === assignments.length
           ? "千牛文案已载入；请核对全部标题、描述、依据和风险。"
-          : `工作台后台已回填 ${drafts.length}/${assignments.length} 个坑位，正在继续处理。`;
+          : `已完成 ${drafts.length}/${assignments.length} 个坑位，正在继续生成。`;
         renderCopyEditor(processed, requestId);
       };
       const pollCopyRequest = async (requestId) => {
@@ -5503,7 +5619,7 @@
             return;
           }
           if (requestState === "failed") {
-            copyStatus.textContent = `文案生成遇到问题，已保留 ${progressDrafts.length}/${assignments.length} 个坑位并将诊断交给 Codex。`;
+            copyStatus.textContent = `文案生成遇到问题，已保留 ${progressDrafts.length}/${assignments.length} 个坑位；排查信息已保存。`;
             copyButton.disabled = false;
             return;
           }
@@ -5514,8 +5630,8 @@
           }
           copyButton.disabled = true;
           copyStatus.textContent = requestState === "processing"
-            ? `工作台后台正在复用千牛文案流程：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
-            : "图片已确认，工作台后台正在获取千牛文案。";
+            ? `正在生成千牛文案：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
+            : "图片已确认，正在获取千牛标题和描述。";
           window.setTimeout(() => pollCopyRequest(requestId), 1500);
         } catch (error) {
           if (!copyVersions.isConnected) return;
@@ -5540,7 +5656,7 @@
               }),
             },
           );
-          copyStatus.textContent = "新版本已提交给工作台后台。";
+          copyStatus.textContent = "新版本已提交，正在生成。";
           applyCopyDrafts([], copyRequest.request_id);
         } catch (error) {
           setLocalCopyRequestInFlight(false);
@@ -5768,7 +5884,7 @@
           processed.copy_request?.request_id || processed.copy_request_id || "",
         );
         setLocalCopyRequestInFlight(Boolean(copyRequestId));
-        processStatus.textContent = `图片处理完成：${processed.slots?.length || 0} 个坑位；文案任务已交给工作台后台。`;
+        processStatus.textContent = `图片处理完成：${processed.slots?.length || 0} 个坑位；正在生成文案。`;
         renderProcessedPreview(processed);
         renderCopyEditor(
           processed,
@@ -5873,6 +5989,7 @@
 
     const draw = () => {
       board.replaceChildren();
+      const productTargets = [];
       const hasDraft = [...stateByProduct.values()].some(
         (assignments) => assignments.length > 0,
       );
@@ -5881,10 +5998,16 @@
       products.forEach((product) => {
         const productId = String(product.product_id || "");
         const section = element("section", "slot-product");
+        section.tabIndex = -1;
+        productTargets.push({
+          productId,
+          productTitle: product.product_title,
+          target: section,
+        });
         const heading = element("div", "slot-product-heading");
         heading.append(
-          element("strong", "", `商品 ${productId}`),
-          element("span", "", `3:4 ${product.available_by_ratio?.["3:4"] || 0} 张 · 1:1 ${product.available_by_ratio?.["1:1"] || 0} 张`),
+          element("strong", "", product.product_title || `商品 ${productId}`),
+          element("span", "", `商品 ID ${productId} · 3:4 ${product.available_by_ratio?.["3:4"] || 0} 张 · 1:1 ${product.available_by_ratio?.["1:1"] || 0} 张`),
         );
         const add = element("button", "button-secondary", "人工添加坑位");
         add.type = "button";
@@ -6145,6 +6268,11 @@
           drawAssets();
         });
       });
+      renderProductNavigator(
+        composeProductNavigator,
+        productTargets,
+        { label: "坑位编排商品导航" },
+      );
     };
     draw();
     persist();
@@ -6198,21 +6326,6 @@
     ));
   }
 
-  function hydrateApproverOptions(options) {
-    const list = document.querySelector("[data-approver-options]");
-    if (!list) return;
-    list.replaceChildren();
-    [...new Set(
-      (options || [])
-        .map((item) => String(item || "").trim())
-        .filter(Boolean),
-    )].forEach((owner) => {
-      const option = document.createElement("option");
-      option.value = owner;
-      list.appendChild(option);
-    });
-  }
-
   function renderUploadTaskConfirmation(view) {
     const module = document.querySelector('[data-component="ApprovalChecklist"]');
     const content = module?.querySelector("[data-result-content]");
@@ -6245,6 +6358,32 @@
     }
     content.dataset.approvalSelectionInitialized = selectionIdentity;
     content.replaceChildren();
+
+    const uploadOwnerName = String(
+      currentApprovalUploadIdentity?.user_name || "",
+    ).trim();
+    const uploadOwnerReady = currentApprovalUploadIdentity?.status === "authorized"
+      && Boolean(uploadOwnerName);
+    const uploadOwner = element("div", "upload-owner-identity");
+    uploadOwner.dataset.status = uploadOwnerReady ? "ready" : "required";
+    uploadOwner.append(
+      element("strong", "", "上传负责人"),
+      element(
+        "span",
+        "",
+        uploadOwnerReady
+          ? `${uploadOwnerName}（飞书账号）`
+          : "尚未取得飞书授权账号",
+      ),
+    );
+    if (!uploadOwnerReady) {
+      uploadOwner.appendChild(element(
+        "p",
+        "",
+        "请先在任务配置中完成飞书授权，再提交上传任务。",
+      ));
+    }
+    content.appendChild(uploadOwner);
 
     const summary = element("div", "upload-confirmation-summary");
     [
@@ -6475,8 +6614,8 @@
         if (payload.input) {
           hydrateForm(activeForm(), payload.input.values);
         }
-        if (requestedStageId === "approval") {
-          hydrateApproverOptions(payload.approver_options);
+        if (requestedStageId === "approval" && payload.upload_identity) {
+          currentApprovalUploadIdentity = payload.upload_identity;
         }
         renderStageResult(stages.get(requestedStageId).component);
       } finally {
@@ -6613,7 +6752,7 @@
       renderSubmission();
       renderStageResult(stages.get("asset_matching").component);
       actionMessage.textContent =
-        "文件夹决定已保存，本机正在加载候选图片；不会创建阶段交接。";
+        "文件夹选择已保存，正在加载候选图片。";
     } catch (error) {
       const fieldErrors = error.payload?.field_errors;
       if (fieldErrors) showFieldErrors(form, fieldErrors);
@@ -6907,7 +7046,7 @@
       ? "正在保存草稿…"
       : queued
         ? "草稿已保存，正在执行排队的提交…"
-        : "正在创建交接…";
+        : "正在提交…";
     let requestIdentity = null;
     try {
       await ensureSession();
@@ -6956,8 +7095,8 @@
               : "上传前检查发现需要修改的内容，已返回当前页面。"
             : "当前阶段已完成，可直接进入下一阶段检查。"
           : requestedStageId === "approval"
-            ? "发布授权已提交；工作台后台将自动上传所选任务。"
-            : "交接已持久化，工作台后台已接收并正在排队。";
+            ? "上传任务已提交，正在上传所选任务。"
+            : "已提交，正在排队处理。";
         if (
           payload.status !== "completed"
           && currentWorkflowDispatch?.online !== true
@@ -6991,7 +7130,7 @@
         }
         actionMessage.textContent = automatic
           ? `草稿已自动保存 · ${new Date().toLocaleTimeString()}`
-          : "草稿已保存；不会触发工作台后台处理。";
+          : "当前进度已保存，不会开始下一步。";
       }
       revisionLabel.textContent = String(revision);
       persistenceRequestIds.delete(persistenceIdentity.key);
@@ -7035,7 +7174,7 @@
       const waitStillLive = currentHandoffStatus?.agent_wait
         && !currentHandoffStatus.agent_wait.expired;
       const suffix = waitStillLive
-        ? "；兼容监听仍在线，但本次提交尚未成功"
+        ? "；任务仍在等待，但本次提交尚未成功"
         : "";
       const failureMessage = firstFieldMessage
         || error.userMessage
@@ -7088,7 +7227,7 @@
   async function withdrawSubmission() {
     if (!sessionId || uiState.serverStatus !== "ready_for_agent") return;
     withdrawButton.disabled = true;
-    actionMessage.textContent = "正在撤回尚未被工作台后台领取的提交…";
+    actionMessage.textContent = "正在撤回尚未开始处理的提交…";
     try {
       await fetchJson(apiPath(`/stages/${currentStageId}/withdraw`), {
         method: "POST",
@@ -7237,10 +7376,10 @@
       }
     } catch (error) {
       offlinePanel.hidden = false;
-      connectionLabel.textContent = "工作台后台状态暂不可用";
+      connectionLabel.textContent = "当前任务状态暂时无法读取";
       if (taskAwareness && taskStatusLabel && taskStatusSummary) {
         taskAwareness.dataset.phase = "offline";
-        taskStatusLabel.textContent = "工作台后台已停止或暂不可用";
+        taskStatusLabel.textContent = "当前任务已停止或暂时无法连接";
         taskStatusSummary.textContent =
           "任务记录仍然保留；需要继续查看或处理时，可恢复同一个任务。";
       }
@@ -7286,7 +7425,7 @@
     currentStageLabel.textContent = stage.title;
     actionMessage.textContent = sessionId
       ? "正在恢复当前阶段数据…"
-      : "填写完成后可保存草稿，或提交给工作台后台处理。";
+      : "填写完成后，可以保存进度或提交。";
     renderStatus();
     renderSubmission();
     if (stageId === "setup") initializeSetupLoginGate();
@@ -7346,7 +7485,7 @@
   async function endCurrentTask() {
     if (!sessionId || endCurrentTaskInFlight) return;
     const confirmed = window.confirm(
-      "确定结束当前任务吗？工作台后台会关闭，未完成流程将暂停；任务记录会保留，之后仍可恢复。",
+      "确定结束当前任务吗？未完成流程将暂停，任务记录会保留，之后仍可恢复。",
     );
     if (!confirmed) return;
     endCurrentTaskInFlight = true;
@@ -7363,7 +7502,7 @@
       taskAwareness.dataset.phase = "completed";
       taskStatusLabel.textContent = "当前任务正在结束";
       taskStatusSummary.textContent =
-        "工作台后台正在关闭；任务记录已经保留，之后可以恢复同一个任务。";
+        "任务正在结束；记录已经保留，之后可以恢复同一个任务。";
       taskAutoShutdown.hidden = false;
       taskAutoShutdown.textContent = "关闭后当前页面将停止刷新。";
       actionMessage.textContent = payload.message || "当前任务正在结束。";

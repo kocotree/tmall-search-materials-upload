@@ -204,7 +204,6 @@ def test_approval_fallback_is_exact_and_rejects_broad_acknowledgement(tmp_path):
     _prepare_approval_context(store, session_id)
     values = {
         "task_ids": ["task-001"],
-        "confirmed_by": "tester",
     }
     accepted = client.post(
         f"/api/sessions/{session_id}/stages/approval/chat-fallback",

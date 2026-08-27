@@ -224,7 +224,7 @@
       return {
         offline: false,
         statusLabel: statusLabels.processing,
-        connectionLabel: "工作台后台正在处理",
+        connectionLabel: "当前任务正在处理",
       };
     }
     if (workflowDispatch?.online === true) {
@@ -237,21 +237,21 @@
           ? statusLabels.processing
           : statusLabels[state.serverStatus] || statusLabels.draft,
         connectionLabel: dispatching
-          ? "工作台后台正在处理"
-          : "工作台后台已就绪",
+          ? "当前任务正在处理"
+          : "当前任务已就绪",
       };
     }
     if (waitIsLive) {
       return {
         offline: false,
         statusLabel: statusLabels[state.serverStatus] || statusLabels.draft,
-        connectionLabel: "兼容监听已连接",
+        connectionLabel: "当前任务已连接",
       };
     }
     return {
       offline: true,
       statusLabel: statusLabels[state.serverStatus] || statusLabels.draft,
-      connectionLabel: "工作台后台未连接",
+      connectionLabel: "当前任务暂时无法连接",
     };
   }
 

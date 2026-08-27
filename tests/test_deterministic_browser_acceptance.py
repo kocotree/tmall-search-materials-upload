@@ -20,6 +20,19 @@ from upload_search_materials.final_material_handoff import (
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
+class _AuthorizedLarkAuthCoordinator:
+    def status(self, *, refresh=True):
+        return {
+            "status": "authorized",
+            "message": "当前飞书账号已授权。",
+            "verification_url": "",
+            "user_name": "测试用户",
+        }
+
+    def start(self):
+        return self.status()
+
+
 @contextmanager
 def _live_server(app):
     server = make_server("127.0.0.1", 0, app, threaded=True)
@@ -447,7 +460,7 @@ def test_restored_asset_selections_use_server_preflight_fallback(tmp_path):
         browser.close()
 
 
-def test_approval_missing_identity_scrolls_to_field_without_submitting(
+def test_approval_uses_lark_identity_without_manual_name_field(
     tmp_path,
 ):
     runs = tmp_path / "runs"
@@ -459,13 +472,29 @@ def test_approval_missing_identity_scrolls_to_field_without_submitting(
         runs_root=runs,
     )
     app = create_app(
-        runs, runtime_config=runtime, enforce_stage_order=False
+        runs,
+        runtime_config=runtime,
+        enforce_stage_order=False,
+        lark_auth_coordinator=_AuthorizedLarkAuthCoordinator(),
     )
     store = SessionStore(runs)
     session = store.create_session()
+    store.save_input(session.session_id, "setup", {"store": "测试店铺"})
+    dry_handoff = store.save_input(
+        session.session_id,
+        "dry_run",
+        {"decision": "confirm", "warning_notes": ""},
+    )
+    store.write_result(
+        session.session_id,
+        "dry_run",
+        dry_handoff["revision"],
+        dry_handoff["input_sha256"],
+        status="completed",
+        summary="dry-run complete",
+    )
     state = store.load_session(session.session_id)
     state["current_stage"] = "approval"
-    state["stages"]["dry_run"]["status"] = "completed"
     store._write_session_state(session.session_id, state)
     tasks = [
         {
@@ -514,6 +543,21 @@ def test_approval_missing_identity_scrolls_to_field_without_submitting(
             if request.url.endswith("/stages/approval/submit")
             else None,
         )
+        page.route(
+            "**/api/runtime/lark-base/auth",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "authorization_required",
+                        "message": "请授权飞书账号。",
+                        "verification_url": "",
+                        "user_name": "",
+                    }
+                ),
+            ),
+        )
         page.goto(
             f"{base_url}/?session_id={session.session_id}",
             wait_until="networkidle",
@@ -523,33 +567,22 @@ def test_approval_missing_identity_scrolls_to_field_without_submitting(
             "document.querySelector('[name=task_ids]')?.value.trim()"
             " && !document.querySelector('[data-submit-stage]')?.disabled"
         )
-        confirmed_by = page.locator('[name="confirmed_by"]')
-        initial_box = confirmed_by.bounding_box()
-        assert initial_box is not None and initial_box["y"] > 700
-
-        page.locator("[data-submit-stage]").click()
-        page.wait_for_function(
-            "document.activeElement?.name === 'confirmed_by'"
-        )
-        page.wait_for_function(
-            "() => {"
-            " const rect = document.querySelector('[name=confirmed_by]')"
-            ".getBoundingClientRect();"
-            " return rect.top >= 0 && rect.bottom < window.innerHeight;"
-            "}",
-            timeout=5_000,
-        )
-
-        box = confirmed_by.bounding_box()
-        assert box is not None and 0 <= box["y"] < 700
-        assert confirmed_by.get_attribute("aria-invalid") == "true"
-        assert "请填写授权人" in page.locator(
-            "[data-action-message]"
+        assert page.locator('[name="confirmed_by"]').count() == 0
+        assert "测试用户（飞书账号）" in page.locator(
+            ".upload-owner-identity"
         ).inner_text()
-        assert submit_requests == []
-        assert store.read_optional_stage_document(
+
+        with page.expect_response(
+            lambda response: response.url.endswith("/stages/approval/submit")
+        ) as submit_response:
+            page.locator("[data-submit-stage]").click()
+
+        assert submit_response.value.status == 202
+        assert len(submit_requests) == 1
+        handoff = store.read_optional_stage_document(
             session.session_id, "approval", "handoff"
-        ) is None
+        )
+        assert handoff["authorization"]["confirmed_by"] == "测试用户"
         browser.close()
 
 

@@ -221,7 +221,7 @@ test("a live processing claim reports that the workbench is processing", () => {
   );
   assert.equal(view.offline, false);
   assert.equal(view.statusLabel, "工作台处理中");
-  assert.equal(view.connectionLabel, "工作台后台正在处理");
+  assert.equal(view.connectionLabel, "当前任务正在处理");
 });
 
 test("an online dispatcher keeps normal workflow connected without agent wait", () => {
@@ -235,7 +235,7 @@ test("an online dispatcher keeps normal workflow connected without agent wait", 
   });
   assert.equal(view.offline, false);
   assert.equal(view.statusLabel, "工作台处理中");
-  assert.equal(view.connectionLabel, "工作台后台正在处理");
+  assert.equal(view.connectionLabel, "当前任务正在处理");
 });
 
 test("a live wait reports listening even when the old heartbeat is stale", () => {
@@ -258,7 +258,7 @@ test("a live wait reports listening even when the old heartbeat is stale", () =>
     },
   );
   assert.equal(view.offline, false);
-  assert.equal(view.connectionLabel, "兼容监听已连接");
+  assert.equal(view.connectionLabel, "当前任务已连接");
 });
 
 test("expired leases report disconnected regardless of an old heartbeat", () => {
@@ -281,7 +281,7 @@ test("expired leases report disconnected regardless of an old heartbeat", () => 
     },
   );
   assert.equal(view.offline, true);
-  assert.equal(view.connectionLabel, "工作台后台未连接");
+  assert.equal(view.connectionLabel, "当前任务暂时无法连接");
 });
 
 test("selection preflight weights expensive formats and large images", () => {

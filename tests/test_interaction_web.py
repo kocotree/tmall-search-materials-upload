@@ -20,6 +20,19 @@ from upload_search_materials.interaction.stages import STAGES
 from upload_search_materials.runtime_config import DiscoveredPath, RuntimeConfig
 
 
+class AuthorizedLarkAuthCoordinator:
+    def status(self, *, refresh=True):
+        return {
+            "status": "authorized",
+            "message": "当前飞书账号已授权。",
+            "verification_url": "",
+            "user_name": "测试用户",
+        }
+
+    def start(self):
+        return self.status()
+
+
 @pytest.fixture
 def client(tmp_path):
     workspace = Path(__file__).parents[1]
@@ -50,7 +63,10 @@ def client(tmp_path):
         user_data_root=tmp_path / "user-data",
     )
     return create_app(
-        tmp_path, runtime_config=runtime, enforce_stage_order=False
+        tmp_path,
+        runtime_config=runtime,
+        enforce_stage_order=False,
+        lark_auth_coordinator=AuthorizedLarkAuthCoordinator(),
     ).test_client()
 
 
@@ -337,7 +353,8 @@ def test_setup_page_uses_one_click_lark_authorization(client):
     assert response.status_code == 200
     assert "data-authorize-lark-base" in text
     assert "data-refresh-lark-owner-snapshot" in text
-    assert "商品信息表和上传记录表已由团队预设" in text
+    assert "商品信息表和上传记录表已由团队预设" not in text
+    assert "素材加载时自动排除已经成功上传的原图" not in text
     assert "data-lark-enabled" not in text
     assert "data-save-lark-base" not in text
     assert "商品信息表缺少飞书 Wiki 读取权限" in script
@@ -349,6 +366,7 @@ def test_setup_page_uses_one_click_lark_authorization(client):
     assert "没有读取到任何商品记录" in script
     assert "已授权 · 需补充权限" in script
     assert "飞书账号已授权，但默认数据表暂时不可用" not in script
+    assert 'name="confirmed_by"' not in text
 
 
 def test_bounded_agent_action_processes_product_selection_inside_workbench(
@@ -654,6 +672,20 @@ def test_root_displays_current_plugin_version_at_header_center(client):
     assert f"v{manifest['version']}" in html
 
 
+def test_root_shows_plain_language_lark_identity_and_compact_empty_states(client):
+    html = client.get("/").get_data(as_text=True)
+
+    assert "data-header-lark-user" in html
+    assert "data-header-lark-user-name" in html
+    assert "飞书账号" in html
+    assert "PROMOTION MATERIAL MATRIX" not in html
+    assert "ASSET MATCH" not in html
+    assert "UPLOAD CONFIRMATION" not in html
+    assert "工作台后台返回真实巡检结果" not in html
+    assert "查看排查信息" in html
+    assert "复制异常诊断说明" in html
+
+
 def test_new_session_hides_internal_and_legacy_stages(client, session_id):
     html = client.get(f"/?session_id={session_id}").get_data(as_text=True)
 
@@ -679,11 +711,11 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert "按下面 3 步完成" in html
     assert "高级设置 · 导入已有文件" in html
     assert "搜推素材" in html and "全量自动采集" in html
-    assert "提交后由系统自动采集" in html
+    assert "提交后由系统自动采集" not in html
     assert 'name="promotion_max_pages"' not in html
     assert 'name="product_scope"' not in html
     assert "在文件夹归属审查中逐步积累" not in html
-    assert "视频" in html and "本轮延期" in html
+    assert "本轮延期" not in html
     assert 'name="month"' not in html
     assert "目标月份" not in html
     assert 'data-setup-login-gate' in html
@@ -694,7 +726,7 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert 'name="store_confirmed"' not in html
     assert "我已确认当前页面店铺与目标店铺一致" not in html
     assert "本阶段输入" not in html
-    assert 'data-approver-options' in html
+    assert 'data-approver-options' not in html
     for removed in ("basic_xlsx", "search_xlsx", "asset_root", "runs_root"):
         assert f'name="{removed}"' not in html
     assert re.search(
@@ -1123,8 +1155,8 @@ def test_setup_page_shows_discovered_inputs_and_configurable_image_sources(clien
         assert root in html
     assert 'data-component="ImageSourceConfig"' in html
     assert "已预填 3 个常用来源" in html
-    assert "尚未保存时，会自动查找常用业务文件夹" in html
-    assert "提交时系统会自动检测" in html
+    assert "确认本次图片源" in html
+    assert "未自动找到时，可粘贴路径或选择文件夹" in html
     assert "添加图片源" in html
     assert "检测路径" in html
     assert "保存为常用图片源" in html
@@ -2108,8 +2140,9 @@ def test_page_explains_workbench_offline_recovery_without_exposing_task_path(cli
 
     assert 'data-task-awareness' in html
     assert "整个任务" in html
-    assert "页面会持续显示当前进度" in html
-    assert "工作台后台未连接" in html
+    assert "这里会持续显示当前进度和下一步操作" in html
+    assert "当前任务暂时无法连接" in html
+    assert "查看排查信息" in html
     assert "复制异常诊断说明" in html
     assert "当前任务目录" in html
     assert 'class="technical-only" aria-hidden="true"><dt>当前任务目录' in html
@@ -2152,7 +2185,7 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
     html = client.get("/").get_data(as_text=True)
 
     assert "搜推素材完整度" in html
-    assert "目标 / 已有 / 缺失 / 证据" in html
+    assert "目标 / 已有 / 缺失 / 证据" not in html
     assert 'data-field="selected_product_ids"' in html
     assert html.count("interaction-data-field") >= 1
 
@@ -2166,12 +2199,19 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "取消当前筛选结果",
         "重新巡检",
         "/stages/completeness/reinspect",
-        "选择进入素材匹配",
         "已自动排除",
         "命中自动排除规则",
         "查看后台证据",
     ):
         assert text in script
+    inspection_script = script.split("function renderInspectionMatrix", 1)[1].split(
+        "function readJsonListControl", 1
+    )[0]
+    assert "选择进入素材匹配" not in inspection_script
+    assert 'card.setAttribute("role", "checkbox")' in inspection_script
+    assert 'card.addEventListener("click"' in inspection_script
+    assert 'card.addEventListener("keydown"' in inspection_script
+    assert 'stateBadge.textContent = selectable' in inspection_script
     assert '["needs_manual_review", "需人工确认"],' not in script
     assert '["需人工确认", statusCounts.needs_manual_review || 0],' not in script
     assert 'element("small", "", "基础素材")' not in script
@@ -2305,9 +2345,9 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "已提交，等待工作台处理" in javascript
     assert "工作台处理中" in javascript
     assert "补充后重新提交" in javascript
-    assert "兼容监听已连接" in javascript
-    assert "工作台后台正在处理" in javascript
-    assert "工作台后台未连接" in javascript
+    assert "当前任务已连接" in javascript
+    assert "当前任务正在处理" in javascript
+    assert "当前任务暂时无法连接" in javascript
     assert "technicalDiagnosticView" in javascript
     assert "需要重新提交" in javascript
     assert "重新提交到工作台" in javascript
@@ -2336,7 +2376,10 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "!selectionCheckActive" not in back_enabled_expression.group(1)
     assert 'currentStageId === "slots_copy" && localCopyRequestInFlight' in javascript
     assert "setLocalCopyRequestInFlight(true)" in javascript
-    assert '["asset_matching", "slots_copy"].includes(currentStageId)' in javascript
+    assert (
+        '["completeness", "asset_matching", "slots_copy"].includes(currentStageId)'
+        in javascript
+    )
     assert "pendingBackNavigation" in javascript
     assert "selectionPreflightConcurrency = 3" not in javascript
     assert "2000" in javascript
@@ -2754,7 +2797,7 @@ def test_frontend_keeps_request_id_across_retry_and_reloads_conflict(client):
     assert "body.request_id = persistenceIdentity.value" in script
     assert "await loadStage();" in script
     assert "waitStillLive" in script
-    assert "budget_remaining_seconds" in script
+    assert "等待处理期间仍可继续编辑" in script
 
 
 def test_frontend_back_navigation_awaits_stage_hydration_without_empty_render(client):
@@ -3049,7 +3092,12 @@ def test_approval_stage_exposes_upload_task_review_context(
     assert response.status_code == 200
     assert response.json["result"]["summary"] == "upload tasks ready"
     assert response.json["result"]["data"]["tasks"][0]["task_id"] == "task-1"
-    assert response.json["approver_options"] == ["小雨", "阿杰"]
+    assert response.json["upload_identity"] == {
+        "status": "authorized",
+        "reason_code": "",
+        "message": "上传负责人：测试用户（飞书账号）",
+        "user_name": "测试用户",
+    }
 
 
 def test_approval_autosave_preserves_review_context_in_frontend(client):
@@ -4068,7 +4116,9 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "备注（可选）" not in folder_review_source
     assert "排除该文件夹" not in folder_review_source
     assert '"is-unselectable"' in source
-    assert "hydrateApproverOptions" in source
+    assert "hydrateApproverOptions" not in source
+    assert "尚未取得飞书授权账号" in source
+    assert "（飞书账号）" in source
     assert "请先筛选候选文件夹" not in source
     assert "素材数统计中" not in source
     assert "文件夹内共发现" not in source
@@ -4093,6 +4143,11 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "loadFolderImageCounts" in source
     assert "published_batch_count" in source
     assert "const galleryComplete" in source
+    assert "renderProductNavigator" in source
+    assert "坑位编排商品导航" in source
+    assert "图片裁剪商品导航" in source
+    assert '"(prefers-reduced-motion: reduce)"' in source
+    assert 'behavior: reduceMotion ? "auto" : "smooth"' in source
 
 
 def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():
@@ -4110,8 +4165,8 @@ def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():
 
     assert "requestedStageId" not in function_body
     assert "/stages/asset_matching/folder-image-counts" in source
-    assert "本机固定操作" in source
-    assert "不会创建阶段交接" in source
+    assert "确认文件夹后加载候选图片" in source
+    assert "不会创建阶段交接" not in source
     assert "本机正在加载图片" in source
     assert "历史进度口径" in source
 
@@ -4332,7 +4387,7 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert "恢复过期处理" in source
     assert "processing_claim" in source
     assert "/recover-processing" in source
-    assert "处理租约已于" in source
+    assert "处理等待已于" in source
     assert 'currentStageId === "completeness"' in source
     assert "dispatcherOwnsRecovery" in source
     assert "currentWorkflowDispatch?.online === true" in source
@@ -4415,7 +4470,6 @@ def test_approval_submit_uses_one_click_authorization(
         json={
             "values": {
                 "task_ids": ["task-1"],
-                "confirmed_by": "reviewer",
             }
         },
     )
@@ -4425,6 +4479,14 @@ def test_approval_submit_uses_one_click_authorization(
     assert handoff["handoff_kind"] == "publish_authorization"
     assert handoff["authorization"]["action"] == "approve_and_publish_exact_tasks"
     assert handoff["authorization"]["final_confirmation"] is True
+    assert handoff["authorization"]["confirmed_by"] == "测试用户"
+    assert handoff["authorization"]["confirmed_by_source"] == (
+        "lark_authorized_user"
+    )
+    approval_input = store.read_optional_stage_document(
+        session_id, "approval", "input"
+    )
+    assert approval_input["values"] == {"task_ids": ["task-1"]}
     assert "confirmed_at" not in handoff["authorization"]
     assert "valid_until" not in handoff["authorization"]
 
@@ -4437,13 +4499,68 @@ def test_validation_enforces_approval_task_list(client, session_id, tmp_path):
         json={
             "values": {
                 "task_ids": "not a list",
-                "confirmed_by": "reviewer",
             }
         },
     )
 
     assert response.status_code == 422
     assert "task_ids" in response.json["field_errors"]
+
+
+def test_approval_submit_requires_a_named_authorized_lark_user(tmp_path):
+    class UnauthorizedLarkAuthCoordinator:
+        def status(self, *, refresh=True):
+            return {
+                "status": "authorization_required",
+                "message": "请授权飞书账号。",
+                "verification_url": "",
+                "user_name": "",
+            }
+
+    workspace = Path(__file__).parents[1]
+    runtime = RuntimeConfig(
+        workspace_root=workspace,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path,
+        config_path=tmp_path / "config" / "runtime.json",
+        user_data_root=tmp_path / "user-data",
+    )
+    local_client = create_app(
+        tmp_path,
+        runtime_config=runtime,
+        enforce_stage_order=False,
+        lark_auth_coordinator=UnauthorizedLarkAuthCoordinator(),
+    ).test_client()
+    store = SessionStore(tmp_path)
+    session_id = local_client.post("/api/sessions", json={}).json["session_id"]
+    store.save_input(session_id, "setup", {"store": "测试店铺"})
+    dry_handoff = store.save_input(
+        session_id,
+        "dry_run",
+        {"decision": "confirm", "warning_notes": ""},
+    )
+    store.write_result(
+        session_id,
+        "dry_run",
+        dry_handoff["revision"],
+        dry_handoff["input_sha256"],
+        status="completed",
+        summary="dry-run complete",
+    )
+
+    response = local_client.post(
+        f"/api/sessions/{session_id}/stages/approval/submit",
+        json={"values": {"task_ids": ["task-1"]}},
+    )
+
+    assert response.status_code == 422
+    assert response.json["reason_code"] == "LARK_UPLOAD_IDENTITY_REQUIRED"
+    assert "完成飞书授权" in response.json["message"]
+    assert store.read_optional_stage_document(
+        session_id, "approval", "handoff"
+    ) is None
 
 
 
@@ -4580,5 +4697,5 @@ def test_collection_ui_prompts_for_human_check_and_auto_resume():
     ).read_text(encoding="utf-8")
 
     assert 'worker.phase === "waiting_human_check"' in source
-    assert "请在 CDP Chrome 中完成验证" in source
+    assert "请在千牛窗口中完成验证" in source
     assert "验证通过后会自动继续采集" in source
