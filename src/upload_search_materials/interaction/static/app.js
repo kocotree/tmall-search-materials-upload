@@ -102,6 +102,7 @@
   let isHydrating = false;
   let currentStageInputLoaded = false;
   let currentStageHasPersistedInput = false;
+  let stageLoadSequence = 0;
   let folderCountsLoading = false;
   let folderCountsLoadedFor = "";
   let setupLoginReady = !setupLoginGate;
@@ -234,6 +235,7 @@
 
   async function fetchJson(path, options = {}) {
     const response = await fetch(path, {
+      cache: "no-store",
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
       ...options,
     });
@@ -2375,6 +2377,7 @@
     filter.setAttribute("aria-label", "筛选完整度状态");
     [
       ["all", "全部"],
+      ["selected", "已选"],
       ["needs_supplement", "待补充"],
       ["complete", "已完整"],
       ["excluded", "已自动排除"],
@@ -2428,6 +2431,7 @@
         query: search.value,
         status: filter.value,
         owner: ownerFilter.value,
+        selectedProductIds: selected,
       });
     };
 
@@ -2523,6 +2527,7 @@
         const toggleSelection = () => {
           if (selectionDisabled) return;
           syncSelection(!selected.has(productId));
+          if (filter.value === "selected") draw();
         };
         card.addEventListener("click", (event) => {
           if (event.target.closest("details, summary, a, button, input, select, textarea, label")) {
@@ -6704,6 +6709,8 @@
 
   async function loadStage() {
     const requestedStageId = currentStageId;
+    const requestedGeneration = stageGeneration;
+    const requestedLoadSequence = ++stageLoadSequence;
     if (!sessionId) {
       currentStageInputLoaded = true;
       currentStageHasPersistedInput = false;
@@ -6722,7 +6729,11 @@
     }
     try {
       const payload = await fetchJson(apiPath(`/stages/${requestedStageId}`));
-      if (requestedStageId !== currentStageId) return;
+      if (
+        requestedStageId !== currentStageId
+        || requestedGeneration !== stageGeneration
+        || requestedLoadSequence !== stageLoadSequence
+      ) return;
       if (requestedStageId === "asset_matching") selectedAssetValidation = null;
       revision = payload.state.revision;
       revisionLabel.textContent = String(revision);
@@ -6802,7 +6813,11 @@
         loadFolderImageCounts();
       }
     } catch (error) {
-      if (requestedStageId !== currentStageId) return;
+      if (
+        requestedStageId !== currentStageId
+        || requestedGeneration !== stageGeneration
+        || requestedLoadSequence !== stageLoadSequence
+      ) return;
       actionMessage.textContent = error.message;
     }
   }
@@ -7490,6 +7505,7 @@
         stageState.status,
         uiState.result,
         currentStageInputLoaded,
+        stageState.revision,
       );
       if (
         stageChanged

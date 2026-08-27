@@ -197,6 +197,14 @@ test("completeness products can be filtered by owner without changing status sco
       .map((product) => product.product_id),
     ["2"],
   );
+  assert.deepEqual(
+    UiState.filterCompletenessProducts(products, {
+      status: "selected",
+      owner: "张三",
+      selectedProductIds: new Set(["1", "2"]),
+    }).map((product) => product.product_id),
+    ["1"],
+  );
 });
 
 test("a live processing claim reports that the workbench is processing", () => {
@@ -729,6 +737,26 @@ test("editable review stages retry hydration when their durable result is missin
       "needs_user_input",
       { data: { products: [] } },
       true,
+    ),
+    false,
+  );
+  assert.equal(
+    UiState.stageNeedsResultHydration(
+      "asset_matching",
+      "needs_user_input",
+      { revision: 4, data: { folder_candidates: [] } },
+      true,
+      5,
+    ),
+    true,
+  );
+  assert.equal(
+    UiState.stageNeedsResultHydration(
+      "asset_matching",
+      "needs_user_input",
+      { revision: 5, data: { folder_candidates: [] } },
+      true,
+      5,
     ),
     false,
   );

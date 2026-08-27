@@ -557,11 +557,19 @@
     status,
     result,
     inputLoaded = true,
+    currentRevision = null,
   ) {
     if (!inputLoaded) return true;
-    return ["completeness", "asset_matching"].includes(String(stageId || ""))
-      && ["needs_user_input", "blocked"].includes(String(status || ""))
-      && (!result || typeof result !== "object");
+    const editableReviewStage = ["completeness", "asset_matching"].includes(
+      String(stageId || ""),
+    ) && ["needs_user_input", "blocked"].includes(String(status || ""));
+    if (!editableReviewStage) return false;
+    if (!result || typeof result !== "object") return true;
+    const expectedRevision = Number(currentRevision);
+    const resultRevision = Number(result.revision);
+    return Number.isInteger(expectedRevision)
+      && Number.isInteger(resultRevision)
+      && expectedRevision !== resultRevision;
   }
 
   function fifthStagePage(workflowState) {
@@ -796,13 +804,21 @@
     query = "",
     status = "all",
     owner = "all",
+    selectedProductIds = [],
   } = {}) {
     const needle = String(query || "").trim().toLocaleLowerCase("zh-CN");
     const selectedStatus = String(status || "all");
     const selectedOwner = String(owner || "all");
+    const selected = new Set(
+      [...(selectedProductIds || [])]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    );
     return (Array.isArray(products) ? products : []).filter((product) => {
       const productOwner = String(product?.owner || "").trim();
       const matchesStatus = selectedStatus === "all"
+        || (selectedStatus === "selected"
+          && selected.has(String(product?.product_id || "").trim()))
         || product?.status === selectedStatus;
       const matchesOwner = selectedOwner === "all"
         || (selectedOwner === "__unassigned__" && !productOwner)

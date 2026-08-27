@@ -2915,6 +2915,25 @@ def test_frontend_back_navigation_awaits_stage_hydration_without_empty_render(cl
     assert "UiState.stageNeedsResultHydration" in poll
 
 
+def test_frontend_discards_stale_stage_loads_and_bypasses_dynamic_cache(client):
+    script = client.get("/static/app.js").get_data(as_text=True)
+    load_stage = script.split("async function loadStage()", 1)[1].split(
+        "async function prepareLocalGallery", 1
+    )[0]
+
+    assert 'cache: "no-store"' in script
+    assert "requestedLoadSequence = ++stageLoadSequence" in load_stage
+    assert "requestedGeneration !== stageGeneration" in load_stage
+    assert "requestedLoadSequence !== stageLoadSequence" in load_stage
+
+
+def test_completeness_status_filter_includes_selected_products(client):
+    script = client.get("/static/app.js").get_data(as_text=True)
+
+    assert '["selected", "已选"]' in script
+    assert "selectedProductIds: selected" in script
+
+
 def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
     response = client.post(
         f"/api/sessions/{session_id}/stages/setup/draft",
