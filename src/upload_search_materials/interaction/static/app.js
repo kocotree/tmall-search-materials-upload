@@ -2802,11 +2802,12 @@
     targets.forEach((item) => {
       const productId = String(item.productId || "");
       const productTitle = String(item.productTitle || "").trim();
+      const primaryLabel = productTitle || "商品名称未获取";
       const button = element("button", "product-jump-button");
       button.type = "button";
-      button.title = productTitle || `商品 ${productId}`;
+      button.title = `${primaryLabel} · ID ${productId}`;
       button.append(
-        element("span", "", productTitle || `商品 ${productId}`),
+        element("span", "", primaryLabel),
         element("small", "", `ID ${productId}`),
       );
       button.addEventListener("click", () => {
@@ -3142,13 +3143,17 @@
       )
       : [];
     const removedProducts = removedProductIdSet();
-    const candidates = allCandidates.filter(
-      (candidate) => !removedProducts.has(String(candidate.product_id || "")),
+    const presentation = UiState.folderReviewPresentation(
+      data,
+      [...removedProducts],
     );
-    if (!candidates.length) return;
+    const candidates = presentation.candidates;
     const module = document.querySelector('[data-component="AssetMatchGallery"]');
     const content = module?.querySelector("[data-result-content]");
     if (!content) return;
+    const resultHeading = content.querySelector(".result-data > strong");
+    if (resultHeading) resultHeading.textContent = presentation.summary;
+    if (!candidates.length) return;
 
     const review = element("section", "folder-review");
     const productNavigator = element("div", "product-jump-mount");
@@ -3168,17 +3173,22 @@
       const productCandidates = candidates.filter(
         (item) => String(item.product_id || "") === productId,
       );
+      const productTitle = UiState.resolveProductTitle(
+        data,
+        productId,
+        productCandidates[0]?.product_title,
+      );
       const group = element("section", "folder-product");
       group.tabIndex = -1;
       productTargets.push({
         productId,
-        productTitle: productCandidates[0]?.product_title,
+        productTitle,
         target: group,
       });
       const heading = element("div", "asset-product-heading");
       const headingText = element("div");
       headingText.append(
-        element("strong", "", productCandidates[0]?.product_title || `商品 ${productId}`),
+        element("strong", "", productTitle || "商品名称未获取"),
         element(
           "span",
           "",
@@ -3191,7 +3201,7 @@
         progress,
         removeProductButton(
           productId,
-          productCandidates[0]?.product_title,
+          productTitle,
           data,
         ),
       );
@@ -3489,6 +3499,11 @@
 
     requirements.forEach((requirement) => {
       const productId = String(requirement.product_id || "");
+      const productTitle = UiState.resolveProductTitle(
+        data,
+        productId,
+        requirement.product_title,
+      );
       const missingMaterials = Number(requirement.missing_materials || 0);
       const productFolders = folderCandidates.filter(
         (candidate) => String(candidate.product_id || "") === productId,
@@ -3509,19 +3524,19 @@
       product.tabIndex = -1;
       productTargets.push({
         productId,
-        productTitle: requirement.product_title,
+        productTitle,
         target: product,
       });
       const heading = element("div", "asset-product-heading");
       const title = element("div");
       const candidateSummary = element("span");
       title.append(
-        element("strong", "", requirement.product_title || `商品 ${productId}`),
+        element("strong", "", productTitle || "商品名称未获取"),
         candidateSummary,
       );
       const preflightFilter = document.createElement("select");
       preflightFilter.className = "asset-preflight-filter";
-      preflightFilter.setAttribute("aria-label", `${requirement.product_title || productId} 图片状态筛选`);
+      preflightFilter.setAttribute("aria-label", `${productTitle || productId} 图片状态筛选`);
       [
         ["all", "全部图片"],
         ["direct", "可直传"],
@@ -3540,7 +3555,7 @@
         preflightFilter,
         removeProductButton(
           productId,
-          requirement.product_title,
+          productTitle,
           data,
         ),
       );
@@ -3694,7 +3709,7 @@
           if (selectedIds.has(assetId)) card.classList.add("is-selected");
           const image = document.createElement("img");
           image.loading = "lazy";
-          image.alt = `${requirement.product_title || productId} 候选图片`;
+          image.alt = `${productTitle || productId} 候选图片`;
           image.src = apiPath(
             `/stages/asset_matching/assets/${encodeURIComponent(assetId)}`,
           );
@@ -3980,7 +3995,7 @@
             }
             const image = document.createElement("img");
             image.loading = "lazy";
-            image.alt = `${requirement.product_title || productId} 已选图片`;
+            image.alt = `${productTitle || productId} 已选图片`;
             image.src = apiPath(
               `/stages/asset_matching/assets/${encodeURIComponent(candidate.asset_id)}`,
             );
@@ -6510,6 +6525,22 @@
     if (schemaComponent === "approval_table") renderUploadTaskConfirmation(view);
   }
 
+  function renderStageLoadingState(stageId) {
+    if (stageId !== "asset_matching") return;
+    const module = document.querySelector('[data-component="AssetMatchGallery"]');
+    const content = module?.querySelector("[data-result-content]");
+    if (!content) return;
+    const loading = element("div", "empty-state");
+    loading.dataset.emptyState = "正在加载候选文件夹";
+    loading.setAttribute("aria-live", "polite");
+    loading.append(
+      element("span", "", "◎"),
+      element("strong", "", "正在加载候选文件夹…"),
+      element("p", "", "加载完成后将同时显示候选数量和文件夹列表。"),
+    );
+    content.replaceChildren(loading);
+  }
+
   async function loadFolderImageCounts() {
     if (
       folderCountsLoading
@@ -7426,6 +7457,7 @@
     actionMessage.textContent = sessionId
       ? "正在恢复当前阶段数据…"
       : "填写完成后，可以保存进度或提交。";
+    renderStageLoadingState(stageId);
     renderStatus();
     renderSubmission();
     if (stageId === "setup") initializeSetupLoginGate();

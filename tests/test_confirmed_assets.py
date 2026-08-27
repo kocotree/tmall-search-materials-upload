@@ -224,6 +224,38 @@ def test_confirmed_gallery_excludes_successful_uploads_and_fills_replacements(
     assert product["history_replacement_count"] == 1
 
 
+def test_confirmed_gallery_keeps_product_identity_when_history_removes_all_images(
+    tmp_path,
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    _image(folder / "only.png", (1, 2, 3))
+    args = (
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [
+            {
+                "decision": "confirmed",
+                "folder_path": str(folder),
+                "product_id": "123",
+                "source_system": "model",
+            }
+        ],
+    )
+    baseline = build_confirmed_folder_gallery(*args, candidate_limit=1)
+    uploaded = baseline["asset_candidates"][0]["sha256"]
+
+    filtered = build_confirmed_folder_gallery(
+        *args,
+        candidate_limit=1,
+        uploaded_source_sha256={uploaded},
+    )
+
+    assert filtered["asset_candidates"] == []
+    assert filtered["requirements"][0]["product_title"] == "测试商品"
+    assert filtered["requirements"][0]["sku"] == "SKU-123"
+
+
 def test_confirmed_gallery_shows_all_fourteen_without_declaring_a_shortage(tmp_path):
     folder = tmp_path / "分龄成长太阳镜"
     folder.mkdir()

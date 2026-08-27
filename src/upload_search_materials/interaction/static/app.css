@@ -590,6 +590,7 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .radio-group label { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
 .help-text { margin: 6px 0 0; color: var(--warning); font-size: 11px; }
 .field-error { min-height: 16px; margin: 4px 0 0; color: var(--danger); font-size: 10px; }
+.setup-auto-field-error:empty { display: none; }
 
 .result-data { padding: 18px; background: #f7f8f6; border-radius: 12px; }
 .result-data ul { max-height: 240px; overflow: auto; margin: 12px 0 0; padding-left: 22px; color: var(--muted); font-size: 12px; }

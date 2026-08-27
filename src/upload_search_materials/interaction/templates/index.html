@@ -195,14 +195,8 @@
                   </p>
                   <p class="field-error" id="setup-products_csv-error" data-field-error="products_csv" aria-live="polite"></p>
                 </article>
-                <article class="setup-status-card" data-ready="{{ 'true' if setup_inputs.rules_available else 'false' }}">
-                  <span>规则表</span><strong>{{ "已找到" if setup_inputs.rules_available else "未找到" }}</strong>
-                  <input name="rules_csv" type="hidden" value="{{ setup_inputs.rules_csv }}" aria-describedby="setup-rules_csv-error">
-                  <p class="field-error" id="setup-rules_csv-error" data-field-error="rules_csv" aria-live="polite"></p>
-                </article>
-                <article class="setup-status-card" data-ready="pending">
-                  <span>搜推素材</span><strong>全量自动采集</strong>
-                </article>
+                <input name="rules_csv" type="hidden" value="{{ setup_inputs.rules_csv }}" aria-describedby="setup-rules_csv-error">
+                <p class="field-error setup-auto-field-error" id="setup-rules_csv-error" data-field-error="rules_csv" aria-live="polite"></p>
                 <article class="setup-status-card setup-status-card-wide collection-runtime-config" data-component="CollectionRuntimeConfig" data-ready="pending" hidden aria-hidden="true">
                   <span>采集运行环境</span><strong data-collection-runtime-summary>正在检测</strong>
                   <p>当前配置页只负责工作流交互；另一个 CDP Chrome 窗口负责用户登录和只读采集。</p>

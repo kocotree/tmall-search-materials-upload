@@ -744,6 +744,54 @@
     return { blockingReasons, nextAction };
   }
 
+  function resolveProductTitle(data, productId, preferredTitle = "") {
+    const normalizedProductId = String(productId || "").trim();
+    const collections = [
+      data?.requirements,
+      data?.products,
+      data?.folder_candidates,
+      data?.asset_candidates,
+    ];
+    for (const collection of collections) {
+      const product = (Array.isArray(collection) ? collection : []).find(
+        (item) => String(item?.product_id || "").trim() === normalizedProductId,
+      );
+      const title = String(
+        product?.product_title || product?.product_name || "",
+      ).trim();
+      if (title) return title;
+    }
+    return String(preferredTitle || "").trim();
+  }
+
+  function folderReviewPresentation(data, removedProductIds = []) {
+    const removed = new Set(
+      (Array.isArray(removedProductIds) ? removedProductIds : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    );
+    const candidates = (Array.isArray(data?.folder_candidates)
+      ? data.folder_candidates
+      : [])
+      .filter((candidate) => candidate?.match_type !== "confirmed_alias")
+      .filter(
+        (candidate) => !removed.has(String(candidate?.product_id || "").trim()),
+      );
+    const productCount = new Set(
+      candidates
+        .map((candidate) => String(candidate?.product_id || "").trim())
+        .filter(Boolean),
+    ).size;
+    return {
+      candidates,
+      candidateCount: candidates.length,
+      productCount,
+      summary: candidates.length
+        ? `已显示 ${productCount} 个商品的 ${candidates.length} 个候选文件夹`
+        : "未找到可显示的候选文件夹",
+    };
+  }
+
   function filterCompletenessProducts(products, {
     query = "",
     status = "all",
@@ -828,6 +876,8 @@
     recoveryView,
     resultView,
     resultSections,
+    resolveProductTitle,
+    folderReviewPresentation,
     statusLabels,
     stageNeedsResultHydration,
     stagePollChanged,

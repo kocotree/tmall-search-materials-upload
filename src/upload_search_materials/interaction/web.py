@@ -5976,7 +5976,7 @@ def _completeness_matrix_fallback_result(
     if not isinstance(stage_state, dict):
         return None
     status = str(stage_state.get("status") or "")
-    if status in {"", "draft", "ready_for_agent", "processing"}:
+    if status in {"", "ready_for_agent", "processing"}:
         return None
     matrix_path = (
         store._stage_path(session_id, "completeness")

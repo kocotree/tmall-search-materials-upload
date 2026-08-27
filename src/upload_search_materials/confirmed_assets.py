@@ -732,6 +732,13 @@ def _build_gallery_document(
         for item in data["requirements"]
         if str(item.get("product_id", "")) in confirmed_by_product
     ]
+    for requirement in data["requirements"]:
+        product_id = str(requirement.get("product_id", ""))
+        product = products_by_id.get(product_id)
+        if product is None:
+            continue
+        requirement["product_title"] = str(product.title)
+        requirement["sku"] = str(product.sku)
     requirement_products = {
         str(item.get("product_id", ""))
         for item in data["requirements"]

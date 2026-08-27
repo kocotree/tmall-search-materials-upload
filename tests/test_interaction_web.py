@@ -710,7 +710,8 @@ def test_setup_page_separates_user_choices_automatic_inputs_and_advanced_imports
     assert "任务所需内容" in html
     assert "按下面 3 步完成" in html
     assert "高级设置 · 导入已有文件" in html
-    assert "搜推素材" in html and "全量自动采集" in html
+    assert "规则表</span>" not in html
+    assert "全量自动采集" not in html
     assert "提交后由系统自动采集" not in html
     assert 'name="promotion_max_pages"' not in html
     assert 'name="product_scope"' not in html
@@ -1887,6 +1888,30 @@ def test_returning_to_product_selection_restores_inspection_matrix_fallback(
     product = stage.json["result"]["data"]["products"][0]
     assert product["product_id"] == "898439684957"
     assert product["promotion"]["missing_count"] == 5
+
+    drafted = client.post(
+        f"/api/sessions/{session_id}/stages/completeness/draft",
+        json={
+            "revision": reopened.json["target_revision"],
+            "values": {"selected_product_ids": ["898439684957"]},
+        },
+    )
+    after_autosave = client.get(
+        f"/api/sessions/{session_id}/stages/completeness"
+    )
+
+    assert drafted.status_code == 200
+    assert drafted.json["status"] == "draft"
+    assert after_autosave.status_code == 200
+    assert after_autosave.json["state"]["status"] == "draft"
+    assert (
+        after_autosave.json["result"]["fallback_source"]
+        == "completeness-matrix.json"
+    )
+    assert (
+        after_autosave.json["result"]["data"]["products"][0]["product_id"]
+        == "898439684957"
+    )
 
 
 def test_returning_from_slots_restores_confirmed_asset_gallery(
@@ -4146,6 +4171,11 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "renderProductNavigator" in source
     assert "坑位编排商品导航" in source
     assert "图片裁剪商品导航" in source
+    assert "正在加载候选文件夹…" in source
+    assert "加载完成后将同时显示候选数量和文件夹列表。" in source
+    assert "商品名称未获取" in source
+    assert "UiState.folderReviewPresentation" in source
+    assert "UiState.resolveProductTitle" in source
     assert '"(prefers-reduced-motion: reduce)"' in source
     assert 'behavior: reduceMotion ? "auto" : "smooth"' in source
 

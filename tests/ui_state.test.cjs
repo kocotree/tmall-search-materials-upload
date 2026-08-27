@@ -849,3 +849,34 @@ test("identical image source paths stay duplicated for backend rejection", () =>
     "共享素材",
   ]);
 });
+
+test("product title resolution prefers task product data over sparse candidates", () => {
+  const data = {
+    requirements: [{ product_id: "P1", product_title: "任务商品名称" }],
+    folder_candidates: [{ product_id: "P1", product_title: "" }],
+  };
+
+  assert.equal(
+    UiState.resolveProductTitle(data, "P1", "候选回退名称"),
+    "任务商品名称",
+  );
+  assert.equal(
+    UiState.resolveProductTitle({}, "P2", "回退名称"),
+    "回退名称",
+  );
+});
+
+test("folder review summary counts only folders that will be rendered", () => {
+  const view = UiState.folderReviewPresentation({
+    folder_candidates: [
+      { product_id: "P1", folder_id: "F1", match_type: "exact_product_name" },
+      { product_id: "P1", folder_id: "F2", match_type: "confirmed_alias" },
+      { product_id: "P2", folder_id: "F3", match_type: "exact_sku" },
+    ],
+  }, ["P2"]);
+
+  assert.equal(view.productCount, 1);
+  assert.equal(view.candidateCount, 1);
+  assert.equal(view.summary, "已显示 1 个商品的 1 个候选文件夹");
+  assert.deepEqual(view.candidates.map((candidate) => candidate.folder_id), ["F1"]);
+});
