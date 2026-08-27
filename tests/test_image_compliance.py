@@ -61,7 +61,8 @@ def test_policy_snapshot_is_deterministic(tmp_path):
         (3000, 2000, "1:1", {"x": 500, "y": 0, "width": 2000, "height": 2000}),
         (2000, 3000, "1:1", {"x": 0, "y": 500, "width": 2000, "height": 2000}),
         (3000, 2000, "3:4", {"x": 750, "y": 0, "width": 1500, "height": 2000}),
-        (2000, 3000, "3:4", {"x": 0, "y": 167, "width": 2000, "height": 2666}),
+        (2000, 3000, "3:4", {"x": 1, "y": 168, "width": 1998, "height": 2664}),
+        (1280, 1740, "3:4", {"x": 1, "y": 18, "width": 1278, "height": 1704}),
     ],
 )
 def test_maximum_inscribed_crop_is_centered(width, height, ratio, pixel):
@@ -186,6 +187,35 @@ def test_crop_box_validation_rejects_ratio_and_bounds():
             width=2000,
             height=1000,
         )
+
+
+def test_crop_box_snaps_near_native_dimensions_to_exact_ratio():
+    validated = validate_normalized_crop(
+        maximum_inscribed_crop(1280, 1740, "3:4")["normalized"],
+        target_ratio="3:4",
+        width=1280,
+        height=1740,
+    )
+
+    assert validated["pixel"] == {
+        "x": 1,
+        "y": 18,
+        "width": 1278,
+        "height": 1704,
+    }
+    assert validated["pixel"]["width"] * 4 == validated["pixel"]["height"] * 3
+
+
+def test_near_ratio_source_is_not_classified_as_native():
+    result = classify_image(
+        width=1280,
+        height=1740,
+        size_bytes=2 * MIB,
+        extension=".png",
+    )
+
+    assert result["status"] == "croppable"
+    assert result["matching_ratios"] == []
 
 
 def test_null_providers_do_not_claim_capabilities():

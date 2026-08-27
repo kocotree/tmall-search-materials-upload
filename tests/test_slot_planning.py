@@ -330,3 +330,60 @@ def test_post_plan_crop_change_reprocesses_only_changed_image_identity(tmp_path)
     assert [item["output_sha256"] for item in first_outputs[1:]] == [
         item["output_sha256"] for item in second_outputs[1:]
     ]
+
+
+def test_near_native_candidates_always_use_exact_standard_crop(tmp_path):
+    policy = default_image_policy()
+    outputs = []
+    for index in range(3):
+        source = tmp_path / f"near-native-{index}.jpg"
+        Image.effect_noise((1280, 1740), 70 + index).convert("RGB").save(
+            source,
+            format="JPEG",
+            quality=95,
+        )
+        outputs.append(
+            {
+                "asset_id": f"A{index}",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "source_path": str(source),
+                "source_sha256": sha256_file(source),
+                "crop_box": {
+                    "normalized": [
+                        1 / 1280,
+                        18 / 1740,
+                        1279 / 1280,
+                        1722 / 1740,
+                    ]
+                },
+                # Historical/current snapshots may still call this native under
+                # the old tolerance.  It must no longer bypass the crop path.
+                "native_ratio": True,
+                "requires_compression": False,
+            }
+        )
+    board = {
+        "image_review_revision": 2,
+        "policy_sha256": "policy",
+        "policy": policy,
+        "slot_image_min": 3,
+        "slot_image_max": 9,
+        "products": [{"product_id": "P1", "outputs": outputs}],
+    }
+    assignments = [{
+        "slot_id": "slot-1",
+        "product_id": "P1",
+        "target_ratio": "3:4",
+        "asset_ids": ["A0", "A1", "A2"],
+    }]
+
+    result = materialize_confirmed_slot_plan(
+        assignments,
+        board,
+        derived_root=tmp_path / "derived",
+    )
+
+    for output in result["slots"][0]["outputs"]:
+        assert output["crop_source"] == "candidate"
+        assert output["output_width"] * 4 == output["output_height"] * 3

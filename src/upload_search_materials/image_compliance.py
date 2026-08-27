@@ -313,14 +313,36 @@ def snapshot_image_policy(
 
 
 def _ratio_value(value: str) -> float:
+    left, right = _ratio_terms(value)
+    return left / right
+
+
+def _ratio_terms(value: str) -> tuple[int, int]:
     try:
-        left, right = str(value).split(":", 1)
-        ratio = float(left) / float(right)
+        raw_left, raw_right = str(value).split(":", 1)
+        left = int(raw_left)
+        right = int(raw_right)
     except (TypeError, ValueError, ZeroDivisionError) as error:
         raise ImagePolicyError(f"invalid aspect ratio: {value}") from error
-    if ratio <= 0:
+    if left <= 0 or right <= 0:
         raise ImagePolicyError(f"invalid aspect ratio: {value}")
-    return ratio
+    divisor = math.gcd(left, right)
+    return left // divisor, right // divisor
+
+
+def matches_exact_aspect_ratio(
+    width: int,
+    height: int,
+    target_ratio: str,
+) -> bool:
+    """Return whether integer output dimensions exactly match the target ratio."""
+
+    width = int(width)
+    height = int(height)
+    if width <= 0 or height <= 0:
+        return False
+    left, right = _ratio_terms(target_ratio)
+    return width * right == height * left
 
 
 def maximum_inscribed_crop(
@@ -332,17 +354,14 @@ def maximum_inscribed_crop(
     height = int(height)
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive")
-    ratio = _ratio_value(target_ratio)
-    if width / height > ratio:
-        crop_height = height
-        crop_width = min(width, max(1, int(height * ratio)))
-        x = (width - crop_width) // 2
-        y = 0
-    else:
-        crop_width = width
-        crop_height = min(height, max(1, int(width / ratio)))
-        x = 0
-        y = (height - crop_height) // 2
+    left, right = _ratio_terms(target_ratio)
+    scale = min(width // left, height // right)
+    if scale <= 0:
+        raise ValueError("source dimensions are smaller than the target ratio")
+    crop_width = left * scale
+    crop_height = right * scale
+    x = (width - crop_width) // 2
+    y = (height - crop_height) // 2
     pixel = {
         "x": x,
         "y": y,
@@ -396,7 +415,21 @@ def validate_normalized_crop(
     actual = pixel["width"] / pixel["height"] if pixel["height"] else 0
     if abs(actual - _ratio_value(target_ratio)) > tolerance:
         raise ValueError("crop box does not preserve target ratio")
-    return {"normalized": normalized, "pixel": pixel}
+    left, right = _ratio_terms(target_ratio)
+    scale = min(pixel["width"] // left, pixel["height"] // right)
+    if scale <= 0:
+        raise ValueError("crop box is smaller than the target ratio")
+    pixel["width"] = left * scale
+    pixel["height"] = right * scale
+    pixel["x"] = min(pixel["x"], width - pixel["width"])
+    pixel["y"] = min(pixel["y"], height - pixel["height"])
+    exact_normalized = {
+        "x": pixel["x"] / width,
+        "y": pixel["y"] / height,
+        "width": pixel["width"] / width,
+        "height": pixel["height"] / height,
+    }
+    return {"normalized": exact_normalized, "pixel": pixel}
 
 
 def format_size(size_bytes: int | None) -> str:
@@ -660,9 +693,7 @@ def classify_image(
                 crop["pixel"]["width"] >= image_policy["min_width"]
                 and crop["pixel"]["height"] >= image_policy["min_height"]
             )
-            if abs(actual_ratio - _ratio_value(target_ratio)) <= image_policy[
-                "aspect_ratio_tolerance"
-            ]:
+            if matches_exact_aspect_ratio(width, height, target_ratio):
                 matching_ratios.append(target_ratio)
             checks[target_ratio] = {
                 "target_ratio": target_ratio,

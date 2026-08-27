@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlencode
 
 from werkzeug.serving import make_server
@@ -105,7 +105,10 @@ from .io_tables import (
     sha256_file,
     validate_product_records,
 )
-from .lark_base_sync import write_successful_upload_log
+from .lark_base_sync import (
+    IncrementalUploadLogWriter,
+    write_successful_upload_log,
+)
 from .interaction.session import (
     AGENT_WAIT_SEGMENT_SECONDS,
     InteractionConflict,
@@ -512,7 +515,14 @@ def _run_sources_unchanged(run: dict) -> bool:
         return False
 
 
-def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
+def _publish(
+    args,
+    page,
+    page_factory=None,
+    *,
+    resume: bool = False,
+    on_successful_item: Callable[[Mapping[str, Any]], object] | None = None,
+) -> int:
     run_dir = Path(args.run_dir)
     manifest_path = run_dir / "approval-manifest.json"
     if not manifest_path.is_file():
@@ -644,6 +654,15 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                             "evidence": outcome.evidence,
                         }
                     )
+                    persisted_record = state.item_record(item.task_id)
+                    if (
+                        on_successful_item is not None
+                        and persisted_record is not None
+                        and persisted_record["status"]
+                        in {"submitted", "under_review", "success"}
+                        and persisted_record.get("remote_material_id")
+                    ):
+                        on_successful_item(persisted_record)
                     if outcome.status == "publish_uncertain":
                         batch_paused = True
                         break
@@ -704,6 +723,15 @@ def _publish(args, page, page_factory=None, *, resume: bool = False) -> int:
                             "evidence": outcome.evidence,
                         }
                     )
+                    persisted_record = state.item_record(item.task_id)
+                    if (
+                        on_successful_item is not None
+                        and persisted_record is not None
+                        and persisted_record["status"]
+                        in {"submitted", "under_review", "success"}
+                        and persisted_record.get("remote_material_id")
+                    ):
+                        on_successful_item(persisted_record)
                     if outcome.status == "publish_uncertain":
                         break
             finally:
@@ -1727,12 +1755,24 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
         selectors=str(selectors),
         cdp_url=cdp_url,
     )
-    publish_code = _publish(
-        publish_args,
-        page,
-        page_factory,
-        resume=bool(prepared.get("existing")),
+    upload_log_path = store._stage_path(args.session, "approval") / "lark-upload-log.json"
+    incremental_upload_log = IncrementalUploadLogWriter(
+        run_dir=Path(prepared["run_dir"]),
+        session_inputs_dir=store._session_path(args.session) / "inputs",
+        config=runtime.lark_base,
+        confirmed_by=str(prepared.get("confirmed_by", "")),
+        evidence_path=(upload_log_path if runtime.lark_base.enabled else None),
     )
+    try:
+        publish_code = _publish(
+            publish_args,
+            page,
+            page_factory,
+            resume=bool(prepared.get("existing")),
+            on_successful_item=incremental_upload_log.submit,
+        )
+    finally:
+        incremental_upload_log.close()
 
     state_store = StateStore(Path(prepared["run_dir"]) / "run.sqlite3")
     try:
@@ -1749,7 +1789,6 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
         for record in records
     )
     results_path = Path(prepared["run_dir"]) / "upload-results.json"
-    upload_log_path = store._stage_path(args.session, "approval") / "lark-upload-log.json"
     upload_log = write_successful_upload_log(
         run_dir=Path(prepared["run_dir"]),
         session_inputs_dir=store._session_path(args.session) / "inputs",

@@ -5053,24 +5053,15 @@
       const controls = element("div", "slot-crop-actions");
       const restore = element("button", "button-secondary", "恢复建议框");
       restore.type = "button";
-      const original = element(
-        "button",
-        "button-secondary",
-        cropState.use_original ? "已使用原图" : "使用原图",
-      );
-      original.type = "button";
-      original.hidden = !output.native_ratio;
-      controls.append(restore, original);
+      controls.append(restore);
       const currentBox = () => cropState.normalized_box;
       const update = () => {
         const box = currentBox();
-        const useOriginal = cropState.use_original === true;
-        overlay.hidden = useOriginal || !box;
-        preview.hidden = useOriginal || !box;
-        restore.disabled = useOriginal;
-        original.textContent = useOriginal ? "已使用原图" : "使用原图";
-        if (useOriginal || !box) {
-          outputSize.textContent = `原图直出 ${width}×${height}`;
+        overlay.hidden = !box;
+        preview.hidden = !box;
+        restore.disabled = !box;
+        if (!box) {
+          outputSize.textContent = "标准比例框暂不可用";
           return;
         }
         overlay.style.left = `${box[0] * 100}%`;
@@ -5103,7 +5094,7 @@
         }
       };
       const beginPointer = (event, mode) => {
-        if (cropState.use_original || !currentBox() || !width || !height) return;
+        if (!currentBox() || !width || !height) return;
         event.preventDefault();
         const start = [...currentBox()];
         const startX = event.clientX;
@@ -5142,6 +5133,9 @@
         const stop = () => {
           window.removeEventListener("pointermove", move);
           window.removeEventListener("pointerup", stop);
+          if (JSON.stringify(start) !== JSON.stringify(currentBox())) {
+            invalidateCropPreflight();
+          }
         };
         window.addEventListener("pointermove", move);
         window.addEventListener("pointerup", stop, { once: true });
@@ -5155,8 +5149,7 @@
       });
       overlay.addEventListener("keydown", (event) => {
         if (
-          cropState.use_original
-          || !currentBox()
+          !currentBox()
           || !width
           || !height
           || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
@@ -5201,14 +5194,7 @@
       });
       image.addEventListener("load", update);
       restore.addEventListener("click", () => {
-        cropState.use_original = false;
         cropState.normalized_box = normalizedCropBox(output);
-        invalidateCropPreflight();
-        update();
-      });
-      original.addEventListener("click", () => {
-        cropState.use_original = true;
-        cropState.normalized_box = null;
         invalidateCropPreflight();
         update();
       });
@@ -5297,12 +5283,14 @@
             return;
           }
           const cropKey = `${assignment.slot_id}:${assetId}`;
-          if (!cropParameters[cropKey]) {
+          if (
+            !cropParameters[cropKey]
+            || cropParameters[cropKey].use_original === true
+            || !Array.isArray(cropParameters[cropKey].normalized_box)
+          ) {
             cropParameters[cropKey] = {
-              normalized_box: output.native_ratio
-                ? null
-                : normalizedCropBox(output),
-              use_original: Boolean(output.native_ratio),
+              normalized_box: normalizedCropBox(output),
+              use_original: false,
               confirm_compression: !output.requires_compression,
             };
           }
@@ -5351,9 +5339,9 @@
             element(
               "small",
               "",
-              `目标 ${assignment.target_ratio} · ${
-                output.native_ratio ? "原生比例直出" : "需要裁剪"
-              }${output.requires_compression ? " · 需要压缩" : ""}`,
+              `目标 ${assignment.target_ratio} · 标准比例框${
+                output.requires_compression ? " · 需要压缩" : ""
+              }`,
             ),
             createSlotCropEditor(
               output,

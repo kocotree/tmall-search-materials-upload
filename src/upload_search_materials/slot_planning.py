@@ -11,7 +11,12 @@ from typing import Any, Iterable, Mapping
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .image_compliance import KIB, MIB, _ratio_value, normalize_image_policy
+from .image_compliance import (
+    KIB,
+    MIB,
+    matches_exact_aspect_ratio,
+    normalize_image_policy,
+)
 from .image_compliance import PillowImageCompressionProvider, provider_contract_payload
 from .interaction.session import InteractionConflict, SessionStore
 from .io_tables import sha256_file
@@ -471,15 +476,11 @@ def validate_final_output(
         raise ValueError("SOURCE_UNREADABLE: output cannot be read") from error
     if width < image_policy["min_width"] or height < image_policy["min_height"]:
         raise ValueError("OUTPUT_DIMENSIONS_BELOW_MINIMUM")
-    actual_ratio = width / height
-    matching = [
-        ratio
-        for ratio in image_policy["allowed_aspect_ratios"]
-        if abs(actual_ratio - _ratio_value(ratio))
-        <= image_policy["aspect_ratio_tolerance"]
-    ]
     expected_ratio = str(output.get("target_ratio", ""))
-    if expected_ratio not in matching:
+    if (
+        expected_ratio not in image_policy["allowed_aspect_ratios"]
+        or not matches_exact_aspect_ratio(width, height, expected_ratio)
+    ):
         raise ValueError("OUTPUT_ASPECT_RATIO_INVALID")
     return {
         **dict(output),
@@ -800,7 +801,9 @@ def materialize_confirmed_slot_plan(
                     f"{assignment['target_ratio']}|{order}"
                 ).encode("utf-8")
             ).hexdigest()[:24]
-            native = bool(candidate.get("native_ratio")) and submitted_box is None
+            selected_box = submitted_box or candidate_box
+            if selected_box is None:
+                raise ValueError("CROP_BOX_REQUIRED")
             compressed = provider.compress(
                 asset_id=scoped_id,
                 source_sha256=expected_source_sha256,
@@ -810,13 +813,7 @@ def materialize_confirmed_slot_plan(
                 max_output_bytes=maximum,
                 derived_root=str(root),
                 target_ratio=assignment["target_ratio"],
-                normalized_box=(
-                    None
-                    if native
-                    else (
-                        submitted_box or candidate_box
-                    )
-                ),
+                normalized_box=selected_box,
             )
             output = {
                 **provider_contract_payload(compressed),
@@ -833,7 +830,7 @@ def materialize_confirmed_slot_plan(
                 "crop_source": (
                     "manual"
                     if submitted_box is not None
-                    else ("native" if native else "candidate")
+                    else "candidate"
                 ),
             }
             if sha256_file(source_path) != expected_source_sha256:

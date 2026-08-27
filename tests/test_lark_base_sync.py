@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from upload_search_materials.lark_base_sync import (
+    IncrementalUploadLogWriter,
     LarkCliResult,
     build_upload_log_rows,
     inspect_lark_base_config,
@@ -640,6 +641,70 @@ def test_upload_log_retry_appends_only_new_successful_tasks(tmp_path, monkeypatc
     persisted = json.loads(evidence.read_text(encoding="utf-8"))
     assert persisted["created_count"] == 2
     assert len(persisted["recorded_upload_keys"]) == 2
+
+
+def test_incremental_upload_log_writer_does_not_wait_before_next_slot(
+    tmp_path,
+    monkeypatch,
+):
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    submitted_batches = []
+
+    def fake_rows(**kwargs):
+        return [
+            {"商品 ID": str(record["task_id"]), "上传时间": "固定时间"}
+            for record in kwargs["task_records"]
+            if record
+        ]
+
+    def runner(args, _timeout):
+        payload = json.loads(args[args.index("--json") + 1])
+        submitted_batches.append(payload["create_records"])
+        started.set()
+        assert release.wait(timeout=5)
+        return LarkCliResult(
+            ok=True,
+            payload={"record_id_list": ["recorded"]},
+        )
+
+    monkeypatch.setattr(
+        "upload_search_materials.lark_base_sync.build_upload_log_rows",
+        fake_rows,
+    )
+    writer = IncrementalUploadLogWriter(
+        run_dir=tmp_path,
+        session_inputs_dir=tmp_path,
+        config=LarkBaseConfig(
+            enabled=True,
+            upload_log_base_token="base-token",
+            upload_log_table_id="上传记录表",
+        ),
+        evidence_path=tmp_path / "lark-upload-log.json",
+        runner=runner,
+    )
+
+    assert writer.submit({
+        "task_id": "slot-1",
+        "status": "submitted",
+        "remote_material_id": "remote-1",
+    }) is True
+    assert started.wait(timeout=2)
+    assert writer.submit({
+        "task_id": "slot-2",
+        "status": "under_review",
+        "remote_material_id": "remote-2",
+    }) is True
+    release.set()
+    results = writer.close()
+
+    assert [result.status for result in results] == ["completed", "completed"]
+    assert submitted_batches == [
+        [{"商品 ID": "slot-1", "上传时间": "固定时间"}],
+        [{"商品 ID": "slot-2", "上传时间": "固定时间"}],
+    ]
 
 
 def test_runtime_upload_history_snapshot_downloads_only_valid_fingerprints(

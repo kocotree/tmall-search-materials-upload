@@ -8,6 +8,7 @@ ordinary Base/auth/network failures.
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
@@ -81,6 +82,86 @@ class LarkCliResult:
     stderr: str = ""
     reason_code: str = ""
     message: str = ""
+
+
+class IncrementalUploadLogWriter:
+    """Append successful slot records without delaying the next upload.
+
+    The upload state database remains the durable source of pending records.
+    Calls are serialized in one background thread so the shared idempotency
+    evidence cannot be updated concurrently.  A final reconciliation can pass
+    all persisted successful records to ``write_successful_upload_log``.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_dir: Path,
+        session_inputs_dir: Path,
+        config: LarkBaseConfig,
+        confirmed_by: str = "",
+        evidence_path: Path | None = None,
+        runner: Runner | None = None,
+    ) -> None:
+        self.run_dir = Path(run_dir)
+        self.session_inputs_dir = Path(session_inputs_dir)
+        self.config = config
+        self.confirmed_by = confirmed_by
+        self.evidence_path = evidence_path
+        self.runner = runner
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="lark-upload-log",
+        )
+        self._futures: list[Future[UploadLogResult]] = []
+        self._closed = False
+
+    def submit(self, task_record: Mapping[str, Any] | None) -> bool:
+        """Queue one persisted successful slot and return without network wait."""
+
+        if self._closed or not task_record:
+            return False
+        record = dict(task_record)
+        if (
+            str(record.get("status", "")).strip()
+            not in SUCCESS_UPLOAD_STATUSES
+            or not str(record.get("remote_material_id") or "").strip()
+        ):
+            return False
+        self._futures.append(
+            self._executor.submit(
+                write_successful_upload_log,
+                run_dir=self.run_dir,
+                session_inputs_dir=self.session_inputs_dir,
+                task_records=[record],
+                config=self.config,
+                confirmed_by=self.confirmed_by,
+                evidence_path=self.evidence_path,
+                runner=self.runner,
+            )
+        )
+        return True
+
+    def close(self) -> tuple[UploadLogResult, ...]:
+        """Finish queued writes after all slot uploads have left the critical path."""
+
+        if self._closed:
+            return ()
+        self._closed = True
+        self._executor.shutdown(wait=True)
+        results: list[UploadLogResult] = []
+        for future in self._futures:
+            try:
+                results.append(future.result())
+            except Exception as error:  # pragma: no cover - defensive soft-fail boundary
+                results.append(
+                    UploadLogResult(
+                        status="failed",
+                        reason_code="LARK_INCREMENTAL_UPLOAD_LOG_FAILED",
+                        message=str(error),
+                    )
+                )
+        return tuple(results)
 
 
 @dataclass(frozen=True)
