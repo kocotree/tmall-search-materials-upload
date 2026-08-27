@@ -327,7 +327,7 @@ def test_product_scope_waits_for_spa_table_hydration(monkeypatch):
     assert page.wait_count == 2
 
 
-def test_product_scope_keeps_waiting_past_previous_slow_page_limit():
+def test_product_scope_keeps_waiting_past_previous_sixty_second_limit():
     product_scope = _FakeScope(
         "https://myseller.taobao.com/material-center",
         ["商品名称/ID"],
@@ -335,7 +335,7 @@ def test_product_scope_keeps_waiting_past_previous_slow_page_limit():
     )
 
     def hydrate(wait_count):
-        if wait_count == 55:
+        if wait_count == 250:
             product_scope.table_ready = True
 
     page = _FakePage([product_scope], on_wait=hydrate)
@@ -343,7 +343,19 @@ def test_product_scope_keeps_waiting_past_previous_slow_page_limit():
 
     assert scope is product_scope
     assert search.placeholder == "商品名称/ID"
-    assert page.wait_count == 55
+    assert page.wait_count == 250
+
+
+def test_copy_network_waits_cover_slow_navigation_upload_and_ai():
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    assert copy_module.NAVIGATION_TIMEOUT_MS == 60_000
+    assert (
+        copy_module.PRODUCT_SCOPE_ATTEMPTS
+        * copy_module.PRODUCT_SCOPE_DELAY_MS
+    ) >= 90_000
+    assert copy_module.COPY_UPLOAD_TIMEOUT_MS == 120_000
+    assert copy_module.AI_COPY_TIMEOUT_MS == 180_000
 
 
 def test_product_scope_timeout_refreshes_once_before_retrying(monkeypatch):

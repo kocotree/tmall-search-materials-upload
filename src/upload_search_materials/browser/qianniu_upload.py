@@ -215,13 +215,15 @@ def _wait_for_upload_completion(
     page,
     selector_frame,
     expected_count: int,
+    *,
+    timeout_ms: int = 60_000,
 ) -> None:
     success = selector_frame.get_by_text(
         f"{expected_count} 个文件上传成功",
         exact=False,
     )
     try:
-        success.wait_for(state="visible", timeout=60_000)
+        success.wait_for(state="visible", timeout=timeout_ms)
     except PlaywrightTimeoutError:
         try:
             body = selector_frame.locator("body").inner_text()
@@ -271,11 +273,14 @@ def _select_uploaded_cards(
     page,
     selector_frame,
     paths: Sequence[str],
+    *,
+    attempts: int = 30,
+    delay_ms: int = 300,
 ) -> None:
     candidates_by_path = []
     selected_cards = []
     use_existing_selection = False
-    for _ in range(30):
+    for _ in range(attempts):
         cards = selector_frame.locator(
             '[class*="PicList_PicturesShow_main-show"]'
         )
@@ -310,7 +315,7 @@ def _select_uploaded_cards(
             break
         if all(len(visible) == 1 for _, visible in candidates_by_path):
             break
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(delay_ms)
 
     if not use_existing_selection:
         selector_frame.locator(

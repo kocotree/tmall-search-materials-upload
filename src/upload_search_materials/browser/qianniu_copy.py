@@ -19,9 +19,19 @@ from ..io_tables import sha256_file
 MATERIAL_RECOMMEND_QUERY = "?tab=recommend"
 PUBLISH_FRAME_FRAGMENT = "/publish-feeds/imagePreview"
 MATERIAL_SELECTOR_FRAME_FRAGMENT = "sucai-selector-ng"
-PRODUCT_SCOPE_ATTEMPTS = 200
+NAVIGATION_TIMEOUT_MS = 60_000
+PRODUCT_SCOPE_ATTEMPTS = 300
 PRODUCT_SCOPE_DELAY_MS = 300
-AI_COPY_TIMEOUT_MS = 90_000
+PRODUCT_ROW_ATTEMPTS = 100
+LIVE_SLOT_ATTEMPTS = 100
+PUBLISH_FRAME_ATTEMPTS = 100
+PUBLISH_BODY_ATTEMPTS = 120
+MATERIAL_ROOT_ATTEMPTS = 120
+MATERIAL_CARD_ATTEMPTS = 120
+MATERIAL_SELECTOR_FRAME_ATTEMPTS = 100
+COPY_UPLOAD_TIMEOUT_MS = 120_000
+COPY_UPLOAD_CARD_ATTEMPTS = 100
+AI_COPY_TIMEOUT_MS = 180_000
 AI_COPY_POLL_MS = 500
 
 
@@ -309,7 +319,7 @@ def _open_recommend_list(page, material_center_url: str) -> None:
     page.goto(
         _recommend_url(material_center_url),
         wait_until="domcontentloaded",
-        timeout=30_000,
+        timeout=NAVIGATION_TIMEOUT_MS,
     )
     _dismiss_guides(page)
 
@@ -412,7 +422,7 @@ def _find_product_row(page, product_id: str):
     search.fill(product_id)
     search.press("Enter")
     last_count = 0
-    for _ in range(30):
+    for _ in range(PRODUCT_ROW_ATTEMPTS):
         try:
             rows = scope.locator("tbody tr").filter(
                 has_text=product_id
@@ -492,7 +502,7 @@ def _open_slot_publish_form(
 ):
     def resolve_live_slot():
         last_slot_count = 0
-        for _ in range(30):
+        for _ in range(LIVE_SLOT_ATTEMPTS):
             try:
                 live_row = row
                 if live_row is None:
@@ -553,7 +563,7 @@ def _open_slot_publish_form(
             frame = _wait_for_frame(
                 page,
                 PUBLISH_FRAME_FRAGMENT,
-                attempts=20,
+                attempts=PUBLISH_FRAME_ATTEMPTS,
                 delay_ms=300,
             )
             break
@@ -574,7 +584,7 @@ def _open_slot_publish_form(
             ),
         )
     body = ""
-    for _ in range(40):
+    for _ in range(PUBLISH_BODY_ATTEMPTS):
         body = frame.locator("body").inner_text().strip()
         if body:
             break
@@ -599,7 +609,7 @@ def _reset_material_selector_to_all_images(page, selector):
     # the stable root entry before deciding that no seed image exists.
     visible_entries = []
     all_image_entries = selector.get_by_text("全部图片", exact=True)
-    for _ in range(40):
+    for _ in range(MATERIAL_ROOT_ATTEMPTS):
         all_image_entries = selector.get_by_text("全部图片", exact=True)
         visible_entries = []
         for index in range(all_image_entries.count()):
@@ -623,7 +633,7 @@ def _reset_material_selector_to_all_images(page, selector):
     cards = selector.locator(
         '[class*="PicList_PicturesShow_main-show"]'
     )
-    for _ in range(40):
+    for _ in range(MATERIAL_CARD_ATTEMPTS):
         if cards.count() > 0:
             return cards
         page.wait_for_timeout(250)
@@ -643,7 +653,7 @@ def _find_existing_seed_card(page, selector, filename: str):
     cards_selector = '[class*="PicList_PicturesShow_main-show"]'
     search.fill(filename)
     search.press("Enter")
-    for _ in range(20):
+    for _ in range(MATERIAL_CARD_ATTEMPTS):
         page.wait_for_timeout(250)
         matches = selector.locator(cards_selector).filter(
             has_text=filename
@@ -735,7 +745,10 @@ def _select_seed_image(
         )
     upload.click(force=True)
     selector = _wait_for_frame(
-        page, MATERIAL_SELECTOR_FRAME_FRAGMENT, delay_ms=300
+        page,
+        MATERIAL_SELECTOR_FRAME_FRAGMENT,
+        attempts=MATERIAL_SELECTOR_FRAME_ATTEMPTS,
+        delay_ms=300,
     )
     # Normalize only the selector's display folder. This does not search for
     # or reuse a cloud asset; it ensures the newly local-uploaded card is
@@ -763,14 +776,25 @@ def _select_seed_image(
         [str(path)],
         upload_names=[upload_name],
     )
-    _wait_for_upload_completion(page, selector, 1)
+    _wait_for_upload_completion(
+        page,
+        selector,
+        1,
+        timeout_ms=COPY_UPLOAD_TIMEOUT_MS,
+    )
     selector = _wait_for_frame(
         page,
         MATERIAL_SELECTOR_FRAME_FRAGMENT,
-        attempts=20,
+        attempts=MATERIAL_SELECTOR_FRAME_ATTEMPTS,
         delay_ms=300,
     )
-    _select_uploaded_cards(page, selector, [upload_name])
+    _select_uploaded_cards(
+        page,
+        selector,
+        [upload_name],
+        attempts=COPY_UPLOAD_CARD_ATTEMPTS,
+        delay_ms=300,
+    )
     return upload_name
 
 
@@ -902,7 +926,10 @@ def generate_qianniu_copy_drafts(
                 ),
             )
             publish_frame = _wait_for_frame(
-                page, PUBLISH_FRAME_FRAGMENT, delay_ms=200
+                page,
+                PUBLISH_FRAME_FRAGMENT,
+                attempts=PUBLISH_FRAME_ATTEMPTS,
+                delay_ms=300,
             )
             title, description, elapsed = _generate_copy(
                 page, publish_frame

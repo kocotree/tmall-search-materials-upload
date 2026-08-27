@@ -85,6 +85,7 @@
   let currentBackNavigation = null;
   let currentGalleryProgress = null;
   let currentGalleryJob = null;
+  let localCopyRequestInFlight = false;
   let isHydrating = false;
   let currentStageInputLoaded = false;
   let currentStageHasPersistedInput = false;
@@ -1464,7 +1465,6 @@
       activeForm()?.querySelector('[name="task_ids"]')?.value || "",
     ).split(/\r?\n/).some((taskId) => taskId.trim());
     submitButton.disabled = lockedByServer
-      || technicalDiagnostic.active
       || !approvalHasSelectedTasks;
     if (
       currentStageId === "asset_matching"
@@ -1497,6 +1497,7 @@
     );
     const localBackLockActive = stageLocalActionInFlight
       || pendingBackNavigation
+      || (currentStageId === "slots_copy" && localCopyRequestInFlight)
       || (
         persistenceInFlight
         && !["asset_matching", "slots_copy"].includes(currentStageId)
@@ -1512,7 +1513,9 @@
     backButton.title = localBackLockActive
       ? stageLocalActionInFlight
         ? "当前步骤正在保存或处理，完成后才能返回上一步。"
-        : "当前步骤正在保存，完成后才能返回上一步。"
+        : localCopyRequestInFlight
+          ? "文案正在生成，完成后才能返回上一步。"
+          : "当前步骤正在保存，完成后才能返回上一步。"
       : selectionCheckActive && currentBackNavigation?.enabled
         ? "仍有图片检测在后台进行；返回上一步会放弃当前素材选择。"
         : currentBackNavigation?.message || "";
@@ -2747,6 +2750,17 @@
     );
   }
 
+  function galleryJobIsActive(job = currentGalleryJob) {
+    return ["queued", "running"].includes(job?.status);
+  }
+
+  function setLocalCopyRequestInFlight(active) {
+    const next = Boolean(active);
+    if (localCopyRequestInFlight === next) return;
+    localCopyRequestInFlight = next;
+    if (currentStageId === "slots_copy") renderStatus();
+  }
+
   function assetMatchingProductIds(data) {
     const ids = new Set();
     ["requirements", "folder_candidates", "asset_candidates"].forEach((key) => {
@@ -2759,6 +2773,7 @@
   }
 
   function removeProductFromCurrentTask(productId, productTitle, data) {
+    if (galleryJobIsActive()) return false;
     const normalizedProductId = String(productId || "").trim();
     const removed = removedProductIdSet();
     const activeProducts = [...assetMatchingProductIds(data)]
@@ -2852,10 +2867,12 @@
     const removed = removedProductIdSet();
     const activeCount = [...assetMatchingProductIds(data)]
       .filter((value) => !removed.has(value)).length;
-    button.disabled = activeCount <= 1;
-    button.title = button.disabled
+    button.disabled = galleryJobIsActive() || activeCount <= 1;
+    button.title = activeCount <= 1
       ? "本次任务至少需要保留一个商品"
-      : "仅从本次上传任务中去掉该商品";
+      : galleryJobIsActive()
+        ? ""
+        : "仅从本次上传任务中去掉该商品";
     button.setAttribute(
       "aria-label",
       `去掉当前商品：${productTitle || productId}`,
@@ -3088,8 +3105,10 @@
         const key = `${productId}\u0000${candidate.folder_id}`;
         const saved = decisionsByKey.get(key) || {};
         const card = element("article", "folder-card");
-        card.tabIndex = 0;
+        const galleryActive = galleryJobIsActive();
+        card.tabIndex = galleryActive ? -1 : 0;
         card.setAttribute("role", "checkbox");
+        card.setAttribute("aria-disabled", String(galleryActive));
         const identity = element("div", "folder-card-identity");
         const countStatus = String(
           candidate.image_count_status || "pending",
@@ -3192,6 +3211,7 @@
           }));
         };
         const toggleDecision = () => {
+          if (galleryJobIsActive()) return;
           syncDecision(
             currentDecision === "confirmed" ? "rejected" : "confirmed",
           );
@@ -3220,8 +3240,8 @@
         uiState.serverStatus,
       );
       const galleryAlreadyLoaded = currentStep === "image_selection";
-      const folderSelectionChanged = !galleryAlreadyLoaded
-        || UiState.folderSelectionChanged(
+      const galleryNeedsReload = !galleryAlreadyLoaded
+        || UiState.galleryNeedsReload(
           view.result?.data?.gallery_identity?.prepared_folder_keys,
           folderDecisions(),
         );
@@ -3232,10 +3252,10 @@
         ? "确认文件夹并重新加载图片"
         : "确认文件夹并加载图片";
       localButton.disabled = galleryActive
-        || (galleryAlreadyLoaded && !folderSelectionChanged);
+        || (galleryAlreadyLoaded && !galleryNeedsReload);
       localSummary.textContent = galleryActive
         ? "本机正在按最新文件夹选择加载图片。"
-        : galleryAlreadyLoaded && folderSelectionChanged
+        : galleryAlreadyLoaded && galleryNeedsReload
           ? "文件夹选择已变更，请重新加载图片后继续选图。"
           : galleryAlreadyLoaded
             ? "当前候选图片与文件夹选择一致；调整文件夹后可重新加载。"
@@ -4330,6 +4350,11 @@
       const requestedIndex = pageOrder.indexOf(page);
       if (requestedIndex < 0) return;
       if (userRequested && requestedIndex > maxUnlockedPage) return;
+      if (
+        userRequested
+        && localCopyRequestInFlight
+        && page !== "copy"
+      ) return;
       activeSubpage = page;
       Object.entries(subpages).forEach(([name, panel]) => {
         panel.hidden = name !== page;
@@ -4337,7 +4362,11 @@
       [...wizard.children].forEach((item, index) => {
         item.dataset.active = index === requestedIndex ? "true" : "false";
         item.dataset.complete = index < maxUnlockedPage ? "true" : "false";
-        item.disabled = index > maxUnlockedPage;
+        item.disabled = index > maxUnlockedPage
+          || (
+            localCopyRequestInFlight
+            && pageOrder[index] !== "copy"
+          );
       });
     };
     pageOrder.forEach((page, index) => {
@@ -5370,20 +5399,9 @@
       finishHint = element("small", "copy-finish-hint");
       updateCopyActions();
       finish.addEventListener("click", () => persistStage("submit"));
-      const backToProcess = element(
-        "button",
-        "button-secondary",
-        "返回图片裁剪",
-      );
-      backToProcess.type = "button";
-      backToProcess.addEventListener("click", () => setSubpage(
-        "process",
-        { userRequested: true },
-      ));
       const finalActions = element("div", "slot-page-actions");
       finalActions.append(
         finishHint,
-        backToProcess,
         finish,
       );
       const technical = document.createElement("details");
@@ -5405,46 +5423,16 @@
       );
       writeJsonListControl("copy_edits", copyState);
       const applyCopyDrafts = (drafts, requestId) => {
-        const draftsBySlot = new Map(
-          drafts.map((draft) => [String(draft.slot_id), draft]),
-        );
-        const existingBySlot = new Map(
+        const existingItems =
           readJsonListControl("copy_edits")
-            .filter((item) => item?.slot_id)
-            .map((item) => [String(item.slot_id), item]),
+            .filter((item) => item?.slot_id);
+        const merged = UiState.copyDraftsForVersion(
+          assignments,
+          existingItems,
+          drafts,
+          requestId,
+          processed.slots || [],
         );
-        const merged = assignments.map((assignment) => {
-          const slotId = String(assignment.slot_id);
-          const draft = draftsBySlot.get(slotId);
-          const existing = existingBySlot.get(slotId) || {};
-          if (!draft) return existing.slot_id
-            ? existing
-            : {
-              slot_id: slotId,
-              product_id: assignment.product_id,
-              title: "",
-              description: "",
-              evidence: [],
-              risks: [],
-              confirmed: false,
-              source: "pending_qianniu_builtin_ai",
-              request_id: requestId,
-            };
-          return {
-            slot_id: slotId,
-            product_id: assignment.product_id,
-            title: draft.title || "",
-            description: draft.description || "",
-            evidence: draft.evidence || [],
-            risks: draft.risks || [],
-            confirmed: Boolean(
-              String(draft.title || "").trim()
-              && String(draft.description || "").trim()
-            ),
-            source: String(draft.source || "qianniu_builtin_ai"),
-            request_id: requestId,
-          };
-        });
         writeJsonListControl("copy_edits", merged, { notify: true });
         copyStatus.textContent = drafts.length === assignments.length
           ? "千牛文案已载入；请核对全部标题、描述、依据和风险。"
@@ -5459,12 +5447,16 @@
           );
           if (!copyVersions.isConnected) return;
           const requestState = detail.request?.status || "";
+          const requestIsActive = ["pending_agent", "processing"]
+            .includes(requestState);
+          setLocalCopyRequestInFlight(requestIsActive);
+          setSubpage("copy");
           const progressDrafts = detail.progress?.copy_drafts || [];
           const completedDrafts = detail.response?.result?.copy_drafts || [];
           const drafts = completedDrafts.length
             ? completedDrafts
             : progressDrafts;
-          const knownCount = savedCopyItems.filter(
+          const knownCount = readJsonListControl("copy_edits").filter(
             (item) => String(item.request_id || "") === requestId
               && String(item.title || "").trim()
               && String(item.description || "").trim(),
@@ -5483,6 +5475,11 @@
             copyButton.disabled = false;
             return;
           }
+          if (["cancelled", "superseded"].includes(requestState)) {
+            copyStatus.textContent = "当前文案版本已停止，可以重新生成新版本。";
+            copyButton.disabled = false;
+            return;
+          }
           copyButton.disabled = true;
           copyStatus.textContent = requestState === "processing"
             ? `工作台后台正在复用千牛文案流程：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
@@ -5495,6 +5492,8 @@
         }
       };
       const requestCopy = async (regenerate = false) => {
+        setLocalCopyRequestInFlight(true);
+        setSubpage("copy");
         copyButton.disabled = true;
         copyButton.textContent = `正在创建版本 ${copyVersionCount + 1}…`;
         copyStatus.textContent = "正在创建新的千牛文案任务…";
@@ -5510,8 +5509,10 @@
             },
           );
           copyStatus.textContent = "新版本已提交给工作台后台。";
-          pollCopyRequest(copyRequest.request_id);
+          applyCopyDrafts([], copyRequest.request_id);
         } catch (error) {
+          setLocalCopyRequestInFlight(false);
+          setSubpage("copy");
           copyStatus.textContent = error.userMessage || error.message;
           copyButton.disabled = false;
         } finally {
@@ -5524,9 +5525,16 @@
           const copyRequests = (payload.requests || []).filter(
             (item) => item.kind === "copy_draft",
           );
-          const versions = copyRequests.filter(
-            (item) => item.kind === "copy_draft" && item.status === "completed",
+          const versionView = UiState.copyRequestVersionView(
+            copyRequests,
+            restoredRequestId,
           );
+          const versions = versionView.versions;
+          const activeCopyRequest = versions.find(
+            (item) => item.request_id === versionView.activeRequestId,
+          ) || null;
+          setLocalCopyRequestInFlight(Boolean(activeCopyRequest));
+          setSubpage(activeCopyRequest ? "copy" : activeSubpage);
           copyVersionCount = versions.length;
           copyButton.textContent = "重新生成新版本";
           copyButton.hidden = copyRequests.length === 0;
@@ -5536,56 +5544,56 @@
             option.textContent = "暂无千牛文案版本";
             copyVersions.appendChild(option);
             copyVersions.disabled = true;
-            const active = copyRequests.find(
-              (item) => item.request_id === restoredRequestId,
-            ) || copyRequests[0];
-            if (active) pollCopyRequest(active.request_id);
+            if (!activeCopyRequest) {
+              const latest = copyRequests.find(
+                (item) => item.request_id === restoredRequestId,
+              ) || copyRequests[0];
+              if (latest) pollCopyRequest(latest.request_id);
+            }
             return;
           }
           versions.forEach((item, index) => {
             const option = document.createElement("option");
             option.value = item.request_id;
-            option.textContent = `版本 ${versions.length - index} · ${item.request_id}`;
+            option.textContent = `版本 ${item.version_number} · ${item.status_label}`;
             copyVersions.appendChild(option);
           });
-          const selectedVersionExists = versions.some(
-            (item) => item.request_id === restoredRequestId,
-          );
-          if (selectedVersionExists) {
-            copyVersions.value = restoredRequestId;
-            pollCopyRequest(restoredRequestId);
-            return;
-          }
           const currentDrafts = readJsonListControl("copy_edits")
             .filter((item) => item?.slot_id);
           if (!copyVersions.isConnected) return;
           if (
-            hasMeaningfulCopyDrafts(savedCopyItems)
-            || hasMeaningfulCopyDrafts(currentDrafts)
+            !activeCopyRequest
+            && !restoredRequestId
+            && (
+              hasMeaningfulCopyDrafts(savedCopyItems)
+              || hasMeaningfulCopyDrafts(currentDrafts)
+            )
           ) {
             const option = document.createElement("option");
             option.value = "";
             option.textContent = "当前草稿 · 未绑定 AI 版本";
             option.selected = true;
             copyVersions.prepend(option);
-            const active = copyRequests.find(
-              (item) => item.request_id === restoredRequestId
-                && ["pending_agent", "processing"].includes(item.status),
-            );
-            if (active) pollCopyRequest(active.request_id);
             return;
           }
-          const latestRequestId = versions[0].request_id;
-          pollCopyRequest(latestRequestId);
+          const selectedRequestId = versionView.selectedRequestId;
+          if (!selectedRequestId) return;
+          copyVersions.value = selectedRequestId;
+          pollCopyRequest(selectedRequestId);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (restoredRequestId) pollCopyRequest(restoredRequestId);
+        });
       copyVersions.addEventListener("change", async () => {
         if (!copyVersions.value) return;
         const detail = await fetchJson(
           apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(copyVersions.value)}`),
         );
+        const drafts = detail.response?.result?.copy_drafts?.length
+          ? detail.response.result.copy_drafts
+          : detail.progress?.copy_drafts || [];
         applyCopyDrafts(
-          detail.response?.result?.copy_drafts || [],
+          drafts,
           copyVersions.value,
         );
       });
@@ -5710,6 +5718,7 @@
         return;
       }
       processPlanButton.disabled = true;
+      setLocalCopyRequestInFlight(true);
       processStatus.textContent = "正在确认图片输出并创建千牛文案任务…";
       try {
         const processed = await fetchJson(
@@ -5723,11 +5732,15 @@
           },
         );
         processedOutputs = processed;
+        const copyRequestId = String(
+          processed.copy_request?.request_id || processed.copy_request_id || "",
+        );
+        setLocalCopyRequestInFlight(Boolean(copyRequestId));
         processStatus.textContent = `图片处理完成：${processed.slots?.length || 0} 个坑位；文案任务已交给工作台后台。`;
         renderProcessedPreview(processed);
         renderCopyEditor(
           processed,
-          processed.copy_request?.request_id || processed.copy_request_id || "",
+          copyRequestId,
         );
         maxUnlockedPage = Math.max(
           maxUnlockedPage,
@@ -5735,6 +5748,7 @@
         );
         setSubpage("copy");
       } catch (error) {
+        setLocalCopyRequestInFlight(false);
         processStatus.textContent = error.userMessage
           || Object.values(error.fieldErrors || {})[0]
           || error.message;
@@ -6509,7 +6523,7 @@
     );
     if (
       currentStep === "image_selection"
-      && !UiState.folderSelectionChanged(
+      && !UiState.galleryNeedsReload(
         uiState.result?.data?.gallery_identity?.prepared_folder_keys,
         values.folder_decisions,
       )
@@ -7207,6 +7221,7 @@
     currentBackNavigation = null;
     currentGalleryJob = null;
     currentGalleryProgress = null;
+    localCopyRequestInFlight = false;
     currentStageInputLoaded = false;
     currentStageHasPersistedInput = false;
     recoverProcessingButton.hidden = true;

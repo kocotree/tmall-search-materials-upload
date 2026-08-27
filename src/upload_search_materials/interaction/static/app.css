@@ -882,6 +882,15 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
   opacity: 0.68;
 }
 .folder-card[data-decision="rejected"]:hover { opacity: 0.84; }
+.folder-card[aria-disabled="true"] {
+  cursor: not-allowed;
+  box-shadow: none;
+  opacity: 0.62;
+}
+.folder-card[aria-disabled="true"]:hover {
+  border-color: var(--line);
+  box-shadow: none;
+}
 .folder-card-identity, .folder-card-status { display: grid; gap: 7px; min-width: 0; }
 .folder-card-status { align-content: start; justify-items: end; text-align: right; }
 .folder-selection-state {

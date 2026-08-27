@@ -7,6 +7,7 @@ import pytest
 from upload_search_materials.agent_handoff import (
     claim_agent_request,
     complete_agent_request,
+    fail_agent_request,
     read_agent_request,
     supersede_agent_request,
 )
@@ -946,7 +947,7 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
     assert detail["progress"]["completed_count"] == detail["progress"]["total_count"]
 
 
-def test_slots_copy_back_supersedes_active_copy_without_disabling_navigation(
+def test_slots_copy_back_is_disabled_until_active_copy_finishes(
     tmp_path,
 ):
     client, store, session_id = _prepared_slot_client(tmp_path)
@@ -961,15 +962,32 @@ def test_slots_copy_back_supersedes_active_copy_without_disabling_navigation(
         f"/api/sessions/{session_id}/stages/slots_copy/status"
     )
     assert status.status_code == 200
-    assert status.json["back_navigation"]["enabled"] is True
-    assert status.json["back_navigation"]["reason_code"] == ""
-
-    stale = client.post(
-        f"/api/sessions/{session_id}/stages/slots_copy/back",
-        json={"revision": revision + 1},
+    assert status.json["back_navigation"]["enabled"] is False
+    assert (
+        status.json["back_navigation"]["reason_code"]
+        == "STAGE_BACK_COPY_ACTIVE"
     )
-    assert stale.status_code == 409
+
+    blocked = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/back",
+        json={"revision": revision},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json["reason_code"] == "STAGE_BACK_COPY_ACTIVE"
     assert read_agent_request(store, session_id, request_id)["status"] == "pending_agent"
+    assert store.load_session(session_id)["current_stage"] == "slots_copy"
+
+    fail_agent_request(
+        store,
+        session_id,
+        request_id,
+        actor="test",
+        reason_code="TEST_COPY_FAILED",
+    )
+    status = client.get(
+        f"/api/sessions/{session_id}/stages/slots_copy/status"
+    )
+    assert status.json["back_navigation"]["enabled"] is True
 
     reopened = client.post(
         f"/api/sessions/{session_id}/stages/slots_copy/back",
@@ -978,7 +996,6 @@ def test_slots_copy_back_supersedes_active_copy_without_disabling_navigation(
 
     assert reopened.status_code == 200, reopened.json
     assert reopened.json["target_stage_id"] == "asset_matching"
-    assert read_agent_request(store, session_id, request_id)["status"] == "superseded"
     assert store.load_session(session_id)["current_stage"] == "asset_matching"
 
 

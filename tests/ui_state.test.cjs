@@ -78,7 +78,7 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
-test("agent-owned setup diagnostics wait for system recovery", () => {
+test("agent-owned setup diagnostics allow a preserved configuration to be resubmitted", () => {
   assert.equal(typeof UiState.technicalDiagnosticView, "function");
   let state = UiState.createState("setup");
   state = UiState.receiveStage(state, {
@@ -94,9 +94,9 @@ test("agent-owned setup diagnostics wait for system recovery", () => {
 
   assert.deepEqual(UiState.technicalDiagnosticView(state), {
     active: true,
-    statusLabel: "系统正在处理异常",
-    submitLabel: "等待系统恢复",
-    message: "系统正在恢复本机采集配置，当前业务数据已保留。",
+    statusLabel: "需要重新提交",
+    submitLabel: "重新提交到工作台",
+    message: "上次处理未完成，当前配置已保留。请检查配置后重新提交。",
   });
 
   state = UiState.receiveStage(state, {
@@ -110,6 +110,66 @@ test("agent-owned setup diagnostics wait for system recovery", () => {
     },
   });
   assert.equal(UiState.technicalDiagnosticView(state).active, false);
+});
+
+test("an active copy version takes over from the previously selected version", () => {
+  const view = UiState.copyRequestVersionView([
+    { kind: "copy_draft", request_id: "new", status: "processing" },
+    { kind: "copy_draft", request_id: "old", status: "completed" },
+  ], "old");
+
+  assert.equal(view.activeRequestId, "new");
+  assert.equal(view.selectedRequestId, "new");
+  assert.deepEqual(
+    view.versions.map((item) => [item.version_number, item.status_label]),
+    [[2, "生成中"], [1, "已完成"]],
+  );
+});
+
+test("a new copy version never fills unfinished slots from an old version", () => {
+  const assignments = [
+    { slot_id: "slot-1", product_id: "p1" },
+    { slot_id: "slot-2", product_id: "p2" },
+  ];
+  const merged = UiState.copyDraftsForVersion(
+    assignments,
+    [
+      {
+        slot_id: "slot-1",
+        product_id: "p1",
+        title: "旧标题一",
+        description: "旧描述一",
+        request_id: "old",
+      },
+      {
+        slot_id: "slot-2",
+        product_id: "p2",
+        title: "旧标题二",
+        description: "旧描述二",
+        request_id: "old",
+      },
+    ],
+    [
+      {
+        slot_id: "slot-1",
+        title: "新标题一",
+        description: "新描述一",
+      },
+    ],
+    "new",
+    [
+      { slot_id: "slot-1", outputs: [{ output_sha256: "sha-1" }] },
+      { slot_id: "slot-2", outputs: [{ output_sha256: "sha-2" }] },
+    ],
+  );
+
+  assert.equal(merged[0].title, "新标题一");
+  assert.equal(merged[0].request_id, "new");
+  assert.deepEqual(merged[0].output_sha256, ["sha-1"]);
+  assert.equal(merged[1].title, "");
+  assert.equal(merged[1].description, "");
+  assert.equal(merged[1].source, "pending_qianniu_builtin_ai");
+  assert.deepEqual(merged[1].output_sha256, ["sha-2"]);
 });
 
 test("completeness products can be filtered by owner without changing status scope", () => {
@@ -372,26 +432,26 @@ test("products with full material slots cannot enter asset matching", () => {
   );
 });
 
-test("gallery reload detects added and removed selected folders", () => {
+test("gallery reload is required only for newly added folders", () => {
   const prepared = [
     { product_id: "P1", folder_id: "F1" },
     { product_id: "P1", folder_id: "F2" },
   ];
-  assert.equal(UiState.folderSelectionChanged(prepared, [
+  assert.equal(UiState.galleryNeedsReload(prepared, [
     { product_id: "P1", folder_id: "F2", decision: "confirmed" },
     { product_id: "P1", folder_id: "F1", decision: "confirmed" },
     { product_id: "P1", folder_id: "F3", decision: "rejected" },
   ]), false);
-  assert.equal(UiState.folderSelectionChanged(prepared, [
+  assert.equal(UiState.galleryNeedsReload(prepared, [
     { product_id: "P1", folder_id: "F1", decision: "confirmed" },
     { product_id: "P1", folder_id: "F2", decision: "rejected" },
-  ]), true);
-  assert.equal(UiState.folderSelectionChanged(prepared, [
+  ]), false);
+  assert.equal(UiState.galleryNeedsReload(prepared, [
     { product_id: "P1", folder_id: "F1", decision: "confirmed" },
     { product_id: "P1", folder_id: "F2", decision: "confirmed" },
     { product_id: "P1", folder_id: "F3", decision: "confirmed" },
   ]), true);
-  assert.equal(UiState.folderSelectionChanged(null, []), true);
+  assert.equal(UiState.galleryNeedsReload(null, []), true);
 });
 
 test("persisted preflight cache preserves click intent without re-executing", async () => {

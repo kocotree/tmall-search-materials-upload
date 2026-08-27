@@ -273,7 +273,7 @@ def _stage_back_navigation(
                 reason_code="STAGE_BACK_GALLERY_ACTIVE",
             )
             return navigation
-    if stage_id == "approval" and _has_active_copy_request(
+    if stage_id in {"slots_copy", "approval"} and _has_active_copy_request(
         store, session_id
     ):
         navigation.update(
@@ -3484,10 +3484,6 @@ def create_app(
                 reason_code=str(navigation["reason_code"]),
                 message=str(navigation["message"]),
             )
-        active_copy_request = (
-            stage_id == "slots_copy"
-            and _has_active_copy_request(store, session_id)
-        )
         try:
             result = store.reopen_previous_stage(
                 session_id,
@@ -3503,14 +3499,6 @@ def create_app(
                 message=STAGE_BACK_ERROR_COPY.get(
                     reason_code, "当前暂时不能返回上一步，请刷新后重试。"
                 ),
-            )
-        if active_copy_request:
-            # Returning to asset matching explicitly revokes the current slot
-            # plan and every copy draft derived from it.  Supersede the open
-            # request only after the revision-bound stage transition succeeds,
-            # so a stale page cannot cancel otherwise valid background work.
-            _supersede_slot_requests_after_revision_change(
-                store, session_id, stage_id
             )
         invalidation_label = f"back-{secrets.token_hex(6)}"
         target_stage_id = result["target_stage_id"]
@@ -3542,14 +3530,7 @@ def create_app(
                     "slot-plan.snapshot.json",
                     "confirmed-copy-drafts.json",
                 ),
-                # A running copy worker retains its request directory while it
-                # observes the superseded status and exits.  Moving that
-                # directory underneath the worker could recreate stale files
-                # at the original path on Windows.  The superseded request is
-                # safe immutable history and is ignored by future dispatches.
-                directories=(
-                    () if active_copy_request else ("agent-requests",)
-                ),
+                directories=("agent-requests",),
             )
         return jsonify(result)
 

@@ -2191,6 +2191,7 @@ def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_control
     ):
         assert text in javascript
     assert "已确认标题、描述，可进入上传任务确认" not in javascript
+    assert "返回图片裁剪" not in javascript
     assert '? ["process", "copy"]' in javascript
     assert "请求 ID：" not in javascript
     assert 'detail: { source: "explicit-user-edit" }' in javascript
@@ -2203,11 +2204,13 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     javascript = client.get("/static/app.js").get_data(as_text=True)
 
     assert 'const renderCopyEditor = (processed, selectedRequestId = "")' in javascript
-    assert "copyVersions.value = restoredRequestId" in javascript
+    assert "UiState.copyRequestVersionView" in javascript
+    assert "UiState.copyDraftsForVersion" in javascript
     assert 'request_id: String(existing.request_id || "")' in javascript
     assert "当前草稿 · 未绑定 AI 版本" in javascript
     assert "hasMeaningfulCopyDrafts(savedCopyItems)" in javascript
-    assert "pollCopyRequest(latestRequestId)" in javascript
+    assert "applyCopyDrafts([], copyRequest.request_id)" in javascript
+    assert "版本 ${item.version_number} · ${item.status_label}" in javascript
     assert '"裁剪预校验"' in javascript
     assert 'apiPath("/stages/slots_copy/crop-preflight")' in javascript
     assert 'copyButton.textContent = "重新生成新版本"' in javascript
@@ -2270,8 +2273,10 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert "工作台后台正在处理" in javascript
     assert "工作台后台未连接" in javascript
     assert "technicalDiagnosticView" in javascript
-    assert "系统正在处理异常" in javascript
-    assert "等待系统恢复" in javascript
+    assert "需要重新提交" in javascript
+    assert "重新提交到工作台" in javascript
+    assert "等待系统恢复" not in javascript
+    assert "|| technicalDiagnostic.active" not in javascript
     assert "maxConcurrent: 6" in javascript
     assert "maxWeight: 8" in javascript
     assert "排队中，可再次点击取消" in javascript
@@ -2293,6 +2298,8 @@ def test_javascript_uses_task_three_api_and_precise_status_copy(client):
     assert back_enabled_expression is not None
     assert "!localBackLockActive" in back_enabled_expression.group(1)
     assert "!selectionCheckActive" not in back_enabled_expression.group(1)
+    assert 'currentStageId === "slots_copy" && localCopyRequestInFlight' in javascript
+    assert "setLocalCopyRequestInFlight(true)" in javascript
     assert '["asset_matching", "slots_copy"].includes(currentStageId)' in javascript
     assert "pendingBackNavigation" in javascript
     assert "selectionPreflightConcurrency = 3" not in javascript
@@ -3976,7 +3983,14 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "确认文件夹并加载图片" in source
     assert "确认文件夹并重新加载图片" in source
     assert "文件夹选择已变更，请重新加载图片后继续选图。" in source
-    assert "UiState.folderSelectionChanged" in folder_review_source
+    assert "UiState.galleryNeedsReload" in folder_review_source
+    assert (
+        'card.setAttribute("aria-disabled", String(galleryActive))'
+        in folder_review_source
+    )
+    assert "if (galleryJobIsActive()) return;" in folder_review_source
+    assert "button.disabled = galleryJobIsActive() || activeCount <= 1" in source
+    assert "图片正在加载，完成后可调整候选文件夹或去掉商品。" not in source
     assert "确认选图并提交给工作台" in source
     assert "第 1 步：筛选文件夹" in source
     assert "第 2 步：选择图片" in source
@@ -4067,7 +4081,7 @@ def test_prepare_local_gallery_materializes_visible_folder_defaults():
     assert "Number.isInteger(requestRevision)" in function_body
     assert "revision: requestRevision" in function_body
     assert "fieldErrors?.folder_decisions" in function_body
-    assert "UiState.folderSelectionChanged" in function_body
+    assert "UiState.galleryNeedsReload" in function_body
     assert "文件夹选择没有变化，无需重新加载图片。" in function_body
 
 

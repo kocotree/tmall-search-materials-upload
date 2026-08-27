@@ -74,12 +74,122 @@
       && diagnostic.user_action_required !== true;
     return {
       active,
-      statusLabel: active ? "系统正在处理异常" : "",
-      submitLabel: active ? "等待系统恢复" : "",
+      statusLabel: active ? "需要重新提交" : "",
+      submitLabel: active ? "重新提交到工作台" : "",
       message: active
-        ? "系统正在恢复本机采集配置，当前业务数据已保留。"
+        ? "上次处理未完成，当前配置已保留。请检查配置后重新提交。"
         : "",
     };
+  }
+
+  function copyRequestVersionView(requests, preferredRequestId = "") {
+    const versions = (Array.isArray(requests) ? requests : [])
+      .filter((item) => item?.kind === "copy_draft")
+      .map((item, index, items) => {
+        const status = String(item?.status || "");
+        const statusLabel = {
+          pending_agent: "等待生成",
+          processing: "生成中",
+          completed: "已完成",
+          failed: "未完成",
+          cancelled: "已停止",
+          superseded: "已停止",
+        }[status] || "状态未知";
+        return {
+          ...item,
+          request_id: String(item?.request_id || ""),
+          version_number: items.length - index,
+          status_label: statusLabel,
+        };
+      });
+    const activeStatuses = new Set(["pending_agent", "processing"]);
+    const preferredActive = versions.find((item) => (
+      item.request_id === String(preferredRequestId || "")
+      && activeStatuses.has(String(item.status || ""))
+    ));
+    const active = preferredActive || versions.find(
+      (item) => activeStatuses.has(String(item.status || "")),
+    ) || null;
+    const preferred = versions.find(
+      (item) => item.request_id === String(preferredRequestId || ""),
+    ) || null;
+    return {
+      versions,
+      activeRequestId: active?.request_id || "",
+      selectedRequestId: active?.request_id
+        || preferred?.request_id
+        || versions[0]?.request_id
+        || "",
+    };
+  }
+
+  function copyDraftsForVersion(
+    assignments,
+    existingItems,
+    drafts,
+    requestId,
+    processedSlots = [],
+  ) {
+    const versionId = String(requestId || "");
+    const draftsBySlot = new Map(
+      (Array.isArray(drafts) ? drafts : [])
+        .map((draft) => [String(draft?.slot_id || ""), draft]),
+    );
+    const existingBySlot = new Map(
+      (Array.isArray(existingItems) ? existingItems : [])
+        .filter((item) => item?.slot_id)
+        .map((item) => [String(item.slot_id), item]),
+    );
+    const processedBySlot = new Map(
+      (Array.isArray(processedSlots) ? processedSlots : [])
+        .filter((item) => item?.slot_id)
+        .map((item) => [String(item.slot_id), item]),
+    );
+    return (Array.isArray(assignments) ? assignments : []).map((assignment) => {
+      const slotId = String(assignment?.slot_id || "");
+      const draft = draftsBySlot.get(slotId);
+      const existing = existingBySlot.get(slotId) || {};
+      const sameVersion = String(existing.request_id || "") === versionId;
+      const outputSha256 = sameVersion && Array.isArray(existing.output_sha256)
+        ? existing.output_sha256
+        : (processedBySlot.get(slotId)?.outputs || [])
+          .map((output) => String(output?.output_sha256 || ""))
+          .filter(Boolean);
+      const title = draft
+        ? String(draft.title || "")
+        : sameVersion
+          ? String(existing.title || "")
+          : "";
+      const description = draft
+        ? String(draft.description || "")
+        : sameVersion
+          ? String(existing.description || "")
+          : "";
+      return {
+        slot_id: slotId,
+        product_id: String(assignment?.product_id || ""),
+        title,
+        description,
+        evidence: draft
+          ? (Array.isArray(draft.evidence) ? draft.evidence : [])
+          : sameVersion && Array.isArray(existing.evidence)
+            ? existing.evidence
+            : [],
+        risks: draft
+          ? (Array.isArray(draft.risks) ? draft.risks : [])
+          : sameVersion && Array.isArray(existing.risks)
+            ? existing.risks
+            : [],
+        confirmed: Boolean(title.trim() && description.trim()),
+        source: draft
+          ? String(draft.source || "qianniu_builtin_ai")
+          : sameVersion
+            ? String(existing.source || "pending_qianniu_builtin_ai")
+            : "pending_qianniu_builtin_ai",
+        request_id: versionId,
+        output_sha256: outputSha256,
+      };
+    });
   }
 
   function submissionView(state) {
@@ -359,7 +469,7 @@
     };
   }
 
-  function folderSelectionChanged(preparedFolderKeys, decisions) {
+  function galleryNeedsReload(preparedFolderKeys, decisions) {
     if (!Array.isArray(preparedFolderKeys)) return true;
     const keyFor = (item) => (
       `${String(item?.product_id || "")}\u0000${String(item?.folder_id || "")}`
@@ -378,8 +488,7 @@
         )
         .map(keyFor),
     );
-    return prepared.size !== confirmed.size
-      || [...prepared].some((key) => !confirmed.has(key));
+    return [...confirmed].some((key) => !prepared.has(key));
   }
 
   function switchStage(state, stageId) {
@@ -686,13 +795,15 @@
     completenessProductSelectable,
     connectionView,
     controlPresentation,
+    copyDraftsForVersion,
+    copyRequestVersionView,
     createRequestIdentity,
     createSelectionPreflightScheduler,
     createState,
     draftRequestBody,
     fifthStagePage,
     filterCompletenessProducts,
-    folderSelectionChanged,
+    galleryNeedsReload,
     twoStepFifthStagePage,
     isCurrentRequest,
     jsonSemanticallyEqual,
