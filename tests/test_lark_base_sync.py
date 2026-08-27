@@ -5,6 +5,7 @@ from upload_search_materials.lark_base_sync import (
     IncrementalUploadLogWriter,
     LarkCliResult,
     build_upload_log_rows,
+    default_lark_cli_runner,
     inspect_lark_base_config,
     inspect_product_metadata_snapshot,
     inspect_upload_history_snapshot,
@@ -54,6 +55,60 @@ def _read_json_argument(args) -> tuple[dict, Path]:
     payload_path = Path(argument[1:])
     assert payload_path.is_file()
     return json.loads(payload_path.read_text(encoding="utf-8")), payload_path
+
+
+def test_default_lark_cli_runner_uses_relative_json_file_argument(
+    tmp_path,
+    monkeypatch,
+):
+    payload_dir = tmp_path / "含 空格的任务目录"
+    payload_dir.mkdir()
+    payload_path = payload_dir / ".lark-upload-log-test.json"
+    payload_path.write_text('{"create_records":[]}', encoding="utf-8")
+    observed = {}
+
+    monkeypatch.setattr(
+        "upload_search_materials.lark_base_sync.shutil.which",
+        lambda name: "C:\\tools\\lark-cli.cmd" if name == "lark-cli.cmd" else None,
+    )
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["cwd"] = kwargs.get("cwd")
+        return type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": "{}", "stderr": ""},
+        )()
+
+    monkeypatch.setattr(
+        "upload_search_materials.lark_base_sync.subprocess.run",
+        fake_run,
+    )
+
+    result = default_lark_cli_runner(
+        [
+            "base",
+            "+record-batch-create",
+            "--json",
+            f"@{payload_path}",
+            "--as",
+            "user",
+        ],
+        30,
+    )
+
+    assert result.ok is True
+    assert observed["cwd"] == str(payload_dir)
+    assert observed["command"] == [
+        "C:\\tools\\lark-cli.cmd",
+        "base",
+        "+record-batch-create",
+        "--json",
+        "@.lark-upload-log-test.json",
+        "--as",
+        "user",
+    ]
 
 
 def test_sync_product_metadata_overrides_owner_from_lark(tmp_path):

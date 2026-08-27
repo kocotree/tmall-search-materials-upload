@@ -311,12 +311,24 @@ def default_lark_cli_runner(
             reason_code="LARK_CLI_NOT_FOUND",
             message="未找到 lark-cli，跳过飞书多维表格同步。",
         )
+    command_args = [str(value) for value in args]
+    working_directory: str | None = None
+    try:
+        json_argument_index = command_args.index("--json") + 1
+        json_argument = command_args[json_argument_index]
+    except (ValueError, IndexError):
+        json_argument = ""
+    if json_argument.startswith("@"):
+        json_path = Path(json_argument[1:])
+        if json_path.is_absolute():
+            working_directory = str(json_path.parent)
+            command_args[json_argument_index] = f"@{json_path.name}"
     try:
         environment = os.environ.copy()
         environment["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
         environment["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
         completed = subprocess.run(
-            [executable, *args],
+            [executable, *command_args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -324,6 +336,7 @@ def default_lark_cli_runner(
             timeout=timeout_seconds,
             check=False,
             env=environment,
+            cwd=working_directory,
             creationflags=(
                 subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             ),
