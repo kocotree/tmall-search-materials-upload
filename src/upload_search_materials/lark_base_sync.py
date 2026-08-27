@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -360,6 +361,54 @@ def default_lark_cli_runner(
             message="飞书多维表格返回内容无法解析。",
         )
     return LarkCliResult(ok=True, payload=payload, stdout=stdout, stderr=stderr)
+
+
+def _run_lark_cli_with_json_file(
+    *,
+    runner: Runner,
+    command_before_json: Sequence[str],
+    payload: Mapping[str, Any],
+    command_after_json: Sequence[str],
+    timeout_seconds: float,
+    directory: Path,
+) -> LarkCliResult:
+    """Pass structured JSON through a UTF-8 file, avoiding Windows cmd quoting."""
+
+    json_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=".lark-upload-log-",
+            suffix=".json",
+            dir=Path(directory),
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            json_path = Path(handle.name)
+    except OSError as error:
+        return LarkCliResult(
+            ok=False,
+            reason_code="LARK_JSON_PAYLOAD_FILE_FAILED",
+            message=f"无法准备飞书写入数据：{error}",
+        )
+
+    try:
+        return runner(
+            [
+                *command_before_json,
+                "--json",
+                f"@{json_path}",
+                *command_after_json,
+            ],
+            timeout_seconds,
+        )
+    finally:
+        try:
+            json_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def inspect_lark_base_config(
@@ -936,7 +985,10 @@ def write_successful_upload_log(
         for value in existing.get("recorded_row_sha256s", [])
         if re.fullmatch(r"[0-9a-f]{64}", str(value))
     }
-    if not recorded_row_sha256s:
+    if (
+        not recorded_row_sha256s
+        and str(existing.get("status") or "") == "completed"
+    ):
         recorded_row_sha256s.update(
             _stable_json_sha256(row)
             for row in existing.get("rows", [])
@@ -1017,20 +1069,21 @@ def write_successful_upload_log(
         return result
 
     target = target_result.payload
-    payload = {"create_records": pending_rows}
-    command = [
-        "base",
-        "+record-batch-create",
-        "--base-token",
-        target.base_token,
-        "--table-id",
-        target.table_id,
-        "--json",
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        "--as",
-        "user",
-    ]
-    create_result = active_runner(command, config.command_timeout_seconds)
+    create_result = _run_lark_cli_with_json_file(
+        runner=active_runner,
+        command_before_json=[
+            "base",
+            "+record-batch-create",
+            "--base-token",
+            target.base_token,
+            "--table-id",
+            target.table_id,
+        ],
+        payload={"create_records": pending_rows},
+        command_after_json=["--as", "user"],
+        timeout_seconds=config.command_timeout_seconds,
+        directory=Path(run_dir),
+    )
     if not create_result.ok:
         result = UploadLogResult(
             status="failed",

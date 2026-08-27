@@ -48,6 +48,14 @@ def _write_products(path: Path) -> None:
     )
 
 
+def _read_json_argument(args) -> tuple[dict, Path]:
+    argument = args[args.index("--json") + 1]
+    assert argument.startswith("@")
+    payload_path = Path(argument[1:])
+    assert payload_path.is_file()
+    return json.loads(payload_path.read_text(encoding="utf-8")), payload_path
+
+
 def test_sync_product_metadata_overrides_owner_from_lark(tmp_path):
     product = ProductRecord(
         "1001",
@@ -506,9 +514,12 @@ def test_write_successful_upload_log_uses_batch_create(tmp_path):
         encoding="utf-8",
     )
 
+    payload_paths = []
+
     def runner(args, _timeout):
         assert "+record-batch-create" in args
-        submitted = json.loads(args[args.index("--json") + 1])
+        submitted, payload_path = _read_json_argument(args)
+        payload_paths.append(payload_path)
         assert submitted["create_records"][0]["上传负责人"] == "上传人"
         assert submitted["create_records"][0]["原图 SHA-256"] == "a" * 64
         return LarkCliResult(
@@ -540,6 +551,7 @@ def test_write_successful_upload_log_uses_batch_create(tmp_path):
 
     assert result.status == "completed"
     assert result.created_count == 1
+    assert payload_paths and all(not path.exists() for path in payload_paths)
 
     def should_not_write(_args, _timeout):
         raise AssertionError("duplicate upload logs must not be appended")
@@ -583,7 +595,7 @@ def test_upload_log_retry_appends_only_new_successful_tasks(tmp_path, monkeypatc
 
     def runner(args, _timeout):
         assert "+record-batch-create" in args
-        payload = json.loads(args[args.index("--json") + 1])
+        payload, _payload_path = _read_json_argument(args)
         submitted_batches.append(payload["create_records"])
         return LarkCliResult(
             ok=True,
@@ -661,7 +673,7 @@ def test_incremental_upload_log_writer_does_not_wait_before_next_slot(
         ]
 
     def runner(args, _timeout):
-        payload = json.loads(args[args.index("--json") + 1])
+        payload, _payload_path = _read_json_argument(args)
         submitted_batches.append(payload["create_records"])
         started.set()
         assert release.wait(timeout=5)
@@ -704,6 +716,86 @@ def test_incremental_upload_log_writer_does_not_wait_before_next_slot(
     assert submitted_batches == [
         [{"商品 ID": "slot-1", "上传时间": "固定时间"}],
         [{"商品 ID": "slot-2", "上传时间": "固定时间"}],
+    ]
+
+
+def test_upload_log_failure_does_not_mark_rows_as_recorded(tmp_path, monkeypatch):
+    evidence = tmp_path / "lark-upload-log.json"
+    submitted_batches = []
+
+    def fake_rows(**kwargs):
+        return [
+            {"商品 ID": str(record["task_id"]), "上传时间": "固定时间"}
+            for record in kwargs["task_records"]
+            if record
+        ]
+
+    def runner(args, _timeout):
+        payload, _payload_path = _read_json_argument(args)
+        submitted_batches.append(payload["create_records"])
+        if len(submitted_batches) == 1:
+            return LarkCliResult(
+                ok=False,
+                reason_code="LARK_COMMAND_FAILED",
+                message="invalid JSON",
+            )
+        return LarkCliResult(
+            ok=True,
+            payload={
+                "record_id_list": [
+                    f"rec-{index}"
+                    for index in range(len(payload["create_records"]))
+                ]
+            },
+        )
+
+    monkeypatch.setattr(
+        "upload_search_materials.lark_base_sync.build_upload_log_rows",
+        fake_rows,
+    )
+    config = LarkBaseConfig(
+        enabled=True,
+        upload_log_base_token="base-token",
+        upload_log_table_id="上传记录表",
+    )
+    first = {
+        "task_id": "MAT-1",
+        "status": "submitted",
+        "remote_material_id": "remote-1",
+    }
+    second = {
+        "task_id": "MAT-2",
+        "status": "submitted",
+        "remote_material_id": "remote-2",
+    }
+
+    failed = write_successful_upload_log(
+        run_dir=tmp_path,
+        session_inputs_dir=tmp_path,
+        task_records=[first],
+        config=config,
+        evidence_path=evidence,
+        runner=runner,
+    )
+    reconciled = write_successful_upload_log(
+        run_dir=tmp_path,
+        session_inputs_dir=tmp_path,
+        task_records=[first, second],
+        config=config,
+        evidence_path=evidence,
+        runner=runner,
+    )
+
+    assert failed.status == "failed"
+    assert reconciled.status == "completed"
+    assert reconciled.attempted_count == 2
+    assert reconciled.created_count == 2
+    assert submitted_batches == [
+        [{"商品 ID": "MAT-1", "上传时间": "固定时间"}],
+        [
+            {"商品 ID": "MAT-1", "上传时间": "固定时间"},
+            {"商品 ID": "MAT-2", "上传时间": "固定时间"},
+        ],
     ]
 
 
