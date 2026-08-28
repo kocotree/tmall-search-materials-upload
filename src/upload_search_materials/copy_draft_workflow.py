@@ -28,7 +28,10 @@ from .agent_handoff import (
     recovery_prompt,
     retry_agent_request,
 )
-from .browser.qianniu_copy import QianniuCopyError, generate_qianniu_copy_drafts
+from .browser.qianniu_copy import (
+    QianniuCopyError,
+    open_qianniu_product_copy_session,
+)
 from .browser.session import CdpUnavailable, open_cdp_page
 from .interaction.session import InteractionConflict, SessionStore
 from .slot_workflow import (
@@ -59,6 +62,7 @@ COPY_SLOT_RETRYABLE_REASON_CODES = frozenset(
         "QIANNIU_COPY_POPUP_BLOCKED",
         "QIANNIU_COPY_RESPONSE_INVALID",
         "QIANNIU_COPY_RESULT_INVALID",
+        "QIANNIU_COPY_RESULT_STALE",
         "QIANNIU_COPY_RUNTIME_FAILED",
         "QIANNIU_COPY_SEED_SELECTION_INVALID",
         "QIANNIU_EMPTY_SLOT_SHORTAGE",
@@ -79,6 +83,7 @@ COPY_SLOT_RETRYABLE_REASON_CODES = frozenset(
 COPY_SLOT_SKIP_MESSAGES = {
     "QIANNIU_AI_COPY_TIMEOUT": "千牛生成文案超时",
     "QIANNIU_COPY_RESULT_INVALID": "千牛返回的标题或描述不完整",
+    "QIANNIU_COPY_RESULT_STALE": "千牛没有返回当前图片的新文案",
     "QIANNIU_EMPTY_SLOT_SHORTAGE": "目标坑位当前不可用",
     "QIANNIU_PRODUCT_IDENTITY_MISMATCH": "千牛未找到该商品",
     "QIANNIU_PRODUCT_NOT_BOUND": "千牛页面未锁定到该商品",
@@ -318,6 +323,22 @@ def _with_remote_slot_occurrences(
         remote_occurrences[product_id] = occurrence + 1
         prepared.append(slot)
     return prepared
+
+
+def _unfinished_slots_by_product(
+    slots: list[Mapping[str, Any]],
+    completed: Mapping[str, Mapping[str, Any]],
+) -> list[list[Mapping[str, Any]]]:
+    """Group unfinished slots by first product appearance."""
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for slot in slots:
+        slot_id = str(slot.get("slot_id", "")).strip()
+        if slot_id in completed:
+            continue
+        product_id = str(slot.get("product_id", "")).strip()
+        grouped.setdefault(product_id, []).append(slot)
+    return list(grouped.values())
 
 
 def create_copy_draft_request(
@@ -588,64 +609,84 @@ def process_copy_draft_request(
     try:
         write_progress("processing")
         with browser_context as browser_page:
-            for slot in slots:
-                current_slot_id = str(slot.get("slot_id", ""))
+            product_groups = _unfinished_slots_by_product(slots, completed)
+            for product_slots in product_groups:
                 stopped = stopped_response()
                 if stopped is not None:
                     return stopped
-                if current_slot_id in completed:
-                    continue
-                write_progress("processing", current_slot_id=current_slot_id)
-                for attempt_index in range(COPY_SLOT_MAX_RETRIES + 1):
-                    try:
-                        # Reuse the maintained Playwright implementation.
-                        # Passing one slot at a time lets us checkpoint, retry,
-                        # and skip without replaying completed slots.
-                        drafts = generate_qianniu_copy_drafts(
-                            browser_page,
-                            [slot],
-                            material_center_url=runtime.material_center_url,
-                        )
-                        if len(drafts) != 1:
-                            raise QianniuCopyError(
-                                "QIANNIU_COPY_RESPONSE_INVALID",
-                                f"坑位 {current_slot_id} 未返回唯一文案",
-                            )
+                with open_qianniu_product_copy_session(
+                    browser_page,
+                    product_slots,
+                    material_center_url=runtime.material_center_url,
+                ) as product_session:
+                    for slot in product_slots:
+                        current_slot_id = str(slot.get("slot_id", ""))
                         stopped = stopped_response()
                         if stopped is not None:
                             return stopped
-                        completed[current_slot_id] = dict(drafts[0])
-                        write_progress("processing")
-                        break
-                    except QianniuCopyError as error:
-                        if (
-                            error.reason_code
-                            not in COPY_SLOT_RETRYABLE_REASON_CODES
-                        ):
-                            raise
-                        stopped = stopped_response()
-                        if stopped is not None:
-                            return stopped
-                        if attempt_index < COPY_SLOT_MAX_RETRIES:
-                            write_progress(
-                                "processing",
-                                current_slot_id=current_slot_id,
-                                reason_code=error.reason_code,
-                                current_retry_count=attempt_index + 1,
-                            )
-                            continue
-                        completed[current_slot_id] = _skipped_copy_draft(
-                            slot,
-                            error,
-                            attempt_count=attempt_index + 1,
-                        )
                         write_progress(
                             "processing",
                             current_slot_id=current_slot_id,
-                            reason_code=error.reason_code,
-                            current_retry_count=COPY_SLOT_MAX_RETRIES,
                         )
-                        break
+                        for attempt_index in range(
+                            COPY_SLOT_MAX_RETRIES + 1
+                        ):
+                            try:
+                                draft = product_session.generate_slot(slot)
+                                if (
+                                    not isinstance(draft, Mapping)
+                                    or str(draft.get("slot_id", ""))
+                                    != current_slot_id
+                                ):
+                                    raise QianniuCopyError(
+                                        "QIANNIU_COPY_RESPONSE_INVALID",
+                                        (
+                                            f"坑位 {current_slot_id} "
+                                            "未返回唯一文案"
+                                        ),
+                                    )
+                                stopped = stopped_response()
+                                if stopped is not None:
+                                    return stopped
+                                completed[current_slot_id] = dict(draft)
+                                write_progress("processing")
+                                break
+                            except QianniuCopyError as error:
+                                if (
+                                    error.reason_code
+                                    not in COPY_SLOT_RETRYABLE_REASON_CODES
+                                ):
+                                    raise
+                                stopped = stopped_response()
+                                if stopped is not None:
+                                    return stopped
+                                product_session.recover_after_failure()
+                                if attempt_index < COPY_SLOT_MAX_RETRIES:
+                                    write_progress(
+                                        "processing",
+                                        current_slot_id=current_slot_id,
+                                        reason_code=error.reason_code,
+                                        current_retry_count=(
+                                            attempt_index + 1
+                                        ),
+                                    )
+                                    continue
+                                completed[current_slot_id] = (
+                                    _skipped_copy_draft(
+                                        slot,
+                                        error,
+                                        attempt_count=attempt_index + 1,
+                                    )
+                                )
+                                write_progress(
+                                    "processing",
+                                    current_slot_id=current_slot_id,
+                                    reason_code=error.reason_code,
+                                    current_retry_count=(
+                                        COPY_SLOT_MAX_RETRIES
+                                    ),
+                                )
+                                break
         response = complete_agent_request(
             store,
             session_id,

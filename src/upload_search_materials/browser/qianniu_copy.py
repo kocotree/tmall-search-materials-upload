@@ -916,26 +916,73 @@ def _select_seed_image(
     return upload_name
 
 
-def _generate_copy(page, publish_frame) -> tuple[str, str, float]:
+def _visible_text_actions(publish_frame, text: str) -> list[Any]:
+    try:
+        actions = publish_frame.get_by_text(text, exact=True)
+        return [
+            actions.nth(index)
+            for index in range(actions.count())
+            if actions.nth(index).is_visible()
+        ]
+    except Exception:
+        # A React revision can temporarily remove one of the two mutually
+        # exclusive actions while the panel resets after replacing the image.
+        return []
+
+
+def _current_copy_result(publish_frame) -> tuple[str, str] | None:
+    parsed = _read_ai_result_panel(publish_frame)
+    if parsed is not None:
+        return parsed
+    try:
+        body = publish_frame.locator("body").inner_text()
+        return parse_qianniu_ai_copy(body)
+    except Exception:
+        return None
+
+
+def _generate_copy(
+    page,
+    publish_frame,
+    *,
+    previous_copy: tuple[str, str] | None = None,
+) -> tuple[str, str, float]:
     import time
 
     _settle_copy_popups(page, publish_form_open=True)
-    assistant = publish_frame.get_by_text("AI生成文案", exact=True)
-    if assistant.count() != 1 or not assistant.is_visible():
+    initial_actions = _visible_text_actions(publish_frame, "AI生成文案")
+    regenerate_actions = _visible_text_actions(publish_frame, "重新生成")
+    baseline_copy: tuple[str, str] | None = None
+    requires_generation_evidence = False
+    if previous_copy is not None and len(regenerate_actions) == 1:
+        action = regenerate_actions[0]
+        baseline_copy = _current_copy_result(publish_frame) or previous_copy
+        requires_generation_evidence = True
+    elif len(initial_actions) == 1:
+        action = initial_actions[0]
+    elif len(regenerate_actions) == 1:
+        action = regenerate_actions[0]
+        baseline_copy = _current_copy_result(publish_frame) or previous_copy
+        requires_generation_evidence = True
+    else:
         raise QianniuCopyError(
             "QIANNIU_AI_COPY_ACTION_NOT_FOUND",
-            "选择图片后没有出现 AI生成文案",
+            "选择图片后没有出现唯一的 AI 生成或重新生成入口",
         )
     started = time.perf_counter()
-    assistant.click(force=True)
+    action.click(force=True)
     body = ""
     result_panel_ready = False
+    observed_generation = False
+    stale_result_observed = False
     for _ in range(AI_COPY_TIMEOUT_MS // AI_COPY_POLL_MS):
         page.wait_for_timeout(AI_COPY_POLL_MS)
         body = publish_frame.locator("body").inner_text()
+        if "生成中" in body:
+            observed_generation = True
+            continue
         if (
-            "生成中" not in body
-            and "重新生成" in body
+            "重新生成" in body
             and "填充文案" in body
         ):
             result_panel_ready = True
@@ -949,9 +996,24 @@ def _generate_copy(page, publish_frame) -> tuple[str, str, float]:
                     # same bounded AI wait instead of failing the slot early.
                     continue
             title, description = parsed
+            if (
+                requires_generation_evidence
+                and not observed_generation
+                and (
+                    baseline_copy is None
+                    or (title, description) == baseline_copy
+                )
+            ):
+                stale_result_observed = True
+                continue
             return title, description, round(
                 time.perf_counter() - started, 2
             )
+    if stale_result_observed:
+        raise QianniuCopyError(
+            "QIANNIU_COPY_RESULT_STALE",
+            "千牛没有返回可确认属于当前图片的新文案",
+        )
     if result_panel_ready:
         raise QianniuCopyError(
             "QIANNIU_COPY_RESULT_INVALID",
@@ -963,6 +1025,261 @@ def _generate_copy(page, publish_frame) -> tuple[str, str, float]:
     )
 
 
+def _prepare_slot_occurrences(
+    slots: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    occurrences: dict[str, int] = {}
+    prepared: list[dict[str, Any]] = []
+    for raw_slot in slots:
+        slot = dict(raw_slot)
+        product_id = str(slot.get("product_id", "")).strip()
+        occurrence = occurrences.get(product_id, 0)
+        if slot.get("remote_slot_position") is None:
+            slot.setdefault("remote_slot_occurrence", occurrence)
+        occurrences[product_id] = occurrence + 1
+        prepared.append(slot)
+    return prepared
+
+
+class QianniuProductCopySession:
+    """Reuse one unconfirmed Qianniu publish form for one product."""
+
+    def __init__(
+        self,
+        page,
+        slots: Sequence[Mapping[str, Any]],
+        *,
+        material_center_url: str,
+    ) -> None:
+        self.page = page
+        self.material_center_url = material_center_url
+        self.slots = [dict(slot) for slot in slots]
+        product_ids = {
+            str(slot.get("product_id", "")).strip()
+            for slot in self.slots
+        }
+        if not self.slots or len(product_ids) != 1 or "" in product_ids:
+            raise QianniuCopyError(
+                "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                "商品级文案会话必须只包含一个有效商品",
+            )
+        self.product_id = next(iter(product_ids))
+        self._slot_ids = {
+            str(slot.get("slot_id", "")).strip() for slot in self.slots
+        }
+        if "" in self._slot_ids or len(self._slot_ids) != len(self.slots):
+            raise QianniuCopyError(
+                "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                "文案请求包含缺失或重复的 slot_id",
+            )
+        self._positions: dict[str, int] = {}
+        self._publish_frame = None
+        self._last_copy: tuple[str, str] | None = None
+
+    def __enter__(self) -> "QianniuProductCopySession":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if exc_type is None:
+            self.close()
+        else:
+            self._close_safely()
+        return False
+
+    def _resolve_positions(self, row) -> None:
+        empty_positions = _empty_slot_positions(row)
+        positions: dict[str, int] = {}
+        seen_positions: set[int] = set()
+        for local_occurrence, raw_slot in enumerate(self.slots):
+            slot_id = str(raw_slot.get("slot_id", "")).strip()
+            if not slot_id or slot_id in positions:
+                raise QianniuCopyError(
+                    "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                    "文案请求包含缺失或重复的 slot_id",
+                )
+            requested_position = raw_slot.get("remote_slot_position")
+            if requested_position is not None:
+                position = int(requested_position)
+                if position not in empty_positions:
+                    raise QianniuCopyError(
+                        "QIANNIU_SLOT_OCCUPIED",
+                        f"商品 {self.product_id} 第 {position} 个坑位不可用",
+                    )
+            else:
+                occurrence = int(
+                    raw_slot.get("remote_slot_occurrence", local_occurrence)
+                )
+                if occurrence < 0:
+                    raise QianniuCopyError(
+                        "QIANNIU_SLOT_OCCURRENCE_INVALID",
+                        f"商品 {self.product_id} 的空坑位序号不可为负数",
+                    )
+                if occurrence >= len(empty_positions):
+                    raise QianniuCopyError(
+                        "QIANNIU_EMPTY_SLOT_SHORTAGE",
+                        (
+                            f"商品 {self.product_id} 需要第 {occurrence + 1} 个空坑位，"
+                            f"当前只识别到 {len(empty_positions)} 个"
+                        ),
+                    )
+                position = empty_positions[occurrence]
+            if position in seen_positions:
+                raise QianniuCopyError(
+                    "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                    f"商品 {self.product_id} 的多个文案坑位指向同一位置 {position}",
+                )
+            seen_positions.add(position)
+            positions[slot_id] = position
+        self._positions = positions
+
+    def _open(self) -> None:
+        _ensure_recommend_list(self.page, self.material_center_url)
+        row = _find_product_row_with_recovery(
+            self.page,
+            self.product_id,
+            self.material_center_url,
+        )
+        self._resolve_positions(row)
+        first_slot_id = str(self.slots[0].get("slot_id", "")).strip()
+        self._publish_frame = _open_slot_publish_form(
+            self.page,
+            self.product_id,
+            self._positions[first_slot_id],
+            row=row,
+        )
+
+    def _current_frame(self):
+        if self._publish_frame is None:
+            self._open()
+            return self._publish_frame
+        try:
+            self._publish_frame = _wait_for_frame(
+                self.page,
+                PUBLISH_FRAME_FRAGMENT,
+                attempts=1,
+                delay_ms=0,
+            )
+        except QianniuCopyError:
+            self._publish_frame = None
+        if self._publish_frame is None:
+            self._open()
+        return self._publish_frame
+
+    def generate_slot(self, raw_slot: Mapping[str, Any]) -> dict[str, Any]:
+        slot_id = str(raw_slot.get("slot_id", "")).strip()
+        product_id = str(raw_slot.get("product_id", "")).strip()
+        if product_id != self.product_id or slot_id not in self._slot_ids:
+            raise QianniuCopyError(
+                "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                "当前坑位不属于已打开的商品级文案会话",
+            )
+        ordered_outputs = raw_slot.get("ordered_outputs")
+        if (
+            not isinstance(ordered_outputs, Sequence)
+            or isinstance(ordered_outputs, (str, bytes))
+            or not ordered_outputs
+            or not isinstance(ordered_outputs[0], Mapping)
+        ):
+            raise QianniuCopyError(
+                "QIANNIU_COPY_SEED_OUTPUT_MISSING",
+                f"商品 {product_id} 的坑位缺少最终图片输出",
+            )
+        seed_output = ordered_outputs[0]
+        publish_frame = self._current_frame()
+        seed_image_name = _select_seed_image(
+            self.page,
+            publish_frame,
+            seed_path=str(seed_output.get("output_path", "")),
+            expected_sha256=str(seed_output.get("output_sha256", "")),
+        )
+        self._publish_frame = _wait_for_frame(
+            self.page,
+            PUBLISH_FRAME_FRAGMENT,
+            attempts=PUBLISH_FRAME_ATTEMPTS,
+            delay_ms=300,
+        )
+        title, description, elapsed = _generate_copy(
+            self.page,
+            self._publish_frame,
+            previous_copy=self._last_copy,
+        )
+        self._last_copy = (title, description)
+        return QianniuCopyDraft(
+            slot_id=slot_id,
+            product_id=product_id,
+            remote_slot_position=self._positions[slot_id],
+            title=title,
+            description=description,
+            seed_image_name=seed_image_name,
+            elapsed_seconds=elapsed,
+        ).as_response_item()
+
+    def recover_after_failure(self) -> None:
+        """Reuse a clean bound form, otherwise discard uncertain UI state."""
+
+        try:
+            publish_frame = _wait_for_frame(
+                self.page,
+                PUBLISH_FRAME_FRAGMENT,
+                attempts=1,
+                delay_ms=0,
+            )
+            try:
+                _wait_for_frame(
+                    self.page,
+                    MATERIAL_SELECTOR_FRAME_FRAGMENT,
+                    attempts=1,
+                    delay_ms=0,
+                )
+            except QianniuCopyError:
+                body = publish_frame.locator("body").inner_text()
+                if (
+                    "该内容暂不支持修改商品" in body
+                    and "生成中" not in body
+                ):
+                    self._publish_frame = publish_frame
+                    return
+        except Exception:
+            pass
+        self._publish_frame = None
+        try:
+            _ensure_recommend_list(self.page, self.material_center_url)
+        except Exception:
+            # The next attempt performs the normal bounded list recovery.
+            pass
+
+    def close(self) -> None:
+        self._publish_frame = None
+        try:
+            _ensure_recommend_list(self.page, self.material_center_url)
+        except QianniuCopyError:
+            raise
+        except Exception as error:
+            raise QianniuCopyError(
+                "QIANNIU_COPY_RUNTIME_FAILED",
+                str(error),
+            ) from error
+
+    def _close_safely(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def open_qianniu_product_copy_session(
+    page,
+    slots: Sequence[Mapping[str, Any]],
+    *,
+    material_center_url: str,
+) -> QianniuProductCopySession:
+    return QianniuProductCopySession(
+        page,
+        slots,
+        material_center_url=material_center_url,
+    )
+
+
 def generate_qianniu_copy_drafts(
     page,
     slots: Sequence[Mapping[str, Any]],
@@ -971,114 +1288,37 @@ def generate_qianniu_copy_drafts(
 ) -> list[dict[str, Any]]:
     """Generate one reviewable Qianniu draft for every final output slot."""
 
-    occurrence_by_product: dict[str, int] = {}
-    drafts: list[dict[str, Any]] = []
-    _ensure_recommend_list(page, material_center_url)
+    prepared = _prepare_slot_occurrences(slots)
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, slot in enumerate(prepared):
+        product_id = str(slot.get("product_id", "")).strip()
+        grouped.setdefault(product_id, []).append((index, slot))
+    drafts_by_index: dict[int, dict[str, Any]] = {}
     try:
-        for raw_slot in slots:
-            slot_id = str(raw_slot.get("slot_id", "")).strip()
-            product_id = str(raw_slot.get("product_id", "")).strip()
-            if not slot_id or not product_id:
-                raise QianniuCopyError(
-                    "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
-                    "文案请求缺少 slot_id 或 product_id",
-                )
-            occurrence = int(
-                raw_slot.get(
-                    "remote_slot_occurrence",
-                    occurrence_by_product.get(product_id, 0),
-                )
-            )
-            if occurrence < 0:
-                raise QianniuCopyError(
-                    "QIANNIU_SLOT_OCCURRENCE_INVALID",
-                    f"商品 {product_id} 的空坑位序号不可为负数",
-                )
-            row = _find_product_row_with_recovery(
+        for grouped_slots in grouped.values():
+            product_slots = [slot for _index, slot in grouped_slots]
+            with open_qianniu_product_copy_session(
                 page,
-                product_id,
-                material_center_url,
-            )
-            empty_positions = _empty_slot_positions(row)
-            requested_position = raw_slot.get("remote_slot_position")
-            if requested_position is not None:
-                position = int(requested_position)
-                if position not in empty_positions:
-                    raise QianniuCopyError(
-                        "QIANNIU_SLOT_OCCUPIED",
-                        f"商品 {product_id} 第 {position} 个坑位不可用",
+                product_slots,
+                material_center_url=material_center_url,
+            ) as product_session:
+                for index, raw_slot in grouped_slots:
+                    drafts_by_index[index] = product_session.generate_slot(
+                        raw_slot
                     )
-            else:
-                if occurrence >= len(empty_positions):
-                    raise QianniuCopyError(
-                        "QIANNIU_EMPTY_SLOT_SHORTAGE",
-                        (
-                            f"商品 {product_id} 需要第 {occurrence + 1} 个空坑位，"
-                            f"当前只识别到 {len(empty_positions)} 个"
-                        ),
-                    )
-                position = empty_positions[occurrence]
-            occurrence_by_product[product_id] = occurrence + 1
-            publish_frame = _open_slot_publish_form(
-                page,
-                product_id,
-                position,
-                row=row,
-            )
-            ordered_outputs = raw_slot.get("ordered_outputs")
-            if (
-                not isinstance(ordered_outputs, Sequence)
-                or not ordered_outputs
-                or not isinstance(ordered_outputs[0], Mapping)
-            ):
-                raise QianniuCopyError(
-                    "QIANNIU_COPY_SEED_OUTPUT_MISSING",
-                    f"商品 {product_id} 的坑位缺少最终图片输出",
-                )
-            seed_output = ordered_outputs[0]
-            seed_image_name = _select_seed_image(
-                page,
-                publish_frame,
-                seed_path=str(seed_output.get("output_path", "")),
-                expected_sha256=str(
-                    seed_output.get("output_sha256", "")
-                ),
-            )
-            publish_frame = _wait_for_frame(
-                page,
-                PUBLISH_FRAME_FRAGMENT,
-                attempts=PUBLISH_FRAME_ATTEMPTS,
-                delay_ms=300,
-            )
-            title, description, elapsed = _generate_copy(
-                page, publish_frame
-            )
-            draft = QianniuCopyDraft(
-                slot_id=slot_id,
-                product_id=product_id,
-                remote_slot_position=position,
-                title=title,
-                description=description,
-                seed_image_name=seed_image_name,
-                elapsed_seconds=elapsed,
-            )
-            drafts.append(draft.as_response_item())
-            # Returning to the list discards the unconfirmed form.  Do not
-            # click "填充文案", the form's final "确认", or publish.
-            _open_recommend_list(page, material_center_url)
     except QianniuCopyError:
         try:
-            _open_recommend_list(page, material_center_url)
+            _ensure_recommend_list(page, material_center_url)
         except Exception:
             pass
         raise
     except Exception as error:
         try:
-            _open_recommend_list(page, material_center_url)
+            _ensure_recommend_list(page, material_center_url)
         except Exception:
             pass
         raise QianniuCopyError(
             "QIANNIU_COPY_RUNTIME_FAILED",
             str(error),
         ) from error
-    return drafts
+    return [drafts_by_index[index] for index in range(len(prepared))]

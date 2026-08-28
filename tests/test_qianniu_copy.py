@@ -5,6 +5,7 @@ from upload_search_materials.browser.qianniu_copy import (
     COPY_LATE_POPUP_QUIET_CHECKS,
     COPY_LIST_SAFE_POPUP_SELECTORS,
     COPY_POPUP_SETTLE_DELAY_MS,
+    QianniuProductCopySession,
     QianniuCopyError,
     _click_visible_image_text_action,
     _ensure_recommend_list,
@@ -15,6 +16,7 @@ from upload_search_materials.browser.qianniu_copy import (
     _reset_material_selector_to_all_images,
     _settle_copy_popups,
     _wait_for_product_scope,
+    generate_qianniu_copy_drafts,
     parse_qianniu_ai_copy,
 )
 
@@ -371,6 +373,223 @@ def test_generate_copy_settles_form_popups_before_ai_action(monkeypatch):
 
     assert calls == [(page, {"publish_form_open": True})]
     assert frame.assistant.clicked is True
+
+
+class _FakeRegenerateFrame:
+    def __init__(self, bodies):
+        self.bodies = list(bodies)
+        self.body_index = 0
+        self.regenerate = _FakeAssistantAction()
+
+    def get_by_text(self, text, *, exact=False):
+        assert exact is True
+        if text == "AI生成文案":
+            return _FakeCollection([])
+        if text == "重新生成":
+            return _FakeCollection([self.regenerate])
+        if text == "填充文案":
+            return _FakeCollection([])
+        raise AssertionError(text)
+
+    def locator(self, selector):
+        assert selector == "body"
+        frame = self
+
+        class Body:
+            def inner_text(self):
+                index = min(frame.body_index, len(frame.bodies) - 1)
+                frame.body_index += 1
+                return frame.bodies[index]
+
+        return Body()
+
+
+def _copy_body(title, description):
+    return (
+        f"重新生成\n填充文案\n标题\n{title}\n"
+        f"正文\n{description}\n确认\n取消"
+    )
+
+
+def test_generate_copy_rejects_unchanged_result_without_new_cycle(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    monkeypatch.setattr(copy_module, "AI_COPY_TIMEOUT_MS", 1_000)
+    old = _copy_body("旧标题", "旧描述")
+    frame = _FakeRegenerateFrame([old, old, old])
+
+    with pytest.raises(QianniuCopyError, match="QIANNIU_COPY_RESULT_STALE"):
+        _generate_copy(
+            _FakePage([]),
+            frame,
+            previous_copy=("旧标题", "旧描述"),
+        )
+
+    assert frame.regenerate.clicked is True
+
+
+def test_generate_copy_accepts_same_text_after_observed_generation_cycle():
+    old = _copy_body("相同标题", "相同描述")
+    frame = _FakeRegenerateFrame([old, "生成中…", old])
+
+    title, description, _elapsed = _generate_copy(
+        _FakePage([]),
+        frame,
+        previous_copy=("相同标题", "相同描述"),
+    )
+
+    assert (title, description) == ("相同标题", "相同描述")
+
+
+def test_generate_copy_prefers_regenerate_for_next_slot_when_both_actions_exist():
+    old = _copy_body("上一坑标题", "上一坑描述")
+    new = _copy_body("当前坑标题", "当前坑描述")
+
+    class BothActionFrame(_FakeRegenerateFrame):
+        def __init__(self):
+            super().__init__([old, "生成中…", new])
+            self.initial = _FakeAssistantAction()
+
+        def get_by_text(self, text, *, exact=False):
+            if text == "AI生成文案":
+                return _FakeCollection([self.initial])
+            return super().get_by_text(text, exact=exact)
+
+    frame = BothActionFrame()
+
+    title, description, _elapsed = _generate_copy(
+        _FakePage([]),
+        frame,
+        previous_copy=("上一坑标题", "上一坑描述"),
+    )
+
+    assert frame.regenerate.clicked is True
+    assert frame.initial.clicked is False
+    assert (title, description) == ("当前坑标题", "当前坑描述")
+
+
+def test_product_session_opens_once_and_replaces_seed_for_each_slot(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    frame = object()
+    row = object()
+    calls = []
+    generated = []
+    monkeypatch.setattr(
+        copy_module,
+        "_ensure_recommend_list",
+        lambda page, url: calls.append(("list", page, url)),
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_find_product_row_with_recovery",
+        lambda page, product_id, url: row,
+    )
+    monkeypatch.setattr(copy_module, "_empty_slot_positions", lambda _row: [2, 4])
+    monkeypatch.setattr(
+        copy_module,
+        "_open_slot_publish_form",
+        lambda page, product_id, position, **kwargs: (
+            calls.append(("open", product_id, position)) or frame
+        ),
+    )
+    monkeypatch.setattr(copy_module, "_wait_for_frame", lambda *_args, **_kwargs: frame)
+    monkeypatch.setattr(
+        copy_module,
+        "_select_seed_image",
+        lambda _page, _frame, *, seed_path, expected_sha256: (
+            calls.append(("seed", seed_path, expected_sha256))
+            or f"uploaded-{seed_path}"
+        ),
+    )
+
+    def fake_generate(_page, _frame, *, previous_copy=None):
+        generated.append(previous_copy)
+        number = len(generated)
+        return f"标题{number}", f"描述{number}", 0.1
+
+    monkeypatch.setattr(copy_module, "_generate_copy", fake_generate)
+    slots = [
+        {
+            "slot_id": "p1-a",
+            "product_id": "P1",
+            "remote_slot_occurrence": 0,
+            "ordered_outputs": [{"output_path": "a.jpg", "output_sha256": "a" * 64}],
+        },
+        {
+            "slot_id": "p1-b",
+            "product_id": "P1",
+            "remote_slot_occurrence": 1,
+            "ordered_outputs": [{"output_path": "b.jpg", "output_sha256": "b" * 64}],
+        },
+    ]
+
+    with QianniuProductCopySession(
+        object(),
+        slots,
+        material_center_url="https://example.test/materials",
+    ) as session:
+        first = session.generate_slot(slots[0])
+        second = session.generate_slot(slots[1])
+
+    assert [call for call in calls if call[0] == "open"] == [("open", "P1", 2)]
+    assert [call[1] for call in calls if call[0] == "seed"] == ["a.jpg", "b.jpg"]
+    assert generated == [None, ("标题1", "描述1")]
+    assert first["remote_slot_position"] == 2
+    assert second["remote_slot_position"] == 4
+
+
+def test_grouped_copy_wrapper_preserves_original_request_order(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    opened = []
+    generated = []
+
+    class FakeSession:
+        def __init__(self, _page, slots, *, material_center_url):
+            opened.append(
+                (
+                    material_center_url,
+                    [slot["slot_id"] for slot in slots],
+                    [slot["remote_slot_occurrence"] for slot in slots],
+                )
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        def generate_slot(self, slot):
+            generated.append(slot["slot_id"])
+            return {"slot_id": slot["slot_id"], "product_id": slot["product_id"]}
+
+    monkeypatch.setattr(
+        copy_module,
+        "open_qianniu_product_copy_session",
+        FakeSession,
+    )
+    slots = [
+        {"slot_id": "p1-a", "product_id": "P1"},
+        {"slot_id": "p2-a", "product_id": "P2"},
+        {"slot_id": "p1-b", "product_id": "P1"},
+    ]
+
+    drafts = generate_qianniu_copy_drafts(
+        object(),
+        slots,
+        material_center_url="https://example.test/materials",
+    )
+
+    assert opened == [
+        ("https://example.test/materials", ["p1-a", "p1-b"], [0, 1]),
+        ("https://example.test/materials", ["p2-a"], [0]),
+    ]
+    assert generated == ["p1-a", "p1-b", "p2-a"]
+    assert [draft["slot_id"] for draft in drafts] == ["p1-a", "p2-a", "p1-b"]
 
 
 class _FakeResultPanelAction:

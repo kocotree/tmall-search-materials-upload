@@ -12,6 +12,7 @@ from upload_search_materials.agent_handoff import (
     supersede_agent_request,
 )
 from upload_search_materials.copy_draft_workflow import (
+    _unfinished_slots_by_product,
     _with_remote_slot_occurrences,
     process_copy_draft_request,
 )
@@ -22,6 +23,39 @@ from upload_search_materials.interaction.session import (
     SessionStore,
 )
 from upload_search_materials.interaction.web import create_app
+
+
+def _patch_copy_product_session(monkeypatch, workflow, fake_generate):
+    """Adapt legacy one-slot browser fakes to the product-session contract."""
+
+    class FakeProductSession:
+        def __init__(self, page, slots, *, material_center_url):
+            self.page = page
+            self.slots = slots
+            self.material_center_url = material_center_url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        def generate_slot(self, slot):
+            drafts = fake_generate(
+                self.page,
+                [slot],
+                material_center_url=self.material_center_url,
+            )
+            return drafts[0]
+
+        def recover_after_failure(self):
+            return None
+
+    monkeypatch.setattr(
+        workflow,
+        "open_qianniu_product_copy_session",
+        FakeProductSession,
+    )
 
 
 def _prepared_slot_client(
@@ -926,7 +960,7 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
             }
         ]
 
-    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     page = object()
     response = process_copy_draft_request(
         store,
@@ -998,7 +1032,7 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
             "source": "qianniu_builtin_ai",
         }]
 
-    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     response = process_copy_draft_request(
         store,
         session_id,
@@ -1041,6 +1075,82 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
     assert progress["skipped_slots"][0]["slot_id"] == "slot-fail"
 
 
+def test_copy_processor_reuses_one_session_for_same_product_slots(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path, asset_count=6)
+    request_id = _queue_copy_request(
+        client,
+        store,
+        session_id,
+        slot_assignments=[
+            {
+                "slot_id": "slot-a",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            },
+            {
+                "slot_id": "slot-b",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-3", "asset-4", "asset-5"],
+            },
+        ],
+    )
+    opened_groups = []
+
+    class FakeProductSession:
+        def __init__(self, _page, slots, *, material_center_url):
+            assert material_center_url == "https://example.test/materials"
+            opened_groups.append([slot["slot_id"] for slot in slots])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        def generate_slot(self, slot):
+            return {
+                "slot_id": slot["slot_id"],
+                "product_id": slot["product_id"],
+                "title": f"{slot['slot_id']} 标题",
+                "description": f"{slot['slot_id']} 描述",
+                "evidence": ["千牛商品坑位内置 AI 生成"],
+                "risks": [],
+                "source": "qianniu_builtin_ai",
+            }
+
+        def recover_after_failure(self):
+            return None
+
+    monkeypatch.setattr(
+        workflow,
+        "open_qianniu_product_copy_session",
+        FakeProductSession,
+    )
+
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert opened_groups == [["slot-a", "slot-b"]]
+    assert [
+        item["slot_id"] for item in response["result"]["copy_drafts"]
+    ] == ["slot-a", "slot-b"]
+
+
 def test_copy_processor_does_not_skip_batch_identity_failures(
     tmp_path, monkeypatch
 ):
@@ -1058,7 +1168,7 @@ def test_copy_processor_does_not_skip_batch_identity_failures(
             "多个页面区域同时包含商品搜索框和商品表格",
         )
 
-    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     with pytest.raises(
         workflow.CopyDraftProcessingError,
         match="QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
@@ -1168,7 +1278,7 @@ def test_copy_processor_stops_cleanly_when_slot_plan_is_superseded(
             "source": "qianniu_builtin_ai",
         }]
 
-    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     response = process_copy_draft_request(
         store,
         session_id,
@@ -1212,9 +1322,9 @@ def test_copy_processor_rejects_tampered_authorization_before_browser(
     )
     store._write_json_atomic(request_path, request)
 
-    monkeypatch.setattr(
+    _patch_copy_product_session(
+        monkeypatch,
         workflow,
-        "generate_qianniu_copy_drafts",
         lambda *_args, **_kwargs: pytest.fail("browser must not run"),
     )
     with pytest.raises(
@@ -1271,7 +1381,7 @@ def test_copy_processor_upgrades_legacy_request_without_chat_confirmation(
             "source": "qianniu_builtin_ai",
         }]
 
-    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     response = process_copy_draft_request(
         store,
         session_id,
@@ -1313,6 +1423,24 @@ def test_copy_slots_keep_distinct_remote_occurrences_across_checkpoint_calls():
         1,
         None,
         3,
+    ]
+
+
+def test_unfinished_copy_slots_group_by_first_product_and_skip_restored_product():
+    groups = _unfinished_slots_by_product(
+        [
+            {"slot_id": "p1-a", "product_id": "P1"},
+            {"slot_id": "p2-a", "product_id": "P2"},
+            {"slot_id": "p1-b", "product_id": "P1"},
+        ],
+        {
+            "p1-a": {"slot_id": "p1-a"},
+            "p1-b": {"slot_id": "p1-b"},
+        },
+    )
+
+    assert [[slot["slot_id"] for slot in group] for group in groups] == [
+        ["p2-a"]
     ]
 
 
@@ -1386,7 +1514,7 @@ def test_copy_request_completion_allows_frontend_progress_autosave(
             "remote_slot_position": 1,
         }]
 
-    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     response = process_copy_draft_request(
         store,
         session_id,
