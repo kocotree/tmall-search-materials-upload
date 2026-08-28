@@ -35,6 +35,8 @@ COPY_UPLOAD_TIMEOUT_MS = 120_000
 COPY_UPLOAD_CARD_ATTEMPTS = 100
 AI_COPY_TIMEOUT_MS = 180_000
 AI_COPY_POLL_MS = 500
+PUBLISH_FORM_CLOSE_ATTEMPTS = 12
+PUBLISH_FORM_CLOSE_DELAY_MS = 250
 COPY_POPUP_SETTLE_DELAY_MS = 250
 COPY_LATE_POPUP_QUIET_CHECKS = 8
 COPY_BLOCKING_OVERLAY_SELECTOR = (
@@ -442,6 +444,124 @@ def _recommend_list_is_current(page, material_center_url: str) -> bool:
         PUBLISH_FRAME_FRAGMENT in str(getattr(frame, "url", "") or "")
         for frame in list(getattr(page, "frames", []) or [])
     )
+
+
+def _publish_form_frames(page) -> list[Any]:
+    return [
+        frame
+        for frame in list(getattr(page, "frames", []) or [])
+        if PUBLISH_FRAME_FRAGMENT
+        in str(getattr(frame, "url", "") or "")
+    ]
+
+
+def _wait_for_publish_form_to_close(
+    page,
+    *,
+    attempts: int = PUBLISH_FORM_CLOSE_ATTEMPTS,
+) -> bool:
+    for attempt in range(attempts + 1):
+        if not _publish_form_frames(page):
+            return True
+        if attempt < attempts:
+            page.wait_for_timeout(PUBLISH_FORM_CLOSE_DELAY_MS)
+    return False
+
+
+def _click_first_visible_close_control(scope, selectors: Sequence[str]) -> bool:
+    for selector in selectors:
+        try:
+            candidates = scope.locator(selector)
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                if not candidate.is_visible():
+                    continue
+                candidate.click(force=True, timeout=1_500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _close_publish_form_in_place(page, publish_frame=None) -> bool:
+    """Discard one unconfirmed form without refreshing the product list."""
+
+    if not _publish_form_frames(page):
+        return True
+    frame_close_selectors = (
+        'button:has-text("确认取消")',
+        'button:has-text("确认退出")',
+        '[aria-label*="关闭"]',
+        '[title*="关闭"]',
+        ".ant-modal-close",
+        ".ant-drawer-close",
+        '[class*="CloseButton"]',
+        '[class*="closeButton"]',
+        'button:has-text("退出")',
+        'button:has-text("关闭")',
+        'button:has-text("取消")',
+    )
+    page_close_selectors = (
+        ".next-overlay-wrapper.opened button:has(svg.next-icon-remote)",
+        ".next-overlay-wrapper.opened a:has(svg.next-icon-remote)",
+        ".next-overlay-wrapper.opened [role=\"button\"]:has(svg.next-icon-remote)",
+        'button:has-text("确认取消")',
+        'button:has-text("确认退出")',
+        '[aria-label*="关闭"]',
+        '[title*="关闭"]',
+        ".ant-modal-close",
+        ".ant-drawer-close",
+    )
+    for _ in range(3):
+        try:
+            backdrops = page.locator(
+                ".next-overlay-wrapper.opened > .next-overlay-backdrop"
+            )
+            for index in range(backdrops.count()):
+                backdrop = backdrops.nth(index)
+                if not backdrop.is_visible():
+                    continue
+                backdrop.click(
+                    position={"x": 8, "y": 8},
+                    force=True,
+                    timeout=1_500,
+                )
+                if _wait_for_publish_form_to_close(page, attempts=4):
+                    return True
+        except Exception:
+            pass
+
+        frames = _publish_form_frames(page)
+        scopes = []
+        if publish_frame is not None and any(
+            publish_frame is frame for frame in frames
+        ):
+            scopes.append(publish_frame)
+        scopes.extend(
+            frame
+            for frame in frames
+            if all(frame is not scope for scope in scopes)
+        )
+        for scope in scopes:
+            if _click_first_visible_close_control(
+                scope,
+                frame_close_selectors,
+            ) and _wait_for_publish_form_to_close(page, attempts=4):
+                return True
+        if _click_first_visible_close_control(
+            page,
+            page_close_selectors,
+        ) and _wait_for_publish_form_to_close(page, attempts=4):
+            return True
+        try:
+            keyboard = getattr(page, "keyboard", None)
+            if keyboard is not None:
+                keyboard.press("Escape")
+            if _wait_for_publish_form_to_close(page, attempts=4):
+                return True
+        except Exception:
+            pass
+    return not _publish_form_frames(page)
 
 
 def _ensure_recommend_list(page, material_center_url: str) -> bool:
@@ -1042,7 +1162,7 @@ def _prepare_slot_occurrences(
 
 
 class QianniuProductCopySession:
-    """Reuse one unconfirmed Qianniu publish form for one product."""
+    """Reuse one filtered product row while opening a fresh form per slot."""
 
     def __init__(
         self,
@@ -1073,8 +1193,8 @@ class QianniuProductCopySession:
                 "文案请求包含缺失或重复的 slot_id",
             )
         self._positions: dict[str, int] = {}
+        self._row = None
         self._publish_frame = None
-        self._last_copy: tuple[str, str] | None = None
 
     def __enter__(self) -> "QianniuProductCopySession":
         return self
@@ -1133,6 +1253,8 @@ class QianniuProductCopySession:
         self._positions = positions
 
     def _open(self) -> None:
+        if self._row is not None and self._positions:
+            return
         _ensure_recommend_list(self.page, self.material_center_url)
         row = _find_product_row_with_recovery(
             self.page,
@@ -1140,30 +1262,20 @@ class QianniuProductCopySession:
             self.material_center_url,
         )
         self._resolve_positions(row)
-        first_slot_id = str(self.slots[0].get("slot_id", "")).strip()
-        self._publish_frame = _open_slot_publish_form(
-            self.page,
-            self.product_id,
-            self._positions[first_slot_id],
-            row=row,
-        )
+        self._row = row
 
-    def _current_frame(self):
-        if self._publish_frame is None:
-            self._open()
-            return self._publish_frame
-        try:
-            self._publish_frame = _wait_for_frame(
-                self.page,
-                PUBLISH_FRAME_FRAGMENT,
-                attempts=1,
-                delay_ms=0,
-            )
-        except QianniuCopyError:
+    def _close_current_form(self) -> None:
+        if _close_publish_form_in_place(
+            self.page,
+            self._publish_frame,
+        ):
             self._publish_frame = None
-        if self._publish_frame is None:
-            self._open()
-        return self._publish_frame
+            return
+        self._publish_frame = None
+        raise QianniuCopyError(
+            "QIANNIU_PUBLISH_FORM_CLOSE_FAILED",
+            "上一坑位的未发布表单未能原地关闭",
+        )
 
     def generate_slot(self, raw_slot: Mapping[str, Any]) -> dict[str, Any]:
         slot_id = str(raw_slot.get("slot_id", "")).strip()
@@ -1185,10 +1297,17 @@ class QianniuProductCopySession:
                 f"商品 {product_id} 的坑位缺少最终图片输出",
             )
         seed_output = ordered_outputs[0]
-        publish_frame = self._current_frame()
+        self._open()
+        self._close_current_form()
+        self._publish_frame = _open_slot_publish_form(
+            self.page,
+            self.product_id,
+            self._positions[slot_id],
+            row=self._row,
+        )
         seed_image_name = _select_seed_image(
             self.page,
-            publish_frame,
+            self._publish_frame,
             seed_path=str(seed_output.get("output_path", "")),
             expected_sha256=str(seed_output.get("output_sha256", "")),
         )
@@ -1201,9 +1320,8 @@ class QianniuProductCopySession:
         title, description, elapsed = _generate_copy(
             self.page,
             self._publish_frame,
-            previous_copy=self._last_copy,
+            previous_copy=None,
         )
-        self._last_copy = (title, description)
         return QianniuCopyDraft(
             slot_id=slot_id,
             product_id=product_id,
@@ -1215,33 +1333,17 @@ class QianniuProductCopySession:
         ).as_response_item()
 
     def recover_after_failure(self) -> None:
-        """Reuse a clean bound form, otherwise discard uncertain UI state."""
+        """Close the failed slot form before retrying the same product row."""
 
-        try:
-            publish_frame = _wait_for_frame(
-                self.page,
-                PUBLISH_FRAME_FRAGMENT,
-                attempts=1,
-                delay_ms=0,
-            )
-            try:
-                _wait_for_frame(
-                    self.page,
-                    MATERIAL_SELECTOR_FRAME_FRAGMENT,
-                    attempts=1,
-                    delay_ms=0,
-                )
-            except QianniuCopyError:
-                body = publish_frame.locator("body").inner_text()
-                if (
-                    "该内容暂不支持修改商品" in body
-                    and "生成中" not in body
-                ):
-                    self._publish_frame = publish_frame
-                    return
-        except Exception:
-            pass
+        if _close_publish_form_in_place(
+            self.page,
+            self._publish_frame,
+        ):
+            self._publish_frame = None
+            return
         self._publish_frame = None
+        self._row = None
+        self._positions = {}
         try:
             _ensure_recommend_list(self.page, self.material_center_url)
         except Exception:
@@ -1249,9 +1351,17 @@ class QianniuProductCopySession:
             pass
 
     def close(self) -> None:
+        if _close_publish_form_in_place(
+            self.page,
+            self._publish_frame,
+        ):
+            self._publish_frame = None
+            return
         self._publish_frame = None
+        self._row = None
+        self._positions = {}
         try:
-            _ensure_recommend_list(self.page, self.material_center_url)
+            _open_recommend_list(self.page, self.material_center_url)
         except QianniuCopyError:
             raise
         except Exception as error:

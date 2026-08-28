@@ -468,7 +468,7 @@ def test_generate_copy_prefers_regenerate_for_next_slot_when_both_actions_exist(
     assert (title, description) == ("当前坑标题", "当前坑描述")
 
 
-def test_product_session_opens_once_and_replaces_seed_for_each_slot(
+def test_product_session_searches_once_and_opens_fresh_form_for_each_slot(
     monkeypatch,
 ):
     import upload_search_materials.browser.qianniu_copy as copy_module
@@ -485,7 +485,9 @@ def test_product_session_opens_once_and_replaces_seed_for_each_slot(
     monkeypatch.setattr(
         copy_module,
         "_find_product_row_with_recovery",
-        lambda page, product_id, url: row,
+        lambda page, product_id, url: (
+            calls.append(("find", product_id)) or row
+        ),
     )
     monkeypatch.setattr(copy_module, "_empty_slot_positions", lambda _row: [2, 4])
     monkeypatch.setattr(
@@ -496,6 +498,13 @@ def test_product_session_opens_once_and_replaces_seed_for_each_slot(
         ),
     )
     monkeypatch.setattr(copy_module, "_wait_for_frame", lambda *_args, **_kwargs: frame)
+    monkeypatch.setattr(
+        copy_module,
+        "_close_publish_form_in_place",
+        lambda page, publish_frame=None: (
+            calls.append(("close", publish_frame)) or True
+        ),
+    )
     monkeypatch.setattr(
         copy_module,
         "_select_seed_image",
@@ -534,11 +543,100 @@ def test_product_session_opens_once_and_replaces_seed_for_each_slot(
         first = session.generate_slot(slots[0])
         second = session.generate_slot(slots[1])
 
-    assert [call for call in calls if call[0] == "open"] == [("open", "P1", 2)]
+    assert [call for call in calls if call[0] == "list"] == [
+        ("list", session.page, "https://example.test/materials")
+    ]
+    assert [call for call in calls if call[0] == "find"] == [("find", "P1")]
+    assert [call for call in calls if call[0] == "open"] == [
+        ("open", "P1", 2),
+        ("open", "P1", 4),
+    ]
     assert [call[1] for call in calls if call[0] == "seed"] == ["a.jpg", "b.jpg"]
-    assert generated == [None, ("标题1", "描述1")]
+    assert generated == [None, None]
     assert first["remote_slot_position"] == 2
     assert second["remote_slot_position"] == 4
+
+
+def test_product_session_retry_closes_form_without_researching_product(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    page = object()
+    row = object()
+    frame = object()
+    navigations = []
+    monkeypatch.setattr(
+        copy_module,
+        "_close_publish_form_in_place",
+        lambda actual_page, actual_frame=None: (
+            actual_page is page and actual_frame is frame
+        ),
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_ensure_recommend_list",
+        lambda actual_page, url: navigations.append((actual_page, url)),
+    )
+    session = QianniuProductCopySession(
+        page,
+        [{"slot_id": "p1-a", "product_id": "P1"}],
+        material_center_url="https://example.test/materials",
+    )
+    session._row = row
+    session._positions = {"p1-a": 2}
+    session._publish_frame = frame
+
+    session.recover_after_failure()
+
+    assert session._publish_frame is None
+    assert session._row is row
+    assert session._positions == {"p1-a": 2}
+    assert navigations == []
+
+
+def test_close_publish_form_in_place_uses_backdrop_without_navigation():
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    frame = type(
+        "PublishFrame",
+        (),
+        {"url": "https://example.test/publish-feeds/imagePreview"},
+    )()
+
+    class Backdrop:
+        def __init__(self, page):
+            self.page = page
+
+        def is_visible(self):
+            return True
+
+        def click(self, *, position, force, timeout):
+            assert position == {"x": 8, "y": 8}
+            assert force is True
+            assert timeout == 1_500
+            self.page.frames = []
+
+    class Page:
+        def __init__(self):
+            self.url = "https://example.test/material-center?tab=recommend"
+            self.frames = [frame]
+            self.wait_count = 0
+
+        def locator(self, selector):
+            assert selector == (
+                ".next-overlay-wrapper.opened > .next-overlay-backdrop"
+            )
+            return _FakeCollection([Backdrop(self)])
+
+        def wait_for_timeout(self, _delay_ms):
+            self.wait_count += 1
+
+    page = Page()
+
+    assert copy_module._close_publish_form_in_place(page, frame) is True
+    assert page.url == "https://example.test/material-center?tab=recommend"
+    assert page.frames == []
 
 
 def test_grouped_copy_wrapper_preserves_original_request_order(monkeypatch):
