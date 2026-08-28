@@ -775,6 +775,7 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .asset-check { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; }
 .asset-check input { width: 15px; height: 15px; accent-color: var(--accent-dark); }
 .asset-warning { width: 100%; color: var(--warning); font-size: 9px; }
+.folder-match-warning-danger { color: var(--danger); font-weight: 700; }
 .asset-hard-error { width: 100%; color: #812d1e !important; font-size: 9px; font-weight: 700; }
 .image-review-overview {
   display: flex;
@@ -1450,6 +1451,28 @@ summary:focus-visible {
   color: #315a4d;
   font-size: 0.75rem;
   line-height: 1.55;
+}
+
+.copy-skipped-notice {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #e5a35a;
+  border-radius: 0.8rem;
+  background: #fff8ed;
+  color: #7c3f0c;
+}
+
+.copy-skipped-notice p {
+  margin: 0.35rem 0 0.5rem;
+}
+
+.copy-skipped-notice ul {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.copy-skipped-notice li + li {
+  margin-top: 0.25rem;
 }
 
 .copy-toolbar-actions {

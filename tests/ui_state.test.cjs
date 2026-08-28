@@ -172,6 +172,33 @@ test("a new copy version never fills unfinished slots from an old version", () =
   assert.deepEqual(merged[1].output_sha256, ["sha-2"]);
 });
 
+test("a skipped copy slot keeps its manual-fill reason in the active version", () => {
+  const merged = UiState.copyDraftsForVersion(
+    [{ slot_id: "slot-1", product_id: "p1" }],
+    [],
+    [{
+      slot_id: "slot-1",
+      product_id: "p1",
+      title: "",
+      description: "",
+      evidence: ["自动获取未完成"],
+      risks: ["请人工填写"],
+      source: "manual_required",
+      generation_status: "skipped",
+      skip_reason_code: "QIANNIU_PRODUCT_IDENTITY_MISMATCH",
+      skip_message: "千牛未找到该商品",
+      attempt_count: 4,
+      retry_count: 3,
+    }],
+    "request-new",
+  );
+
+  assert.equal(merged[0].generation_status, "skipped");
+  assert.equal(merged[0].skip_message, "千牛未找到该商品");
+  assert.equal(merged[0].retry_count, 3);
+  assert.equal(merged[0].confirmed, false);
+});
+
 test("completeness products can be filtered by owner without changing status scope", () => {
   assert.equal(typeof UiState.filterCompletenessProducts, "function");
   const products = [

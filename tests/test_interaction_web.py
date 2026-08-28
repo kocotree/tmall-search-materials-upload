@@ -2400,6 +2400,9 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     assert '"裁剪预校验"' in javascript
     assert 'apiPath("/stages/slots_copy/crop-preflight")' in javascript
     assert 'copyButton.textContent = "重新生成新版本"' in javascript
+    assert "copy-skipped-notice" in javascript
+    assert "已重试 3 次仍未完成，系统已跳过" in javascript
+    assert "当前坑位正在重试 ${retryCount}/3" in javascript
     assert '"生成标题与描述"' not in javascript
     assert re.search(
         r'new CustomEvent\(\s*"input",\s*'
@@ -3519,7 +3522,7 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
     assert persisted["values"]["source_types"] == ["image"]
     assert [
         item["decision"] for item in persisted["values"]["folder_decisions"]
-    ] == ["confirmed", "rejected", "confirmed", "rejected"]
+    ] == ["confirmed", "confirmed", "confirmed", "rejected"]
     assert persisted["values"].get("asset_decisions", []) == []
     stage_path = tmp_path / session_id / "03-asset-matching"
     assert not (stage_path / "handoff.json").exists()
@@ -4354,6 +4357,26 @@ def test_prepare_local_gallery_materializes_visible_folder_defaults():
     assert "fieldErrors?.folder_decisions" in function_body
     assert "UiState.galleryNeedsReload" in function_body
     assert "文件夹选择没有变化，无需重新加载图片。" in function_body
+
+
+def test_fuzzy_folder_default_and_warning_are_visible_risk_controls():
+    static_root = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+    )
+    source = (static_root / "app.js").read_text(encoding="utf-8")
+    stylesheet = (static_root / "app.css").read_text(encoding="utf-8")
+
+    assert 'candidate.match_type === "fuzzy_name_candidate"' in source
+    assert '"asset-warning folder-match-warning-danger"' in source
+    assert "粗略名称命中；默认采用，请重点核对，不属于本商品请排除" in source
+    assert (
+        ".folder-match-warning-danger { color: var(--danger); font-weight: 700; }"
+        in stylesheet
+    )
 
 
 def test_asset_matching_internal_decisions_are_hidden_structured_controls(client):

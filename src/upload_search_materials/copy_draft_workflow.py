@@ -51,6 +51,41 @@ COPY_AUTHORIZATION_SOURCES = {
     "workbench_copy_regeneration",
     "legacy_workbench_copy_request",
 }
+COPY_SLOT_MAX_RETRIES = 3
+COPY_SLOT_RETRYABLE_REASON_CODES = frozenset(
+    {
+        "QIANNIU_AI_COPY_ACTION_NOT_FOUND",
+        "QIANNIU_AI_COPY_TIMEOUT",
+        "QIANNIU_COPY_POPUP_BLOCKED",
+        "QIANNIU_COPY_RESPONSE_INVALID",
+        "QIANNIU_COPY_RESULT_INVALID",
+        "QIANNIU_COPY_RUNTIME_FAILED",
+        "QIANNIU_COPY_SEED_SELECTION_INVALID",
+        "QIANNIU_EMPTY_SLOT_SHORTAGE",
+        "QIANNIU_FRAME_NOT_READY",
+        "QIANNIU_IMAGE_TEXT_ACTION_NOT_FOUND",
+        "QIANNIU_IMAGE_TEXT_ACTION_UNSTABLE",
+        "QIANNIU_MATERIAL_ROOT_NOT_FOUND",
+        "QIANNIU_MATERIAL_SEARCH_NOT_FOUND",
+        "QIANNIU_MATERIAL_SELECTOR_NOT_FOUND",
+        "QIANNIU_PRODUCT_IDENTITY_MISMATCH",
+        "QIANNIU_PRODUCT_NOT_BOUND",
+        "QIANNIU_PRODUCT_SEARCH_NOT_FOUND",
+        "QIANNIU_SLOT_NOT_FOUND",
+        "QIANNIU_SLOT_OCCUPIED",
+        "QIANNIU_SLOT_TABLE_INVALID",
+    }
+)
+COPY_SLOT_SKIP_MESSAGES = {
+    "QIANNIU_AI_COPY_TIMEOUT": "千牛生成文案超时",
+    "QIANNIU_COPY_RESULT_INVALID": "千牛返回的标题或描述不完整",
+    "QIANNIU_EMPTY_SLOT_SHORTAGE": "目标坑位当前不可用",
+    "QIANNIU_PRODUCT_IDENTITY_MISMATCH": "千牛未找到该商品",
+    "QIANNIU_PRODUCT_NOT_BOUND": "千牛页面未锁定到该商品",
+    "QIANNIU_PRODUCT_SEARCH_NOT_FOUND": "千牛商品列表暂时未加载完成",
+    "QIANNIU_SLOT_NOT_FOUND": "千牛未找到目标坑位",
+    "QIANNIU_SLOT_OCCUPIED": "目标坑位当前不可用",
+}
 
 
 class CopyDraftProcessingError(RuntimeError):
@@ -62,6 +97,40 @@ class CopyDraftProcessingError(RuntimeError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _skipped_copy_draft(
+    slot: Mapping[str, Any],
+    error: QianniuCopyError,
+    *,
+    attempt_count: int,
+) -> dict[str, Any]:
+    """Represent one exhausted slot without blocking later copy generation."""
+
+    slot_id = str(slot.get("slot_id", "")).strip()
+    product_id = str(slot.get("product_id", "")).strip()
+    reason_code = str(error.reason_code)
+    message = COPY_SLOT_SKIP_MESSAGES.get(
+        reason_code,
+        "千牛自动获取文案未完成",
+    )
+    skipped = {
+        "slot_id": slot_id,
+        "product_id": product_id,
+        "title": "",
+        "description": "",
+        "evidence": ["千牛自动获取未完成，已保留该坑位供人工填写"],
+        "risks": [f"{message}，请人工填写并核对标题和描述"],
+        "source": "manual_required",
+        "generation_status": "skipped",
+        "skip_reason_code": reason_code,
+        "skip_message": message,
+        "attempt_count": attempt_count,
+        "retry_count": max(0, attempt_count - 1),
+    }
+    if slot.get("remote_slot_position") is not None:
+        skipped["remote_slot_position"] = int(slot["remote_slot_position"])
+    return skipped
 
 
 def _canonical_sha256(value: Mapping[str, Any]) -> str:
@@ -440,9 +509,26 @@ def process_copy_draft_request(
         if isinstance(item, Mapping) and item.get("slot_id")
     }
 
+    def ordered_completed() -> list[dict[str, Any]]:
+        return [
+            completed[str(slot.get("slot_id", ""))]
+            for slot in slots
+            if str(slot.get("slot_id", "")) in completed
+        ]
+
     def write_progress(
-        status: str, *, current_slot_id: str = "", reason_code: str = ""
+        status: str,
+        *,
+        current_slot_id: str = "",
+        reason_code: str = "",
+        current_retry_count: int = 0,
     ) -> dict[str, Any]:
+        ordered = ordered_completed()
+        skipped = [
+            item
+            for item in ordered
+            if item.get("generation_status") == "skipped"
+        ]
         document = {
             "schema_version": 1,
             "session_id": session_id,
@@ -452,13 +538,14 @@ def process_copy_draft_request(
             "status": status,
             "current_slot_id": current_slot_id,
             "completed_count": len(completed),
+            "generated_count": len(ordered) - len(skipped),
+            "skipped_count": len(skipped),
             "total_count": len(slots),
-            "copy_drafts": [
-                completed[str(slot.get("slot_id", ""))]
-                for slot in slots
-                if str(slot.get("slot_id", "")) in completed
-            ],
+            "copy_drafts": ordered,
+            "skipped_slots": skipped,
             "reason_code": reason_code,
+            "current_retry_count": current_retry_count,
+            "max_retries": COPY_SLOT_MAX_RETRIES,
             "updated_at": _now(),
         }
         store._write_json_atomic(progress_path, document)
@@ -488,7 +575,7 @@ def process_copy_draft_request(
             "status": status,
             "request_id": request_id,
             "kind": "copy_draft",
-            "result": {"copy_drafts": list(completed.values())},
+            "result": {"copy_drafts": ordered_completed()},
         }
 
     factory = page_factory or open_cdp_page
@@ -509,24 +596,56 @@ def process_copy_draft_request(
                 if current_slot_id in completed:
                     continue
                 write_progress("processing", current_slot_id=current_slot_id)
-                # Reuse the maintained Playwright implementation.  Passing one
-                # slot at a time lets us persist completed work without copying
-                # or reimplementing any browser selectors or navigation.
-                drafts = generate_qianniu_copy_drafts(
-                    browser_page,
-                    [slot],
-                    material_center_url=runtime.material_center_url,
-                )
-                if len(drafts) != 1:
-                    raise QianniuCopyError(
-                        "QIANNIU_COPY_RESPONSE_INVALID",
-                        f"坑位 {current_slot_id} 未返回唯一文案",
-                    )
-                stopped = stopped_response()
-                if stopped is not None:
-                    return stopped
-                completed[current_slot_id] = dict(drafts[0])
-                write_progress("processing")
+                for attempt_index in range(COPY_SLOT_MAX_RETRIES + 1):
+                    try:
+                        # Reuse the maintained Playwright implementation.
+                        # Passing one slot at a time lets us checkpoint, retry,
+                        # and skip without replaying completed slots.
+                        drafts = generate_qianniu_copy_drafts(
+                            browser_page,
+                            [slot],
+                            material_center_url=runtime.material_center_url,
+                        )
+                        if len(drafts) != 1:
+                            raise QianniuCopyError(
+                                "QIANNIU_COPY_RESPONSE_INVALID",
+                                f"坑位 {current_slot_id} 未返回唯一文案",
+                            )
+                        stopped = stopped_response()
+                        if stopped is not None:
+                            return stopped
+                        completed[current_slot_id] = dict(drafts[0])
+                        write_progress("processing")
+                        break
+                    except QianniuCopyError as error:
+                        if (
+                            error.reason_code
+                            not in COPY_SLOT_RETRYABLE_REASON_CODES
+                        ):
+                            raise
+                        stopped = stopped_response()
+                        if stopped is not None:
+                            return stopped
+                        if attempt_index < COPY_SLOT_MAX_RETRIES:
+                            write_progress(
+                                "processing",
+                                current_slot_id=current_slot_id,
+                                reason_code=error.reason_code,
+                                current_retry_count=attempt_index + 1,
+                            )
+                            continue
+                        completed[current_slot_id] = _skipped_copy_draft(
+                            slot,
+                            error,
+                            attempt_count=attempt_index + 1,
+                        )
+                        write_progress(
+                            "processing",
+                            current_slot_id=current_slot_id,
+                            reason_code=error.reason_code,
+                            current_retry_count=COPY_SLOT_MAX_RETRIES,
+                        )
+                        break
         response = complete_agent_request(
             store,
             session_id,
@@ -536,7 +655,7 @@ def process_copy_draft_request(
                 "kind": "copy_draft",
                 "provider_id": "qianniu-builtin-ai",
                 "response_model": "qianniu-builtin-copy",
-                "result": {"copy_drafts": list(completed.values())},
+                "result": {"copy_drafts": ordered_completed()},
             },
             actor=actor,
             # The frontend checkpoints each newly generated draft into the

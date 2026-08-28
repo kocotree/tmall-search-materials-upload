@@ -3114,11 +3114,14 @@
       .map((candidate) => {
         const key = `${candidate.product_id}\u0000${candidate.folder_id}`;
         const saved = savedByKey.get(key) || {};
-        const decision = ["confirmed", "rejected"].includes(saved.decision)
-          ? saved.decision
+        const defaultDecision = candidate.match_type === "fuzzy_name_candidate"
+          ? "confirmed"
           : candidate.decision === "rejected"
             ? "rejected"
             : "confirmed";
+        const decision = ["confirmed", "rejected"].includes(saved.decision)
+          ? saved.decision
+          : defaultDecision;
         return {
           folder_id: String(candidate.folder_id),
           product_id: String(candidate.product_id),
@@ -3400,7 +3403,9 @@
         const stateBadge = element("span", "folder-selection-state");
         const warning = element(
           "span",
-          "asset-warning",
+          candidate.match_type === "fuzzy_name_candidate"
+            ? "asset-warning folder-match-warning-danger"
+            : "asset-warning",
           candidate.match_type === "exact_sku"
             ? "货号命中；如不属于本商品请排除"
             : candidate.match_type === "exact_folder_query"
@@ -3410,7 +3415,7 @@
                 : candidate.match_type === "short_split_name_candidate"
                   ? "文件夹包含 3–4 字完整片段；默认排除，确认属于本商品后再采用"
               : candidate.match_type === "fuzzy_name_candidate"
-                ? "粗略名称命中；默认排除，确认属于本商品后再采用"
+                ? "粗略名称命中；默认采用，请重点核对，不属于本商品请排除"
                 : "名称精确命中；默认采用，可手动排除",
         );
         status.append(stateBadge, warning);
@@ -5447,6 +5452,38 @@
         "copy-toolbar-status",
         "千牛会按商品坑位生成文案；全部生成后请逐项核对标题和描述。",
       );
+      const copySkippedNotice = element("section", "copy-skipped-notice");
+      copySkippedNotice.hidden = true;
+      copySkippedNotice.setAttribute("aria-live", "polite");
+      const updateCopySkippedNotice = (drafts) => {
+        const skipped = (Array.isArray(drafts) ? drafts : []).filter(
+          (item) => String(item?.generation_status || "") === "skipped",
+        );
+        copySkippedNotice.hidden = skipped.length === 0;
+        copySkippedNotice.replaceChildren();
+        if (!skipped.length) return;
+        const list = document.createElement("ul");
+        skipped.forEach((item) => {
+          const position = Number(item.remote_slot_position || 0);
+          const slotLabel = position
+            ? `第 ${position} 个坑位`
+            : String(item.slot_id || "未知坑位");
+          list.appendChild(element(
+            "li",
+            "",
+            `商品 ${String(item.product_id || "未知")} · ${slotLabel}：${String(item.skip_message || "千牛自动获取文案未完成")}`,
+          ));
+        });
+        copySkippedNotice.append(
+          element(
+            "strong",
+            "",
+            `以下 ${skipped.length} 个坑位已重试 3 次仍未完成，系统已跳过：`,
+          ),
+          element("p", "", "请核对这些坑位，并补充仍为空白的标题和描述；其他坑位不受影响。"),
+          list,
+        );
+      };
       const copyButton = element(
         "button",
         "primary-button",
@@ -5508,6 +5545,11 @@
           source: String(existing.source || "manual"),
           evidence: Array.isArray(existing.evidence) ? existing.evidence : [],
           risks: Array.isArray(existing.risks) ? existing.risks : [],
+          generation_status: String(existing.generation_status || "pending"),
+          skip_reason_code: String(existing.skip_reason_code || ""),
+          skip_message: String(existing.skip_message || ""),
+          attempt_count: Number(existing.attempt_count || 0),
+          retry_count: Number(existing.retry_count || 0),
           request_id: String(existing.request_id || ""),
           output_sha256: Array.isArray(existing.output_sha256)
             ? existing.output_sha256
@@ -5692,6 +5734,7 @@
       copyContent.replaceChildren(
         copyHeading,
         copyActions,
+        copySkippedNotice,
         copyWorkspace,
         finalActions,
         technical,
@@ -5709,9 +5752,15 @@
           processed.slots || [],
         );
         writeJsonListControl("copy_edits", merged, { notify: true });
+        const skippedCount = drafts.filter(
+          (item) => String(item?.generation_status || "") === "skipped",
+        ).length;
+        const generatedCount = drafts.length - skippedCount;
         copyStatus.textContent = drafts.length === assignments.length
-          ? "千牛文案已载入；请核对全部标题、描述、依据和风险。"
-          : `已完成 ${drafts.length}/${assignments.length} 个坑位，正在继续生成。`;
+          ? skippedCount
+            ? `自动获取完成 ${generatedCount} 个坑位，跳过 ${skippedCount} 个坑位；请核对并补充跳过项。`
+            : "千牛文案已载入；请核对全部标题、描述、依据和风险。"
+          : `已处理 ${drafts.length}/${assignments.length} 个坑位，正在继续生成。`;
         renderCopyEditor(processed, requestId);
       };
       const pollCopyRequest = async (requestId) => {
@@ -5731,17 +5780,31 @@
           const drafts = completedDrafts.length
             ? completedDrafts
             : progressDrafts;
+          const skippedDrafts = drafts.filter(
+            (item) => String(item?.generation_status || "") === "skipped",
+          );
+          const generatedCount = drafts.length - skippedDrafts.length;
+          updateCopySkippedNotice(drafts);
           const knownCount = readJsonListControl("copy_edits").filter(
             (item) => String(item.request_id || "") === requestId
-              && String(item.title || "").trim()
-              && String(item.description || "").trim(),
+              && (
+                ["generated", "skipped"].includes(
+                  String(item.generation_status || ""),
+                )
+                || (
+                  String(item.title || "").trim()
+                  && String(item.description || "").trim()
+                )
+              ),
           ).length;
           if (drafts.length > knownCount) {
             applyCopyDrafts(drafts, requestId);
             return;
           }
           if (requestState === "completed") {
-            copyStatus.textContent = "千牛文案已载入；请核对全部内容后统一确认。";
+            copyStatus.textContent = skippedDrafts.length
+              ? `自动获取完成 ${generatedCount} 个坑位，跳过 ${skippedDrafts.length} 个坑位；请核对并补充跳过项。`
+              : "千牛文案已载入；请核对全部内容后统一确认。";
             copyButton.disabled = false;
             return;
           }
@@ -5756,8 +5819,12 @@
             return;
           }
           copyButton.disabled = true;
+          const retryCount = Number(detail.progress?.current_retry_count || 0);
+          const retryText = retryCount
+            ? `；当前坑位正在重试 ${retryCount}/3`
+            : "";
           copyStatus.textContent = requestState === "processing"
-            ? `正在生成千牛文案：已完成 ${progressDrafts.length}/${assignments.length} 个坑位。`
+            ? `正在生成千牛文案：已处理 ${progressDrafts.length}/${assignments.length} 个坑位${retryText}。`
             : "图片已确认，正在获取千牛标题和描述。";
           window.setTimeout(() => pollCopyRequest(requestId), 1500);
         } catch (error) {
@@ -5867,6 +5934,7 @@
         const drafts = detail.response?.result?.copy_drafts?.length
           ? detail.response.result.copy_drafts
           : detail.progress?.copy_drafts || [];
+        updateCopySkippedNotice(drafts);
         applyCopyDrafts(
           drafts,
           copyVersions.value,

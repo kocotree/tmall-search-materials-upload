@@ -827,7 +827,9 @@ def test_copy_progress_autosave_does_not_supersede_open_request(tmp_path):
     )["status"] == "pending_agent"
 
 
-def _queue_copy_request(client, store, session_id):
+def _queue_copy_request(
+    client, store, session_id, *, slot_assignments=None
+):
     current_endpoint = (
         f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"
     )
@@ -835,7 +837,7 @@ def _queue_copy_request(client, store, session_id):
         current_endpoint,
         json={
             "plan_revision": 0,
-            "slot_assignments": [
+            "slot_assignments": slot_assignments or [
                 {
                     "slot_id": "slot-a",
                     "product_id": "P1",
@@ -945,6 +947,144 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
     ).json
     assert detail["progress"]["status"] == "completed"
     assert detail["progress"]["completed_count"] == detail["progress"]["total_count"]
+
+
+def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(
+        tmp_path, asset_count=6
+    )
+    request_id = _queue_copy_request(
+        client,
+        store,
+        session_id,
+        slot_assignments=[
+            {
+                "slot_id": "slot-fail",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            },
+            {
+                "slot_id": "slot-ok",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-3", "asset-4", "asset-5"],
+            },
+        ],
+    )
+    calls = []
+
+    def fake_generate(_page, slots, *, material_center_url):
+        assert material_center_url == "https://example.test/materials"
+        slot = slots[0]
+        calls.append(slot["slot_id"])
+        if slot["slot_id"] == "slot-fail":
+            raise workflow.QianniuCopyError(
+                "QIANNIU_PRODUCT_IDENTITY_MISMATCH",
+                "商品 P1 命中 0 行",
+            )
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "继续生成的标题",
+            "description": "前一个坑位跳过后，这个坑位仍然可以正常生成。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert calls == ["slot-fail"] * 4 + ["slot-ok"]
+    drafts = {
+        item["slot_id"]: item
+        for item in response["result"]["copy_drafts"]
+    }
+    skipped = drafts["slot-fail"]
+    assert skipped["generation_status"] == "skipped"
+    assert skipped["title"] == ""
+    assert skipped["description"] == ""
+    assert skipped["retry_count"] == 3
+    assert skipped["attempt_count"] == 4
+    assert skipped["skip_message"] == "千牛未找到该商品"
+    assert drafts["slot-ok"]["title"] == "继续生成的标题"
+    assert read_agent_request(store, session_id, request_id)["status"] == (
+        "completed"
+    )
+    progress = store._read_json(
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "progress.json",
+        "copy-progress",
+    )
+    assert progress["status"] == "completed"
+    assert progress["completed_count"] == 2
+    assert progress["generated_count"] == 1
+    assert progress["skipped_count"] == 1
+    assert progress["max_retries"] == 3
+    assert progress["skipped_slots"][0]["slot_id"] == "slot-fail"
+
+
+def test_copy_processor_does_not_skip_batch_identity_failures(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
+    calls = []
+
+    def fake_generate(_page, slots, *, material_center_url):
+        calls.append((slots[0]["slot_id"], material_center_url))
+        raise workflow.QianniuCopyError(
+            "QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
+            "多个页面区域同时包含商品搜索框和商品表格",
+        )
+
+    monkeypatch.setattr(workflow, "generate_qianniu_copy_drafts", fake_generate)
+    with pytest.raises(
+        workflow.CopyDraftProcessingError,
+        match="QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
+    ):
+        process_copy_draft_request(
+            store,
+            session_id,
+            request_id,
+            runtime=SimpleNamespace(
+                cdp_url="http://127.0.0.1:9222",
+                material_center_url="https://example.test/materials",
+            ),
+            page=object(),
+        )
+
+    assert calls == [("slot-a", "https://example.test/materials")]
+    assert read_agent_request(store, session_id, request_id)["status"] == "failed"
+    progress = store._read_json(
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "progress.json",
+        "copy-progress",
+    )
+    assert progress["status"] == "failed"
+    assert progress["skipped_count"] == 0
 
 
 def test_slots_copy_back_is_disabled_until_active_copy_finishes(

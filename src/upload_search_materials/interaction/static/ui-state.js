@@ -165,6 +165,11 @@
         : sameVersion
           ? String(existing.description || "")
           : "";
+      const generationStatus = draft
+        ? String(draft.generation_status || "generated")
+        : sameVersion
+          ? String(existing.generation_status || "pending")
+          : "pending";
       return {
         slot_id: slotId,
         product_id: String(assignment?.product_id || ""),
@@ -186,6 +191,27 @@
           : sameVersion
             ? String(existing.source || "pending_qianniu_builtin_ai")
             : "pending_qianniu_builtin_ai",
+        generation_status: generationStatus,
+        skip_reason_code: draft
+          ? String(draft.skip_reason_code || "")
+          : sameVersion
+            ? String(existing.skip_reason_code || "")
+            : "",
+        skip_message: draft
+          ? String(draft.skip_message || "")
+          : sameVersion
+            ? String(existing.skip_message || "")
+            : "",
+        attempt_count: draft
+          ? Number(draft.attempt_count || 0)
+          : sameVersion
+            ? Number(existing.attempt_count || 0)
+            : 0,
+        retry_count: draft
+          ? Number(draft.retry_count || 0)
+          : sameVersion
+            ? Number(existing.retry_count || 0)
+            : 0,
         request_id: versionId,
         output_sha256: outputSha256,
       };

@@ -818,7 +818,7 @@ def test_folder_review_treats_missing_and_historical_pending_as_confirmed(tmp_pa
     ] == ["confirmed", "confirmed"]
 
 
-def test_folder_review_defaults_fuzzy_candidates_to_rejected(tmp_path):
+def test_folder_review_defaults_fuzzy_candidates_to_confirmed(tmp_path):
     candidates = tmp_path / "folder-candidates.csv"
     candidates.write_text(
         "folder_id,source_system,absolute_path,relative_path,folder_name,product_id,sku,product_title,match_type,match_status\n"
@@ -827,19 +827,19 @@ def test_folder_review_defaults_fuzzy_candidates_to_rejected(tmp_path):
     )
 
     default_data = build_folder_review_data(candidates)
-    confirmed_data = build_folder_review_data(
+    rejected_data = build_folder_review_data(
         candidates,
         decisions=[
             {
                 "folder_id": "F-1",
                 "product_id": "768088523792",
-                "decision": "confirmed",
+                "decision": "rejected",
             }
         ],
     )
 
-    assert default_data["folder_candidates"][0]["decision"] == "rejected"
-    assert confirmed_data["folder_candidates"][0]["decision"] == "confirmed"
+    assert default_data["folder_candidates"][0]["decision"] == "confirmed"
+    assert rejected_data["folder_candidates"][0]["decision"] == "rejected"
 
 
 def test_folder_review_defaults_long_split_to_confirmed_and_short_split_to_rejected(
