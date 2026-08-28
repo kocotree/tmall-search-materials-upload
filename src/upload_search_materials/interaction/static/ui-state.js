@@ -830,11 +830,13 @@
     query = "",
     status = "all",
     owner = "all",
+    productGrade = "all",
     selectedProductIds = [],
   } = {}) {
     const needle = String(query || "").trim().toLocaleLowerCase("zh-CN");
     const selectedStatus = String(status || "all");
     const selectedOwner = String(owner || "all");
+    const selectedProductGrade = String(productGrade || "all");
     const selected = new Set(
       [...(selectedProductIds || [])]
         .map((value) => String(value || "").trim())
@@ -842,6 +844,9 @@
     );
     return (Array.isArray(products) ? products : []).filter((product) => {
       const productOwner = String(product?.owner || "").trim();
+      const productGrade = String(
+        product?.product_grade || product?.grade || "",
+      ).trim();
       const matchesStatus = selectedStatus === "all"
         || (selectedStatus === "selected"
           && selected.has(String(product?.product_id || "").trim()))
@@ -849,13 +854,20 @@
       const matchesOwner = selectedOwner === "all"
         || (selectedOwner === "__unassigned__" && !productOwner)
         || productOwner === selectedOwner;
+      const matchesProductGrade = selectedProductGrade === "all"
+        || (selectedProductGrade === "__ungraded__" && !productGrade)
+        || productGrade === selectedProductGrade;
       const haystack = [
         product?.product_id,
         product?.sku,
         product?.product_title,
         productOwner,
+        productGrade,
       ].join(" ").toLocaleLowerCase("zh-CN");
-      return matchesStatus && matchesOwner && (!needle || haystack.includes(needle));
+      return matchesStatus
+        && matchesOwner
+        && matchesProductGrade
+        && (!needle || haystack.includes(needle));
     });
   }
 

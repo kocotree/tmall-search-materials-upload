@@ -199,12 +199,12 @@ test("a skipped copy slot keeps its manual-fill reason in the active version", (
   assert.equal(merged[0].confirmed, false);
 });
 
-test("completeness products can be filtered by owner without changing status scope", () => {
+test("completeness products can be filtered by owner and product grade", () => {
   assert.equal(typeof UiState.filterCompletenessProducts, "function");
   const products = [
-    { product_id: "1", product_title: "太阳镜", owner: "张三", status: "needs_supplement" },
-    { product_id: "2", product_title: "软软镜", owner: "李四", status: "complete" },
-    { product_id: "3", product_title: "稳稳镜", owner: "", status: "needs_supplement" },
+    { product_id: "1", product_title: "太阳镜", owner: "张三", product_grade: "S级", status: "needs_supplement" },
+    { product_id: "2", product_title: "软软镜", owner: "李四", product_grade: "A级", status: "complete" },
+    { product_id: "3", product_title: "稳稳镜", owner: "", product_grade: "", status: "needs_supplement" },
   ];
 
   assert.deepEqual(
@@ -228,9 +228,20 @@ test("completeness products can be filtered by owner without changing status sco
     UiState.filterCompletenessProducts(products, {
       status: "selected",
       owner: "张三",
+      productGrade: "S级",
       selectedProductIds: new Set(["1", "2"]),
     }).map((product) => product.product_id),
     ["1"],
+  );
+  assert.deepEqual(
+    UiState.filterCompletenessProducts(products, { productGrade: "A级" })
+      .map((product) => product.product_id),
+    ["2"],
+  );
+  assert.deepEqual(
+    UiState.filterCompletenessProducts(products, { productGrade: "__ungraded__" })
+      .map((product) => product.product_id),
+    ["3"],
   );
 });
 

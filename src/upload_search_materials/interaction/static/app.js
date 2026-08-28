@@ -2407,6 +2407,29 @@
       option.textContent = label;
       ownerFilter.appendChild(option);
     });
+    const productGradeFilter = document.createElement("select");
+    productGradeFilter.setAttribute("aria-label", "筛选产品等级");
+    const productGradeOptions = [
+      ["all", "全部产品等级"],
+      ...[...new Set(
+        products
+          .map((product) => String(product.product_grade || product.grade || "").trim())
+          .filter(Boolean),
+      )]
+        .sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true }))
+        .map((productGrade) => [productGrade, productGrade]),
+    ];
+    if (products.some(
+      (product) => !String(product.product_grade || product.grade || "").trim(),
+    )) {
+      productGradeOptions.push(["__ungraded__", "未标注产品等级"]);
+    }
+    productGradeOptions.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      productGradeFilter.appendChild(option);
+    });
     const bulkSelect = element("button", "secondary-button", "选择当前筛选结果");
     bulkSelect.type = "button";
     bulkSelect.disabled = locked;
@@ -2418,6 +2441,7 @@
       search,
       filter,
       ownerFilter,
+      productGradeFilter,
       bulkSelect,
       bulkClear,
     );
@@ -2431,6 +2455,7 @@
         query: search.value,
         status: filter.value,
         owner: ownerFilter.value,
+        productGrade: productGradeFilter.value,
         selectedProductIds: selected,
       });
     };
@@ -2553,6 +2578,7 @@
     search.addEventListener("input", draw);
     filter.addEventListener("change", draw);
     ownerFilter.addEventListener("change", draw);
+    productGradeFilter.addEventListener("change", draw);
     bulkSelect.addEventListener("click", () => {
       visibleProducts().forEach((product) => {
         if (UiState.completenessProductSelectable(product)) {

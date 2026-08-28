@@ -2304,6 +2304,9 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "全部负责人",
         "未分配负责人",
         "筛选负责人",
+        "全部产品等级",
+        "未标注产品等级",
+        "筛选产品等级",
         "选择当前筛选结果",
         "取消当前筛选结果",
         "重新巡检",
@@ -2955,6 +2958,7 @@ def test_completeness_status_filter_includes_selected_products(client):
 
     assert '["selected", "已选"]' in script
     assert "selectedProductIds: selected" in script
+    assert "productGrade: productGradeFilter.value" in script
 
 
 def test_draft_rejects_unknown_values_without_persisting_sensitive_input(client, session_id, tmp_path):
