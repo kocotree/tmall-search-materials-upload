@@ -353,6 +353,85 @@ test("selection preflight weights expensive formats and large images", () => {
   }), 4);
 });
 
+test("completed image preflights merge into the latest formal selection", () => {
+  let decisions = [{
+    product_id: "product-a",
+    asset_id: "asset-1",
+    sha256: "sha-1",
+    decision: "selected",
+    selection_order: 1,
+  }];
+  decisions = UiState.mergeSelectedAssetDecision(decisions, {
+    product_id: "product-a",
+    asset_id: "asset-2",
+    sha256: "sha-2",
+    feasible_ratios: ["3:4"],
+  });
+  decisions = UiState.mergeSelectedAssetDecision(decisions, {
+    product_id: "product-a",
+    asset_id: "asset-3",
+    sha256: "sha-3",
+    feasible_ratios: ["1:1"],
+  });
+
+  assert.deepEqual(
+    decisions.map((item) => [item.asset_id, item.selection_order]),
+    [["asset-1", 1], ["asset-2", 2], ["asset-3", 3]],
+  );
+  decisions = UiState.mergeSelectedAssetDecision(
+    decisions,
+    { product_id: "product-a", asset_id: "asset-2" },
+    false,
+  );
+  assert.deepEqual(
+    decisions.map((item) => item.asset_id),
+    ["asset-1", "asset-3"],
+  );
+});
+
+test("image-selection hydration waits for edits, saves, or running preflights", () => {
+  const idle = {
+    stageId: "asset_matching",
+    workflowStep: "image_selection",
+  };
+  assert.equal(UiState.shouldDeferEditableStageHydration(idle), false);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    dirty: true,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    persistenceInFlight: true,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    pendingPreflightCount: 2,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    stageId: "completeness",
+    workflowStep: "image_selection",
+    dirty: true,
+  }), false);
+});
+
+test("product navigator selects the section crossing the viewport activation line", () => {
+  assert.equal(UiState.activeProductTargetIndex([], 200), -1);
+  assert.equal(UiState.activeProductTargetIndex([
+    { top: 260, bottom: 660 },
+    { top: 680, bottom: 1080 },
+  ], 200), 0);
+  assert.equal(UiState.activeProductTargetIndex([
+    { top: -420, bottom: 120 },
+    { top: 140, bottom: 740 },
+    { top: 760, bottom: 1260 },
+  ], 200), 1);
+  assert.equal(UiState.activeProductTargetIndex([
+    { top: -900, bottom: -300 },
+    { top: -280, bottom: -20 },
+    { top: 320, bottom: 900 },
+  ], 200), 1);
+});
+
 test("selection preflight scheduler runs six normal images from one source", async () => {
   const releases = [];
   const started = [];

@@ -296,6 +296,78 @@
     return 1;
   }
 
+  function mergeSelectedAssetDecision(items, decision, selected = true) {
+    const current = (Array.isArray(items) ? items : []).filter(
+      (item) => item?.decision === "selected" && item?.asset_id,
+    );
+    const productId = String(decision?.product_id || "");
+    const assetId = String(decision?.asset_id || "");
+    if (!productId || !assetId) return current;
+    const targetIndex = current.findIndex(
+      (item) => String(item.product_id || "") === productId
+        && String(item.asset_id || "") === assetId,
+    );
+    if (!selected) {
+      return current.filter((_item, index) => index !== targetIndex);
+    }
+    const previous = targetIndex >= 0 ? current[targetIndex] : null;
+    const previousOrder = Number(previous?.selection_order || 0);
+    const maximumProductOrder = current.reduce((maximum, item) => (
+      String(item.product_id || "") === productId
+        ? Math.max(maximum, Number(item.selection_order || 0))
+        : maximum
+    ), 0);
+    const merged = {
+      ...(previous || {}),
+      ...(decision || {}),
+      product_id: productId,
+      asset_id: assetId,
+      decision: "selected",
+      selection_order: previousOrder > 0
+        ? previousOrder
+        : maximumProductOrder + 1,
+    };
+    if (targetIndex < 0) return [...current, merged];
+    return current.map((item, index) => (index === targetIndex ? merged : item));
+  }
+
+  function shouldDeferEditableStageHydration({
+    stageId,
+    workflowStep,
+    dirty = false,
+    persistenceInFlight = false,
+    pendingPreflightCount = 0,
+  } = {}) {
+    return stageId === "asset_matching"
+      && workflowStep === "image_selection"
+      && (
+        dirty
+        || persistenceInFlight
+        || Number(pendingPreflightCount || 0) > 0
+      );
+  }
+
+  function activeProductTargetIndex(rects, activationLine = 0) {
+    const sections = (Array.isArray(rects) ? rects : [])
+      .map((rect, index) => ({
+        index,
+        top: Number(rect?.top),
+        bottom: Number(rect?.bottom),
+      }))
+      .filter((rect) => Number.isFinite(rect.top) && Number.isFinite(rect.bottom));
+    if (!sections.length) return -1;
+    const line = Number.isFinite(Number(activationLine))
+      ? Number(activationLine)
+      : 0;
+    const containing = sections.find(
+      (rect) => rect.top <= line && rect.bottom > line,
+    );
+    if (containing) return containing.index;
+    const above = sections.filter((rect) => rect.top <= line);
+    if (above.length) return above[above.length - 1].index;
+    return sections[0].index;
+  }
+
   function createSelectionPreflightScheduler({
     execute,
     onChange = () => {},
@@ -903,6 +975,7 @@
   }
 
   return {
+    activeProductTargetIndex,
     canonicalJsonValue,
     assetSelectionGuidance,
     completenessProductHasOpenSlots,
@@ -922,6 +995,7 @@
     isCurrentRequest,
     jsonSemanticallyEqual,
     markDirty,
+    mergeSelectedAssetDecision,
     persistedRevision,
     mergePersistenceIntent,
     receiveRecovery,
@@ -940,6 +1014,7 @@
     technicalDiagnosticView,
     selectInitialStage,
     selectionPreflightWeight,
+    shouldDeferEditableStageHydration,
     switchStage,
     disambiguateImageSourceLabels,
   };

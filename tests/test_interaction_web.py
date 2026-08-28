@@ -4308,6 +4308,12 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "published_batch_count" in source
     assert "const galleryComplete" in source
     assert "renderProductNavigator" in source
+    assert "UiState.activeProductTargetIndex" in source
+    assert 'button.setAttribute("aria-current", "true")' in source
+    assert 'window.addEventListener("scroll", scheduleCurrentProductUpdate' in source
+    assert "UiState.mergeSelectedAssetDecision" in source
+    assert "UiState.shouldDeferEditableStageHydration" in source
+    assert "persistSelectedCandidates" not in source
     assert "坑位编排商品导航" in source
     assert "图片裁剪商品导航" in source
     assert "正在加载候选文件夹…" in source

@@ -113,6 +113,8 @@
   const selectionPreflights = new Map();
   const selectionPreflightCardRefreshers = new Map();
   const appliedSelectionPreflightIntents = new Map();
+  const productNavigatorCleanups = new WeakMap();
+  const activeProductNavigatorCleanups = new Set();
   const selectionPreflightScheduler = UiState.createSelectionPreflightScheduler({
     maxConcurrent: 6,
     maxWeight: 8,
@@ -2831,21 +2833,18 @@
       : `原图已满足 ${matching.join("、")}，并达到推荐分辨率`;
   }
 
-  function persistSelectedCandidates(productId, selected) {
+  function persistSelectedCandidate(productId, candidate, selected) {
     const currentDecisions = selectedAssetDecisions();
-    const previousForProduct = new Map(
-      currentDecisions
-        .filter((item) => String(item.product_id) === String(productId))
-        .map((item) => [String(item.asset_id || ""), item]),
+    const previous = currentDecisions.find(
+      (item) => String(item.product_id || "") === String(productId)
+        && String(item.asset_id || "") === String(candidate.asset_id || ""),
     );
-    const otherProducts = currentDecisions
-      .filter((item) => String(item.product_id) !== String(productId));
-    const selectedRows = selected.map((candidate, index) => {
-      const selectionPreflight = selectionPreflightFor(candidate.asset_id);
-      const previous = previousForProduct.get(String(candidate.asset_id || ""));
-      const canRetainPrevious = previous
-        && String(previous.sha256 || "") === String(candidate.sha256 || "");
-      return {
+    const selectionPreflight = selectionPreflightFor(candidate.asset_id);
+    const canRetainPrevious = previous
+      && String(previous.sha256 || "") === String(candidate.sha256 || "");
+    const nextDecisions = UiState.mergeSelectedAssetDecision(
+      currentDecisions,
+      {
         product_id: String(productId),
         asset_id: String(candidate.asset_id),
         sha256: String(candidate.sha256),
@@ -2853,8 +2852,6 @@
         folder_path: String(candidate.folder_path || candidate.candidate_directory || ""),
         source_system: String(candidate.source_system || ""),
         source_path: String(candidate.source_path || ""),
-        decision: "selected",
-        selection_order: index + 1,
         selection_preflight_identity: String(
           selectionPreflight?.identity_sha256
           || (canRetainPrevious ? previous.selection_preflight_identity : "")
@@ -2865,9 +2862,9 @@
           || (canRetainPrevious ? previous.feasible_ratios : [])
           || []
         )],
-      };
-    });
-    const nextDecisions = [...otherProducts, ...selectedRows];
+      },
+      selected,
+    );
     const changed = writeJsonListControl(
       "asset_decisions",
       nextDecisions,
@@ -2917,6 +2914,8 @@
     { label = "商品导航" } = {},
   ) {
     if (!mount) return;
+    productNavigatorCleanups.get(mount)?.();
+    productNavigatorCleanups.delete(mount);
     const targets = (items || []).filter((item) => item?.target);
     if (targets.length < 2) {
       mount.replaceChildren();
@@ -2933,7 +2932,7 @@
     );
     const links = element("nav", "product-jump-list");
     links.setAttribute("aria-label", label);
-    targets.forEach((item) => {
+    const buttons = targets.map((item, index) => {
       const productId = String(item.productId || "");
       const productTitle = String(item.productTitle || "").trim();
       const primaryLabel = productTitle || "商品名称未获取";
@@ -2945,6 +2944,14 @@
         element("small", "", `ID ${productId}`),
       );
       button.addEventListener("click", () => {
+        buttons.forEach((candidateButton, candidateIndex) => {
+          candidateButton.classList.toggle("is-current", candidateIndex === index);
+          if (candidateIndex === index) {
+            candidateButton.setAttribute("aria-current", "true");
+          } else {
+            candidateButton.removeAttribute("aria-current");
+          }
+        });
         const reduceMotion = window.matchMedia?.(
           "(prefers-reduced-motion: reduce)",
         )?.matches;
@@ -2955,9 +2962,44 @@
         item.target.focus({ preventScroll: true });
       });
       links.appendChild(button);
+      return button;
     });
     details.append(summary, links);
     mount.replaceChildren(details);
+
+    let animationFrame = null;
+    const updateCurrentProduct = () => {
+      animationFrame = null;
+      const activationLine = Math.min(260, Math.max(150, window.innerHeight * 0.3));
+      const activeIndex = UiState.activeProductTargetIndex(
+        targets.map((item) => item.target.getBoundingClientRect()),
+        activationLine,
+      );
+      buttons.forEach((button, index) => {
+        const current = index === activeIndex;
+        button.classList.toggle("is-current", current);
+        if (current) button.setAttribute("aria-current", "true");
+        else button.removeAttribute("aria-current");
+      });
+    };
+    const scheduleCurrentProductUpdate = () => {
+      if (animationFrame != null) return;
+      animationFrame = window.requestAnimationFrame(updateCurrentProduct);
+    };
+    window.addEventListener("scroll", scheduleCurrentProductUpdate, { passive: true });
+    window.addEventListener("resize", scheduleCurrentProductUpdate);
+    details.addEventListener("toggle", scheduleCurrentProductUpdate);
+    const cleanup = () => {
+      if (animationFrame != null) window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener("scroll", scheduleCurrentProductUpdate);
+      window.removeEventListener("resize", scheduleCurrentProductUpdate);
+      details.removeEventListener("toggle", scheduleCurrentProductUpdate);
+      productNavigatorCleanups.delete(mount);
+      activeProductNavigatorCleanups.delete(cleanup);
+    };
+    productNavigatorCleanups.set(mount, cleanup);
+    activeProductNavigatorCleanups.add(cleanup);
+    scheduleCurrentProductUpdate();
   }
 
   function folderDecisions() {
@@ -3923,15 +3965,6 @@
           card.append(image, meta, controls);
           grid.appendChild(card);
 
-          const persistCurrentSelection = () => {
-            persistSelectedCandidates(
-              productId,
-              productCandidates.filter(
-                (item) => selectedIds.has(String(item.asset_id)),
-              ),
-            );
-          };
-
           const refreshSelectionCard = () => {
             const job = selectionPreflightScheduler.get(assetId);
             const result = selectionPreflightFor(assetId);
@@ -4009,15 +4042,16 @@
               selectionPreflightScheduler.cancel(assetId);
               selectedIds.delete(assetId);
               persistLicense(assetId, false);
+              persistSelectedCandidate(productId, candidate, false);
               actionMessage.textContent = result.message;
             } else {
               selectedIds.add(assetId);
               persistLicense(assetId, true);
+              persistSelectedCandidate(productId, candidate, true);
               actionMessage.textContent = result.status === "warning"
                 ? result.message
                 : "图片预裁剪检查通过。";
             }
-            persistCurrentSelection();
             refreshSelectionCard();
             updateSelectionSummary();
             renderSelected();
@@ -4037,7 +4071,7 @@
                 selectedIds.delete(assetId);
                 persistLicense(assetId, false);
                 actionMessage.textContent = error.userMessage || error.message;
-                persistCurrentSelection();
+                persistSelectedCandidate(productId, candidate, false);
                 refreshSelectionCard();
                 updateSelectionSummary();
                 renderSelected();
@@ -4047,7 +4081,7 @@
             selectionPreflightScheduler.cancel(assetId);
             selectedIds.delete(assetId);
             persistLicense(assetId, false);
-            persistCurrentSelection();
+            persistSelectedCandidate(productId, candidate, false);
             refreshSelectionCard();
             updateSelectionSummary();
             renderSelected();
@@ -4149,12 +4183,7 @@
               selectionPreflightScheduler.cancel(assetId);
               selectedIds.delete(assetId);
               persistLicense(assetId, false);
-              persistSelectedCandidates(
-                productId,
-                productCandidates.filter(
-                  (value) => selectedIds.has(String(value.asset_id)),
-                ),
-              );
+              persistSelectedCandidate(productId, candidate, false);
               selectionPreflightCardRefreshers.get(assetId)?.();
               updateSelectionSummary();
               renderSelected();
@@ -6686,6 +6715,7 @@
   }
 
   function renderStageResult(schemaComponent) {
+    [...activeProductNavigatorCleanups].forEach((cleanup) => cleanup());
     const view = UiState.resultView(uiState);
     (resultRenderers[schemaComponent] || []).forEach((rendererName) => {
       renderResult(rendererName, view);
@@ -7604,12 +7634,22 @@
         currentStageInputLoaded,
         stageState.revision,
       );
-      if (
+      const stageHydrationChanged = (
         stageChanged
         || galleryChanged
         || backNavigationChanged
         || resultHydrationRequired
-      ) {
+      );
+      const hydrationDeferred = UiState.shouldDeferEditableStageHydration({
+        stageId: requestedStageId,
+        workflowStep: requestedStageId === "asset_matching"
+          ? inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
+          : "",
+        dirty: uiState.dirty,
+        persistenceInFlight,
+        pendingPreflightCount: selectionPreflightScheduler.desiredPendingCount(),
+      });
+      if (stageHydrationChanged && !hydrationDeferred) {
         renderStatus();
         await loadStage();
       } else {

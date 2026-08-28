@@ -42,6 +42,8 @@
 - [x] 4.7 In image selection, label the action “确认选图并进入坑位编排” and show discovered, prepared, valid, selected, 100-limit, and 30-per-batch counts.
 - [x] 4.8 Refresh or reopen the page into image selection when a valid current gallery exists, without reverting to “尚未扫描”.
 - [ ] 4.9 Add frontend tests comparing revision, input SHA-256, handoff, audit events, and dirty state before and after read-only hydration.
+- [x] 4.10 Merge each completed image preflight into the latest formal selection state and defer same-stage hydration while image-selection edits or preflights are pending.
+- [x] 4.11 Highlight the current product in the reusable product navigator while its folder, gallery, compose, or crop section crosses the viewport activation line.
 
 ## 5. Gallery Invalidation and Final Selection Boundary
 
