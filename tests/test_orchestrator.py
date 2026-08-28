@@ -1290,9 +1290,27 @@ def test_supplement_defaults_to_high_value_batch_scan_and_writes_checkpoint(
         "证据": "page=1",
     }
     second = dict(first, 商品ID="903588197784", 现有素材数="3", 缺失数量="6")
+    random_actions = []
+
+    def fake_random_action(page, **kwargs):
+        random_actions.append((page, kwargs))
+        return {
+            "status": "completed",
+            "page_state_restored": True,
+        }
+
+    monkeypatch.setattr(
+        cli_module,
+        "perform_random_collection_action",
+        fake_random_action,
+    )
+    monkeypatch.setattr(cli_module, "random_page_interval", lambda: 2)
 
     def fake_scan(page, selectors, **kwargs):
         assert kwargs["filter_selector_key"] == "high_value_filter"
+        assert kwargs["random_interval_picker"]() == 2
+        assert kwargs["human_check_waiter"] is not None
+        assert kwargs["random_action"](1)["page_state_restored"] is True
         kwargs["on_page"](1, [first])
         kwargs["on_page"](2, [first, second])
         return [first, second]
@@ -1330,6 +1348,10 @@ def test_supplement_defaults_to_high_value_batch_scan_and_writes_checkpoint(
     assert checkpoint["last_completed_page"] == 2
     assert checkpoint["row_count"] == 2
     assert checkpoint["scan_mode"] == "high-value"
+    assert len(random_actions) == 1
+    assert random_actions[0][0] is page
+    assert random_actions[0][1]["rows_selector"] == "tbody tr"
+    assert callable(random_actions[0][1]["wait_for_human_check"])
 
 
 def test_resume_partitions_uncertain_item_into_verification_only(tmp_path):

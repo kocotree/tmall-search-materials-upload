@@ -60,6 +60,10 @@ from .browser.config import (
     load_selector_profile,
     load_selectors,
 )
+from .browser.collection_actions import (
+    perform_random_collection_action,
+    random_page_interval,
+)
 from .browser.export_page import export_reports
 from .browser.material_page import (
     SelectorInvalidError,
@@ -899,6 +903,34 @@ def _supplement(args, page, page_factory=None) -> int:
         with page_context(page, args.cdp_url, page_factory) as resolved_page:
             assert_store_identity(resolved_page, selectors["store_name"], args.store)
             detect_human_check(resolved_page, selectors["human_check"])
+
+            random_action = None
+            random_interval_picker = None
+            human_check_waiter = None
+            if scan_mode in {"high-value", "recommended"}:
+                def check_human_check(_page_number: int, _location: str) -> None:
+                    detect_human_check(
+                        resolved_page,
+                        selectors["human_check"],
+                    )
+
+                def run_random_action(_page_number: int) -> Mapping[str, Any]:
+                    return perform_random_collection_action(
+                        resolved_page,
+                        rows_selector=str(selectors["promotion_rows"]),
+                        popup_selectors=selectors,
+                        wait_for_human_check=(
+                            lambda action_page, _location: detect_human_check(
+                                action_page,
+                                selectors["human_check"],
+                            )
+                        ),
+                    )
+
+                random_action = run_random_action
+                random_interval_picker = random_page_interval
+                human_check_waiter = check_human_check
+
             collect_supplement_material_status(
                 resolved_page,
                 selectors,
@@ -910,6 +942,9 @@ def _supplement(args, page, page_factory=None) -> int:
                 max_pages=args.max_pages,
                 settle_delay_ms=args.settle_delay_ms,
                 action_wait_ms=args.action_wait_ms,
+                human_check_waiter=human_check_waiter,
+                random_action=random_action,
+                random_interval_picker=random_interval_picker,
             )
     except BrowserSessionRequired as error:
         print(f"补采被阻断：{error}", file=sys.stderr)

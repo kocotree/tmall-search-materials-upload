@@ -22,4 +22,4 @@ Before taking any workflow action:
 9. While the workbench and its declared processors are healthy, Codex must not call `agent-wait`, `listen-handoff`, `wait-agent-request`, a stage processor, or a terminal status loop. Submission is atomically persisted before the dispatcher is notified; service startup and exact-session recovery scan the durable backlog before waiting for new work, so both “先提交后恢复” and “先启动后提交” are covered without chat text such as “已提交”. The page polls the dispatcher status and shows ready, queued, running, complete, or failed. Do not search or read project source, enumerate Plugin/version/runs directories, or directly read handoff/input files to rediscover a normal route. Source diagnosis is allowed only after a fixed processor returns a stable error and writes the current Agent diagnostic; read `diagnose-session` first and keep investigation within that failing processor's call path.
 
 Generated from canonical SHA-256:
-`b6b178a76394b253afc28b622350bd8a5e31d585f0642b1ddb739670bcd9131f`
+`5eaf177926ba1dd1fcefdda26bb1b82ae21867d65144eaaa417b0ea0d2ae105f`

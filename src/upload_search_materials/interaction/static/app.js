@@ -2475,9 +2475,15 @@
         const target = product.promotion?.target_slots;
         const current = product.promotion?.current_count;
         const missing = product.promotion?.missing_count;
+        const productGrade = String(product.product_grade || product.grade || "").trim();
+        const slotSummary = element("div", "inspection-slot-summary");
+        slotSummary.append(
+          element("strong", "", target == null || current == null ? "坑位待补采" : `${current} / ${target} 篇`),
+          element("span", "inspection-product-grade", `产品等级 ${productGrade || "未标注"}`),
+        );
         promotion.append(
           element("small", "", "搜推素材"),
-          element("strong", "", target == null || current == null ? "坑位待补采" : `${current} / ${target} 篇`),
+          slotSummary,
           element("span", "", missing == null ? "缺失数未知" : `缺失 ${missing} 篇`),
           element(
             "span",

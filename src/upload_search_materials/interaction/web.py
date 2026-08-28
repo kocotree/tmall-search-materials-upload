@@ -9,6 +9,7 @@ import os
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+import re
 import secrets
 import threading
 import time
@@ -183,6 +184,41 @@ STAGE_BACK_ERROR_COPY = {
     "STAGE_BACK_GALLERY_ACTIVE": "图片正在加载，完成或停止后才能返回上一步。",
     "STAGE_BACK_COPY_ACTIVE": "文案正在生成，完成后才能返回上一步。",
 }
+CONTENT_ADDRESSED_PREVIEW_ID = re.compile(r"[0-9a-f]{16}\Z")
+
+
+def _content_addressed_preview_path(
+    store: SessionStore,
+    session_id: str,
+    asset_id: str,
+) -> Path | None:
+    """Return an executor-built task preview without opening gallery JSON.
+
+    Current gallery assets use the first 16 lowercase hex characters of the
+    source SHA-256 as their id and preview filename. Restricting this fast
+    path to that content-addressed form prevents path traversal and keeps
+    legacy/non-canonical ids on the fully validated compatibility path.
+    """
+
+    if CONTENT_ADDRESSED_PREVIEW_ID.fullmatch(asset_id) is None:
+        return None
+    preview_path = (
+        store._stage_path(session_id, "asset_matching")
+        / "preview-cache"
+        / f"{asset_id}.jpg"
+    )
+    return preview_path if preview_path.is_file() else None
+
+
+def _send_private_preview(preview_path: Path):
+    response = send_file(
+        preview_path,
+        conditional=True,
+        max_age=300,
+        mimetype="image/jpeg",
+    )
+    response.headers["Cache-Control"] = "private, max-age=300"
+    return response
 
 
 def _load_plugin_version(plugin_root: Path | None = None) -> str:
@@ -381,6 +417,59 @@ def create_app(
     )
     workflow_dispatcher: WorkflowDispatcher | None = None
     workflow_lifecycle: WorkflowCompletionMonitor | None = None
+    preview_candidate_cache: dict[
+        str, tuple[tuple[Any, ...], frozenset[str]]
+    ] = {}
+    preview_candidate_cache_lock = threading.Lock()
+
+    def current_preview_candidate_ids(
+        session_id: str,
+        state: dict[str, Any],
+    ) -> frozenset[str]:
+        """Read candidate membership at most once per gallery publication."""
+
+        stage_path = store._stage_path(session_id, "asset_matching")
+
+        def document_signature(name: str) -> tuple[int, int]:
+            try:
+                stat = (stage_path / name).stat()
+            except OSError:
+                return (-1, -1)
+            return (int(stat.st_mtime_ns), int(stat.st_size))
+
+        version = (
+            int(state["stages"]["asset_matching"].get("revision") or 0),
+            document_signature("result.json"),
+            document_signature("review-context.json"),
+            document_signature("partial-gallery.json"),
+            document_signature("confirmed-gallery.json"),
+        )
+        cached = preview_candidate_cache.get(session_id)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        with preview_candidate_cache_lock:
+            cached = preview_candidate_cache.get(session_id)
+            if cached is not None and cached[0] == version:
+                return cached[1]
+            current = _current_result(
+                store,
+                session_id,
+                "asset_matching",
+                state,
+            )
+            candidates = (
+                (current.get("data") or {}).get("asset_candidates")
+                if isinstance(current, dict)
+                else None
+            )
+            candidate_ids = frozenset(
+                str(candidate.get("asset_id", ""))
+                for candidate in candidates or []
+                if isinstance(candidate, dict)
+                and str(candidate.get("asset_id", ""))
+            )
+            preview_candidate_cache[session_id] = (version, candidate_ids)
+            return candidate_ids
 
     def lark_product_snapshot_path() -> Path:
         root = runtime.user_data_root or runtime.runs_root.parent
@@ -3918,6 +4007,16 @@ def create_app(
     def asset_preview(session_id: str, asset_id: str):
         state = store.load_session(session_id)
         stage = get_stage("asset_matching")
+        cached_preview = _content_addressed_preview_path(
+            store,
+            session_id,
+            asset_id,
+        )
+        if (
+            cached_preview is not None
+            and asset_id in current_preview_candidate_ids(session_id, state)
+        ):
+            return _send_private_preview(cached_preview)
         result = _current_result(
             store,
             session_id,
@@ -3947,14 +4046,7 @@ def create_app(
         )
         preview_path = preview_cache / f"{asset_id}.jpg"
         if preview_path.is_file():
-            response = send_file(
-                preview_path,
-                conditional=True,
-                max_age=300,
-                mimetype="image/jpeg",
-            )
-            response.headers["Cache-Control"] = "private, max-age=300"
-            return response
+            return _send_private_preview(preview_path)
         try:
             source_path = Path(str(candidate.get("source_path", ""))).resolve()
             allowed_roots = [Path(str(root)).resolve() for root in roots]
@@ -3980,14 +4072,7 @@ def create_app(
             build_image_preview(source_path, preview_path)
         except (OSError, RuntimeError, ValueError):
             raise NotFound() from None
-        response = send_file(
-            preview_path,
-            conditional=True,
-            max_age=300,
-            mimetype="image/jpeg",
-        )
-        response.headers["Cache-Control"] = "private, max-age=300"
-        return response
+        return _send_private_preview(preview_path)
 
     @app.get(
         "/api/sessions/<session_id>/stages/image_review/assets/<asset_id>"

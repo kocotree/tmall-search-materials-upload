@@ -124,11 +124,11 @@ last completed page、row count、last checkpoint、log path 和 terminal status
 
 ## Completeness Matrix
 
-本轮只上传搜推素材，不审查或补传基础素材。运行 `tmall-materials inspect-completeness`，将搜推素材实时采集 CSV 转为第二阶段矩阵。矩阵范围严格等于“商品分类 → 搜推高价值”的全量采集结果；商品总表只补充名称、货号与负责人（“运营”列），不得扩入其他商品。输出使用 `contract_version=1`、`source_filter=search_recommend_high_value`，包含 `summary` 和 `products`。
+本轮只上传搜推素材，不审查或补传基础素材。运行 `tmall-materials inspect-completeness`，将搜推素材实时采集 CSV 转为第二阶段矩阵。矩阵范围严格等于“商品分类 → 搜推高价值”的全量采集结果；商品总表只补充名称、货号、产品等级与负责人（“运营”列），不得扩入其他商品。输出使用 `contract_version=1`、`source_filter=search_recommend_high_value`，包含 `summary` 和 `products`。
 
 每个商品必须包含：
 
-- `product_id`、`sku`、`product_title`、`owner`、整体 `status` 和布尔值 `selectable`；`owner` 来自商品总表“运营”列，未填写时为空字符串。
+- `product_id`、`sku`、`product_title`、`product_grade`、`owner`、整体 `status` 和布尔值 `selectable`；`product_grade` 来自飞书商品信息快照或商品总表“产品等级”列，`owner` 来自商品总表“运营”列，未填写时均为空字符串。
 - `eligibility.status/reason_codes/evidence`；标题或等级命中 `uvno`、`积分`、`清仓`、`好物体验`、`会员日` 时，写为 `status=excluded`、`selectable=false`，页面保留展示但禁选。
 - `promotion.target_slots/current_count/missing_count`、远端素材 ID、原因码、采集时间和证据；无法识别容量时标记 `needs_manual_review`，不得根据分类猜测目标容量。
 - `candidate_asset_count`；第二阶段尚未完成素材匹配时保持 `null`，页面显示“待素材匹配”，不得伪造为 0。
@@ -201,7 +201,7 @@ gallery Worker 枚举受支持扩展名后，先对每条唯一路径执行一�
 - `asset_decisions`：`product_id`、`asset_id`、`sha256`、来源、`decision=selected`、`selection_order`。第三阶段不写 `group_index` 或坑位内 `position`；第五阶段完成编排后再生成。
 - `removed_product_ids`：用户在素材匹配页点击“去掉当前商品”后写入的商品 ID 列表，只能是第二阶段边界内、当前素材匹配结果中的商品。服务端同步把这些商品的文件夹决定规范为 `rejected`，清理其图片与授权决定，并从最终素材包的 `missing_slots_by_product` 中排除；至少保留一个商品。
 
-候选选择在大小合规池中执行任务内稳定伪随机抽样：路径先规范化排序，抽样身份绑定策略版本、任务、商品和稳定文件夹；相同任务输入不变时必须得到相同候选，新任务可以得到不同候选。默认只对当前任务抽中的合规候选计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。
+候选选择在大小合规池中执行任务内稳定伪随机抽样：路径先规范化排序，抽样身份绑定策略版本、任务、商品和稳定文件夹；相同任务输入不变时必须得到相同候选，新任务可以得到不同候选。默认只对当前任务抽中的合规候选计算 SHA-256；本地与当前批次重复以 SHA-256 排除。远端内容指纹不可用时不得把远端素材 ID 当作图片去重证据。图片预览必须同时满足“出现在当前结果中”及“位于配置根目录或当前任务已确认文件夹下”，从而兼容映射盘与 UNC 路径差异但不扩大文件读取范围。当前任务由素材执行器生成的内容寻址预览以 SHA-256 前 16 位小写十六进制 `asset_id` 命名；预览接口先直接发送已存在的任务内 JPEG 缓存，不得对每个缩略图请求重复读取大型 `review-context.json`。非规范 ID 或缓存缺失时继续通过当前结果和允许根目录校验后按需生成，以兼容历史任务。
 
 ## AI 文案响应
 

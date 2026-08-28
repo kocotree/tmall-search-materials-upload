@@ -615,6 +615,8 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
 .inspection-row[data-status="excluded"] { border-left-color: #7d8790; background: #f3f5f5; }
 .inspection-identity, .inspection-cell, .inspection-controls { display: grid; gap: 6px; min-width: 0; }
 .inspection-identity > span, .inspection-cell > span { color: var(--muted); font-size: 10px; }
+.inspection-slot-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.inspection-product-grade { padding: 2px 7px; color: #275848; font-size: 10px; font-weight: 750; background: #e3f0e9; border-radius: 999px; }
 .inspection-status { width: max-content; padding: 3px 7px; color: #74410d !important; background: #fae8ce; border-radius: 999px; }
 .inspection-row[data-status="complete"] .inspection-status { color: #275848 !important; background: #dceee6; }
 .inspection-row[data-status="excluded"] .inspection-status { color: #4f5960 !important; background: #dfe4e6; }

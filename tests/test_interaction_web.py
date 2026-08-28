@@ -2310,6 +2310,7 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "/stages/completeness/reinspect",
         "已自动排除",
         "命中自动排除规则",
+        "产品等级",
         "查看后台证据",
     ):
         assert text in script
@@ -3894,8 +3895,9 @@ def test_completeness_submit_rejects_excluded_or_stale_product_ids(
 
 
 def test_asset_gallery_serves_only_current_result_candidate_images(
-    client, session_id, tmp_path
+    client, session_id, tmp_path, monkeypatch
 ):
+    asset_id = "a" * 16
     image_path = tmp_path / "candidate.png"
     Image.new("RGB", (20, 30), "red").save(image_path)
     submitted = client.post(
@@ -3904,8 +3906,12 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
             "values": {
                 "image_roots": [str(tmp_path)],
                 "source_types": ["image"],
-                "license_decisions": [{"asset_id": "A", "status": "confirmed"}],
-                "asset_decisions": [{"asset_id": "A", "decision": "selected"}],
+                "license_decisions": [
+                    {"asset_id": asset_id, "status": "confirmed"}
+                ],
+                "asset_decisions": [
+                    {"asset_id": asset_id, "decision": "selected"}
+                ],
             }
         },
     )
@@ -3927,7 +3933,7 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
             ],
             "asset_candidates": [
                 {
-                    "asset_id": "A",
+                    "asset_id": asset_id,
                     "product_id": "123",
                     "source_path": str(image_path),
                     "sha256": "a" * 64,
@@ -3950,13 +3956,16 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
 
     stage = client.get(f"/api/sessions/{session_id}/stages/asset_matching")
     preview = client.get(
-        f"/api/sessions/{session_id}/stages/asset_matching/assets/A"
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/{asset_id}"
     )
     missing = client.get(
         f"/api/sessions/{session_id}/stages/asset_matching/assets/UNKNOWN"
     )
 
-    assert stage.json["result"]["data"]["asset_candidates"][0]["asset_id"] == "A"
+    assert (
+        stage.json["result"]["data"]["asset_candidates"][0]["asset_id"]
+        == asset_id
+    )
     assert preview.status_code == 200
     assert preview.mimetype == "image/jpeg"
     assert preview.headers["Cache-Control"] == "private, max-age=300"
@@ -3965,16 +3974,29 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
         / session_id
         / "03-asset-matching"
         / "preview-cache"
-        / "A.jpg"
+        / f"{asset_id}.jpg"
     ).is_file()
     assert missing.status_code == 404
     image_path.unlink()
+    primed_preview = client.get(
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/{asset_id}"
+    )
+    assert primed_preview.status_code == 200
+    current_result = web_module._current_result
+    monkeypatch.setattr(
+        web_module,
+        "_current_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cached content-addressed previews must not read gallery context"
+        ),
+    )
     cached_preview = client.get(
-        f"/api/sessions/{session_id}/stages/asset_matching/assets/A"
+        f"/api/sessions/{session_id}/stages/asset_matching/assets/{asset_id}"
     )
     assert cached_preview.status_code == 200
     assert cached_preview.mimetype == "image/jpeg"
     assert cached_preview.headers["Cache-Control"] == "private, max-age=300"
+    monkeypatch.setattr(web_module, "_current_result", current_result)
 
     draft = client.post(
         f"/api/sessions/{session_id}/stages/asset_matching/draft",
@@ -3986,7 +4008,7 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
                 "license_decisions": [],
                 "asset_decisions": [
                     {
-                        "asset_id": "A",
+                        "asset_id": asset_id,
                         "product_id": "123",
                         "sha256": "a" * 64,
                         "source_system": "model_nas",
@@ -4002,7 +4024,7 @@ def test_asset_gallery_serves_only_current_result_candidate_images(
         session_id, "asset_matching", "input"
     )
     assert current_input["values"]["license_decisions"] == [
-        {"asset_id": "A", "status": "confirmed"}
+        {"asset_id": asset_id, "status": "confirmed"}
     ]
 
 

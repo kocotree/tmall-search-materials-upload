@@ -51,6 +51,14 @@ TITLE_FIELDS = (
     "Product Name",
     "product_title",
 )
+GRADE_FIELDS = (
+    "产品等级",
+    "商品等级",
+    "产品级别",
+    "Product Grade",
+    "product_grade",
+    "grade",
+)
 OWNER_FIELDS = (
     "运营",
     "负责人",
@@ -171,6 +179,7 @@ class ProductMetadata:
     owner: str = ""
     sku: str = ""
     title: str = ""
+    grade: str = ""
 
 
 @dataclass(frozen=True)
@@ -733,6 +742,7 @@ def refresh_product_metadata_snapshot(
             "owner": item.owner,
             "sku": item.sku,
             "title": item.title,
+            "grade": item.grade,
         }
         for item in sorted(metadata.values(), key=lambda item: item.product_id)
     ]
@@ -1479,6 +1489,7 @@ def _metadata_by_product_id(records: Sequence[Mapping[str, Any]]) -> dict[str, P
             owner=_first_field_text(fields, OWNER_FIELDS),
             sku=_first_field_text(fields, SKU_FIELDS),
             title=_first_field_text(fields, TITLE_FIELDS),
+            grade=_first_field_text(fields, GRADE_FIELDS),
         )
     return values
 
@@ -1525,6 +1536,7 @@ def _read_product_metadata_snapshot(
             owner=str(raw.get("owner") or "").strip(),
             sku=str(raw.get("sku") or "").strip(),
             title=str(raw.get("title") or "").strip(),
+            grade=str(raw.get("grade") or "").strip(),
         )
     if not metadata:
         return {}, {}, "LARK_PRODUCT_SNAPSHOT_INVALID"
@@ -1618,6 +1630,10 @@ def _overlay_product_metadata(
         if not product.title and meta.title:
             product.title = meta.title
             product.raw["商品名称（查找引用）"] = meta.title
+        grade = meta.grade.strip()
+        if grade and grade != product.grade.strip():
+            product.grade = grade
+            product.raw["产品等级"] = grade
         enriched.append(product)
     return enriched, matched_count, updated_owner_count
 

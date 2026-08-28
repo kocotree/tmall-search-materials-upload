@@ -214,6 +214,7 @@ def test_runtime_product_snapshot_downloads_then_drives_local_owner_sync(tmp_pat
                             "运营": "蟹黄",
                             "货号": "BASE-SKU",
                             "商品名称": "飞书商品",
+                            "产品等级": "S级",
                         }
                     }
                 ],
@@ -226,6 +227,7 @@ def test_runtime_product_snapshot_downloads_then_drives_local_owner_sync(tmp_pat
     assert result.metadata_count == 1
     document = json.loads(snapshot.read_text(encoding="utf-8"))
     assert document["records"][0]["owner"] == "蟹黄"
+    assert document["records"][0]["grade"] == "S级"
     assert "base_token" not in document
     assert inspect_product_metadata_snapshot(snapshot)["status"] == "available"
 
@@ -240,6 +242,8 @@ def test_runtime_product_snapshot_downloads_then_drives_local_owner_sync(tmp_pat
 
     assert synced.status == "completed"
     assert synced.records[0].owner == "蟹黄"
+    assert synced.records[0].grade == "S级"
+    assert synced.records[0].raw["产品等级"] == "S级"
     assert synced.matched_count == 1
     assert synced.snapshot_updated_at == result.updated_at
 
@@ -267,10 +271,11 @@ def test_runtime_product_snapshot_supports_columnar_record_pages(tmp_path):
                             "运营",
                             "货号（查找引用）",
                             "商品名称（查找引用）",
+                            "产品等级",
                         ],
                         "data": [
-                            ["1001", "蟹黄", ["SKU-1"], ["商品一"]],
-                            ["1002", ["桃酥"], ["SKU-2"], ["商品二"]],
+                            ["1001", "蟹黄", ["SKU-1"], ["商品一"], "S级"],
+                            ["1002", ["桃酥"], ["SKU-2"], ["商品二"], "A级"],
                         ],
                         "record_id_list": ["rec1", "rec2"],
                         "has_more": True,
@@ -288,8 +293,9 @@ def test_runtime_product_snapshot_supports_columnar_record_pages(tmp_path):
                         "运营",
                         "货号（查找引用）",
                         "商品名称（查找引用）",
+                        "产品等级",
                     ],
-                    "data": [["1003", "虾米", ["SKU-3"], ["商品三"]]],
+                    "data": [["1003", "虾米", ["SKU-3"], ["商品三"], "B级"]],
                     "record_id_list": ["rec3"],
                     "has_more": False,
                 },
@@ -314,6 +320,7 @@ def test_runtime_product_snapshot_supports_columnar_record_pages(tmp_path):
         "1003",
     ]
     assert document["records"][1]["owner"] == "桃酥"
+    assert [item["grade"] for item in document["records"]] == ["S级", "A级", "B级"]
 
 
 def test_empty_product_snapshot_refresh_preserves_previous_success(tmp_path):

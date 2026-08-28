@@ -177,6 +177,9 @@ def build_completeness_matrix(
     records = []
     for product_id, promotion in promotion_by_id.items():
         product = product_by_id.get(product_id, {})
+        product_grade = str(
+            product.get("产品等级", product.get("grade", ""))
+        ).strip()
         product_titles = []
         for field_name in (
             "商品名称（查找引用）",
@@ -190,7 +193,7 @@ def build_completeness_matrix(
             if title and title not in product_titles:
                 product_titles.append(title)
         exclusion = evaluate_exclusions(
-            str(product.get("产品等级", product.get("grade", ""))).strip(),
+            product_grade,
             product_titles,
         )
         excluded = exclusion.status == "excluded"
@@ -237,6 +240,7 @@ def build_completeness_matrix(
                 "owner": str(
                     product.get("运营", product.get("owner", ""))
                 ).strip(),
+                "product_grade": product_grade,
                 "status": overall_status,
                 "selectable": not excluded,
                 "eligibility": {

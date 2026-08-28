@@ -493,6 +493,7 @@ def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_pa
                         "fields": {
                             "商品ID": "886506466908",
                             "负责人": "飞书负责人",
+                            "产品等级": "S级",
                         },
                     }
                 ],
@@ -515,6 +516,7 @@ def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_pa
     assert result["status"] == "refreshed"
     refreshed = json.loads(matrix_path.read_text(encoding="utf-8"))
     assert refreshed["products"][0]["owner"] == "飞书负责人"
+    assert refreshed["products"][0]["product_grade"] == "S级"
     assert refreshed["pagination"] == {"terminal_page": 29}
     assert refreshed["product_row_anomalies"] == {"blocked_row_count": 0}
     assert "base_token" not in refreshed["lark_product_sync"]
@@ -522,6 +524,7 @@ def test_refresh_completeness_product_metadata_reuses_collection_snapshot(tmp_pa
         session.session_id, "completeness", "review-context"
     )
     assert context["data"]["products"][0]["owner"] == "飞书负责人"
+    assert context["data"]["products"][0]["product_grade"] == "S级"
 
     second = refresh_completeness_product_metadata(
         runs_root=session.path.parent,

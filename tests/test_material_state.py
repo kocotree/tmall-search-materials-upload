@@ -208,6 +208,7 @@ def test_completeness_matrix_marks_rule_matches_excluded_and_unselectable():
         "EXCLUDE_MEMBER_DAY",
     ]
     assert matrix["products"][5]["selectable"] is True
+    assert matrix["products"][5]["product_grade"] == "A级"
     assert matrix["summary"]["excluded_count"] == 5
     assert matrix["summary"]["selectable_count"] == 1
     assert matrix["summary"]["status_counts"]["excluded"] == 5
