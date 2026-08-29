@@ -6,6 +6,7 @@ from playwright.sync_api import Error as PlaywrightError
 from upload_search_materials.browser.qianniu_upload import (
     QianniuProductUploadSession,
     QianniuUploadError,
+    _wait_for_material_confirm_ready,
     _wait_for_upload_completion,
 )
 
@@ -77,6 +78,64 @@ def test_upload_completion_accepts_a_longer_copy_timeout():
     )
 
     assert selector.locator.timeout == 120_000
+
+
+def test_material_confirm_waits_until_selected_cards_are_committed(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    waits = []
+    enabled_states = iter([False, False, True])
+    confirm = SimpleNamespace(is_enabled=lambda: next(enabled_states))
+    page = SimpleNamespace(wait_for_timeout=lambda delay: waits.append(delay))
+    selector = SimpleNamespace(locator=lambda _selector: object())
+    monkeypatch.setattr(
+        module,
+        "_read_selection_count",
+        lambda _selector: (1, "确定"),
+    )
+    monkeypatch.setattr(module, "_first_visible", lambda _locator: confirm)
+
+    result = _wait_for_material_confirm_ready(
+        page,
+        selector,
+        1,
+        attempts=5,
+        delay_ms=300,
+    )
+
+    assert result is confirm
+    assert waits == [300, 300]
+
+
+def test_material_confirm_reports_not_ready_after_wait_exhaustion(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    waits = []
+    confirm = SimpleNamespace(is_enabled=lambda: False)
+    page = SimpleNamespace(wait_for_timeout=lambda delay: waits.append(delay))
+    selector = SimpleNamespace(locator=lambda _selector: object())
+    monkeypatch.setattr(
+        module,
+        "_read_selection_count",
+        lambda _selector: (1, "确定"),
+    )
+    monkeypatch.setattr(module, "_first_visible", lambda _locator: confirm)
+
+    with pytest.raises(QianniuUploadError) as exc_info:
+        _wait_for_material_confirm_ready(
+            page,
+            selector,
+            1,
+            attempts=3,
+            delay_ms=300,
+        )
+
+    assert exc_info.value.reason_code == "QIANNIU_MATERIAL_CONFIRM_NOT_READY"
+    assert waits == [300, 300]
 
 
 def test_product_upload_session_reuses_filtered_product_row(monkeypatch):

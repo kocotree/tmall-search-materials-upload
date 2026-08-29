@@ -998,6 +998,7 @@ def _select_seed_image(
     # image; do not search or reuse a cloud-library image because the current
     # cloud folder and stale search state are not task-scoped.
     from .qianniu_upload import (
+        QianniuUploadError,
         _select_uploaded_cards,
         _set_local_files,
         _wait_for_upload_completion,
@@ -1008,31 +1009,37 @@ def _select_seed_image(
         f"seed-{expected_sha256[:12]}-{uuid.uuid4().hex[:8]}"
         f"{extension}"
     )
-    _set_local_files(
-        page,
-        selector,
-        [str(path)],
-        upload_names=[upload_name],
-    )
-    _wait_for_upload_completion(
-        page,
-        selector,
-        1,
-        timeout_ms=COPY_UPLOAD_TIMEOUT_MS,
-    )
-    selector = _wait_for_frame(
-        page,
-        MATERIAL_SELECTOR_FRAME_FRAGMENT,
-        attempts=MATERIAL_SELECTOR_FRAME_ATTEMPTS,
-        delay_ms=300,
-    )
-    _select_uploaded_cards(
-        page,
-        selector,
-        [upload_name],
-        attempts=COPY_UPLOAD_CARD_ATTEMPTS,
-        delay_ms=300,
-    )
+    try:
+        _set_local_files(
+            page,
+            selector,
+            [str(path)],
+            upload_names=[upload_name],
+        )
+        _wait_for_upload_completion(
+            page,
+            selector,
+            1,
+            timeout_ms=COPY_UPLOAD_TIMEOUT_MS,
+        )
+        selector = _wait_for_frame(
+            page,
+            MATERIAL_SELECTOR_FRAME_FRAGMENT,
+            attempts=MATERIAL_SELECTOR_FRAME_ATTEMPTS,
+            delay_ms=300,
+        )
+        _select_uploaded_cards(
+            page,
+            selector,
+            [upload_name],
+            attempts=COPY_UPLOAD_CARD_ATTEMPTS,
+            delay_ms=300,
+        )
+    except QianniuUploadError as error:
+        raise QianniuCopyError(
+            error.reason_code,
+            error.detail,
+        ) from error
     return upload_name
 
 

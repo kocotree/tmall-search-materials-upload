@@ -983,8 +983,18 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
     assert detail["progress"]["completed_count"] == detail["progress"]["total_count"]
 
 
+@pytest.mark.parametrize(
+    ("reason_code", "skip_message"),
+    [
+        ("QIANNIU_PRODUCT_IDENTITY_MISMATCH", "千牛未找到该商品"),
+        (
+            "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+            "千牛素材选择确认暂时未就绪",
+        ),
+    ],
+)
 def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, reason_code, skip_message
 ):
     from types import SimpleNamespace
     import upload_search_materials.copy_draft_workflow as workflow
@@ -1019,7 +1029,7 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
         calls.append(slot["slot_id"])
         if slot["slot_id"] == "slot-fail":
             raise workflow.QianniuCopyError(
-                "QIANNIU_PRODUCT_IDENTITY_MISMATCH",
+                reason_code,
                 "商品 P1 命中 0 行",
             )
         return [{
@@ -1055,7 +1065,7 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
     assert skipped["description"] == ""
     assert skipped["retry_count"] == 3
     assert skipped["attempt_count"] == 4
-    assert skipped["skip_message"] == "千牛未找到该商品"
+    assert skipped["skip_message"] == skip_message
     assert drafts["slot-ok"]["title"] == "继续生成的标题"
     assert read_agent_request(store, session_id, request_id)["status"] == (
         "completed"

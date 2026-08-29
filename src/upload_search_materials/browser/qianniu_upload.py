@@ -89,6 +89,45 @@ def _read_selection_count(selector_frame) -> tuple[int, str]:
     return int(checked), text
 
 
+def _wait_for_material_confirm_ready(
+    page,
+    selector_frame,
+    expected_count: int,
+    *,
+    attempts: int,
+    delay_ms: int,
+):
+    """Wait for Qianniu to commit the checked cards into button state."""
+
+    selected_count = -1
+    confirm_text = ""
+    confirm = None
+    max_attempts = max(1, attempts)
+    for attempt_index in range(max_attempts):
+        selected_count, confirm_text = _read_selection_count(selector_frame)
+        confirm = _first_visible(
+            selector_frame.locator('button:has-text("确定")')
+        )
+        if (
+            selected_count == expected_count
+            and confirm is not None
+            and confirm.is_enabled()
+        ):
+            return confirm
+        if attempt_index + 1 < max_attempts:
+            page.wait_for_timeout(delay_ms)
+
+    if selected_count != expected_count:
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_SELECTION_COUNT_MISMATCH",
+            f"expected={expected_count};actual={selected_count}",
+        )
+    raise QianniuUploadError(
+        "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+        confirm_text,
+    )
+
+
 def _set_local_files(
     page,
     selector_frame,
@@ -366,20 +405,13 @@ def _select_uploaded_cards(
             )
             page.wait_for_timeout(200)
 
-    selected_count, confirm_text = _read_selection_count(selector_frame)
-    if selected_count != len(paths):
-        raise QianniuUploadError(
-            "QIANNIU_MATERIAL_SELECTION_COUNT_MISMATCH",
-            f"expected={len(paths)};actual={selected_count}",
-        )
-    confirm = _first_visible(
-        selector_frame.locator('button:has-text("确定")')
+    confirm = _wait_for_material_confirm_ready(
+        page,
+        selector_frame,
+        len(paths),
+        attempts=attempts,
+        delay_ms=delay_ms,
     )
-    if confirm is None or not confirm.is_enabled():
-        raise QianniuUploadError(
-            "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
-            confirm_text,
-        )
     for _ in range(3):
         confirm.click()
         page.wait_for_timeout(1_500)

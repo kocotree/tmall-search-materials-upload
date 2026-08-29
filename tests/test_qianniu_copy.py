@@ -1,3 +1,6 @@
+from hashlib import sha256
+from types import SimpleNamespace
+
 import pytest
 
 from upload_search_materials.browser.qianniu_copy import (
@@ -466,6 +469,64 @@ def test_generate_copy_prefers_regenerate_for_next_slot_when_both_actions_exist(
     assert frame.regenerate.clicked is True
     assert frame.initial.clicked is False
     assert (title, description) == ("当前坑标题", "当前坑描述")
+
+
+def test_seed_image_normalizes_upload_failure_for_slot_retry(
+    tmp_path,
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+    import upload_search_materials.browser.qianniu_upload as upload_module
+
+    seed = tmp_path / "seed.jpg"
+    seed.write_bytes(b"seed-image")
+    expected_sha256 = sha256(seed.read_bytes()).hexdigest()
+    selector = object()
+
+    class UploadButton:
+        def count(self):
+            return 1
+
+        def click(self, **_kwargs):
+            return None
+
+    publish_frame = SimpleNamespace(
+        get_by_role=lambda *_args, **_kwargs: UploadButton()
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_settle_copy_popups",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_wait_for_frame",
+        lambda *_args, **_kwargs: selector,
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_reset_material_selector_to_all_images",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fail_local_upload(*_args, **_kwargs):
+        raise upload_module.QianniuUploadError(
+            "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+            "确定",
+        )
+
+    monkeypatch.setattr(upload_module, "_set_local_files", fail_local_upload)
+
+    with pytest.raises(QianniuCopyError) as exc_info:
+        copy_module._select_seed_image(
+            object(),
+            publish_frame,
+            seed_path=str(seed),
+            expected_sha256=expected_sha256,
+        )
+
+    assert exc_info.value.reason_code == "QIANNIU_MATERIAL_CONFIRM_NOT_READY"
+    assert exc_info.value.detail == "确定"
 
 
 def test_product_session_searches_once_and_opens_fresh_form_for_each_slot(
