@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 
 from upload_search_materials.browser.qianniu_upload import (
+    QianniuProductUploadSession,
     QianniuUploadError,
     _wait_for_upload_completion,
 )
@@ -74,3 +77,112 @@ def test_upload_completion_accepts_a_longer_copy_timeout():
     )
 
     assert selector.locator.timeout == 120_000
+
+
+def test_product_upload_session_reuses_filtered_product_row(monkeypatch):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    calls = []
+    row = SimpleNamespace(is_visible=lambda: True)
+    item = SimpleNamespace(product_id="123")
+    monkeypatch.setattr(
+        module,
+        "_recommend_list_is_current",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "_ensure_recommend_list",
+        lambda *_args: calls.append("ensure"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_find_product_row_with_recovery",
+        lambda *_args: calls.append("search") or row,
+    )
+    monkeypatch.setattr(
+        module,
+        "_approved_upload_paths",
+        lambda _item: ["approved.jpg"],
+    )
+    monkeypatch.setattr(
+        module,
+        "_prepare_qianniu_upload_from_row",
+        lambda _page, _item, *, row, paths: (
+            calls.append(("prepare", row, tuple(paths))) or {"OLD-1"}
+        ),
+    )
+
+    session = QianniuProductUploadSession(
+        object(),
+        "123",
+        material_center_url="https://example.invalid/material-center",
+    )
+
+    assert session.prepare(item) == {"OLD-1"}
+    assert session.prepare(item) == {"OLD-1"}
+    assert calls == [
+        "ensure",
+        "search",
+        ("prepare", row, ("approved.jpg",)),
+        ("prepare", row, ("approved.jpg",)),
+    ]
+
+
+def test_product_upload_session_waits_for_remote_id_without_refresh(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    waits = []
+    page = SimpleNamespace(wait_for_timeout=lambda delay: waits.append(delay))
+    row = SimpleNamespace(is_visible=lambda: True)
+    item = SimpleNamespace(product_id="123")
+    remote_id_snapshots = iter(
+        [
+            ({"OLD-1"}, {"OLD-1": (1, "old")}),
+            (
+                {"OLD-1", "NEW-1"},
+                {"OLD-1": (2, "old"), "NEW-1": (1, "审核中")},
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        module,
+        "_recommend_list_is_current",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "_wait_for_publish_form_to_close",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "_remote_ids_from_row",
+        lambda _row: next(remote_id_snapshots),
+    )
+    monkeypatch.setattr(
+        module,
+        "_observe_new_remote_item_from_row",
+        lambda *_args, **_kwargs: "observed",
+    )
+    monkeypatch.setattr(
+        module,
+        "_find_product_row_with_recovery",
+        lambda *_args: pytest.fail("same product must not be searched again"),
+    )
+    session = QianniuProductUploadSession(
+        page,
+        "123",
+        material_center_url="https://example.invalid/material-center",
+    )
+    session._row = row
+
+    observed = session.observe_new_remote_item(
+        item,
+        before_remote_ids={"OLD-1"},
+    )
+
+    assert observed == "observed"
+    assert waits == [module.REMOTE_ID_OBSERVE_DELAY_MS]

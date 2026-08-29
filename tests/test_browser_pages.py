@@ -1940,6 +1940,7 @@ def test_qianniu_prepare_failure_stops_before_checkpoint(
 
     assert outcome.status == "blocked"
     assert outcome.reason == "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS"
+    assert outcome.retry_allowed is True
     assert checkpoints == []
 
 

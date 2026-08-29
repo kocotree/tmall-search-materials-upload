@@ -17,10 +17,32 @@ from .session import (
 )
 from .qianniu_upload import (
     DEFAULT_MATERIAL_CENTER_URL,
+    QianniuProductUploadSession,
     QianniuUploadError,
     prepare_qianniu_upload,
     publish_qianniu_once,
 )
+
+
+QIANNIU_NON_RETRYABLE_PRE_PUBLISH_REASONS = frozenset(
+    {
+        "QIANNIU_APPROVED_FILE_MISSING",
+        "QIANNIU_PUBLISH_BUTTON_AMBIGUOUS",
+        "QIANNIU_REMOTE_BASELINE_MISSING",
+        "QIANNIU_REMOTE_ID_AMBIGUOUS",
+        "QIANNIU_SLOT_NOT_FOUND",
+        "QIANNIU_SLOT_OCCUPIED",
+        "QIANNIU_UPLOAD_NAME_COUNT_MISMATCH",
+        "QIANNIU_UPLOAD_SESSION_PRODUCT_MISMATCH",
+        "QIANNIU_VIDEO_UPLOAD_UNSUPPORTED",
+    }
+)
+
+
+def _qianniu_retry_allowed(reason_code: str) -> bool:
+    return bool(reason_code) and (
+        reason_code not in QIANNIU_NON_RETRYABLE_PRE_PUBLISH_REASONS
+    )
 
 
 @dataclass(frozen=True)
@@ -30,6 +52,7 @@ class UploadOutcome:
     retry_allowed: bool = False
     remote_material_id: str | None = None
     evidence: str = ""
+    batch_stop: bool = False
 
 
 def _prepare_exact_product(page, item: MaterialItem, selectors: dict[str, str]) -> None:
@@ -75,6 +98,7 @@ def upload_approved_item(
     before_publish: Callable[[], None] | None = None,
     workflow: str = "legacy_selectors",
     material_center_url: str = DEFAULT_MATERIAL_CENTER_URL,
+    product_session: QianniuProductUploadSession | None = None,
 ) -> UploadOutcome:
     approval = verify_manifest(
         manifest,
@@ -84,48 +108,65 @@ def upload_approved_item(
         rehash_assets=True,
     )
     if not approval.valid:
-        return UploadOutcome("blocked", approval.reason, retry_allowed=False)
+        return UploadOutcome(
+            "blocked",
+            approval.reason,
+            retry_allowed=False,
+        )
     if item.status != MaterialStatus.APPROVED:
-        return UploadOutcome("blocked", "TASK_NOT_APPROVED_STATE", retry_allowed=False)
+        return UploadOutcome(
+            "blocked",
+            "TASK_NOT_APPROVED_STATE",
+            retry_allowed=False,
+            batch_stop=True,
+        )
     if workflow == "qianniu_recommend":
         try:
             assert_store_identity(
                 page, selectors["store_name"], expected_store
             )
             detect_human_check(page, selectors["human_check"])
-            before_remote_ids = prepare_qianniu_upload(
-                page,
-                item,
-                material_center_url=material_center_url,
-            )
-        except (
-            StoreIdentityError,
-            HumanCheckRequired,
-            QianniuUploadError,
-        ) as error:
+            if product_session is None:
+                before_remote_ids = prepare_qianniu_upload(
+                    page,
+                    item,
+                    material_center_url=material_center_url,
+                )
+            else:
+                before_remote_ids = product_session.prepare(item)
+        except (StoreIdentityError, HumanCheckRequired) as error:
             return UploadOutcome(
                 "blocked",
-                (
-                    error.reason_code
-                    if isinstance(error, QianniuUploadError)
-                    else str(error)
-                ),
+                str(error),
                 retry_allowed=False,
                 evidence=str(error),
-            )
-        try:
-            observation = publish_qianniu_once(
-                page,
-                item,
-                material_center_url=material_center_url,
-                before_publish=before_publish,
-                before_remote_ids=before_remote_ids,
+                batch_stop=True,
             )
         except QianniuUploadError as error:
             return UploadOutcome(
                 "blocked",
                 error.reason_code,
-                retry_allowed=False,
+                retry_allowed=_qianniu_retry_allowed(error.reason_code),
+                evidence=str(error),
+            )
+        try:
+            publish_kwargs = {
+                "material_center_url": material_center_url,
+                "before_publish": before_publish,
+                "before_remote_ids": before_remote_ids,
+            }
+            if product_session is not None:
+                publish_kwargs["product_session"] = product_session
+            observation = publish_qianniu_once(
+                page,
+                item,
+                **publish_kwargs,
+            )
+        except QianniuUploadError as error:
+            return UploadOutcome(
+                "blocked",
+                error.reason_code,
+                retry_allowed=_qianniu_retry_allowed(error.reason_code),
                 evidence=str(error),
             )
         return UploadOutcome(

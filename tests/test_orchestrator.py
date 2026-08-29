@@ -1377,6 +1377,75 @@ def test_resume_partitions_uncertain_item_into_verification_only(tmp_path):
     state.close()
 
 
+def test_upload_pre_publish_failure_retries_three_times_then_skips():
+    calls = []
+    recoveries = []
+
+    def upload_once():
+        calls.append("upload")
+        return UploadOutcome(
+            "blocked",
+            "QIANNIU_LOCAL_UPLOAD_TIMEOUT",
+            retry_allowed=True,
+            evidence="network-timeout",
+        )
+
+    outcome = cli_module._upload_with_pre_publish_retries(
+        upload_once,
+        lambda: recoveries.append("recover"),
+    )
+
+    assert len(calls) == 4
+    assert len(recoveries) == 4
+    assert outcome.status == "blocked"
+    assert outcome.retry_allowed is False
+    assert "pre_publish_attempts=4" in outcome.evidence
+    assert "skipped_after_pre_publish_retries=true" in outcome.evidence
+
+
+def test_upload_pre_publish_retry_can_recover_and_publish():
+    outcomes = iter(
+        [
+            UploadOutcome(
+                "blocked",
+                "QIANNIU_LOCAL_UPLOAD_TIMEOUT",
+                retry_allowed=True,
+            ),
+            UploadOutcome(
+                "submitted",
+                remote_material_id="RM-1",
+                evidence="remote-id-delta",
+            ),
+        ]
+    )
+    recoveries = []
+
+    outcome = cli_module._upload_with_pre_publish_retries(
+        lambda: next(outcomes),
+        lambda: recoveries.append("recover"),
+    )
+
+    assert recoveries == ["recover"]
+    assert outcome.status == "submitted"
+    assert outcome.remote_material_id == "RM-1"
+    assert "pre_publish_attempts=2" in outcome.evidence
+
+
+def test_upload_items_are_grouped_by_first_product_appearance():
+    items = [
+        SimpleNamespace(product_id="A", task_id="A-1"),
+        SimpleNamespace(product_id="B", task_id="B-1"),
+        SimpleNamespace(product_id="A", task_id="A-2"),
+    ]
+
+    grouped = cli_module._upload_items_by_product(items)
+
+    assert [[item.task_id for item in group] for group in grouped] == [
+        ["A-1", "A-2"],
+        ["B-1"],
+    ]
+
+
 def test_repeated_publish_does_not_requeue_submitted_item(tmp_path):
     item = material_item_from_dict(
         {

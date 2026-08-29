@@ -73,7 +73,8 @@ from .browser.session import (
     detect_human_check,
     open_cdp_page,
 )
-from .browser.upload_page import upload_approved_item
+from .browser.qianniu_upload import open_qianniu_product_upload_session
+from .browser.upload_page import UploadOutcome, upload_approved_item
 from .browser.verifier import verify_remote_item
 from .copywriting import generate_and_validate_copy
 from .copy_draft_workflow import (
@@ -469,6 +470,75 @@ def partition_persisted_items(state: StateStore, items, *, resume: bool):
     return upload_items, verification_items
 
 
+UPLOAD_PRE_PUBLISH_MAX_RETRIES = 3
+
+
+def _upload_items_by_product(items) -> list[list[Any]]:
+    """Group items by first product appearance without reordering its slots."""
+
+    grouped: dict[str, list[Any]] = {}
+    for item in items:
+        grouped.setdefault(str(item.product_id), []).append(item)
+    return list(grouped.values())
+
+
+def _annotate_pre_publish_attempts(
+    outcome: UploadOutcome,
+    attempt_count: int,
+    *,
+    retry_allowed: bool | None = None,
+    retry_exhausted: bool = False,
+) -> UploadOutcome:
+    evidence = outcome.evidence.strip()
+    evidence_parts = [f"pre_publish_attempts={attempt_count}"]
+    if retry_exhausted:
+        evidence_parts.append("skipped_after_pre_publish_retries=true")
+    attempt_evidence = ";".join(evidence_parts)
+    evidence = (
+        f"{evidence};{attempt_evidence}" if evidence else attempt_evidence
+    )
+    return UploadOutcome(
+        outcome.status,
+        outcome.reason,
+        retry_allowed=(
+            outcome.retry_allowed
+            if retry_allowed is None
+            else retry_allowed
+        ),
+        remote_material_id=outcome.remote_material_id,
+        evidence=evidence,
+        batch_stop=outcome.batch_stop,
+    )
+
+
+def _upload_with_pre_publish_retries(
+    upload_once: Callable[[], UploadOutcome],
+    recover_before_retry: Callable[[], None],
+) -> UploadOutcome:
+    """Retry only failures known to occur before the final publish click."""
+
+    for retry_index in range(UPLOAD_PRE_PUBLISH_MAX_RETRIES + 1):
+        outcome = upload_once()
+        prepare_attempts = retry_index + 1
+        if not outcome.retry_allowed:
+            if outcome.status == "blocked":
+                recover_before_retry()
+            return _annotate_pre_publish_attempts(
+                outcome,
+                prepare_attempts,
+            )
+        recover_before_retry()
+        if retry_index < UPLOAD_PRE_PUBLISH_MAX_RETRIES:
+            continue
+        return _annotate_pre_publish_attempts(
+            outcome,
+            prepare_attempts,
+            retry_allowed=False,
+            retry_exhausted=True,
+        )
+    raise AssertionError("unreachable pre-publish retry state")
+
+
 def _persist_item_transition(
     state: StateStore,
     task_id: str,
@@ -670,74 +740,110 @@ def _publish(
                     if outcome.status == "publish_uncertain":
                         batch_paused = True
                         break
-                for item in ([] if batch_paused else upload_items):
-                    existing = state.item_record(item.task_id)
-                    if existing is None or existing["status"] != "approved":
-                        if existing is None:
-                            state.save_item(item.task_id, "ready_for_review")
+                product_groups = (
+                    []
+                    if batch_paused
+                    else _upload_items_by_product(upload_items)
+                )
+                for product_items in product_groups:
+                    if batch_paused:
+                        break
+                    product_session = open_qianniu_product_upload_session(
+                        resolved_page,
+                        str(product_items[0].product_id),
+                        material_center_url=material_center_url,
+                    )
+                    preserve_uncertain_page = False
+                    for item in product_items:
+                        existing = state.item_record(item.task_id)
+                        if existing is None or existing["status"] != "approved":
+                            if existing is None:
+                                state.save_item(item.task_id, "ready_for_review")
+                            _persist_item_transition(
+                                state,
+                                item.task_id,
+                                "approved",
+                                reason="MANIFEST_APPROVED",
+                                evidence=(
+                                    f"manifest={manifest['manifest_sha256']}"
+                                ),
+                            )
+                        attempt_count = (
+                            int(existing["attempt_count"]) if existing else 0
+                        )
+
+                        def persist_pre_publish_checkpoint(
+                            task_id=item.task_id,
+                            next_attempt=attempt_count + 1,
+                        ):
+                            _persist_item_transition(
+                                state,
+                                task_id,
+                                "uploading",
+                                reason="PRE_PUBLISH_CHECKPOINT",
+                                evidence="PRE_PUBLISH_CHECKPOINT",
+                                attempt_count=next_attempt,
+                            )
+
+                        def upload_once():
+                            return upload_approved_item(
+                                resolved_page,
+                                item,
+                                manifest,
+                                selectors,
+                                expected_store=args.store,
+                                now=_now_iso(),
+                                before_publish=persist_pre_publish_checkpoint,
+                                workflow="qianniu_recommend",
+                                material_center_url=material_center_url,
+                                product_session=product_session,
+                            )
+
+                        outcome = _upload_with_pre_publish_retries(
+                            upload_once,
+                            product_session.recover_after_failure,
+                        )
+                        checkpoint = state.item_record(item.task_id)
                         _persist_item_transition(
                             state,
                             item.task_id,
-                            "approved",
-                            reason="MANIFEST_APPROVED",
-                            evidence=f"manifest={manifest['manifest_sha256']}",
+                            outcome.status,
+                            reason=outcome.reason or "PUBLISH_RESULT",
+                            remote_material_id=outcome.remote_material_id,
+                            evidence=outcome.evidence or outcome.reason,
+                            attempt_count=int(checkpoint["attempt_count"]),
                         )
-                    attempt_count = int(existing["attempt_count"]) if existing else 0
-
-                    def persist_pre_publish_checkpoint(
-                        task_id=item.task_id,
-                        next_attempt=attempt_count + 1,
-                    ):
-                        _persist_item_transition(
-                            state,
-                            task_id,
-                            "uploading",
-                            reason="PRE_PUBLISH_CHECKPOINT",
-                            evidence="PRE_PUBLISH_CHECKPOINT",
-                            attempt_count=next_attempt,
+                        outcomes.append(
+                            {
+                                "task_id": item.task_id,
+                                "status": outcome.status,
+                                "reason": outcome.reason,
+                                "remote_material_id": (
+                                    outcome.remote_material_id
+                                ),
+                                "evidence": outcome.evidence,
+                            }
                         )
-
-                    outcome = upload_approved_item(
-                        resolved_page,
-                        item,
-                        manifest,
-                        selectors,
-                        expected_store=args.store,
-                        now=_now_iso(),
-                        before_publish=persist_pre_publish_checkpoint,
-                        workflow="qianniu_recommend",
-                        material_center_url=material_center_url,
-                    )
-                    checkpoint = state.item_record(item.task_id)
-                    _persist_item_transition(
-                        state,
-                        item.task_id,
-                        outcome.status,
-                        reason=outcome.reason or "PUBLISH_RESULT",
-                        remote_material_id=outcome.remote_material_id,
-                        evidence=outcome.evidence or outcome.reason,
-                        attempt_count=int(checkpoint["attempt_count"]),
-                    )
-                    outcomes.append(
-                        {
-                            "task_id": item.task_id,
-                            "status": outcome.status,
-                            "reason": outcome.reason,
-                            "remote_material_id": outcome.remote_material_id,
-                            "evidence": outcome.evidence,
-                        }
-                    )
-                    persisted_record = state.item_record(item.task_id)
-                    if (
-                        on_successful_item is not None
-                        and persisted_record is not None
-                        and persisted_record["status"]
-                        in {"submitted", "under_review", "success"}
-                        and persisted_record.get("remote_material_id")
-                    ):
-                        on_successful_item(persisted_record)
-                    if outcome.status == "publish_uncertain":
-                        break
+                        persisted_record = state.item_record(item.task_id)
+                        if (
+                            on_successful_item is not None
+                            and persisted_record is not None
+                            and persisted_record["status"]
+                            in {"submitted", "under_review", "success"}
+                            and persisted_record.get("remote_material_id")
+                        ):
+                            on_successful_item(persisted_record)
+                        if (
+                            outcome.status == "publish_uncertain"
+                            or outcome.batch_stop
+                        ):
+                            batch_paused = True
+                            preserve_uncertain_page = (
+                                outcome.status == "publish_uncertain"
+                            )
+                            break
+                    if not preserve_uncertain_page:
+                        product_session.finish()
             finally:
                 state.close()
     except BrowserSessionRequired as error:

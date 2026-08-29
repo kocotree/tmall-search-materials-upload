@@ -21,11 +21,17 @@ from ..models import MaterialItem
 from .qianniu_copy import (
     MATERIAL_SELECTOR_FRAME_FRAGMENT,
     PUBLISH_FRAME_FRAGMENT,
+    QianniuCopyError,
+    _close_publish_form_in_place,
+    _ensure_recommend_list,
     _find_product_row,
+    _find_product_row_with_recovery,
     _open_recommend_list,
     _open_slot_publish_form,
+    _recommend_list_is_current,
     _slot_cells,
     _wait_for_frame,
+    _wait_for_publish_form_to_close,
 )
 
 
@@ -33,6 +39,8 @@ DEFAULT_MATERIAL_CENTER_URL = (
     "https://myseller.taobao.com/home.htm/"
     "material-center/material-management"
 )
+REMOTE_ID_OBSERVE_ATTEMPTS = 20
+REMOTE_ID_OBSERVE_DELAY_MS = 500
 
 
 class QianniuUploadError(RuntimeError):
@@ -442,6 +450,105 @@ def _remote_ids_from_row(row) -> tuple[set[str], dict[str, tuple[int, str]]]:
     return remote_ids, evidence
 
 
+def _approved_upload_paths(item: MaterialItem) -> list[str]:
+    if item.material_type != "image_text":
+        raise QianniuUploadError("QIANNIU_VIDEO_UPLOAD_UNSUPPORTED")
+    paths = [str(asset.source_path) for asset in item.assets]
+    if not paths or any(not Path(path).is_file() for path in paths):
+        raise QianniuUploadError("QIANNIU_APPROVED_FILE_MISSING")
+    return paths
+
+
+def _prepare_qianniu_upload_from_row(
+    page,
+    item: MaterialItem,
+    *,
+    row,
+    paths: Sequence[str],
+) -> set[str]:
+    before_remote_ids, _ = _remote_ids_from_row(row)
+    frame = _open_slot_publish_form(
+        page,
+        str(item.product_id),
+        int(item.slot_index),
+        row=row,
+    )
+    upload = frame.get_by_role("button", name="上传图片", exact=True)
+    if upload.count() != 1 or not upload.is_visible():
+        raise QianniuUploadError("QIANNIU_MATERIAL_SELECTOR_NOT_FOUND")
+    upload.click(force=True)
+    selector_frame = _wait_for_frame(
+        page,
+        MATERIAL_SELECTOR_FRAME_FRAGMENT,
+        attempts=40,
+        delay_ms=300,
+    )
+    upload_names = []
+    for asset, path in zip(item.assets, paths, strict=True):
+        extension = Path(path).suffix.lower() or ".jpg"
+        upload_names.append(
+            f"publish-{asset.sha256[:12]}-{uuid.uuid4().hex[:8]}"
+            f"{extension}"
+        )
+    _set_local_files(
+        page,
+        selector_frame,
+        paths,
+        upload_names=upload_names,
+    )
+    _wait_for_upload_completion(page, selector_frame, len(paths))
+    selector_frame = _wait_for_frame(
+        page,
+        MATERIAL_SELECTOR_FRAME_FRAGMENT,
+        attempts=20,
+        delay_ms=300,
+    )
+    _select_uploaded_cards(page, selector_frame, upload_names)
+    frame = _wait_for_frame(
+        page,
+        PUBLISH_FRAME_FRAGMENT,
+        attempts=30,
+        delay_ms=300,
+    )
+    _fill_first_visible(
+        frame,
+        (
+            'input[placeholder*="标题"]',
+            'textarea[placeholder*="标题"]',
+            'input[maxlength="20"]',
+            'input[placeholder*="8-10个中文字"]',
+        ),
+        item.title,
+        field_name="title",
+    )
+    _fill_first_visible(
+        frame,
+        (
+            'textarea[placeholder*="描述"]',
+            'textarea[placeholder*="内容"]',
+            'textarea[placeholder*="词"]',
+            'textarea[maxlength="1000"]',
+            'textarea[placeholder*="10-1000个中文字"]',
+            '[contenteditable="true"]',
+            'textarea[data-cangjie-dockey]',
+        ),
+        item.description,
+        field_name="description",
+    )
+    return before_remote_ids
+
+
+def _as_upload_error(error: Exception) -> QianniuUploadError:
+    if isinstance(error, QianniuUploadError):
+        return error
+    if isinstance(error, QianniuCopyError):
+        return QianniuUploadError(error.reason_code, error.detail)
+    return QianniuUploadError(
+        "QIANNIU_UPLOAD_PREPARE_FAILED",
+        str(error),
+    )
+
+
 def prepare_qianniu_upload(
     page,
     item: MaterialItem,
@@ -450,98 +557,136 @@ def prepare_qianniu_upload(
 ) -> set[str]:
     """Upload exact approved files and fill copy, stopping before publish."""
 
-    if item.material_type != "image_text":
-        raise QianniuUploadError("QIANNIU_VIDEO_UPLOAD_UNSUPPORTED")
-    paths = [str(asset.source_path) for asset in item.assets]
-    if not paths or any(not Path(path).is_file() for path in paths):
-        raise QianniuUploadError("QIANNIU_APPROVED_FILE_MISSING")
+    paths = _approved_upload_paths(item)
 
     try:
         _open_recommend_list(page, material_center_url)
         row = _find_product_row(page, str(item.product_id))
-        before_remote_ids, _ = _remote_ids_from_row(row)
-        frame = _open_slot_publish_form(
+        return _prepare_qianniu_upload_from_row(
             page,
-            str(item.product_id),
-            int(item.slot_index),
+            item,
             row=row,
+            paths=paths,
         )
-        upload = frame.get_by_role(
-            "button", name="上传图片", exact=True
-        )
-        if upload.count() != 1 or not upload.is_visible():
-            raise QianniuUploadError(
-                "QIANNIU_MATERIAL_SELECTOR_NOT_FOUND"
-            )
-        upload.click(force=True)
-        selector_frame = _wait_for_frame(
-            page,
-            MATERIAL_SELECTOR_FRAME_FRAGMENT,
-            attempts=40,
-            delay_ms=300,
-        )
-        upload_names = []
-        for asset, path in zip(item.assets, paths, strict=True):
-            extension = Path(path).suffix.lower() or ".jpg"
-            upload_names.append(
-                f"publish-{asset.sha256[:12]}-{uuid.uuid4().hex[:8]}"
-                f"{extension}"
-            )
-        _set_local_files(
-            page,
-            selector_frame,
-            paths,
-            upload_names=upload_names,
-        )
-        _wait_for_upload_completion(
-            page, selector_frame, len(paths)
-        )
-        selector_frame = _wait_for_frame(
-            page,
-            MATERIAL_SELECTOR_FRAME_FRAGMENT,
-            attempts=20,
-            delay_ms=300,
-        )
-        _select_uploaded_cards(page, selector_frame, upload_names)
-        frame = _wait_for_frame(
-            page,
-            PUBLISH_FRAME_FRAGMENT,
-            attempts=30,
-            delay_ms=300,
-        )
-        _fill_first_visible(
-            frame,
-            (
-                'input[placeholder*="标题"]',
-                'textarea[placeholder*="标题"]',
-                'input[maxlength="20"]',
-                'input[placeholder*="8-10个中文字"]',
-            ),
-            item.title,
-            field_name="title",
-        )
-        _fill_first_visible(
-            frame,
-            (
-                'textarea[placeholder*="描述"]',
-                'textarea[placeholder*="内容"]',
-                'textarea[placeholder*="词"]',
-                'textarea[maxlength="1000"]',
-                'textarea[placeholder*="10-1000个中文字"]',
-                '[contenteditable="true"]',
-                'textarea[data-cangjie-dockey]',
-            ),
-            item.description,
-            field_name="description",
-        )
-        return before_remote_ids
     except QianniuUploadError:
         raise
     except Exception as error:
-        raise QianniuUploadError(
-            "QIANNIU_UPLOAD_PREPARE_FAILED",
-            str(error),
-        ) from error
+        raise _as_upload_error(error) from error
+
+
+class QianniuProductUploadSession:
+    """Reuse one filtered product row across its formal upload slots."""
+
+    def __init__(
+        self,
+        page,
+        product_id: str,
+        *,
+        material_center_url: str,
+    ) -> None:
+        self.page = page
+        self.product_id = str(product_id).strip()
+        self.material_center_url = material_center_url
+        self._row = None
+        if not self.product_id:
+            raise QianniuUploadError("QIANNIU_PRODUCT_IDENTITY_INVALID")
+
+    def _cached_row_is_live(self) -> bool:
+        if self._row is None or not _recommend_list_is_current(
+            self.page,
+            self.material_center_url,
+        ):
+            return False
+        try:
+            return bool(self._row.is_visible())
+        except Exception:
+            return False
+
+    def _resolve_row(self):
+        if self._cached_row_is_live():
+            return self._row
+        self._row = None
+        try:
+            _ensure_recommend_list(self.page, self.material_center_url)
+            self._row = _find_product_row_with_recovery(
+                self.page,
+                self.product_id,
+                self.material_center_url,
+            )
+            return self._row
+        except Exception as error:
+            raise _as_upload_error(error) from error
+
+    def prepare(self, item: MaterialItem) -> set[str]:
+        if str(item.product_id).strip() != self.product_id:
+            raise QianniuUploadError(
+                "QIANNIU_UPLOAD_SESSION_PRODUCT_MISMATCH",
+                f"session={self.product_id};item={item.product_id}",
+            )
+        paths = _approved_upload_paths(item)
+        try:
+            return _prepare_qianniu_upload_from_row(
+                self.page,
+                item,
+                row=self._resolve_row(),
+                paths=paths,
+            )
+        except Exception as error:
+            raise _as_upload_error(error) from error
+
+    def observe_new_remote_item(
+        self,
+        item: MaterialItem,
+        *,
+        before_remote_ids: set[str],
+    ) -> QianniuPublishObservation:
+        _wait_for_publish_form_to_close(self.page)
+        row = self._resolve_row()
+        for attempt in range(REMOTE_ID_OBSERVE_ATTEMPTS + 1):
+            current_remote_ids, _ = _remote_ids_from_row(row)
+            missing_ids = before_remote_ids - current_remote_ids
+            new_ids = current_remote_ids - before_remote_ids
+            if missing_ids or new_ids:
+                break
+            if attempt < REMOTE_ID_OBSERVE_ATTEMPTS:
+                self.page.wait_for_timeout(REMOTE_ID_OBSERVE_DELAY_MS)
+        return _observe_new_remote_item_from_row(
+            item,
+            row=row,
+            before_remote_ids=before_remote_ids,
+        )
+
+    def recover_after_failure(self) -> None:
+        """Discard an unsubmitted form and retain the filtered row if possible."""
+
+        closed = _close_publish_form_in_place(self.page)
+        if closed and self._cached_row_is_live():
+            return
+        self._row = None
+        try:
+            _ensure_recommend_list(self.page, self.material_center_url)
+        except Exception:
+            # The bounded resolver retries navigation on the next attempt.
+            pass
+
+    def finish(self) -> None:
+        """Leave no unsubmitted form behind after a safely completed group."""
+
+        if not _close_publish_form_in_place(self.page):
+            self._row = None
+
+
+def open_qianniu_product_upload_session(
+    page,
+    product_id: str,
+    *,
+    material_center_url: str,
+) -> QianniuProductUploadSession:
+    return QianniuProductUploadSession(
+        page,
+        product_id,
+        material_center_url=material_center_url,
+    )
 
 
 def _publish_button(page, frame):
@@ -642,15 +787,12 @@ def _observe_target_slot(
     )
 
 
-def _observe_new_remote_item(
-    page,
+def _observe_new_remote_item_from_row(
     item: MaterialItem,
     *,
+    row,
     before_remote_ids: set[str],
-    material_center_url: str,
 ) -> QianniuPublishObservation:
-    _open_recommend_list(page, material_center_url)
-    row = _find_product_row(page, str(item.product_id))
     current_remote_ids, current_evidence = _remote_ids_from_row(row)
     missing_ids = before_remote_ids - current_remote_ids
     new_ids = current_remote_ids - before_remote_ids
@@ -687,6 +829,22 @@ def _observe_new_remote_item(
     )
 
 
+def _observe_new_remote_item(
+    page,
+    item: MaterialItem,
+    *,
+    before_remote_ids: set[str],
+    material_center_url: str,
+) -> QianniuPublishObservation:
+    _open_recommend_list(page, material_center_url)
+    row = _find_product_row(page, str(item.product_id))
+    return _observe_new_remote_item_from_row(
+        item,
+        row=row,
+        before_remote_ids=before_remote_ids,
+    )
+
+
 def publish_qianniu_once(
     page,
     item: MaterialItem,
@@ -694,19 +852,25 @@ def publish_qianniu_once(
     material_center_url: str = DEFAULT_MATERIAL_CENTER_URL,
     before_publish: Callable[[], None] | None = None,
     before_remote_ids: set[str] | None = None,
+    product_session: QianniuProductUploadSession | None = None,
 ) -> QianniuPublishObservation:
     """Click once and identify the new item without assuming stable positions."""
 
     if before_remote_ids is None:
         raise QianniuUploadError("QIANNIU_REMOTE_BASELINE_MISSING")
 
-    frame = _wait_for_frame(
-        page,
-        PUBLISH_FRAME_FRAGMENT,
-        attempts=10,
-        delay_ms=200,
-    )
-    button = _publish_button(page, frame)
+    try:
+        frame = _wait_for_frame(
+            page,
+            PUBLISH_FRAME_FRAGMENT,
+            attempts=10,
+            delay_ms=200,
+        )
+        button = _publish_button(page, frame)
+    except QianniuUploadError:
+        raise
+    except Exception as error:
+        raise _as_upload_error(error) from error
     if before_publish is not None:
         before_publish()
     try:
@@ -716,6 +880,12 @@ def publish_qianniu_once(
             "publish_uncertain",
             "PUBLISH_UNCERTAIN",
             evidence=f"task={item.task_id};click_timeout=true",
+        )
+    except PlaywrightError as error:
+        return QianniuPublishObservation(
+            "publish_uncertain",
+            "PUBLISH_UNCERTAIN",
+            evidence=f"task={item.task_id};click_error={error}",
         )
     page.wait_for_timeout(1_000)
     if _secondary_confirmation_visible(page):
@@ -729,6 +899,11 @@ def publish_qianniu_once(
         )
     page.wait_for_timeout(4_000)
     try:
+        if product_session is not None:
+            return product_session.observe_new_remote_item(
+                item,
+                before_remote_ids=before_remote_ids,
+            )
         return _observe_new_remote_item(
             page,
             item,
