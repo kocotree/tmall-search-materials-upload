@@ -591,12 +591,19 @@ def _active_snapshot_bindings(cache_root: Path) -> list[dict[str, str]] | None:
     return bindings
 
 
+def _cache_snapshot_staging_path(cache_root: Path) -> Path:
+    """Return a short same-volume staging path for a cached snapshot copy."""
+
+    return Path(cache_root) / ".staging" / uuid.uuid4().hex
+
+
 def _copy_snapshot_to_cache(snapshot_path: Path, manifest: Mapping[str, object], cache_root: Path) -> Path:
     source_id = str(manifest["source_id"])
     snapshot_id = str(manifest["snapshot_id"])
     target = Path(cache_root) / "sources" / source_id / "snapshots" / snapshot_id
     if not target.exists():
-        staging = target.parent / f".staging-{snapshot_id}-{uuid.uuid4().hex}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = _cache_snapshot_staging_path(cache_root)
         staging.mkdir(parents=True, exist_ok=False)
         try:
             shutil.copy2(snapshot_path / "folders.csv", staging / "folders.csv")

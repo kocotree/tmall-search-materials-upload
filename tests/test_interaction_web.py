@@ -2317,6 +2317,9 @@ def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_
         "查看后台证据",
     ):
         assert text in script
+    ui_state_script = client.get("/static/ui-state.js").get_data(as_text=True)
+    assert "巡检结果暂时未能加载" in ui_state_script
+    assert "系统已保留当前任务进度，请重新提交当前步骤；无需重新采集。" in ui_state_script
     inspection_script = script.split("function renderInspectionMatrix", 1)[1].split(
         "function readJsonListControl", 1
     )[0]

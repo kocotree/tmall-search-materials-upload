@@ -2294,22 +2294,18 @@
       ? view.result.data.products
       : [];
     if (view.mode === "empty" || !products.length) {
+      const presentation = UiState.completenessEmptyView(uiState, view);
       const empty = element("div", "empty-state inspection-empty");
-      empty.dataset.emptyState = view.mode === "empty" ? view.label : "暂无巡检商品";
+      empty.dataset.emptyState = presentation.label;
       const mark = document.createElement("span");
       mark.setAttribute("aria-hidden", "true");
       mark.textContent = "◎";
-      const label = element(
-        "strong",
-        "",
-        view.mode === "empty" ? view.label : "暂无巡检商品",
-      );
-      const hint = element(
-        "p",
-        "",
-        "可重新巡检“搜推高价值”，系统会重新生成完整度结果。",
-      );
-      empty.append(mark, label, hint, createCompletenessReinspectButton(locked));
+      const label = element("strong", "", presentation.label);
+      const hint = element("p", "", presentation.hint);
+      empty.append(mark, label, hint);
+      if (presentation.allowReinspect) {
+        empty.appendChild(createCompletenessReinspectButton(locked));
+      }
       content.appendChild(empty);
       return;
     }

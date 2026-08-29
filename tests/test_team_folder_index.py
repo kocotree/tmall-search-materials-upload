@@ -399,6 +399,58 @@ def test_sync_caches_snapshot_and_task_materialization_rehydrates_paths(tmp_path
     assert before == after
 
 
+def test_sync_uses_short_local_staging_path_without_republishing_snapshot(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "folder-index.sqlite3"
+    shared = tmp_path / "shared"
+    local = tmp_path / "local"
+    make_database(database, [("folder-1", "source-a", "season/SKU1")])
+    published = publish_snapshot(
+        database_path=database,
+        shared_root=shared,
+        source_id="source-a",
+    )
+    shared_snapshots = shared / "sources" / "source-a" / "snapshots"
+    before = sorted(path.name for path in shared_snapshots.iterdir())
+    observed_staging_paths = []
+    original_staging_path = team_folder_index_module._cache_snapshot_staging_path
+
+    def observe_staging_path(cache_root):
+        path = original_staging_path(cache_root)
+        observed_staging_paths.append(path)
+        return path
+
+    monkeypatch.setattr(
+        team_folder_index_module,
+        "_cache_snapshot_staging_path",
+        observe_staging_path,
+    )
+
+    summary = sync_snapshots(
+        shared_root=shared,
+        local_root=local,
+        image_sources=({"source_id": "source-a", "path": str(tmp_path / "media")},),
+    )
+
+    assert summary["complete"] is True
+    assert len(observed_staging_paths) == 1
+    staging = observed_staging_paths[0]
+    assert staging.parent == local / "team-cache" / ".staging"
+    assert published["snapshot_id"] not in staging.name
+    assert not staging.exists()
+    assert sorted(path.name for path in shared_snapshots.iterdir()) == before
+    cached = (
+        local
+        / "team-cache"
+        / "sources"
+        / "source-a"
+        / "snapshots"
+        / published["snapshot_id"]
+    )
+    assert validate_snapshot(cached)["snapshot_id"] == published["snapshot_id"]
+
+
 def test_sync_reuses_verified_local_snapshot_without_rehashing_shared_csv(
     tmp_path, monkeypatch
 ):

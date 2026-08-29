@@ -78,6 +78,27 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
+test("blocked completeness is not presented as an empty inspection", () => {
+  let state = UiState.createState("completeness");
+  state = UiState.receiveStage(state, {
+    stageId: "completeness",
+    status: "blocked",
+    result: {
+      summary: "完整度巡检未能继续",
+      data: {},
+    },
+  });
+
+  assert.deepEqual(
+    UiState.completenessEmptyView(state, UiState.resultView(state)),
+    {
+      label: "巡检结果暂时未能加载",
+      hint: "系统已保留当前任务进度，请重新提交当前步骤；无需重新采集。",
+      allowReinspect: false,
+    },
+  );
+});
+
 test("agent-owned setup diagnostics allow a preserved configuration to be resubmitted", () => {
   assert.equal(typeof UiState.technicalDiagnosticView, "function");
   let state = UiState.createState("setup");

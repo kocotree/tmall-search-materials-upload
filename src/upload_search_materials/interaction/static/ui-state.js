@@ -65,6 +65,21 @@
     return { mode: "result", result: state.result };
   }
 
+  function completenessEmptyView(state, view) {
+    if (String(state?.serverStatus || "") === "blocked") {
+      return {
+        label: "巡检结果暂时未能加载",
+        hint: "系统已保留当前任务进度，请重新提交当前步骤；无需重新采集。",
+        allowReinspect: false,
+      };
+    }
+    return {
+      label: view?.mode === "empty" ? String(view.label || "尚未扫描") : "暂无巡检商品",
+      hint: "可重新巡检“搜推高价值”，系统会重新生成完整度结果。",
+      allowReinspect: true,
+    };
+  }
+
   function technicalDiagnosticView(state) {
     const diagnostic = state?.result?.agent_diagnostic;
     const active = ["needs_user_input", "blocked"].includes(
@@ -995,6 +1010,7 @@
     assetSelectionGuidance,
     completenessProductHasOpenSlots,
     completenessProductSelectable,
+    completenessEmptyView,
     connectionView,
     controlPresentation,
     copyDraftsForVersion,
