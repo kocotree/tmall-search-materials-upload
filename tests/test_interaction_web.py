@@ -4289,8 +4289,13 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         'card.setAttribute("aria-disabled", String(galleryActive))'
         in folder_review_source
     )
-    assert "if (galleryJobIsActive()) return;" in folder_review_source
-    assert "button.disabled = galleryJobIsActive() || activeCount <= 1" in source
+    assert (
+        "if (galleryJobIsActive() || globalAssetSelectionInFlight) return;"
+        in folder_review_source
+    )
+    assert "button.disabled = galleryJobIsActive()" in source
+    assert "|| globalAssetSelectionInFlight" in source
+    assert "|| activeCount <= 1" in source
     assert "图片正在加载，完成后可调整候选文件夹或去掉商品。" not in source
     assert "确认选图并提交给工作台" in source
     assert "第 1 步：筛选文件夹" in source
@@ -4370,6 +4375,28 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "UiState.resolveProductTitle" in source
     assert '"(prefers-reduced-motion: reduce)"' in source
     assert 'behavior: reduceMotion ? "auto" : "smooth"' in source
+
+
+def test_global_asset_selection_keeps_pipeline_full_and_locks_navigation():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "let globalAssetSelectionInFlight = false" in source
+    assert "activePreflights.size < 6" in source
+    assert "await Promise.race(" in source
+    assert "commitSelectedCandidateBatch(productId, newlySelected)" in source
+    assert 'submitButton.textContent = "正在为全部商品选图…"' in source
+    assert "|| globalAssetSelectionInFlight" in source
+    assert "正在为全部商品选图，完成后才能返回上一步。" in source
+    assert "setGlobalSelectionControlsLocked(true)" in source
+    assert "setGlobalSelectionControlsLocked(false)" in source
+    assert "if (uiState.dirty) scheduleAutoSave();" in source
 
 
 def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():

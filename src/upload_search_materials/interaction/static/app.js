@@ -87,6 +87,7 @@
   let confirmationResolver = null;
   let confirmationReturnFocus = null;
   let stageLocalActionInFlight = false;
+  let globalAssetSelectionInFlight = false;
   let pendingBackNavigation = false;
   let pendingPersistenceMode = null;
   let localEditVersion = 0;
@@ -1610,6 +1611,13 @@
       submitButton.disabled = true;
       submitButton.textContent = "正在检测所选图片…";
     }
+    if (
+      currentStageId === "asset_matching"
+      && globalAssetSelectionInFlight
+    ) {
+      submitButton.disabled = true;
+      submitButton.textContent = "正在为全部商品选图…";
+    }
     saveButton.disabled = lockedByServer;
     if (currentStageId === "setup" && !setupLoginReady) {
       saveButton.disabled = true;
@@ -1627,6 +1635,7 @@
       && currentBackNavigation?.target_stage_id,
     );
     const localBackLockActive = stageLocalActionInFlight
+      || globalAssetSelectionInFlight
       || pendingBackNavigation
       || (currentStageId === "slots_copy" && localCopyRequestInFlight)
       || (
@@ -1642,7 +1651,9 @@
     backButton.disabled = !backEnabled;
     backButton.textContent = currentBackNavigation?.label || "上一步";
     backButton.title = localBackLockActive
-      ? stageLocalActionInFlight
+      ? globalAssetSelectionInFlight
+        ? "正在为全部商品选图，完成后才能返回上一步。"
+        : stageLocalActionInFlight
         ? "当前步骤正在保存或处理，完成后才能返回上一步。"
         : localCopyRequestInFlight
           ? "文案正在生成，完成后才能返回上一步。"
@@ -1963,6 +1974,10 @@
     if (isHydrating) return;
     window.clearTimeout(autoSaveTimer);
     if (!["draft", "needs_user_input", "blocked"].includes(uiState.serverStatus)) return;
+    if (
+      currentStageId === "asset_matching"
+      && globalAssetSelectionInFlight
+    ) return;
     actionMessage.textContent = "有未保存更改；停止输入后将自动保存草稿。";
     autoSaveTimer = window.setTimeout(() => persistStage("draft", { automatic: true }), 1000);
   }
@@ -2830,8 +2845,7 @@
       : `原图已满足 ${matching.join("、")}，并达到推荐分辨率`;
   }
 
-  function persistSelectedCandidate(productId, candidate, selected) {
-    const currentDecisions = selectedAssetDecisions();
+  function selectedCandidateDecision(productId, candidate, currentDecisions) {
     const previous = currentDecisions.find(
       (item) => String(item.product_id || "") === String(productId)
         && String(item.asset_id || "") === String(candidate.asset_id || ""),
@@ -2839,56 +2853,94 @@
     const selectionPreflight = selectionPreflightFor(candidate.asset_id);
     const canRetainPrevious = previous
       && String(previous.sha256 || "") === String(candidate.sha256 || "");
+    return {
+      product_id: String(productId),
+      asset_id: String(candidate.asset_id),
+      sha256: String(candidate.sha256),
+      folder_id: String(candidate.folder_id || candidate.resolved_folder_id || ""),
+      folder_path: String(candidate.folder_path || candidate.candidate_directory || ""),
+      source_system: String(candidate.source_system || ""),
+      source_path: String(candidate.source_path || ""),
+      selection_preflight_identity: String(
+        selectionPreflight?.identity_sha256
+        || (canRetainPrevious ? previous.selection_preflight_identity : "")
+        || "",
+      ),
+      feasible_ratios: [...(
+        selectionPreflight?.feasible_ratios
+        || (canRetainPrevious ? previous.feasible_ratios : [])
+        || []
+      )],
+    };
+  }
+
+  function reconcileSelectedAssetValidation(nextDecisions) {
+    if (!selectedAssetValidation) return;
+    const selectedIds = new Set(
+      nextDecisions.map((item) => String(item.asset_id || "")),
+    );
+    const retainedItems = (selectedAssetValidation.items || []).filter(
+      (item) => selectedIds.has(String(item.asset_id || ""))
+        && item.issue_type !== "duplicate",
+    );
+    selectedAssetValidation = retainedItems.length
+      ? {
+        ...selectedAssetValidation,
+        selected_count: nextDecisions.length,
+        blocking_count: retainedItems.filter(
+          (item) => item.severity === "blocked",
+        ).length,
+        warning_count: retainedItems.filter(
+          (item) => item.severity === "warning",
+        ).length,
+        items: retainedItems,
+      }
+      : null;
+  }
+
+  function persistSelectedCandidate(productId, candidate, selected) {
+    const currentDecisions = selectedAssetDecisions();
     const nextDecisions = UiState.mergeSelectedAssetDecision(
       currentDecisions,
-      {
-        product_id: String(productId),
-        asset_id: String(candidate.asset_id),
-        sha256: String(candidate.sha256),
-        folder_id: String(candidate.folder_id || candidate.resolved_folder_id || ""),
-        folder_path: String(candidate.folder_path || candidate.candidate_directory || ""),
-        source_system: String(candidate.source_system || ""),
-        source_path: String(candidate.source_path || ""),
-        selection_preflight_identity: String(
-          selectionPreflight?.identity_sha256
-          || (canRetainPrevious ? previous.selection_preflight_identity : "")
-          || "",
-        ),
-        feasible_ratios: [...(
-          selectionPreflight?.feasible_ratios
-          || (canRetainPrevious ? previous.feasible_ratios : [])
-          || []
-        )],
-      },
+      selectedCandidateDecision(productId, candidate, currentDecisions),
       selected,
     );
-    const changed = writeJsonListControl(
+    if (writeJsonListControl(
+      "asset_decisions",
+      nextDecisions,
+      { notify: true },
+    )) reconcileSelectedAssetValidation(nextDecisions);
+  }
+
+  function commitSelectedCandidateBatch(productId, candidates) {
+    if (!Array.isArray(candidates) || !candidates.length) return false;
+    let nextDecisions = selectedAssetDecisions();
+    const selectedAssetIds = new Set();
+    candidates.forEach((candidate) => {
+      selectedAssetIds.add(String(candidate.asset_id || ""));
+      nextDecisions = UiState.mergeSelectedAssetDecision(
+        nextDecisions,
+        selectedCandidateDecision(productId, candidate, nextDecisions),
+        true,
+      );
+    });
+    const decisionsChanged = writeJsonListControl(
       "asset_decisions",
       nextDecisions,
       { notify: true },
     );
-    if (changed && selectedAssetValidation) {
-      const selectedIds = new Set(
-        nextDecisions.map((item) => String(item.asset_id || "")),
-      );
-      const retainedItems = (selectedAssetValidation.items || []).filter(
-        (item) => selectedIds.has(String(item.asset_id || ""))
-          && item.issue_type !== "duplicate",
-      );
-      selectedAssetValidation = retainedItems.length
-        ? {
-          ...selectedAssetValidation,
-          selected_count: nextDecisions.length,
-          blocking_count: retainedItems.filter(
-            (item) => item.severity === "blocked",
-          ).length,
-          warning_count: retainedItems.filter(
-            (item) => item.severity === "warning",
-          ).length,
-          items: retainedItems,
-        }
-        : null;
-    }
+    if (decisionsChanged) reconcileSelectedAssetValidation(nextDecisions);
+    const nextLicenses = readJsonListControl("license_decisions")
+      .filter((item) => !selectedAssetIds.has(String(item.asset_id || "")));
+    selectedAssetIds.forEach((assetId) => {
+      nextLicenses.push({ asset_id: assetId, status: "confirmed" });
+    });
+    const licensesChanged = writeJsonListControl(
+      "license_decisions",
+      nextLicenses,
+      { notify: true },
+    );
+    return decisionsChanged || licensesChanged;
   }
 
   function persistLicense(assetId, confirmed, productId = "") {
@@ -3075,7 +3127,7 @@
   }
 
   async function removeProductFromCurrentTask(productId, productTitle, data) {
-    if (galleryJobIsActive()) return false;
+    if (galleryJobIsActive() || globalAssetSelectionInFlight) return false;
     const normalizedProductId = String(productId || "").trim();
     const removed = removedProductIdSet();
     const activeProducts = [...assetMatchingProductIds(data)]
@@ -3173,11 +3225,15 @@
     const removed = removedProductIdSet();
     const activeCount = [...assetMatchingProductIds(data)]
       .filter((value) => !removed.has(value)).length;
-    button.disabled = galleryJobIsActive() || activeCount <= 1;
+    button.disabled = galleryJobIsActive()
+      || globalAssetSelectionInFlight
+      || activeCount <= 1;
     button.title = activeCount <= 1
       ? "本次任务至少需要保留一个商品"
       : galleryJobIsActive()
         ? ""
+        : globalAssetSelectionInFlight
+          ? "自动选图完成后可调整商品范围"
         : "仅从本次上传任务中去掉该商品";
     button.setAttribute(
       "aria-label",
@@ -3432,7 +3488,8 @@
         const key = `${productId}\u0000${candidate.folder_id}`;
         const saved = decisionsByKey.get(key) || {};
         const card = element("article", "folder-card");
-        const galleryActive = galleryJobIsActive();
+        const galleryActive = galleryJobIsActive()
+          || globalAssetSelectionInFlight;
         card.tabIndex = galleryActive ? -1 : 0;
         card.setAttribute("role", "checkbox");
         card.setAttribute("aria-disabled", String(galleryActive));
@@ -3545,7 +3602,7 @@
           }));
         };
         const toggleDecision = () => {
-          if (galleryJobIsActive()) return;
+          if (galleryJobIsActive() || globalAssetSelectionInFlight) return;
           syncDecision(
             currentDecision === "confirmed" ? "rejected" : "confirmed",
           );
@@ -3588,6 +3645,7 @@
         ? "确认文件夹并重新加载图片"
         : "确认文件夹并加载图片";
       localButton.disabled = galleryActive
+        || globalAssetSelectionInFlight
         || (galleryAlreadyLoaded && !galleryNeedsReload);
       localSummary.textContent = galleryActive
         ? "本机正在按最新文件夹选择加载图片。"
@@ -3744,7 +3802,46 @@
     const productNavigator = element("div", "product-jump-mount");
     const productTargets = [];
     const globalSelectionContexts = [];
-    let globalSelectionRunning = false;
+    const globalSelectionLockState = new Map();
+    const setGlobalSelectionControlsLocked = (locked) => {
+      const controls = [
+        ...content.querySelectorAll(
+          ".folder-card, .local-gallery-action button, .asset-product-actions button",
+        ),
+        ...railButtons,
+      ];
+      if (locked) {
+        controls.forEach((control) => {
+          if (!globalSelectionLockState.has(control)) {
+            globalSelectionLockState.set(control, {
+              disabled: "disabled" in control ? control.disabled : null,
+              ariaDisabled: control.getAttribute("aria-disabled"),
+              tabIndex: control.getAttribute("tabindex"),
+            });
+          }
+          if ("disabled" in control) control.disabled = true;
+          control.setAttribute("aria-disabled", "true");
+          control.setAttribute("tabindex", "-1");
+        });
+        return;
+      }
+      globalSelectionLockState.forEach((previous, control) => {
+        if ("disabled" in control && previous.disabled !== null) {
+          control.disabled = previous.disabled;
+        }
+        if (previous.ariaDisabled === null) {
+          control.removeAttribute("aria-disabled");
+        } else {
+          control.setAttribute("aria-disabled", previous.ariaDisabled);
+        }
+        if (previous.tabIndex === null) {
+          control.removeAttribute("tabindex");
+        } else {
+          control.setAttribute("tabindex", previous.tabIndex);
+        }
+      });
+      globalSelectionLockState.clear();
+    };
     const pendingSelectionIntents = new Set();
     const selectionIntentKey = (productId, assetId) => (
       `${String(productId || "")}\u0000${String(assetId || "")}`
@@ -4071,22 +4168,57 @@
         const remaining = ratioPool.filter(
           (candidate) => !selectedIds.has(String(candidate.asset_id || "")),
         );
-        while (selectedCount < desiredCount && remaining.length) {
-          if (
-            currentStageId !== "asset_matching"
-            || !globalSelectionRunning
-          ) break;
-          const needed = desiredCount - selectedCount;
-          const batch = remaining.splice(0, Math.min(6, needed));
-          const requests = batch.map((candidate) => {
+        const activePreflights = new Set();
+        const launchPreflights = () => {
+          while (
+            currentStageId === "asset_matching"
+            && globalAssetSelectionInFlight
+            && activePreflights.size < 6
+            && selectedCount + activePreflights.size < desiredCount
+            && remaining.length
+          ) {
+            const candidate = remaining.shift();
             const assetId = String(candidate.asset_id || "");
             setSelectionIntent(productId, assetId, true);
             selectionPreflightCardRefreshers.get(assetId)?.();
-            return runSelectionPreflight(candidate);
-          });
-          const results = await Promise.allSettled(requests);
-          results.forEach((settled, index) => {
-            const candidate = batch[index];
+            const entry = { candidate, settled: null, promise: null };
+            entry.promise = runSelectionPreflight(candidate).then(
+              (value) => {
+                entry.settled = { status: "fulfilled", value };
+                return entry;
+              },
+              (reason) => {
+                entry.settled = { status: "rejected", reason };
+                return entry;
+              },
+            );
+            activePreflights.add(entry);
+          }
+        };
+        launchPreflights();
+        while (
+          selectedCount < desiredCount
+          && (activePreflights.size || remaining.length)
+        ) {
+          if (
+            currentStageId !== "asset_matching"
+            || !globalAssetSelectionInFlight
+          ) break;
+          if (!activePreflights.size) {
+            launchPreflights();
+            if (!activePreflights.size) break;
+          }
+          await Promise.race(
+            [...activePreflights].map((entry) => entry.promise),
+          );
+          await Promise.resolve();
+          const completed = [...activePreflights].filter(
+            (entry) => entry.settled,
+          );
+          const newlySelected = [];
+          completed.forEach((entry) => {
+            activePreflights.delete(entry);
+            const { candidate, settled } = entry;
             const assetId = String(candidate.asset_id || "");
             const assetSha256 = String(candidate.sha256 || "");
             checkedCount += 1;
@@ -4116,12 +4248,15 @@
             } else {
               selectedIds.add(assetId);
               selectedCount += 1;
-              persistLicense(assetId, true, productId);
-              persistSelectedCandidate(productId, candidate, true);
+              newlySelected.push(candidate);
             }
             refreshSelectionAvailability(assetSha256);
             selectionPreflightCardRefreshers.get(assetId)?.();
           });
+          commitSelectedCandidateBatch(productId, newlySelected);
+          selectedCount = selectedAssetDecisions().filter(
+            (item) => String(item.product_id || "") === productId,
+          ).length;
           updateSelectionSummary();
           reportProgress?.({
             productId,
@@ -4131,6 +4266,7 @@
             selectedCount,
             checkedCount,
           });
+          launchPreflights();
         }
         if (currentStageId === "asset_matching") draw();
         return {
@@ -4294,7 +4430,7 @@
             const duplicateElsewhere = selectedByOtherProduct();
             select.checked = desired;
             select.disabled = !desired && (
-              globalSelectionRunning
+              globalAssetSelectionInFlight
               || !baseSelectable
               || duplicateElsewhere
               || result?.status === "blocked"
@@ -4610,12 +4746,15 @@
       draw();
     });
     globalSelectionButton.addEventListener("click", async () => {
-      if (!galleryComplete || globalSelectionRunning) return;
+      if (!galleryComplete || globalAssetSelectionInFlight) return;
       const renderGeneration = stageGeneration;
-      globalSelectionRunning = true;
+      globalAssetSelectionInFlight = true;
+      window.clearTimeout(autoSaveTimer);
+      setGlobalSelectionControlsLocked(true);
       globalSelectionButton.disabled = true;
       globalSelectionButton.textContent = "正在为全部商品选图…";
       refreshAllSelectionAvailability();
+      renderStatus();
       const outcomes = [];
       const orderedContexts = [...globalSelectionContexts].sort(
         (left, right) => left.priority() - right.priority()
@@ -4637,6 +4776,7 @@
               `正在处理第 ${index + 1}/${orderedContexts.length} 个商品：`
               + `${progress.productTitle || progress.productId}`
               + `，已选 ${progress.selectedCount}/${progress.minimumTarget} 张`
+              + `，已检查 ${progress.checkedCount} 张`
             );
           });
           outcomes.push(outcome);
@@ -4686,7 +4826,8 @@
           actionMessage.textContent = globalSelectionStatus.textContent;
         }
       } finally {
-        globalSelectionRunning = false;
+        globalAssetSelectionInFlight = false;
+        setGlobalSelectionControlsLocked(false);
         if (
           currentStageId === "asset_matching"
           && renderGeneration === stageGeneration
@@ -4694,6 +4835,8 @@
           globalSelectionButton.disabled = false;
           globalSelectionButton.textContent = "一键为全部商品选图";
           refreshAllSelectionAvailability();
+          renderStatus();
+          if (uiState.dirty) scheduleAutoSave();
         }
       }
     });
@@ -8178,6 +8321,7 @@
 
   async function activateStage(stageId) {
     if (!stages.has(stageId)) return;
+    if (globalAssetSelectionInFlight && stageId !== currentStageId) return;
     const previousStageId = currentStageId;
     if (currentStageId === "asset_matching" || stageId === "asset_matching") {
       resetSelectionPreflightClientState();
@@ -8242,6 +8386,7 @@
       !currentBackNavigation?.enabled
       || !currentBackNavigation?.target_stage_id
       || stageLocalActionInFlight
+      || globalAssetSelectionInFlight
     ) return;
     const unsavedWarning = uiState.dirty
       ? " 当前步骤尚未保存的修改也不会保留。"
