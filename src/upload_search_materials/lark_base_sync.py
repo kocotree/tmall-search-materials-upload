@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -78,6 +78,7 @@ UPLOAD_LOG_FIELDS = {
     "title": "标题",
 }
 SUCCESS_UPLOAD_STATUSES = {"submitted", "under_review", "success"}
+BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 MAX_RECORD_LIST_PAGES = 200
 PRODUCT_METADATA_SNAPSHOT_SCHEMA_VERSION = 1
 UPLOAD_HISTORY_SNAPSHOT_SCHEMA_VERSION = 1
@@ -1853,11 +1854,13 @@ def _asset_source_sha256(item: Any) -> str:
 def _display_timestamp(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
-        return iso_timestamp()
+        text = iso_timestamp()
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return text
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(BEIJING_TIMEZONE)
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 

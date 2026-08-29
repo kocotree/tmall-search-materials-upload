@@ -529,7 +529,7 @@ def test_build_upload_log_rows_keeps_only_successful_uploads(tmp_path):
             "商品 ID": "1001",
             "货号": "LOCAL-SKU",
             "商品名称": "本地商品",
-            "上传时间": "2026-08-26 09:30:00",
+            "上传时间": "2026-08-26 17:30:00",
             "上传图片文件名": "素材图.jpg",
             "原图 SHA-256": "a" * 64,
             "标题": "上传标题",
