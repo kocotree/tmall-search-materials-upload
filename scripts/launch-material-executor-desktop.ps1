@@ -3,10 +3,14 @@ param(
     [string]$ProjectRoot,
     [Parameter(Mandatory = $true)]
     [string]$Session,
+    [string]$UserDataRoot = "",
     [string]$Config = ""
 )
 
 $ErrorActionPreference = "Stop"
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
 $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
 $RuntimeRoot = if ($env:TMALL_RUNTIME_ROOT) {
     [System.IO.Path]::GetFullPath($env:TMALL_RUNTIME_ROOT)
@@ -40,8 +44,17 @@ if ($Config) {
     $AllowedConfig = [System.IO.Path]::GetFullPath(
         (Join-Path $ProjectRoot "config")
     )
+    $ResolvedUserDataRoot = if ($UserDataRoot) {
+        [System.IO.Path]::GetFullPath($UserDataRoot)
+    }
+    elseif ($env:TMALL_USER_DATA_ROOT) {
+        [System.IO.Path]::GetFullPath($env:TMALL_USER_DATA_ROOT)
+    }
+    else {
+        [System.IO.Path]::GetFullPath((Split-Path -Parent $RuntimeRoot))
+    }
     $AllowedUserConfig = [System.IO.Path]::GetFullPath(
-        (Join-Path (Split-Path -Parent $RuntimeRoot) "config")
+        (Join-Path $ResolvedUserDataRoot "config")
     )
     if (
         -not [System.IO.File]::Exists($ResolvedConfig) -or

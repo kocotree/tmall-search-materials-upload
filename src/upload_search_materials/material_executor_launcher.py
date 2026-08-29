@@ -87,6 +87,10 @@ def launch_material_executor(
         "-Session",
         session,
     ]
+    if runtime.user_data_root is not None:
+        command.extend(
+            ("-UserDataRoot", str(runtime.user_data_root.resolve()))
+        )
     if config_args:
         command.extend(("-Config", config_args[1]))
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
