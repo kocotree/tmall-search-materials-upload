@@ -346,6 +346,17 @@
     return current.map((item, index) => (index === targetIndex ? merged : item));
   }
 
+  function assetSelectedByOtherProduct(items, productId, sha256) {
+    const currentProductId = String(productId || "");
+    const assetSha256 = String(sha256 || "");
+    if (!currentProductId || !assetSha256) return false;
+    return (Array.isArray(items) ? items : []).some(
+      (item) => item?.decision === "selected"
+        && String(item.product_id || "") !== currentProductId
+        && String(item.sha256 || item.source_sha256 || "") === assetSha256,
+    );
+  }
+
   function shouldDeferEditableStageHydration({
     stageId,
     workflowStep,
@@ -1006,6 +1017,7 @@
 
   return {
     activeProductTargetIndex,
+    assetSelectedByOtherProduct,
     canonicalJsonValue,
     assetSelectionGuidance,
     completenessProductHasOpenSlots,

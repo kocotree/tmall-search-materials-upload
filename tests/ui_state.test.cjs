@@ -410,6 +410,36 @@ test("completed image preflights merge into the latest formal selection", () => 
   );
 });
 
+test("same-task duplicate images are reserved by the first selected product", () => {
+  const decisions = [
+    {
+      product_id: "product-a",
+      asset_id: "asset-a",
+      sha256: "shared-sha",
+      decision: "selected",
+    },
+    {
+      product_id: "product-c",
+      asset_id: "asset-c",
+      sha256: "ignored-sha",
+      decision: "rejected",
+    },
+  ];
+
+  assert.equal(
+    UiState.assetSelectedByOtherProduct(decisions, "product-b", "shared-sha"),
+    true,
+  );
+  assert.equal(
+    UiState.assetSelectedByOtherProduct(decisions, "product-a", "shared-sha"),
+    false,
+  );
+  assert.equal(
+    UiState.assetSelectedByOtherProduct(decisions, "product-b", "ignored-sha"),
+    false,
+  );
+});
+
 test("image-selection hydration waits for edits, saves, or running preflights", () => {
   const idle = {
     stageId: "asset_matching",

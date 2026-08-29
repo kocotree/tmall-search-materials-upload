@@ -2890,10 +2890,17 @@
     }
   }
 
-  function persistLicense(assetId, confirmed) {
+  function persistLicense(assetId, confirmed, productId = "") {
     const retained = readJsonListControl("license_decisions")
       .filter((item) => String(item.asset_id) !== String(assetId));
-    if (confirmed) retained.push({ asset_id: String(assetId), status: "confirmed" });
+    const selectedByAnotherProduct = selectedAssetDecisions().some(
+      (item) => item?.decision === "selected"
+        && String(item.asset_id || "") === String(assetId)
+        && String(item.product_id || "") !== String(productId || ""),
+    );
+    if (confirmed || selectedByAnotherProduct) {
+      retained.push({ asset_id: String(assetId), status: "confirmed" });
+    }
     writeJsonListControl("license_decisions", retained, { notify: true });
   }
 
@@ -2934,11 +2941,30 @@
       const primaryLabel = productTitle || "商品名称未获取";
       const button = element("button", "product-jump-button");
       button.type = "button";
-      button.title = `${primaryLabel} · ID ${productId}`;
+      const hasNavigationStatus = Object.prototype.hasOwnProperty.call(
+        item,
+        "navigationStatus",
+      );
       button.append(
         element("span", "", primaryLabel),
         element("small", "", `ID ${productId}`),
       );
+      if (hasNavigationStatus) {
+        const navigationStatus = element("small", "product-jump-status");
+        button.appendChild(navigationStatus);
+        item.updateNavigationStatus = (value) => {
+          item.navigationStatus = String(value || "").trim();
+          navigationStatus.textContent = item.navigationStatus;
+          navigationStatus.hidden = !item.navigationStatus;
+          button.title = [
+            `${primaryLabel} · ID ${productId}`,
+            item.navigationStatus,
+          ].filter(Boolean).join(" · ");
+        };
+        item.updateNavigationStatus(item.navigationStatus);
+      } else {
+        button.title = `${primaryLabel} · ID ${productId}`;
+      }
       button.addEventListener("click", () => {
         buttons.forEach((candidateButton, candidateIndex) => {
           candidateButton.classList.toggle("is-current", candidateIndex === index);
@@ -3677,6 +3703,51 @@
     content.appendChild(safety);
     const productNavigator = element("div", "product-jump-mount");
     const productTargets = [];
+    const pendingSelectionIntents = new Set();
+    const selectionIntentKey = (productId, assetId) => (
+      `${String(productId || "")}\u0000${String(assetId || "")}`
+    );
+    const hasSelectionIntent = (productId, assetId) => (
+      pendingSelectionIntents.has(selectionIntentKey(productId, assetId))
+    );
+    const setSelectionIntent = (productId, assetId, selected) => {
+      const key = selectionIntentKey(productId, assetId);
+      if (selected) pendingSelectionIntents.add(key);
+      else pendingSelectionIntents.delete(key);
+    };
+    const cancelSelectionPreflightIfUnused = (assetId) => {
+      const suffix = `\u0000${String(assetId || "")}`;
+      const stillPending = [...pendingSelectionIntents].some(
+        (key) => key.endsWith(suffix),
+      );
+      if (!stillPending) selectionPreflightScheduler.cancel(assetId);
+    };
+    const selectionAvailabilityRefreshers = new Map();
+    const clearProductSelectionAvailability = (productId) => {
+      selectionAvailabilityRefreshers.forEach((refreshers, sha256) => {
+        refreshers.delete(String(productId));
+        if (!refreshers.size) selectionAvailabilityRefreshers.delete(sha256);
+      });
+    };
+    const registerSelectionAvailability = (
+      productId,
+      sha256,
+      refresher,
+    ) => {
+      const fingerprint = String(sha256 || "");
+      if (!fingerprint) return;
+      if (!selectionAvailabilityRefreshers.has(fingerprint)) {
+        selectionAvailabilityRefreshers.set(fingerprint, new Map());
+      }
+      selectionAvailabilityRefreshers.get(fingerprint).set(
+        String(productId),
+        refresher,
+      );
+    };
+    const refreshSelectionAvailability = (sha256) => {
+      selectionAvailabilityRefreshers.get(String(sha256 || ""))
+        ?.forEach((refresher) => refresher());
+    };
     content.appendChild(productNavigator);
 
     requirements.forEach((requirement) => {
@@ -3704,11 +3775,13 @@
       let pageIndex = 0;
       const product = element("section", "asset-product");
       product.tabIndex = -1;
-      productTargets.push({
+      const productTarget = {
         productId,
         productTitle,
         target: product,
-      });
+        navigationStatus: "",
+      };
+      productTargets.push(productTarget);
       const heading = element("div", "asset-product-heading");
       const title = element("div");
       const candidateSummary = element("span");
@@ -3829,6 +3902,12 @@
         const duplicateSuffix = guidance.duplicateCount
           ? `；${guidance.duplicateCount} 张重复素材不计入可用数量`
           : "";
+        const navigationStatus = (
+          `缺少篇数 ${missingMaterials}`
+          + ` · 填满所有的坑位还差 ${guidance.fillAllMinimumShortage} 张`
+        );
+        productTarget.navigationStatus = navigationStatus;
+        productTarget.updateNavigationStatus?.(navigationStatus);
         selectionSummary.textContent = guidance.usableUnique < 3
           ? `已选 ${guidance.selectedCount} 张、可用唯一 ${guidance.usableUnique} 张；还差 ${guidance.minimumShortage} 张才能提交。草稿仍可保存${duplicateSuffix}。`
           : `已选 ${guidance.selectedCount} 张、可用唯一 ${guidance.usableUnique} 张；预计创建 ${guidance.completeSlots} 个完整坑位（${preview}），提交后仍可人工调整${duplicateSuffix}。`;
@@ -3859,11 +3938,6 @@
           + ` · 每批显示 ${pageSize} 张`
         );
         const currentDecisions = selectedAssetDecisions();
-        const hashesUsedElsewhere = new Set(
-          currentDecisions
-            .filter((item) => String(item.product_id) !== productId)
-            .map((item) => String(item.sha256 || "")),
-        );
         const previousForProduct = currentDecisions
           .filter((item) => String(item.product_id) === productId);
         const selectedIds = new Set(previousForProduct.map((item) => String(item.asset_id)));
@@ -3871,17 +3945,25 @@
           pageIndex * pageSize,
           (pageIndex + 1) * pageSize,
         );
+        clearProductSelectionAvailability(productId);
         grid.replaceChildren();
 
         displayedCandidates.forEach((candidate) => {
           const renderGeneration = stageGeneration;
           const assetId = String(candidate.asset_id || "");
+          const assetSha256 = String(candidate.sha256 || "");
           const selectionCheck = selectionPreflightFor(assetId);
           const selectionJob = selectionPreflightScheduler.get(assetId);
-          const checking = ["queued", "running"].includes(selectionJob?.state);
-          const selectable = galleryComplete && candidateIsSelectable(candidate)
-            && !hashesUsedElsewhere.has(String(candidate.sha256 || ""))
+          const selectionKey = selectionIntentKey(productId, assetId);
+          const checking = hasSelectionIntent(productId, assetId)
+            && ["queued", "running"].includes(selectionJob?.state);
+          const baseSelectable = galleryComplete && candidateIsSelectable(candidate)
             && selectionCheck?.status !== "blocked";
+          const selectedByOtherProduct = () => UiState.assetSelectedByOtherProduct(
+            selectedAssetDecisions(),
+            productId,
+            assetSha256,
+          );
           const card = element("article", "asset-card");
           card.tabIndex = 0;
           card.setAttribute("role", "checkbox");
@@ -3924,8 +4006,9 @@
           const controls = element("div", "asset-card-controls");
           const select = document.createElement("input");
           select.type = "checkbox";
-          select.checked = selectionJob?.desiredSelected || selectedIds.has(assetId);
-          select.disabled = !selectable;
+          select.checked = hasSelectionIntent(productId, assetId)
+            || selectedIds.has(assetId);
+          select.disabled = !baseSelectable;
           if (!galleryComplete) {
             controls.appendChild(
               element("span", "asset-warning", "候选仍在加载，完成后可选择"),
@@ -3965,13 +4048,18 @@
           const refreshSelectionCard = () => {
             const job = selectionPreflightScheduler.get(assetId);
             const result = selectionPreflightFor(assetId);
-            const isQueued = job?.state === "queued" && job.desiredSelected;
-            const isRunning = job?.state === "running";
-            const desired = job
-              ? job.desiredSelected
-              : selectedIds.has(assetId);
+            const pendingSelection = hasSelectionIntent(productId, assetId);
+            const isQueued = job?.state === "queued" && pendingSelection;
+            const jobRunning = job?.state === "running";
+            const isRunning = jobRunning && pendingSelection;
+            const desired = pendingSelection || selectedIds.has(assetId);
+            const duplicateElsewhere = selectedByOtherProduct();
             select.checked = desired;
-            select.disabled = !selectable || result?.status === "blocked";
+            select.disabled = !desired && (
+              !baseSelectable
+              || duplicateElsewhere
+              || result?.status === "blocked"
+            );
             select.indeterminate = false;
             card.classList.toggle("is-selected", selectedIds.has(assetId));
             card.classList.toggle(
@@ -3984,17 +4072,22 @@
               ? "queued"
               : isRunning && desired
                 ? "checking"
-                : isRunning
+                : jobRunning
                   ? "cancelled"
                   : result?.status || "unchecked";
             selectionFeedback.className = "asset-selection-check";
-            if (isQueued) {
+            if (duplicateElsewhere) {
+              selectionFeedback.classList.add("asset-warning");
+              selectionFeedback.textContent = desired
+                ? "该图片已在其他商品中重复选中，请取消其中一处"
+                : "该图片已被其他商品选用";
+            } else if (isQueued) {
               selectionFeedback.classList.add("asset-warning");
               selectionFeedback.textContent = "排队中，可再次点击取消";
             } else if (isRunning && desired) {
               selectionFeedback.classList.add("asset-warning");
               selectionFeedback.textContent = "正在检查 1:1、3:4 预裁剪，可再次点击取消";
-            } else if (isRunning) {
+            } else if (jobRunning) {
               selectionFeedback.classList.add("asset-warning");
               selectionFeedback.textContent = "已取消选择；后台结果仅用于缓存";
             } else if (result?.status === "passed") {
@@ -4010,6 +4103,11 @@
               selectionFeedback.textContent = "";
             }
           };
+          registerSelectionAvailability(
+            productId,
+            assetSha256,
+            refreshSelectionCard,
+          );
           selectionPreflightCardRefreshers.set(assetId, refreshSelectionCard);
           refreshSelectionCard();
 
@@ -4023,32 +4121,40 @@
               return;
             }
             const job = selectionPreflightScheduler.get(assetId);
-            if ((job && !job.desiredSelected) || (!job && !select.checked)) {
+            if (!hasSelectionIntent(productId, assetId)) {
               refreshSelectionCard();
               return;
             }
             const intentVersion = job?.intentVersion || 0;
             if (
               job
-              && appliedSelectionPreflightIntents.get(assetId) === intentVersion
+              && appliedSelectionPreflightIntents.get(selectionKey) === intentVersion
             ) return;
             if (job) {
-              appliedSelectionPreflightIntents.set(assetId, intentVersion);
+              appliedSelectionPreflightIntents.set(selectionKey, intentVersion);
             }
+            setSelectionIntent(productId, assetId, false);
             if (result.status === "blocked") {
-              selectionPreflightScheduler.cancel(assetId);
+              cancelSelectionPreflightIfUnused(assetId);
               selectedIds.delete(assetId);
-              persistLicense(assetId, false);
+              persistLicense(assetId, false, productId);
               persistSelectedCandidate(productId, candidate, false);
               actionMessage.textContent = result.message;
+            } else if (selectedByOtherProduct()) {
+              cancelSelectionPreflightIfUnused(assetId);
+              selectedIds.delete(assetId);
+              persistLicense(assetId, false, productId);
+              persistSelectedCandidate(productId, candidate, false);
+              actionMessage.textContent = "这张图片已被其他商品选用，请选择其他图片。";
             } else {
               selectedIds.add(assetId);
-              persistLicense(assetId, true);
+              persistLicense(assetId, true, productId);
               persistSelectedCandidate(productId, candidate, true);
               actionMessage.textContent = result.status === "warning"
                 ? result.message
                 : "图片预裁剪检查通过。";
             }
+            refreshSelectionAvailability(assetSha256);
             refreshSelectionCard();
             updateSelectionSummary();
             renderSelected();
@@ -4056,6 +4162,13 @@
 
           select.addEventListener("change", () => {
             if (select.checked) {
+              if (selectedByOtherProduct()) {
+                select.checked = false;
+                actionMessage.textContent = "这张图片已被其他商品选用，请选择其他图片。";
+                refreshSelectionCard();
+                return;
+              }
+              setSelectionIntent(productId, assetId, true);
               actionMessage.textContent = "正在检查所选图片的 1:1、3:4 预裁剪…";
               const request = runSelectionPreflight(candidate);
               refreshSelectionCard();
@@ -4064,21 +4177,25 @@
                   currentStageId !== "asset_matching"
                   || renderGeneration !== stageGeneration
                 ) return;
-                selectionPreflightScheduler.cancel(assetId);
+                setSelectionIntent(productId, assetId, false);
+                cancelSelectionPreflightIfUnused(assetId);
                 selectedIds.delete(assetId);
-                persistLicense(assetId, false);
+                persistLicense(assetId, false, productId);
                 actionMessage.textContent = error.userMessage || error.message;
                 persistSelectedCandidate(productId, candidate, false);
+                refreshSelectionAvailability(assetSha256);
                 refreshSelectionCard();
                 updateSelectionSummary();
                 renderSelected();
               });
               return;
             }
-            selectionPreflightScheduler.cancel(assetId);
+            setSelectionIntent(productId, assetId, false);
+            cancelSelectionPreflightIfUnused(assetId);
             selectedIds.delete(assetId);
-            persistLicense(assetId, false);
+            persistLicense(assetId, false, productId);
             persistSelectedCandidate(productId, candidate, false);
+            refreshSelectionAvailability(assetSha256);
             refreshSelectionCard();
             updateSelectionSummary();
             renderSelected();
@@ -4177,11 +4294,13 @@
             remove.type = "button";
             remove.addEventListener("click", () => {
               const assetId = String(candidate.asset_id);
-              selectionPreflightScheduler.cancel(assetId);
+              setSelectionIntent(productId, assetId, false);
+              cancelSelectionPreflightIfUnused(assetId);
               selectedIds.delete(assetId);
-              persistLicense(assetId, false);
+              persistLicense(assetId, false, productId);
               persistSelectedCandidate(productId, candidate, false);
               selectionPreflightCardRefreshers.get(assetId)?.();
+              refreshSelectionAvailability(candidate.sha256);
               updateSelectionSummary();
               renderSelected();
             });

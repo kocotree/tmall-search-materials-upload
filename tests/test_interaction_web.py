@@ -4298,6 +4298,13 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "按每坑 3–9 张自动生成坑位草稿" in source
     assert "预计创建 ${guidance.completeSlots} 个完整坑位" in source
     assert "重复素材不计入可用数量" in source
+    assert "该图片已被其他商品选用" in source
+    assert "UiState.assetSelectedByOtherProduct" in source
+    assert "pendingSelectionIntents" in source
+    assert "selectionJob?.desiredSelected || selectedIds.has" not in source
+    assert "refreshSelectionAvailability(assetSha256)" in source
+    assert "填满所有的坑位还差 ${guidance.fillAllMinimumShortage} 张" in source
+    assert "productTarget.updateNavigationStatus?.(navigationStatus)" in source
     assert '"换一批"' in source
     assert "已选素材" in source
     assert "发现 ${duplicateCount} 张完全重复图片" in source
