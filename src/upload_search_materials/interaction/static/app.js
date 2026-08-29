@@ -3556,6 +3556,7 @@
         || UiState.galleryNeedsReload(
           view.result?.data?.gallery_identity?.prepared_folder_keys,
           folderDecisions(),
+          [...removedProducts],
         );
       const galleryActive = ["queued", "running"].includes(
         currentGalleryJob?.status,
@@ -3568,9 +3569,9 @@
       localSummary.textContent = galleryActive
         ? "本机正在按最新文件夹选择加载图片。"
         : galleryAlreadyLoaded && galleryNeedsReload
-          ? "文件夹选择已变更，请重新加载图片后继续选图。"
+          ? "文件夹选择已变更；已排除文件夹的图片会立即隐藏，请重新加载以按最新范围补足候选。"
           : galleryAlreadyLoaded
-            ? "当前候选图片与文件夹选择一致；调整文件夹后可重新加载。"
+            ? "当前候选图片与文件夹选择一致，无需重复加载。"
             : "确认文件夹后加载候选图片。";
     };
     localButton.addEventListener("click", () => {
@@ -6979,6 +6980,7 @@
       && !UiState.galleryNeedsReload(
         uiState.result?.data?.gallery_identity?.prepared_folder_keys,
         values.folder_decisions,
+        [...removedProductIdSet()],
       )
     ) {
       actionMessage.textContent = "文件夹选择没有变化，无需重新加载图片。";

@@ -4248,8 +4248,11 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "if (isHydrating) return;" in source
     assert "确认文件夹并加载图片" in source
     assert "确认文件夹并重新加载图片" in source
-    assert "文件夹选择已变更，请重新加载图片后继续选图。" in source
+    assert "已排除文件夹的图片会立即隐藏" in source
+    assert "请重新加载以按最新范围补足候选" in source
+    assert "当前候选图片与文件夹选择一致，无需重复加载。" in source
     assert "UiState.galleryNeedsReload" in folder_review_source
+    assert "[...removedProducts]" in folder_review_source
     assert (
         'card.setAttribute("aria-disabled", String(galleryActive))'
         in folder_review_source
@@ -4366,6 +4369,7 @@ def test_prepare_local_gallery_materializes_visible_folder_defaults():
     assert "revision: requestRevision" in function_body
     assert "fieldErrors?.folder_decisions" in function_body
     assert "UiState.galleryNeedsReload" in function_body
+    assert "[...removedProductIdSet()]" in function_body
     assert "文件夹选择没有变化，无需重新加载图片。" in function_body
 
 

@@ -557,7 +557,7 @@ test("products with full material slots cannot enter asset matching", () => {
   );
 });
 
-test("gallery reload is required only for newly added folders", () => {
+test("gallery reload is required whenever the active folder set changes", () => {
   const prepared = [
     { product_id: "P1", folder_id: "F1" },
     { product_id: "P1", folder_id: "F2" },
@@ -570,12 +570,20 @@ test("gallery reload is required only for newly added folders", () => {
   assert.equal(UiState.galleryNeedsReload(prepared, [
     { product_id: "P1", folder_id: "F1", decision: "confirmed" },
     { product_id: "P1", folder_id: "F2", decision: "rejected" },
-  ]), false);
+  ]), true);
   assert.equal(UiState.galleryNeedsReload(prepared, [
     { product_id: "P1", folder_id: "F1", decision: "confirmed" },
     { product_id: "P1", folder_id: "F2", decision: "confirmed" },
     { product_id: "P1", folder_id: "F3", decision: "confirmed" },
   ]), true);
+  assert.equal(UiState.galleryNeedsReload([
+    ...prepared,
+    { product_id: "P2", folder_id: "F4" },
+  ], [
+    { product_id: "P1", folder_id: "F1", decision: "confirmed" },
+    { product_id: "P1", folder_id: "F2", decision: "confirmed" },
+    { product_id: "P2", folder_id: "F4", decision: "rejected" },
+  ], ["P2"]), false);
   assert.equal(UiState.galleryNeedsReload(null, []), true);
 });
 

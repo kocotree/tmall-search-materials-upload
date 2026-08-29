@@ -567,14 +567,27 @@
     };
   }
 
-  function galleryNeedsReload(preparedFolderKeys, decisions) {
+  function galleryNeedsReload(
+    preparedFolderKeys,
+    decisions,
+    ignoredProductIds = [],
+  ) {
     if (!Array.isArray(preparedFolderKeys)) return true;
+    const ignoredProducts = new Set(
+      (Array.isArray(ignoredProductIds) ? ignoredProductIds : [])
+        .map((value) => String(value || ""))
+        .filter(Boolean),
+    );
     const keyFor = (item) => (
       `${String(item?.product_id || "")}\u0000${String(item?.folder_id || "")}`
     );
     const prepared = new Set(
       preparedFolderKeys
-        .filter((item) => item?.product_id && item?.folder_id)
+        .filter(
+          (item) => item?.product_id
+            && item?.folder_id
+            && !ignoredProducts.has(String(item.product_id)),
+        )
         .map(keyFor),
     );
     const confirmed = new Set(
@@ -582,10 +595,12 @@
         .filter(
           (item) => item?.decision === "confirmed"
             && item?.product_id
-            && item?.folder_id,
+            && item?.folder_id
+            && !ignoredProducts.has(String(item.product_id)),
         )
         .map(keyFor),
     );
+    if (prepared.size !== confirmed.size) return true;
     return [...confirmed].some((key) => !prepared.has(key));
   }
 
