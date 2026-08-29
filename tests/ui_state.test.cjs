@@ -440,6 +440,55 @@ test("same-task duplicate images are reserved by the first selected product", ()
   );
 });
 
+test("global asset selection targets three images for every missing slot", () => {
+  assert.equal(UiState.globalAssetSelectionTarget(3, 20), 9);
+  assert.equal(UiState.globalAssetSelectionTarget(2, 6), 6);
+  assert.equal(UiState.globalAssetSelectionTarget(3, 7), 7);
+  assert.equal(UiState.globalAssetSelectionTarget(2, 2), 2);
+  assert.equal(UiState.globalAssetSelectionTarget(0, 20), 0);
+});
+
+test("global asset selection recognizes all ratios accepted by existing checks", () => {
+  assert.deepEqual(UiState.candidateFeasibleRatios({
+    preflight: {
+      resolution_checks: {
+        "3:4": { minimum_status: "meets_minimum" },
+        "1:1": { minimum_status: "below_minimum" },
+      },
+    },
+  }), ["3:4"]);
+  assert.deepEqual(UiState.candidateFeasibleRatios({
+    feasible_ratios: ["1:1"],
+    ratio_options: { "3:4": { feasible: true } },
+  }), ["1:1"]);
+  assert.deepEqual(UiState.candidateFeasibleRatios({
+    ratio_options: {
+      "3:4": { feasible: true },
+      "1:1": { feasible: true },
+    },
+  }), ["3:4", "1:1"]);
+});
+
+test("global asset random order is stable for the same task and product", () => {
+  const candidates = Array.from({ length: 12 }, (_, index) => ({
+    asset_id: `asset-${index}`,
+    sha256: `sha-${index}`,
+  }));
+  const first = UiState.stableGlobalAssetOrder(
+    candidates,
+    "session-a|gallery-a",
+    "product-a",
+  ).map((item) => item.asset_id);
+  const repeated = UiState.stableGlobalAssetOrder(
+    [...candidates].reverse(),
+    "session-a|gallery-a",
+    "product-a",
+  ).map((item) => item.asset_id);
+
+  assert.deepEqual(repeated, first);
+  assert.deepEqual([...first].sort(), candidates.map((item) => item.asset_id).sort());
+});
+
 test("image-selection hydration waits for edits, saves, or running preflights", () => {
   const idle = {
     stageId: "asset_matching",
@@ -462,6 +511,31 @@ test("image-selection hydration waits for edits, saves, or running preflights", 
     stageId: "completeness",
     workflowStep: "image_selection",
     dirty: true,
+  }), false);
+});
+
+test("copy generation keeps the current subpage during authoritative polling", () => {
+  const idle = {
+    stageId: "slots_copy",
+    workflowStep: "copy",
+  };
+  assert.equal(UiState.shouldDeferEditableStageHydration(idle), false);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    copyRequestInFlight: true,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    dirty: true,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    persistenceInFlight: true,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    stageId: "slots_copy",
+    workflowStep: "process",
+    copyRequestInFlight: true,
   }), false);
 });
 

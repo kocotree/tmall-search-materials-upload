@@ -2943,6 +2943,29 @@ def test_frontend_back_navigation_awaits_stage_hydration_without_empty_render(cl
     assert "UiState.stageNeedsResultHydration" in poll
 
 
+def test_frontend_preserves_copy_subpage_while_slots_copy_rehydrates(client):
+    script = client.get("/static/app.js").get_data(as_text=True)
+    slot_board = script.split("function renderSlotBoard(view)", 1)[1].split(
+        "function writeApprovalTaskIds", 1
+    )[0]
+    loading_state = script.split("function renderStageLoadingState(stageId)", 1)[
+        1
+    ].split("async function loadFolderImageCounts", 1)[0]
+    activate = script.split("async function activateStage(stageId)", 1)[1].split(
+        'railButtons.forEach((button) => {\n    button.addEventListener', 1
+    )[0]
+
+    assert 'let slotsCopyActiveSubpage = "";' in script
+    assert "pageOrder.includes(slotsCopyActiveSubpage)" in slot_board
+    assert "slotsCopyActiveSubpage = page;" in slot_board
+    assert 'workflowLoading.dataset.emptyState = "正在恢复当前处理进度"' in slot_board
+    assert 'setSubpage("copy");' in slot_board
+    assert 'if (stageId === "slots_copy")' in loading_state
+    assert "已保存的坑位、图片和文案不会丢失" in loading_state
+    assert "if (previousStageId !== stageId)" in activate
+    assert 'slotsCopyActiveSubpage = "";' in activate
+
+
 def test_frontend_discards_stale_stage_loads_and_bypasses_dynamic_cache(client):
     script = client.get("/static/app.js").get_data(as_text=True)
     load_stage = script.split("async function loadStage()", 1)[1].split(
@@ -4306,6 +4329,11 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "重复素材不计入可用数量" in source
     assert "该图片已被其他商品选用" in source
     assert "UiState.assetSelectedByOtherProduct" in source
+    assert "一键为全部商品选图" in source
+    assert "UiState.globalAssetSelectionTarget" in source
+    assert "UiState.stableGlobalAssetOrder" in source
+    assert "UiState.candidateFeasibleRatios" in source
+    assert "素材不足，已选择全部可用素材" in source
     assert "pendingSelectionIntents" in source
     assert "selectionJob?.desiredSelected || selectedIds.has" not in source
     assert "refreshSelectionAvailability(assetSha256)" in source

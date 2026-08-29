@@ -99,6 +99,7 @@
   let currentGalleryProgress = null;
   let currentGalleryJob = null;
   let localCopyRequestInFlight = false;
+  let slotsCopyActiveSubpage = "";
   let isHydrating = false;
   let currentStageInputLoaded = false;
   let currentStageHasPersistedInput = false;
@@ -3701,8 +3702,49 @@
       ),
     );
     content.appendChild(safety);
+    const candidateProductIdsBySha = new Map();
+    candidates.forEach((candidate) => {
+      const fingerprint = String(candidate.sha256 || "");
+      if (!fingerprint) return;
+      if (!candidateProductIdsBySha.has(fingerprint)) {
+        candidateProductIdsBySha.set(fingerprint, new Set());
+      }
+      candidateProductIdsBySha.get(fingerprint).add(
+        String(candidate.product_id || ""),
+      );
+    });
+    const globalSelectionSeed = [
+      sessionId,
+      String(data.gallery_job_id || ""),
+      String(data.sampling_identity_sha256 || ""),
+      String(data.gallery_identity?.folder_decisions_sha256 || ""),
+    ].join("|");
+    const globalSelectionPanel = element("section", "asset-global-selection");
+    const globalSelectionCopy = element("div");
+    globalSelectionCopy.append(
+      element("strong", "", "为全部商品自动选图"),
+      element(
+        "span",
+        "",
+        "按每个空坑位最低 3 张补足；素材不足时选择该商品的全部可用素材。",
+      ),
+    );
+    const globalSelectionButton = element(
+      "button",
+      "button-primary",
+      "一键为全部商品选图",
+    );
+    globalSelectionButton.type = "button";
+    globalSelectionButton.disabled = !galleryComplete;
+    const globalSelectionStatus = element("p", "asset-global-selection-status");
+    globalSelectionStatus.setAttribute("role", "status");
+    globalSelectionPanel.hidden = !galleryComplete;
+    globalSelectionPanel.append(globalSelectionCopy, globalSelectionButton);
+    content.append(globalSelectionPanel, globalSelectionStatus);
     const productNavigator = element("div", "product-jump-mount");
     const productTargets = [];
+    const globalSelectionContexts = [];
+    let globalSelectionRunning = false;
     const pendingSelectionIntents = new Set();
     const selectionIntentKey = (productId, assetId) => (
       `${String(productId || "")}\u0000${String(assetId || "")}`
@@ -3747,6 +3789,11 @@
     const refreshSelectionAvailability = (sha256) => {
       selectionAvailabilityRefreshers.get(String(sha256 || ""))
         ?.forEach((refresher) => refresher());
+    };
+    const refreshAllSelectionAvailability = () => {
+      selectionAvailabilityRefreshers.forEach((refreshers) => {
+        refreshers.forEach((refresher) => refresher());
+      });
     };
     content.appendChild(productNavigator);
 
@@ -3913,6 +3960,197 @@
           : `已选 ${guidance.selectedCount} 张、可用唯一 ${guidance.usableUnique} 张；预计创建 ${guidance.completeSlots} 个完整坑位（${preview}），提交后仍可人工调整${duplicateSuffix}。`;
       };
 
+      const exactOrEstimatedRatios = (candidate, decision = null) => {
+        const exact = selectionPreflightFor(candidate?.asset_id);
+        const exactRatios = exact?.feasible_ratios;
+        if (Array.isArray(exactRatios)) {
+          return UiState.candidateFeasibleRatios({
+            feasible_ratios: exactRatios,
+          });
+        }
+        const decisionRatios = decision?.feasible_ratios;
+        if (Array.isArray(decisionRatios) && decisionRatios.length) {
+          return UiState.candidateFeasibleRatios({
+            feasible_ratios: decisionRatios,
+          });
+        }
+        return UiState.candidateFeasibleRatios(candidate);
+      };
+
+      const selectMinimumForProduct = async (reportProgress) => {
+        const productCandidates = visibleCandidates();
+        const currentDecisions = selectedAssetDecisions().filter(
+          (item) => String(item.product_id || "") === productId,
+        );
+        let allowedRatios = ["3:4", "1:1"];
+        currentDecisions.forEach((decision) => {
+          const candidate = productCandidates.find(
+            (item) => String(item.asset_id || "")
+              === String(decision.asset_id || ""),
+          );
+          const ratios = exactOrEstimatedRatios(candidate, decision);
+          if (ratios.length) {
+            allowedRatios = allowedRatios.filter(
+              (ratio) => ratios.includes(ratio),
+            );
+          }
+        });
+        const minimumTarget = Math.max(
+          0,
+          Math.floor(Number(missingMaterials) || 0) * 3,
+        );
+        if (currentDecisions.length && !allowedRatios.length) {
+          return {
+            productId,
+            productTitle,
+            minimumTarget,
+            initialSelectedCount: currentDecisions.length,
+            selectedCount: currentDecisions.length,
+            shortage: Math.max(0, minimumTarget - currentDecisions.length),
+            status: "existing_ratio_conflict",
+          };
+        }
+
+        const selectable = productCandidates.filter((candidate) => (
+          candidateIsSelectable(candidate)
+          && selectionPreflightFor(candidate.asset_id)?.status !== "blocked"
+          && !UiState.assetSelectedByOtherProduct(
+            selectedAssetDecisions(),
+            productId,
+            candidate.sha256,
+          )
+        ));
+        const stableCandidates = UiState.stableGlobalAssetOrder(
+          selectable,
+          globalSelectionSeed,
+          productId,
+        );
+        const stableIndex = new Map(
+          stableCandidates.map((candidate, index) => [
+            String(candidate.asset_id || ""),
+            index,
+          ]),
+        );
+        stableCandidates.sort((left, right) => {
+          const leftShared = candidateProductIdsBySha.get(
+            String(left.sha256 || ""),
+          )?.size || 1;
+          const rightShared = candidateProductIdsBySha.get(
+            String(right.sha256 || ""),
+          )?.size || 1;
+          return leftShared - rightShared
+            || (stableIndex.get(String(left.asset_id || "")) || 0)
+              - (stableIndex.get(String(right.asset_id || "")) || 0);
+        });
+        const ratioCounts = Object.fromEntries(
+          allowedRatios.map((ratio) => [
+            ratio,
+            stableCandidates.filter(
+              (candidate) => exactOrEstimatedRatios(candidate).includes(ratio),
+            ).length,
+          ]),
+        );
+        const targetRatio = [...allowedRatios].sort((left, right) => (
+          Number(ratioCounts[right] || 0) - Number(ratioCounts[left] || 0)
+          || ["3:4", "1:1"].indexOf(left)
+            - ["3:4", "1:1"].indexOf(right)
+        ))[0] || "3:4";
+        const ratioPool = stableCandidates.filter(
+          (candidate) => exactOrEstimatedRatios(candidate).includes(targetRatio),
+        );
+        const desiredCount = UiState.globalAssetSelectionTarget(
+          missingMaterials,
+          ratioPool.length,
+        );
+        const selectedIds = new Set(
+          currentDecisions.map((item) => String(item.asset_id || "")),
+        );
+        let selectedCount = currentDecisions.length;
+        let checkedCount = 0;
+        let failedCount = 0;
+        const remaining = ratioPool.filter(
+          (candidate) => !selectedIds.has(String(candidate.asset_id || "")),
+        );
+        while (selectedCount < desiredCount && remaining.length) {
+          if (
+            currentStageId !== "asset_matching"
+            || !globalSelectionRunning
+          ) break;
+          const needed = desiredCount - selectedCount;
+          const batch = remaining.splice(0, Math.min(6, needed));
+          const requests = batch.map((candidate) => {
+            const assetId = String(candidate.asset_id || "");
+            setSelectionIntent(productId, assetId, true);
+            selectionPreflightCardRefreshers.get(assetId)?.();
+            return runSelectionPreflight(candidate);
+          });
+          const results = await Promise.allSettled(requests);
+          results.forEach((settled, index) => {
+            const candidate = batch[index];
+            const assetId = String(candidate.asset_id || "");
+            const assetSha256 = String(candidate.sha256 || "");
+            checkedCount += 1;
+            const stillDesired = hasSelectionIntent(productId, assetId);
+            setSelectionIntent(productId, assetId, false);
+            if (
+              !stillDesired
+              || settled.status !== "fulfilled"
+              || !settled.value
+              || settled.value.cancelled
+              || settled.value.status === "cancelled"
+              || settled.value.status === "blocked"
+              || !exactOrEstimatedRatios(candidate).includes(targetRatio)
+              || UiState.assetSelectedByOtherProduct(
+                selectedAssetDecisions(),
+                productId,
+                assetSha256,
+              )
+              || selectedCount >= desiredCount
+            ) {
+              failedCount += settled.status === "rejected"
+                || settled.value?.status === "blocked"
+                || !exactOrEstimatedRatios(candidate).includes(targetRatio)
+                ? 1
+                : 0;
+              cancelSelectionPreflightIfUnused(assetId);
+            } else {
+              selectedIds.add(assetId);
+              selectedCount += 1;
+              persistLicense(assetId, true, productId);
+              persistSelectedCandidate(productId, candidate, true);
+            }
+            refreshSelectionAvailability(assetSha256);
+            selectionPreflightCardRefreshers.get(assetId)?.();
+          });
+          updateSelectionSummary();
+          reportProgress?.({
+            productId,
+            productTitle,
+            minimumTarget,
+            desiredCount,
+            selectedCount,
+            checkedCount,
+          });
+        }
+        if (currentStageId === "asset_matching") draw();
+        return {
+          productId,
+          productTitle,
+          minimumTarget,
+          desiredCount,
+          availableCount: ratioPool.length,
+          initialSelectedCount: currentDecisions.length,
+          selectedCount,
+          checkedCount,
+          failedCount,
+          targetRatio,
+          shortage: Math.max(0, minimumTarget - selectedCount),
+          status: selectedCount >= minimumTarget
+            ? "fulfilled"
+            : "insufficient",
+        };
+      };
+
       const draw = () => {
         const productCandidates = visibleCandidates();
         const removedSelectionCount = pruneSelectedCandidates(
@@ -4056,7 +4294,8 @@
             const duplicateElsewhere = selectedByOtherProduct();
             select.checked = desired;
             select.disabled = !desired && (
-              !baseSelectable
+              globalSelectionRunning
+              || !baseSelectable
               || duplicateElsewhere
               || result?.status === "blocked"
             );
@@ -4359,7 +4598,104 @@
         issueFilter.textContent = active ? "只看需处理素材" : "查看全部已选素材";
         renderSelected();
       });
+      globalSelectionContexts.push({
+        productId,
+        productTitle,
+        priority: () => (
+          visibleCandidates().filter(candidateIsSelectable).length
+          - Math.max(0, Math.floor(Number(missingMaterials) || 0) * 3)
+        ),
+        run: selectMinimumForProduct,
+      });
       draw();
+    });
+    globalSelectionButton.addEventListener("click", async () => {
+      if (!galleryComplete || globalSelectionRunning) return;
+      const renderGeneration = stageGeneration;
+      globalSelectionRunning = true;
+      globalSelectionButton.disabled = true;
+      globalSelectionButton.textContent = "正在为全部商品选图…";
+      refreshAllSelectionAvailability();
+      const outcomes = [];
+      const orderedContexts = [...globalSelectionContexts].sort(
+        (left, right) => left.priority() - right.priority()
+          || left.productId.localeCompare(right.productId, "zh-CN"),
+      );
+      try {
+        for (let index = 0; index < orderedContexts.length; index += 1) {
+          if (
+            currentStageId !== "asset_matching"
+            || renderGeneration !== stageGeneration
+          ) break;
+          const context = orderedContexts[index];
+          globalSelectionStatus.textContent = (
+            `正在处理第 ${index + 1}/${orderedContexts.length} 个商品：`
+            + `${context.productTitle || context.productId}`
+          );
+          const outcome = await context.run((progress) => {
+            globalSelectionStatus.textContent = (
+              `正在处理第 ${index + 1}/${orderedContexts.length} 个商品：`
+              + `${progress.productTitle || progress.productId}`
+              + `，已选 ${progress.selectedCount}/${progress.minimumTarget} 张`
+            );
+          });
+          outcomes.push(outcome);
+        }
+        if (
+          currentStageId === "asset_matching"
+          && renderGeneration === stageGeneration
+        ) {
+          const fulfilledCount = outcomes.filter(
+            (item) => item.status === "fulfilled",
+          ).length;
+          const insufficientCount = outcomes.filter(
+            (item) => item.status === "insufficient",
+          ).length;
+          const conflictCount = outcomes.filter(
+            (item) => item.status === "existing_ratio_conflict",
+          ).length;
+          const addedCount = outcomes.reduce(
+            (total, item) => total + Math.max(
+              0,
+              Number(item.selectedCount || 0)
+                - Number(item.initialSelectedCount || 0),
+            ),
+            0,
+          );
+          const notices = [
+            `已为 ${outcomes.length} 个商品完成自动选图，本次新增 ${addedCount} 张素材`,
+            `${fulfilledCount} 个商品已满足全部空坑位`,
+          ];
+          if (insufficientCount) {
+            notices.push(`${insufficientCount} 个商品素材不足，已选择全部可用素材`);
+          }
+          if (conflictCount) {
+            notices.push(`${conflictCount} 个商品的原有选图比例不一致，请手工调整`);
+          }
+          globalSelectionStatus.textContent = `${notices.join("；")}。`;
+          actionMessage.textContent = globalSelectionStatus.textContent;
+        }
+      } catch (error) {
+        if (
+          currentStageId === "asset_matching"
+          && renderGeneration === stageGeneration
+        ) {
+          globalSelectionStatus.textContent = (
+            error.userMessage || error.message || "一键选图未完成，请重试。"
+          );
+          actionMessage.textContent = globalSelectionStatus.textContent;
+        }
+      } finally {
+        globalSelectionRunning = false;
+        if (
+          currentStageId === "asset_matching"
+          && renderGeneration === stageGeneration
+        ) {
+          globalSelectionButton.disabled = false;
+          globalSelectionButton.textContent = "一键为全部商品选图";
+          refreshAllSelectionAvailability();
+        }
+      }
     });
     renderProductNavigator(productNavigator, productTargets);
     if (galleryComplete) {
@@ -4372,7 +4708,7 @@
       if (galleryAutoFocusedFor !== focusIdentity) {
         galleryAutoFocusedFor = focusIdentity;
         window.requestAnimationFrame(() => {
-          content.querySelector(".asset-product")?.scrollIntoView({
+          globalSelectionPanel.scrollIntoView({
             behavior: "smooth",
             block: "start",
           });
@@ -4725,6 +5061,7 @@
         { notify },
       );
     };
+    let workflowLoading = null;
     const applyCurrentPlan = (plan) => {
       if (!plan || !Array.isArray(plan.slot_assignments)) return;
       products.forEach((product) => {
@@ -4773,8 +5110,11 @@
       process: "图片裁剪与压缩",
       copy: "AI 标题与描述",
     };
-    let activeSubpage = pageOrder[0];
-    let maxUnlockedPage = 0;
+    const rememberedSubpage = pageOrder.includes(slotsCopyActiveSubpage)
+      ? slotsCopyActiveSubpage
+      : "";
+    let activeSubpage = rememberedSubpage || pageOrder[0];
+    let maxUnlockedPage = Math.max(0, pageOrder.indexOf(activeSubpage));
     const subpages = {};
     const setSubpage = (page, { userRequested = false } = {}) => {
       const requestedIndex = pageOrder.indexOf(page);
@@ -4786,6 +5126,9 @@
         && page !== "copy"
       ) return;
       activeSubpage = page;
+      slotsCopyActiveSubpage = page;
+      if (workflowLoading) workflowLoading.hidden = true;
+      wizard.hidden = false;
       Object.entries(subpages).forEach(([name, panel]) => {
         panel.hidden = name !== page;
       });
@@ -4812,12 +5155,26 @@
       ));
       wizard.appendChild(button);
     });
-    if (wizard.firstElementChild) wizard.firstElementChild.dataset.active = "true";
+    [...wizard.children].forEach((item, index) => {
+      item.dataset.active = pageOrder[index] === activeSubpage ? "true" : "false";
+      item.disabled = index > maxUnlockedPage;
+    });
+    wizard.hidden = !rememberedSubpage;
     content.appendChild(wizard);
+    workflowLoading = element("div", "empty-state slot-workflow-loading");
+    workflowLoading.dataset.emptyState = "正在恢复当前处理进度";
+    workflowLoading.setAttribute("aria-live", "polite");
+    workflowLoading.hidden = Boolean(rememberedSubpage);
+    workflowLoading.append(
+      element("span", "", "◎"),
+      element("strong", "", "正在恢复当前处理进度…"),
+      element("p", "", "页面会保留正在进行的步骤，恢复后继续显示当前进度。"),
+    );
+    content.appendChild(workflowLoading);
     pageOrder.forEach((page) => {
       const panel = element("section", "slot-subpage");
       panel.dataset.slotSubpage = page;
-      panel.hidden = page !== pageOrder[0];
+      panel.hidden = !rememberedSubpage || page !== activeSubpage;
       subpages[page] = panel;
       content.appendChild(panel);
     });
@@ -6297,6 +6654,7 @@
             maxUnlockedPage,
             pageOrder.indexOf("copy"),
           );
+          setSubpage("copy");
         }
       })
       .catch(() => {});
@@ -6653,6 +7011,10 @@
         );
         if (currentPayload.current_slot_plan) {
           applyCurrentPlan(currentPayload.current_slot_plan);
+        } else if (data.deterministic_plan) {
+          applyCurrentPlan(data.deterministic_plan);
+        } else {
+          setSubpage(pageOrder[0]);
         }
         const requestsPayload = await fetchJson(
           apiPath("/stages/slots_copy/agent-requests"),
@@ -6882,6 +7244,21 @@
   }
 
   function renderStageLoadingState(stageId) {
+    if (stageId === "slots_copy") {
+      const module = document.querySelector('[data-component="SlotBoard"]');
+      const content = module?.querySelector("[data-result-content]");
+      if (!content) return;
+      const loading = element("div", "empty-state slot-workflow-loading");
+      loading.dataset.emptyState = "正在恢复当前处理进度";
+      loading.setAttribute("aria-live", "polite");
+      loading.append(
+        element("span", "", "◎"),
+        element("strong", "", "正在恢复当前处理进度…"),
+        element("p", "", "已保存的坑位、图片和文案不会丢失。"),
+      );
+      content.replaceChildren(loading);
+      return;
+    }
     if (stageId !== "asset_matching") return;
     const module = document.querySelector('[data-component="AssetMatchGallery"]');
     const content = module?.querySelector("[data-result-content]");
@@ -7761,10 +8138,13 @@
         stageId: requestedStageId,
         workflowStep: requestedStageId === "asset_matching"
           ? inferAssetMatchingStep(uiState.result?.data, uiState.serverStatus)
-          : "",
+          : requestedStageId === "slots_copy"
+            ? slotsCopyActiveSubpage
+            : "",
         dirty: uiState.dirty,
         persistenceInFlight,
         pendingPreflightCount: selectionPreflightScheduler.desiredPendingCount(),
+        copyRequestInFlight: localCopyRequestInFlight,
       });
       if (stageHydrationChanged && !hydrationDeferred) {
         renderStatus();
@@ -7798,8 +8178,15 @@
 
   async function activateStage(stageId) {
     if (!stages.has(stageId)) return;
+    const previousStageId = currentStageId;
     if (currentStageId === "asset_matching" || stageId === "asset_matching") {
       resetSelectionPreflightClientState();
+    }
+    if (previousStageId !== stageId) {
+      localCopyRequestInFlight = false;
+      if (previousStageId === "slots_copy" || stageId === "slots_copy") {
+        slotsCopyActiveSubpage = "";
+      }
     }
     stageGeneration += 1;
     window.clearTimeout(autoSaveTimer);
@@ -7813,7 +8200,6 @@
     currentBackNavigation = null;
     currentGalleryJob = null;
     currentGalleryProgress = null;
-    localCopyRequestInFlight = false;
     currentStageInputLoaded = false;
     currentStageHasPersistedInput = false;
     recoverProcessingButton.hidden = true;

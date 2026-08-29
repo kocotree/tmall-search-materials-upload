@@ -357,20 +357,78 @@
     );
   }
 
+  function candidateFeasibleRatios(candidate) {
+    if (Array.isArray(candidate?.feasible_ratios)) {
+      return ["3:4", "1:1"].filter(
+        (ratio) => candidate.feasible_ratios
+          .map((value) => String(value || ""))
+          .includes(ratio),
+      );
+    }
+    const supported = new Set();
+    const ratioOptions = candidate?.ratio_options || {};
+    const checks = candidate?.resolution_checks
+      || candidate?.preflight?.resolution_checks
+      || {};
+    ["3:4", "1:1"].forEach((ratio) => {
+      if (
+        ratioOptions?.[ratio]?.feasible === true
+        || checks?.[ratio]?.minimum_status === "meets_minimum"
+      ) supported.add(ratio);
+    });
+    return ["3:4", "1:1"].filter((ratio) => supported.has(ratio));
+  }
+
+  function globalAssetSelectionTarget(missingMaterials, availableCount) {
+    const missing = Math.max(0, Math.floor(Number(missingMaterials) || 0));
+    const available = Math.max(0, Math.floor(Number(availableCount) || 0));
+    return Math.min(missing * 3, available);
+  }
+
+  function stableTextHash(value) {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function stableGlobalAssetOrder(candidates, seed, productId) {
+    const prefix = `${String(seed || "")}\u0000${String(productId || "")}\u0000`;
+    return [...(Array.isArray(candidates) ? candidates : [])].sort((left, right) => {
+      const leftIdentity = `${String(left?.asset_id || "")}\u0000${String(left?.sha256 || "")}`;
+      const rightIdentity = `${String(right?.asset_id || "")}\u0000${String(right?.sha256 || "")}`;
+      const scoreDifference = stableTextHash(prefix + leftIdentity)
+        - stableTextHash(prefix + rightIdentity);
+      if (scoreDifference) return scoreDifference;
+      return leftIdentity.localeCompare(rightIdentity, "zh-CN");
+    });
+  }
+
   function shouldDeferEditableStageHydration({
     stageId,
     workflowStep,
     dirty = false,
     persistenceInFlight = false,
     pendingPreflightCount = 0,
+    copyRequestInFlight = false,
   } = {}) {
-    return stageId === "asset_matching"
+    const imageSelectionBusy = stageId === "asset_matching"
       && workflowStep === "image_selection"
       && (
         dirty
         || persistenceInFlight
         || Number(pendingPreflightCount || 0) > 0
       );
+    const copyGenerationBusy = stageId === "slots_copy"
+      && workflowStep === "copy"
+      && (
+        dirty
+        || persistenceInFlight
+        || copyRequestInFlight
+      );
+    return imageSelectionBusy || copyGenerationBusy;
   }
 
   function activeProductTargetIndex(rects, activationLine = 0) {
@@ -1018,6 +1076,7 @@
   return {
     activeProductTargetIndex,
     assetSelectedByOtherProduct,
+    candidateFeasibleRatios,
     canonicalJsonValue,
     assetSelectionGuidance,
     completenessProductHasOpenSlots,
@@ -1034,6 +1093,7 @@
     fifthStagePage,
     filterCompletenessProducts,
     galleryNeedsReload,
+    globalAssetSelectionTarget,
     twoStepFifthStagePage,
     isCurrentRequest,
     jsonSemanticallyEqual,
@@ -1057,6 +1117,7 @@
     technicalDiagnosticView,
     selectInitialStage,
     selectionPreflightWeight,
+    stableGlobalAssetOrder,
     shouldDeferEditableStageHydration,
     switchStage,
     disambiguateImageSourceLabels,
