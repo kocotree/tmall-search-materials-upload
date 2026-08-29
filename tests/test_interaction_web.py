@@ -702,8 +702,14 @@ def test_root_renders_nine_stage_left_rail(client):
 
 def test_root_uses_non_repeating_workbench_brand_name(client):
     html = client.get("/").get_data(as_text=True)
+    favicon = client.get("/static/favicon.png")
 
     assert "<title>天猫搜推素材上新工作台</title>" in html
+    assert 'rel="icon" type="image/png" sizes="64x64"' in html
+    assert "/static/favicon.png?v=" in html
+    assert favicon.status_code == 200
+    assert favicon.mimetype == "image/png"
+    assert favicon.data.startswith(b"\x89PNG\r\n\x1a\n")
     assert '<p class="eyebrow">天猫搜推素材</p>' in html
     assert '<p class="brand-name">上新工作台</p>' in html
     assert '<p class="brand-name">素材上新工作台</p>' not in html

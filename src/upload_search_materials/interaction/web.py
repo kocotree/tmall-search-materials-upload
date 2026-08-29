@@ -906,7 +906,13 @@ def create_app(
     static_asset_version = hashlib.sha256(
         b"".join(
             (static_root / name).read_bytes()
-            for name in ("app.css", "ui-state.js", "app.js")
+            for name in (
+                "app.css",
+                "ui-state.js",
+                "app.js",
+                "kocotree-logo.png",
+                "favicon.png",
+            )
         )
     ).hexdigest()[:12]
     plugin_version = _load_plugin_version()
