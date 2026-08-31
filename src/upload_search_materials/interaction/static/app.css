@@ -1409,6 +1409,43 @@ summary:focus-visible {
   gap: 1rem;
 }
 
+.crop-preflight-failure-summary {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.9rem 1rem;
+  border: 2px solid var(--danger);
+  border-radius: 0.8rem;
+  color: #7d2419;
+  background: #fff1ed;
+  scroll-margin-top: 180px;
+}
+
+.crop-preflight-failure-summary p {
+  margin: 0;
+}
+
+.crop-preflight-failure-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.crop-preflight-failure-link {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #db8b7f;
+  border-radius: 0.6rem;
+  color: #7d2419;
+  background: #fff;
+  text-align: left;
+}
+
+.crop-preflight-failure-link:hover,
+.crop-preflight-failure-link:focus-visible {
+  border-color: var(--danger);
+  outline: 2px solid rgba(182, 60, 45, 0.22);
+  outline-offset: 2px;
+}
+
 .slot-process-card {
   display: grid;
   gap: 0.75rem;
@@ -1418,8 +1455,19 @@ summary:focus-visible {
   background: #fff;
 }
 
+.slot-process-image.crop-preflight-failed {
+  border: 2px solid var(--danger);
+  background: #fff4f1;
+  box-shadow: 0 0 0 3px rgba(182, 60, 45, 0.13);
+  scroll-margin-top: 180px;
+}
+
 .slot-process-error {
   color: var(--warning);
+}
+
+.crop-preflight-image-error {
+  color: var(--danger);
 }
 
 .slot-technical-details {

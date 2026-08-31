@@ -67,6 +67,17 @@ class ImagePolicyError(ValueError):
     """Raised when a task cannot produce a trustworthy image-policy snapshot."""
 
 
+class OutputSizeBelowMinimumError(ValueError):
+    """Carry the measured output size across the crop-preflight boundary."""
+
+    reason_code = "OUTPUT_SIZE_BELOW_MINIMUM"
+
+    def __init__(self, *, actual_size_bytes: int, minimum_size_bytes: int) -> None:
+        super().__init__(self.reason_code)
+        self.actual_size_bytes = int(actual_size_bytes)
+        self.minimum_size_bytes = int(minimum_size_bytes)
+
+
 @dataclass(frozen=True)
 class SourceInspection:
     source_path: str
@@ -910,7 +921,10 @@ class PillowImageCompressionProvider:
                     if chosen_quality is not None:
                         break
                     if temporary.exists() and temporary.stat().st_size < minimum:
-                        raise ValueError("OUTPUT_SIZE_BELOW_MINIMUM")
+                        raise OutputSizeBelowMinimumError(
+                            actual_size_bytes=temporary.stat().st_size,
+                            minimum_size_bytes=minimum,
+                        )
                     next_width = int(image.width * output_policy["resize_step"])
                     next_height = int(image.height * output_policy["resize_step"])
                     if (

@@ -5600,6 +5600,11 @@
         "比例按坑位统一选择；每张图片只调整当前比例的裁剪框。",
       ),
     );
+    const cropFailureSummary = element(
+      "section",
+      "crop-preflight-failure-summary",
+    );
+    cropFailureSummary.hidden = true;
     const processProductNavigator = element("div", "product-jump-mount");
     const processWorkspace = element("div", "slot-process-workspace");
     const processStatus = element(
@@ -5640,6 +5645,7 @@
     );
     processPanel.append(
       processHeading,
+      cropFailureSummary,
       processProductNavigator,
       processWorkspace,
       processActions,
@@ -5675,8 +5681,81 @@
       );
     const invalidateCropPreflight = () => {
       cropPreflight = null;
+      cropFailureSummary.hidden = true;
+      cropFailureSummary.replaceChildren();
       processPlanButton.disabled = true;
       processStatus.textContent = "裁剪参数已变化，请重新执行裁剪预校验。";
+    };
+    const cropFailureKey = (slotId, assetId, order) => JSON.stringify([
+      String(slotId || ""),
+      String(assetId || ""),
+      Number(order || 0),
+    ]);
+    const cropPreflightFailures = () => (
+      Array.isArray(cropPreflight?.failures)
+        ? cropPreflight.failures.filter((item) => item && item.slot_id)
+        : []
+    );
+    const renderCropFailureSummary = (
+      failures,
+      failureTargets,
+      { focusFirstFailure = false } = {},
+    ) => {
+      cropFailureSummary.replaceChildren();
+      cropFailureSummary.hidden = failures.length === 0;
+      if (!failures.length) return;
+      cropFailureSummary.append(
+        element("strong", "", `有 ${failures.length} 张图片需要更换`),
+        element(
+          "p",
+          "",
+          "裁剪后文件不足 200KB。你可以更换图片，或去掉对应坑位后重新执行裁剪预校验。",
+        ),
+      );
+      const list = element("div", "crop-preflight-failure-list");
+      failures.forEach((failure) => {
+        const product = products.find(
+          (item) => String(item.product_id) === String(failure.product_id),
+        );
+        const productLabel = failure.product_title
+          || product?.product_title
+          || `商品 ${failure.product_id}`;
+        const actualSize = Number(failure.actual_output_size_bytes || 0);
+        const label = `${productLabel} → ${failure.slot_id} → 第 ${failure.order} 张 → 实际输出 ${
+          actualSize > 0 ? formatBytes(actualSize) : "大小未取得"
+        }`;
+        const jump = element(
+          "button",
+          "crop-preflight-failure-link",
+          label,
+        );
+        jump.type = "button";
+        const key = cropFailureKey(
+          failure.slot_id,
+          failure.asset_id,
+          failure.order,
+        );
+        jump.addEventListener("click", () => {
+          const target = failureTargets.get(key);
+          if (!target) return;
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          target.focus({ preventScroll: true });
+        });
+        list.appendChild(jump);
+      });
+      cropFailureSummary.appendChild(list);
+      if (!focusFirstFailure) return;
+      const first = failures[0];
+      const firstTarget = failureTargets.get(cropFailureKey(
+        first.slot_id,
+        first.asset_id,
+        first.order,
+      ));
+      if (!firstTarget) return;
+      requestAnimationFrame(() => {
+        firstTarget.scrollIntoView({ behavior: "smooth", block: "center" });
+        firstTarget.focus({ preventScroll: true });
+      });
     };
     const createSlotCropEditor = (output, assignment, cropState) => {
       const width = Number(output.width || output.source_width || 0);
@@ -5859,9 +5938,17 @@
       editor.append(frame, controls, outputSize, preview);
       return editor;
     };
-    const renderProcessingPage = () => {
+    const renderProcessingPage = ({ focusFirstFailure = false } = {}) => {
       processWorkspace.replaceChildren();
       const productTargets = new Map();
+      const failures = cropPreflightFailures();
+      const failuresByImage = new Map(
+        failures.map((failure) => [
+          cropFailureKey(failure.slot_id, failure.asset_id, failure.order),
+          failure,
+        ]),
+      );
+      const failureTargets = new Map();
       let blockedReason = "";
       [...stateByProduct.values()].flat().forEach((assignment) => {
         const product = products.find(
@@ -5929,6 +6016,7 @@
             assignment.target_ratio,
           );
           const imageCard = element("article", "slot-process-image");
+          imageCard.tabIndex = -1;
           if (!output) {
             blockedReason = "有已选图片缺少当前坑位比例的处理数据，请返回坑位编排重新选择。";
             imageCard.append(
@@ -5939,6 +6027,12 @@
             return;
           }
           const cropKey = `${assignment.slot_id}:${assetId}`;
+          const failureKey = cropFailureKey(
+            assignment.slot_id,
+            assetId,
+            order + 1,
+          );
+          const cropFailure = failuresByImage.get(failureKey);
           if (
             !cropParameters[cropKey]
             || cropParameters[cropKey].use_original === true
@@ -6006,11 +6100,27 @@
             ),
             compressionLabel,
           );
+          if (cropFailure) {
+            imageCard.classList.add("crop-preflight-failed");
+            imageCard.appendChild(
+              element(
+                "strong",
+                "slot-process-error crop-preflight-image-error",
+                cropFailure.message || "裁剪后文件不足 200KB，请更换该图片",
+              ),
+            );
+            failureTargets.set(failureKey, imageCard);
+          }
           grid.appendChild(imageCard);
         });
         card.append(heading, grid);
         processWorkspace.appendChild(card);
       });
+      renderCropFailureSummary(
+        failures,
+        failureTargets,
+        { focusFirstFailure },
+      );
       renderProductNavigator(
         processProductNavigator,
         [...productTargets.values()],
@@ -6036,7 +6146,9 @@
       processPlanButton.disabled = Boolean(blockedReason)
         || cropPreflight?.workflow_state !== "crop_preflight_passed";
       processStatus.textContent = blockedReason
-        || (cropPreflight?.workflow_state === "crop_preflight_passed"
+        || (failures.length
+          ? `有 ${failures.length} 张图片裁剪后文件不足 200KB，请更换图片或去掉对应坑位后重新预校验。`
+          : cropPreflight?.workflow_state === "crop_preflight_passed"
           ? `裁剪预校验已通过：${cropPreflight.checked_count || 0} 张图片均不少于 204,800 字节。`
           : "请先执行裁剪预校验；通过后才能进入文案生成。");
     };
@@ -6686,6 +6798,11 @@
         currentPlanRevision = Number(
           cropPreflight.plan_revision || currentPlanRevision,
         );
+        if (cropPreflight.workflow_state === "crop_preflight_failed") {
+          renderProcessingPage({ focusFirstFailure: true });
+          processPlanButton.disabled = true;
+          return;
+        }
         processStatus.textContent = `裁剪预校验已通过：${cropPreflight.checked_count || 0} 张图片均不少于 204,800 字节。`;
         processPlanButton.disabled = false;
       } catch (error) {
@@ -6747,7 +6864,9 @@
     });
     fetchJson(apiPath("/stages/slots_copy/crop-preflight"))
       .then((preflight) => {
-        if (preflight.workflow_state !== "crop_preflight_passed") return;
+        if (!["crop_preflight_passed", "crop_preflight_failed"].includes(
+          preflight.workflow_state,
+        )) return;
         cropPreflight = preflight;
         if (preflight.crop_parameters) {
           Object.keys(cropParameters).forEach((key) => delete cropParameters[key]);
@@ -6756,7 +6875,9 @@
         currentPlanRevision = Number(
           preflight.plan_revision || currentPlanRevision,
         );
-        renderProcessingPage();
+        renderProcessingPage({
+          focusFirstFailure: preflight.workflow_state === "crop_preflight_failed",
+        });
       })
       .catch(() => {});
     fetchJson(apiPath("/stages/slots_copy/processed-outputs"))
@@ -7105,8 +7226,13 @@
             if (!confirmed) return;
             const assignments = stateByProduct.get(productId);
             assignments.splice(slotIndex, 1);
+            Object.keys(cropParameters)
+              .filter((key) => key.startsWith(`${currentSlotId}:`))
+              .forEach((key) => delete cropParameters[key]);
+            invalidateCropPreflight();
             persist(true);
             draw();
+            if (!processPanel.hidden) renderProcessingPage();
             composeStatus.textContent = `已去掉坑位“${currentSlotId}”；请重新确认剩余坑位。`;
             actionMessage.textContent = `已去掉当前坑位“${currentSlotId}”。`;
           });

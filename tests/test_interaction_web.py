@@ -2423,6 +2423,24 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     )
 
 
+def test_crop_preflight_failures_are_visible_locatable_and_recoverable(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+    stylesheet = client.get("/static/app.css").get_data(as_text=True)
+
+    assert "crop-preflight-failure-summary" in javascript
+    assert "crop_preflight_failed" in javascript
+    assert "裁剪后文件不足 200KB，请更换该图片" in javascript
+    assert "actual_output_size_bytes" in javascript
+    assert "product_title" in javascript
+    assert "scrollIntoView" in javascript
+    assert "focusFirstFailure" in javascript
+    assert "OUTPUT_SIZE_BELOW_MINIMUM" not in javascript
+    assert "crop-preflight-failed" in stylesheet
+    assert "crop-preflight-image-error" in stylesheet
+    assert "invalidateCropPreflight();" in javascript
+    assert "if (!processPanel.hidden) renderProcessingPage();" in javascript
+
+
 def test_asset_matching_prefills_three_editable_labeled_image_roots(client):
     decoded = html_module.unescape(client.get("/").get_data(as_text=True))
     expected_roots = (

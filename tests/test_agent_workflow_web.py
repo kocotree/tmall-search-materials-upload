@@ -630,6 +630,83 @@ def test_three_step_confirm_and_processing_are_separate_and_idempotent(
     ] == after_first["plan_revision"]
 
 
+def test_crop_preflight_failure_details_are_persisted(tmp_path, monkeypatch):
+    import upload_search_materials.interaction.web as web_module
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    current_endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/current-slot-plan"
+    )
+    current = client.post(
+        current_endpoint,
+        json={
+            "plan_revision": 0,
+            "slot_assignments": [{
+                "slot_id": "slot-a",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            }],
+        },
+    ).json["current_slot_plan"]
+    confirmed = client.post(
+        f"{current_endpoint}/confirm",
+        json={"plan_revision": current["plan_revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.json
+    failure = {
+        "product_id": "P1",
+        "product_title": "测试商品",
+        "slot_id": "slot-a",
+        "asset_id": "asset-1",
+        "order": 2,
+        "reason_code": "OUTPUT_SIZE_BELOW_MINIMUM",
+        "message": "裁剪后文件不足 200KB，请更换该图片",
+        "actual_output_size_bytes": 102400,
+        "minimum_size_bytes": 204800,
+    }
+
+    def fake_materialize(*_args, **kwargs):
+        assert kwargs["collect_failures"] is True
+        return {
+            "schema_version": 1,
+            "workflow_state": "crop_preflight_failed",
+            "processing_sha256": "failed-processing",
+            "slots": [{
+                "slot_id": "slot-a",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "status": "preflight_failed",
+                "outputs": [{"asset_id": "asset-0"}, {"asset_id": "asset-2"}],
+                "failures": [failure],
+            }],
+            "failures": [failure],
+        }
+
+    monkeypatch.setattr(
+        web_module,
+        "materialize_confirmed_slot_plan",
+        fake_materialize,
+    )
+    endpoint = (
+        f"/api/sessions/{session_id}/stages/slots_copy/crop-preflight"
+    )
+    response = client.post(endpoint, json={"crop_parameters": {}})
+
+    assert response.status_code == 200, response.json
+    assert response.json["workflow_state"] == "crop_preflight_failed"
+    assert response.json["checked_count"] == 3
+    assert response.json["passed_count"] == 2
+    assert response.json["failure_count"] == 1
+    assert response.json["failures"] == [failure]
+    assert client.get(endpoint).json == response.json
+    persisted = SessionStore._read_json(
+        store._stage_path(session_id, "slots_copy") / "crop-preflight.json",
+        "crop-preflight",
+    )
+    assert persisted["failures"] == [failure]
+
+
 def test_single_crop_change_invalidates_only_its_slot_copy(tmp_path):
     client, store, session_id = _prepared_slot_client(
         tmp_path, asset_count=6

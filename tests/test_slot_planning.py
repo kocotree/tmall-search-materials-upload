@@ -387,3 +387,78 @@ def test_near_native_candidates_always_use_exact_standard_crop(tmp_path):
     for output in result["slots"][0]["outputs"]:
         assert output["crop_source"] == "candidate"
         assert output["output_width"] * 4 == output["output_height"] * 3
+
+
+def test_crop_preflight_collects_output_size_failures_with_image_context(
+    tmp_path,
+):
+    policy = default_image_policy()
+    outputs = []
+    for index in range(3):
+        source = tmp_path / f"preflight-{index}.jpg"
+        if index == 1:
+            Image.new("RGB", (960, 1280), (245, 245, 245)).save(
+                source,
+                format="JPEG",
+                quality=95,
+            )
+            with source.open("ab") as stream:
+                stream.write(b"\0" * (204800 - source.stat().st_size + 1024))
+        else:
+            Image.effect_noise((960, 1280), 80 + index).convert("RGB").save(
+                source,
+                format="JPEG",
+                quality=95,
+            )
+        outputs.append(
+            {
+                "asset_id": f"A{index}",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "source_path": str(source),
+                "source_sha256": sha256_file(source),
+                "crop_box": {"normalized": [0.0, 0.0, 1.0, 1.0]},
+                "native_ratio": True,
+                "requires_compression": False,
+            }
+        )
+    board = {
+        "image_review_revision": 2,
+        "policy_sha256": "policy",
+        "policy": policy,
+        "slot_image_min": 3,
+        "slot_image_max": 9,
+        "products": [{
+            "product_id": "P1",
+            "product_title": "测试商品",
+            "outputs": outputs,
+        }],
+    }
+    assignments = [{
+        "slot_id": "slot-1",
+        "product_id": "P1",
+        "target_ratio": "3:4",
+        "asset_ids": ["A0", "A1", "A2"],
+    }]
+
+    result = materialize_confirmed_slot_plan(
+        assignments,
+        board,
+        derived_root=tmp_path / "derived",
+        collect_failures=True,
+    )
+
+    assert result["workflow_state"] == "crop_preflight_failed"
+    assert len(result["slots"][0]["outputs"]) == 2
+    assert result["slots"][0]["status"] == "preflight_failed"
+    assert result["slots"][0]["failures"] == result["failures"]
+    failure = result["failures"][0]
+    assert failure["product_id"] == "P1"
+    assert failure["product_title"] == "测试商品"
+    assert failure["slot_id"] == "slot-1"
+    assert failure["asset_id"] == "A1"
+    assert failure["order"] == 2
+    assert failure["reason_code"] == "OUTPUT_SIZE_BELOW_MINIMUM"
+    assert failure["message"] == "裁剪后文件不足 200KB，请更换该图片"
+    assert failure["actual_output_size_bytes"] < 204800
+    assert failure["minimum_size_bytes"] == 204800

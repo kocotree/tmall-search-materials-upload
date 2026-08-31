@@ -14,6 +14,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .image_compliance import (
     KIB,
     MIB,
+    OutputSizeBelowMinimumError,
     matches_exact_aspect_ratio,
     normalize_image_policy,
 )
@@ -465,7 +466,10 @@ def validate_final_output(
     minimum = round(image_policy["min_size_kb"] * KIB)
     maximum = round(image_policy["max_size_mb"] * MIB)
     if size_bytes < minimum:
-        raise ValueError("OUTPUT_SIZE_BELOW_MINIMUM")
+        raise OutputSizeBelowMinimumError(
+            actual_size_bytes=size_bytes,
+            minimum_size_bytes=minimum,
+        )
     if size_bytes > maximum:
         raise ValueError("IMAGE_SIZE_EXCEEDED")
     try:
@@ -700,6 +704,7 @@ def materialize_confirmed_slot_plan(
     *,
     derived_root: Path,
     crop_parameters: Mapping[str, Any] | None = None,
+    collect_failures: bool = False,
 ) -> dict[str, Any]:
     """Generate and revalidate task-local outputs only after plan validation."""
 
@@ -718,6 +723,13 @@ def materialize_confirmed_slot_plan(
     provider = PillowImageCompressionProvider(policy)
     maximum = round(policy["max_size_mb"] * MIB)
     plan_sha256 = slot_plan_sha256(normalized)
+    product_titles = {
+        str(product.get("product_id", "")): str(
+            product.get("product_title", "")
+        )
+        for product in board_data.get("products", [])
+        if isinstance(product, Mapping)
+    }
     crop_values = dict(crop_parameters or {})
     processing_sha256 = hashlib.sha256(
         json.dumps(
@@ -729,138 +741,170 @@ def materialize_confirmed_slot_plan(
         ).encode("utf-8")
     ).hexdigest()
     slots: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     root = Path(derived_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     for assignment in normalized:
         outputs = []
+        slot_failures: list[dict[str, Any]] = []
         for order, asset_id in enumerate(
             assignment["ordered_asset_ids"], start=1
         ):
-            candidate = candidates[(asset_id, assignment["target_ratio"])]
-            crop_key = f"{assignment['slot_id']}:{asset_id}"
-            crop_parameter = crop_values.get(crop_key, {})
-            if crop_parameter and not isinstance(crop_parameter, Mapping):
-                raise ValueError("CROP_PARAMETER_INVALID")
-            submitted_box = (
-                crop_parameter.get("normalized_box")
-                if isinstance(crop_parameter, Mapping)
-                else None
-            )
-            if (
-                bool(candidate.get("requires_compression"))
-                and (
-                    not isinstance(crop_parameter, Mapping)
-                    or crop_parameter.get("confirm_compression") is not True
+            try:
+                candidate = candidates[(asset_id, assignment["target_ratio"])]
+                crop_key = f"{assignment['slot_id']}:{asset_id}"
+                crop_parameter = crop_values.get(crop_key, {})
+                if crop_parameter and not isinstance(crop_parameter, Mapping):
+                    raise ValueError("CROP_PARAMETER_INVALID")
+                submitted_box = (
+                    crop_parameter.get("normalized_box")
+                    if isinstance(crop_parameter, Mapping)
+                    else None
                 )
-            ):
-                raise ValueError("COMPRESSION_CONFIRMATION_REQUIRED")
-            if submitted_box is not None:
                 if (
-                    not isinstance(submitted_box, list)
-                    or len(submitted_box) != 4
-                    or any(
-                        isinstance(value, bool)
-                        or not isinstance(value, (int, float))
-                        or not 0 <= float(value) <= 1
-                        for value in submitted_box
+                    bool(candidate.get("requires_compression"))
+                    and (
+                        not isinstance(crop_parameter, Mapping)
+                        or crop_parameter.get("confirm_compression") is not True
                     )
-                    or float(submitted_box[0]) >= float(submitted_box[2])
-                    or float(submitted_box[1]) >= float(submitted_box[3])
                 ):
-                    raise ValueError("CROP_BOX_INVALID")
-                submitted_box = {
-                    "x": float(submitted_box[0]),
-                    "y": float(submitted_box[1]),
-                    "width": float(submitted_box[2])
-                    - float(submitted_box[0]),
-                    "height": float(submitted_box[3])
-                    - float(submitted_box[1]),
+                    raise ValueError("COMPRESSION_CONFIRMATION_REQUIRED")
+                if submitted_box is not None:
+                    if (
+                        not isinstance(submitted_box, list)
+                        or len(submitted_box) != 4
+                        or any(
+                            isinstance(value, bool)
+                            or not isinstance(value, (int, float))
+                            or not 0 <= float(value) <= 1
+                            for value in submitted_box
+                        )
+                        or float(submitted_box[0]) >= float(submitted_box[2])
+                        or float(submitted_box[1]) >= float(submitted_box[3])
+                    ):
+                        raise ValueError("CROP_BOX_INVALID")
+                    submitted_box = {
+                        "x": float(submitted_box[0]),
+                        "y": float(submitted_box[1]),
+                        "width": float(submitted_box[2])
+                        - float(submitted_box[0]),
+                        "height": float(submitted_box[3])
+                        - float(submitted_box[1]),
+                    }
+                candidate_box = candidate.get("crop_box", {}).get(
+                    "normalized", candidate.get("crop_box")
+                )
+                if isinstance(candidate_box, list) and len(candidate_box) == 4:
+                    candidate_box = {
+                        "x": float(candidate_box[0]),
+                        "y": float(candidate_box[1]),
+                        "width": float(candidate_box[2])
+                        - float(candidate_box[0]),
+                        "height": float(candidate_box[3])
+                        - float(candidate_box[1]),
+                    }
+                source_path = Path(
+                    str(candidate.get("source_path", ""))
+                ).resolve()
+                expected_source_sha256 = str(candidate.get("source_sha256", ""))
+                if (
+                    not source_path.is_file()
+                    or sha256_file(source_path) != expected_source_sha256
+                ):
+                    raise ValueError("SOURCE_IDENTITY_MISMATCH")
+                scoped_id = hashlib.sha256(
+                    (
+                        f"{processing_sha256}|{assignment['slot_id']}|{asset_id}|"
+                        f"{assignment['target_ratio']}|{order}"
+                    ).encode("utf-8")
+                ).hexdigest()[:24]
+                selected_box = submitted_box or candidate_box
+                if selected_box is None:
+                    raise ValueError("CROP_BOX_REQUIRED")
+                compressed = provider.compress(
+                    asset_id=scoped_id,
+                    source_sha256=expected_source_sha256,
+                    source_path=str(source_path),
+                    target_format=policy["output"]["format"],
+                    quality=policy["output"]["quality_max"],
+                    max_output_bytes=maximum,
+                    derived_root=str(root),
+                    target_ratio=assignment["target_ratio"],
+                    normalized_box=selected_box,
+                )
+                output = {
+                    **provider_contract_payload(compressed),
+                    "asset_id": asset_id,
+                    "product_id": assignment["product_id"],
+                    "slot_id": assignment["slot_id"],
+                    "order": order,
+                    "target_ratio": assignment["target_ratio"],
+                    "source_path": str(source_path),
+                    "source_sha256": expected_source_sha256,
+                    "policy_sha256": board_data.get("policy_sha256"),
+                    "plan_sha256": plan_sha256,
+                    "processing_sha256": processing_sha256,
+                    "crop_source": (
+                        "manual"
+                        if submitted_box is not None
+                        else "candidate"
+                    ),
                 }
-            candidate_box = candidate.get("crop_box", {}).get(
-                "normalized", candidate.get("crop_box")
-            )
-            if isinstance(candidate_box, list) and len(candidate_box) == 4:
-                candidate_box = {
-                    "x": float(candidate_box[0]),
-                    "y": float(candidate_box[1]),
-                    "width": float(candidate_box[2])
-                    - float(candidate_box[0]),
-                    "height": float(candidate_box[3])
-                    - float(candidate_box[1]),
+                if sha256_file(source_path) != expected_source_sha256:
+                    Path(output["output_path"]).unlink(missing_ok=True)
+                    raise ValueError("SOURCE_IDENTITY_MISMATCH")
+                verified = validate_final_output(output, policy=policy)
+                output_path = Path(verified["output_path"]).resolve()
+                if not output_path.is_relative_to(root):
+                    raise ValueError("OUTPUT_PATH_OUTSIDE_TASK")
+                outputs.append(verified)
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                if (
+                    not collect_failures
+                    or not isinstance(error, OutputSizeBelowMinimumError)
+                ):
+                    raise
+                failure = {
+                    "product_id": assignment["product_id"],
+                    "product_title": product_titles.get(
+                        assignment["product_id"], ""
+                    ),
+                    "slot_id": assignment["slot_id"],
+                    "asset_id": asset_id,
+                    "order": order,
+                    "reason_code": error.reason_code,
+                    "message": "裁剪后文件不足 200KB，请更换该图片",
+                    "actual_output_size_bytes": error.actual_size_bytes,
+                    "minimum_size_bytes": error.minimum_size_bytes,
                 }
-            source_path = Path(str(candidate.get("source_path", ""))).resolve()
-            expected_source_sha256 = str(candidate.get("source_sha256", ""))
-            if (
-                not source_path.is_file()
-                or sha256_file(source_path) != expected_source_sha256
-            ):
-                raise ValueError("SOURCE_IDENTITY_MISMATCH")
-            scoped_id = hashlib.sha256(
-                (
-                    f"{processing_sha256}|{assignment['slot_id']}|{asset_id}|"
-                    f"{assignment['target_ratio']}|{order}"
-                ).encode("utf-8")
-            ).hexdigest()[:24]
-            selected_box = submitted_box or candidate_box
-            if selected_box is None:
-                raise ValueError("CROP_BOX_REQUIRED")
-            compressed = provider.compress(
-                asset_id=scoped_id,
-                source_sha256=expected_source_sha256,
-                source_path=str(source_path),
-                target_format=policy["output"]["format"],
-                quality=policy["output"]["quality_max"],
-                max_output_bytes=maximum,
-                derived_root=str(root),
-                target_ratio=assignment["target_ratio"],
-                normalized_box=selected_box,
-            )
-            output = {
-                **provider_contract_payload(compressed),
-                "asset_id": asset_id,
-                "product_id": assignment["product_id"],
-                "slot_id": assignment["slot_id"],
-                "order": order,
-                "target_ratio": assignment["target_ratio"],
-                "source_path": str(source_path),
-                "source_sha256": expected_source_sha256,
-                "policy_sha256": board_data.get("policy_sha256"),
-                "plan_sha256": plan_sha256,
-                "processing_sha256": processing_sha256,
-                "crop_source": (
-                    "manual"
-                    if submitted_box is not None
-                    else "candidate"
-                ),
-            }
-            if sha256_file(source_path) != expected_source_sha256:
-                Path(output["output_path"]).unlink(missing_ok=True)
-                raise ValueError("SOURCE_IDENTITY_MISMATCH")
-            verified = validate_final_output(output, policy=policy)
-            output_path = Path(verified["output_path"]).resolve()
-            if not output_path.is_relative_to(root):
-                raise ValueError("OUTPUT_PATH_OUTSIDE_TASK")
-            outputs.append(verified)
+                slot_failures.append(failure)
+                failures.append(failure)
         ratios = {output["target_ratio"] for output in outputs}
-        if len(outputs) < 3 or len(outputs) > 9:
+        if not slot_failures and (len(outputs) < 3 or len(outputs) > 9):
             raise ValueError("IMAGE_COUNT_INVALID")
-        if ratios != {assignment["target_ratio"]}:
+        if outputs and ratios != {assignment["target_ratio"]}:
             raise ValueError("OUTPUT_ASPECT_RATIO_INVALID")
         slots.append(
             {
                 **assignment,
-                "status": "outputs_ready",
+                "status": (
+                    "preflight_failed" if slot_failures else "outputs_ready"
+                ),
                 "outputs": outputs,
+                "failures": slot_failures,
             }
         )
     return {
         "schema_version": 1,
-        "workflow_state": "outputs_ready",
+        "workflow_state": (
+            "crop_preflight_failed" if failures else "outputs_ready"
+        ),
         "image_review_revision": board_data.get("image_review_revision"),
         "policy_sha256": board_data.get("policy_sha256"),
         "plan_sha256": plan_sha256,
         "processing_sha256": processing_sha256,
         "slots": slots,
+        "failures": failures,
     }
 
 

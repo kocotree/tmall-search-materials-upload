@@ -4409,18 +4409,31 @@ def create_app(
                 data,
                 derived_root=stage_path / "derived",
                 crop_parameters=crop_parameters,
+                collect_failures=True,
             )
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             return _validation_error({"slot_assignments": str(error)})
+        failures = [
+            dict(item)
+            for item in processed.get("failures", [])
+            if isinstance(item, dict)
+        ]
+        successful_count = sum(
+            len(slot.get("outputs", []))
+            for slot in processed.get("slots", [])
+            if isinstance(slot, dict)
+        )
         preflight = {
             **processed,
-            "workflow_state": "crop_preflight_passed",
-            "crop_parameters": crop_parameters,
-            "checked_count": sum(
-                len(slot.get("outputs", []))
-                for slot in processed.get("slots", [])
-                if isinstance(slot, dict)
+            "workflow_state": (
+                "crop_preflight_failed"
+                if failures
+                else "crop_preflight_passed"
             ),
+            "crop_parameters": crop_parameters,
+            "checked_count": successful_count + len(failures),
+            "passed_count": successful_count,
+            "failure_count": len(failures),
             "minimum_size_bytes": 204800,
             "checked_at": datetime.now().astimezone().isoformat(),
         }
