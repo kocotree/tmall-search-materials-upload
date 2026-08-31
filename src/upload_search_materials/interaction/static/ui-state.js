@@ -385,6 +385,24 @@
     return Math.min(missing * 3, available);
   }
 
+  function prioritizeGlobalAssetCandidates(candidates) {
+    const values = Array.isArray(candidates) ? candidates : [];
+    const primary = [];
+    const supplement = [];
+    const unsupported = [];
+    values.forEach((candidate) => {
+      const ratios = candidateFeasibleRatios(candidate);
+      if (ratios.includes("3:4")) {
+        primary.push(candidate);
+      } else if (ratios.includes("1:1")) {
+        supplement.push(candidate);
+      } else {
+        unsupported.push(candidate);
+      }
+    });
+    return [...primary, ...supplement, ...unsupported];
+  }
+
   function stableTextHash(value) {
     let hash = 2166136261;
     for (let index = 0; index < value.length; index += 1) {
@@ -1094,6 +1112,7 @@
     filterCompletenessProducts,
     galleryNeedsReload,
     globalAssetSelectionTarget,
+    prioritizeGlobalAssetCandidates,
     twoStepFifthStagePage,
     isCurrentRequest,
     jsonSemanticallyEqual,

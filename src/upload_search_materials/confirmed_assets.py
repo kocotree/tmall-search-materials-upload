@@ -12,12 +12,12 @@ from pathlib import Path
 import random
 import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
-import uuid
 
 from .asset_selection import build_gallery_data
 from .assets import IMAGE_EXTENSIONS, build_loaded_image_preview
 from .image_compliance import default_image_policy, load_image_preflight_source
 from .models import ProductRecord
+from .persistence import atomic_write_json
 
 
 CANDIDATE_STRATEGY_ID = "proportional_task_sample"
@@ -26,7 +26,8 @@ COVERAGE_LIMIT_REASON = "FOLDER_COVERAGE_LIMIT_EXCEEDED"
 NO_SIZE_ELIGIBLE_IMAGES = "NO_SIZE_ELIGIBLE_IMAGES"
 PREFERRED_MIN_SIZE_BYTES = 500 * 1024
 PREFERRED_MAX_SIZE_BYTES = 15 * 1024 * 1024
-GALLERY_CHECKPOINT_SCHEMA_VERSION = 1
+GALLERY_CHECKPOINT_SCHEMA_VERSION = 2
+GALLERY_CHECKPOINT_POLICY_VERSION = 1
 GALLERY_MAX_WORKERS = 8
 GALLERY_PROGRESSIVE_PUBLISH_SIZE = 10
 GALLERY_CHECKPOINT_FLUSH_ITEMS = 10
@@ -83,25 +84,48 @@ def _folder_rank(decision: Mapping[str, Any]) -> tuple[int, str, int, str]:
     )
 
 
-def _iter_images(folder: Path) -> list[Path]:
+def _increment_count(counts: dict[str, int] | None, key: str) -> None:
+    if counts is not None:
+        counts[key] = int(counts.get(key, 0)) + 1
+
+
+def _iter_images(
+    folder: Path,
+    *,
+    error_counts: dict[str, int] | None = None,
+) -> list[Path]:
     """Enumerate image paths with one metadata pass and no directory resolves."""
 
     images: list[Path] = []
-    pending = [Path(folder)]
+    pending = [(Path(folder), True)]
     while pending:
-        current = pending.pop()
-        with os.scandir(current) as entries:
-            for entry in entries:
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                    elif (
-                        Path(entry.name).suffix.casefold() in IMAGE_EXTENSIONS
-                        and entry.is_file(follow_symlinks=False)
-                    ):
-                        images.append(Path(entry.path))
-                except OSError:
-                    raise
+        current, is_root = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            if is_root:
+                raise
+            _increment_count(error_counts, "directory_scan_failure_count")
+            continue
+        try:
+            with entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append((Path(entry.path), False))
+                        elif (
+                            Path(entry.name).suffix.casefold()
+                            in IMAGE_EXTENSIONS
+                            and entry.is_file(follow_symlinks=False)
+                        ):
+                            images.append(Path(entry.path))
+                    except OSError:
+                        _increment_count(
+                            error_counts,
+                            "entry_metadata_failure_count",
+                        )
+        except OSError:
+            _increment_count(error_counts, "directory_scan_failure_count")
     return sorted(images, key=lambda path: str(path).casefold())
 
 
@@ -150,10 +174,14 @@ def _enumerate_confirmed_folders(
     paths_by_folder: list[list[Path]] = [[] for _ in folders]
     raw_counts = [0 for _ in folders]
     seen_paths: set[str] = set()
+    enumeration_errors = {
+        "directory_scan_failure_count": 0,
+        "entry_metadata_failure_count": 0,
+    }
     for _root_key, root in traversal_roots:
         if before_root is not None:
             before_root(root)
-        for path in _iter_images(root):
+        for path in _iter_images(root, error_counts=enumeration_errors):
             path_key = _path_key(path)
             if path_key in seen_paths:
                 continue
@@ -188,6 +216,8 @@ def _enumerate_confirmed_folders(
             len(folders) - len(traversal_roots),
             0,
         ),
+        **enumeration_errors,
+        "enumeration_failure_count": sum(enumeration_errors.values()),
     }
 
 
@@ -431,9 +461,14 @@ def _checkpoint_key(
     decision: Mapping[str, Any],
     path: Path,
 ) -> str:
+    folder_identity = str(decision.get("folder_id", "")).strip() or _path_key(
+        str(decision.get("folder_path", ""))
+    )
     return hashlib.sha256(
         (
             f"{product_id}\0{decision.get('source_system', '')}\0"
+            f"{folder_identity}\0"
+            f"{decision.get('folder_path', '')}\0"
             f"{os.path.abspath(path)}"
         ).encode("utf-8")
     ).hexdigest()
@@ -454,6 +489,7 @@ def _read_task_checkpoint(
 ) -> dict[str, Any]:
     empty = {
         "schema_version": GALLERY_CHECKPOINT_SCHEMA_VERSION,
+        "policy_version": GALLERY_CHECKPOINT_POLICY_VERSION,
         "identity_sha256": identity_sha256,
         "entries": {},
     }
@@ -467,11 +503,19 @@ def _read_task_checkpoint(
         not isinstance(document, dict)
         or document.get("schema_version")
         != GALLERY_CHECKPOINT_SCHEMA_VERSION
-        or document.get("identity_sha256") != identity_sha256
+        or document.get("policy_version")
+        != GALLERY_CHECKPOINT_POLICY_VERSION
         or not isinstance(document.get("entries"), dict)
     ):
         return empty
-    return document
+    previous_identity = str(document.get("identity_sha256", ""))
+    return {
+        "schema_version": GALLERY_CHECKPOINT_SCHEMA_VERSION,
+        "policy_version": GALLERY_CHECKPOINT_POLICY_VERSION,
+        "identity_sha256": identity_sha256,
+        "entries": dict(document["entries"]),
+        "_identity_changed": previous_identity != identity_sha256,
+    }
 
 
 def _write_task_checkpoint(
@@ -480,23 +524,7 @@ def _write_task_checkpoint(
 ) -> None:
     if checkpoint_path is None:
         return
-    target = Path(checkpoint_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(
-                document,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_write_json(Path(checkpoint_path), document, sort_keys=True)
 
 
 def _inspect_candidate_once(
@@ -712,6 +740,8 @@ def _build_gallery_document(
     size_below_minimum: int,
     size_exceeded: int,
     source_stat_failures: int,
+    directory_scan_failures: int,
+    entry_metadata_failures: int,
     planned_inspections: int,
     inspected: int,
     inspection_failures: int,
@@ -811,6 +841,11 @@ def _build_gallery_document(
         "size_below_minimum_count": size_below_minimum,
         "size_exceeded_count": size_exceeded,
         "source_stat_failure_count": source_stat_failures,
+        "directory_scan_failure_count": directory_scan_failures,
+        "entry_metadata_failure_count": entry_metadata_failures,
+        "enumeration_failure_count": (
+            directory_scan_failures + entry_metadata_failures
+        ),
         **tier_totals,
         "inspected_candidates": inspected,
         "inspection_failures": inspection_failures,
@@ -837,6 +872,11 @@ def _build_gallery_document(
         for item in per_product
     ) and COVERAGE_LIMIT_REASON not in reason_codes:
         reason_codes.append(COVERAGE_LIMIT_REASON)
+    if (
+        directory_scan_failures + entry_metadata_failures > 0
+        and "PARTIAL_DIRECTORY_ENUMERATION" not in reason_codes
+    ):
+        reason_codes.append("PARTIAL_DIRECTORY_ENUMERATION")
     data["reason_codes"] = reason_codes
     return data
 
@@ -903,6 +943,8 @@ def build_confirmed_folder_gallery(
     size_below_minimum = 0
     size_exceeded = 0
     source_stat_failures = 0
+    directory_scan_failures = 0
+    entry_metadata_failures = 0
     planned_inspections = 0
     inspected = 0
     inspection_failures = 0
@@ -939,8 +981,15 @@ def build_confirmed_folder_gallery(
         "batch_publish_count": 0,
         "traversal_root_count": 0,
         "avoided_recursive_scan_count": 0,
+        "directory_scan_failure_count": 0,
+        "entry_metadata_failure_count": 0,
+        "checkpoint_write_failure_count": 0,
     }
-    checkpoint_dirty_count = 0
+    checkpoint_dirty_count = int(
+        bool(checkpoint.pop("_identity_changed", False))
+    )
+    checkpoint_writes_disabled = False
+    active_checkpoint_keys: set[str] = set()
     last_checkpoint_write = time.monotonic()
 
     def publish_progress(progress: dict[str, Any]) -> None:
@@ -956,8 +1005,12 @@ def build_confirmed_folder_gallery(
         ) + 1
 
     def flush_checkpoint(*, force: bool = False) -> None:
-        nonlocal checkpoint_dirty_count, last_checkpoint_write
+        nonlocal checkpoint_dirty_count, checkpoint_writes_disabled
+        nonlocal last_checkpoint_write
         if checkpoint_dirty_count == 0:
+            return
+        if checkpoint_writes_disabled:
+            checkpoint_dirty_count = 0
             return
         now = time.monotonic()
         if (
@@ -967,7 +1020,19 @@ def build_confirmed_folder_gallery(
         ):
             return
         started = time.perf_counter()
-        _write_task_checkpoint(checkpoint_path, checkpoint)
+        try:
+            _write_task_checkpoint(checkpoint_path, checkpoint)
+        except OSError:
+            performance["checkpoint_write_ms"] = float(
+                performance["checkpoint_write_ms"]
+            ) + (time.perf_counter() - started) * 1000
+            performance["checkpoint_write_failure_count"] = int(
+                performance["checkpoint_write_failure_count"]
+            ) + 1
+            checkpoint_writes_disabled = True
+            checkpoint_dirty_count = 0
+            last_checkpoint_write = now
+            return
         if checkpoint_path is not None:
             performance["checkpoint_write_ms"] = float(
                 performance["checkpoint_write_ms"]
@@ -1029,6 +1094,20 @@ def build_confirmed_folder_gallery(
         performance["avoided_recursive_scan_count"] = int(
             performance["avoided_recursive_scan_count"]
         ) + int(enumeration_stats["avoided_recursive_scan_count"])
+        product_directory_scan_failures = int(
+            enumeration_stats["directory_scan_failure_count"]
+        )
+        product_entry_metadata_failures = int(
+            enumeration_stats["entry_metadata_failure_count"]
+        )
+        directory_scan_failures += product_directory_scan_failures
+        entry_metadata_failures += product_entry_metadata_failures
+        performance["directory_scan_failure_count"] = int(
+            performance["directory_scan_failure_count"]
+        ) + product_directory_scan_failures
+        performance["entry_metadata_failure_count"] = int(
+            performance["entry_metadata_failure_count"]
+        ) + product_entry_metadata_failures
         product_discovered = sum(
             len(paths) for _decision, paths, _raw_count in candidates_by_folder
         )
@@ -1358,6 +1437,16 @@ def build_confirmed_folder_gallery(
             "discovered_images": product_discovered,
             "size_eligible_count": sum(counts),
             "size_filtered_count": product_discovered - sum(counts),
+            "directory_scan_failure_count": (
+                product_directory_scan_failures
+            ),
+            "entry_metadata_failure_count": (
+                product_entry_metadata_failures
+            ),
+            "enumeration_failure_count": (
+                product_directory_scan_failures
+                + product_entry_metadata_failures
+            ),
             "preferred_size_count": sum(preferred_counts),
             "fallback_below_preferred_count": sum(
                 fallback_below_counts
@@ -1457,6 +1546,10 @@ def build_confirmed_folder_gallery(
             (index, decision, path)
             for index, (decision, path) in enumerate(selected)
         ]
+        active_checkpoint_keys.update(
+            _checkpoint_key(product_id, decision, path)
+            for _index, decision, path in indexed_selected
+        )
         decision_by_index = {
             index: decision for index, decision, _path in indexed_selected
         }
@@ -1587,6 +1680,8 @@ def build_confirmed_folder_gallery(
                     size_below_minimum=size_below_minimum,
                     size_exceeded=size_exceeded,
                     source_stat_failures=source_stat_failures,
+                    directory_scan_failures=directory_scan_failures,
+                    entry_metadata_failures=entry_metadata_failures,
                     planned_inspections=planned_inspections,
                     inspected=inspected,
                     inspection_failures=inspection_failures,
@@ -1628,6 +1723,9 @@ def build_confirmed_folder_gallery(
                 index = next_index
                 next_index += 1
                 indexed_replacements.append((index, decision, path))
+                active_checkpoint_keys.add(
+                    _checkpoint_key(product_id, decision, path)
+                )
                 decision_by_index[index] = decision
                 folder_summary = folder_summary_by_id.get(
                     _decision_folder_id(decision)
@@ -1693,6 +1791,13 @@ def build_confirmed_folder_gallery(
         flush_checkpoint(force=True)
         per_product.append(product_summary)
 
+    stale_checkpoint_keys = set(checkpoint_entries) - active_checkpoint_keys
+    if stale_checkpoint_keys:
+        for key in stale_checkpoint_keys:
+            checkpoint_entries.pop(key, None)
+        checkpoint_dirty_count += len(stale_checkpoint_keys)
+    flush_checkpoint(force=True)
+
     data = _build_gallery_document(
         records,
         status_rows,
@@ -1706,6 +1811,8 @@ def build_confirmed_folder_gallery(
         size_below_minimum=size_below_minimum,
         size_exceeded=size_exceeded,
         source_stat_failures=source_stat_failures,
+        directory_scan_failures=directory_scan_failures,
+        entry_metadata_failures=entry_metadata_failures,
         planned_inspections=planned_inspections,
         inspected=inspected,
         inspection_failures=inspection_failures,

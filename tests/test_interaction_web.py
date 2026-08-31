@@ -4336,6 +4336,7 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
     assert "UiState.assetSelectedByOtherProduct" in source
     assert "一键为全部商品选图" in source
     assert "UiState.globalAssetSelectionTarget" in source
+    assert "UiState.prioritizeGlobalAssetCandidates" in source
     assert "UiState.stableGlobalAssetOrder" in source
     assert "UiState.candidateFeasibleRatios" in source
     assert "素材不足，已选择全部可用素材" in source
@@ -4396,6 +4397,13 @@ def test_global_asset_selection_keeps_pipeline_full_and_locks_navigation():
     assert "正在为全部商品选图，完成后才能返回上一步。" in source
     assert "setGlobalSelectionControlsLocked(true)" in source
     assert "setGlobalSelectionControlsLocked(false)" in source
+    assert ".asset-card input[type='checkbox']" in source
+    assert ".selected-asset-card button" in source
+    assert "select.disabled = globalAssetSelectionInFlight" in source
+    assert "remove.disabled = globalAssetSelectionInFlight" in source
+    assert "if (globalAssetSelectionInFlight) return;" in source
+    assert "优先选择 3:4，不足时补充 1:1" in source
+    assert "existing_ratio_conflict" not in source
     assert "if (uiState.dirty) scheduleAutoSave();" in source
 
 

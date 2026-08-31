@@ -3784,7 +3784,7 @@
       element(
         "span",
         "",
-        "按每个空坑位最低 3 张补足；素材不足时选择该商品的全部可用素材。",
+        "按每个空坑位最低 3 张补足；优先选择 3:4，不足时补充 1:1，素材仍不足则选择全部可用素材。",
       ),
     );
     const globalSelectionButton = element(
@@ -3806,7 +3806,7 @@
     const setGlobalSelectionControlsLocked = (locked) => {
       const controls = [
         ...content.querySelectorAll(
-          ".folder-card, .local-gallery-action button, .asset-product-actions button",
+          ".folder-card, .local-gallery-action button, .asset-product-actions button, .asset-card input[type='checkbox'], .selected-asset-card button",
         ),
         ...railButtons,
       ];
@@ -4079,34 +4079,10 @@
         const currentDecisions = selectedAssetDecisions().filter(
           (item) => String(item.product_id || "") === productId,
         );
-        let allowedRatios = ["3:4", "1:1"];
-        currentDecisions.forEach((decision) => {
-          const candidate = productCandidates.find(
-            (item) => String(item.asset_id || "")
-              === String(decision.asset_id || ""),
-          );
-          const ratios = exactOrEstimatedRatios(candidate, decision);
-          if (ratios.length) {
-            allowedRatios = allowedRatios.filter(
-              (ratio) => ratios.includes(ratio),
-            );
-          }
-        });
         const minimumTarget = Math.max(
           0,
           Math.floor(Number(missingMaterials) || 0) * 3,
         );
-        if (currentDecisions.length && !allowedRatios.length) {
-          return {
-            productId,
-            productTitle,
-            minimumTarget,
-            initialSelectedCount: currentDecisions.length,
-            selectedCount: currentDecisions.length,
-            shortage: Math.max(0, minimumTarget - currentDecisions.length),
-            status: "existing_ratio_conflict",
-          };
-        }
 
         const selectable = productCandidates.filter((candidate) => (
           candidateIsSelectable(candidate)
@@ -4139,35 +4115,27 @@
             || (stableIndex.get(String(left.asset_id || "")) || 0)
               - (stableIndex.get(String(right.asset_id || "")) || 0);
         });
-        const ratioCounts = Object.fromEntries(
-          allowedRatios.map((ratio) => [
-            ratio,
-            stableCandidates.filter(
-              (candidate) => exactOrEstimatedRatios(candidate).includes(ratio),
-            ).length,
-          ]),
-        );
-        const targetRatio = [...allowedRatios].sort((left, right) => (
-          Number(ratioCounts[right] || 0) - Number(ratioCounts[left] || 0)
-          || ["3:4", "1:1"].indexOf(left)
-            - ["3:4", "1:1"].indexOf(right)
-        ))[0] || "3:4";
-        const ratioPool = stableCandidates.filter(
-          (candidate) => exactOrEstimatedRatios(candidate).includes(targetRatio),
-        );
-        const desiredCount = UiState.globalAssetSelectionTarget(
-          missingMaterials,
-          ratioPool.length,
-        );
+        const ratioReadyCandidates = stableCandidates.map((candidate) => ({
+          candidate,
+          feasible_ratios: exactOrEstimatedRatios(candidate),
+        }));
+        const prioritizedCandidates = UiState.prioritizeGlobalAssetCandidates(
+          ratioReadyCandidates,
+        ).map((item) => item.candidate);
         const selectedIds = new Set(
           currentDecisions.map((item) => String(item.asset_id || "")),
+        );
+        const remaining = prioritizedCandidates.filter(
+          (candidate) => !selectedIds.has(String(candidate.asset_id || "")),
+        );
+        const availableCount = currentDecisions.length + remaining.length;
+        const desiredCount = UiState.globalAssetSelectionTarget(
+          missingMaterials,
+          availableCount,
         );
         let selectedCount = currentDecisions.length;
         let checkedCount = 0;
         let failedCount = 0;
-        const remaining = ratioPool.filter(
-          (candidate) => !selectedIds.has(String(candidate.asset_id || "")),
-        );
         const activePreflights = new Set();
         const launchPreflights = () => {
           while (
@@ -4231,7 +4199,7 @@
               || settled.value.cancelled
               || settled.value.status === "cancelled"
               || settled.value.status === "blocked"
-              || !exactOrEstimatedRatios(candidate).includes(targetRatio)
+              || exactOrEstimatedRatios(candidate).length === 0
               || UiState.assetSelectedByOtherProduct(
                 selectedAssetDecisions(),
                 productId,
@@ -4241,7 +4209,7 @@
             ) {
               failedCount += settled.status === "rejected"
                 || settled.value?.status === "blocked"
-                || !exactOrEstimatedRatios(candidate).includes(targetRatio)
+                || exactOrEstimatedRatios(candidate).length === 0
                 ? 1
                 : 0;
               cancelSelectionPreflightIfUnused(assetId);
@@ -4274,12 +4242,11 @@
           productTitle,
           minimumTarget,
           desiredCount,
-          availableCount: ratioPool.length,
+          availableCount,
           initialSelectedCount: currentDecisions.length,
           selectedCount,
           checkedCount,
           failedCount,
-          targetRatio,
           shortage: Math.max(0, minimumTarget - selectedCount),
           status: selectedCount >= minimumTarget
             ? "fulfilled"
@@ -4429,11 +4396,12 @@
             const desired = pendingSelection || selectedIds.has(assetId);
             const duplicateElsewhere = selectedByOtherProduct();
             select.checked = desired;
-            select.disabled = !desired && (
-              globalAssetSelectionInFlight
-              || !baseSelectable
-              || duplicateElsewhere
-              || result?.status === "blocked"
+            select.disabled = globalAssetSelectionInFlight || (
+              !desired && (
+                !baseSelectable
+                || duplicateElsewhere
+                || result?.status === "blocked"
+              )
             );
             select.indeterminate = false;
             card.classList.toggle("is-selected", selectedIds.has(assetId));
@@ -4458,10 +4426,14 @@
                 : "该图片已被其他商品选用";
             } else if (isQueued) {
               selectionFeedback.classList.add("asset-warning");
-              selectionFeedback.textContent = "排队中，可再次点击取消";
+              selectionFeedback.textContent = globalAssetSelectionInFlight
+                ? "自动选图排队中"
+                : "排队中，可再次点击取消";
             } else if (isRunning && desired) {
               selectionFeedback.classList.add("asset-warning");
-              selectionFeedback.textContent = "正在检查 1:1、3:4 预裁剪，可再次点击取消";
+              selectionFeedback.textContent = globalAssetSelectionInFlight
+                ? "自动选图正在检查 1:1、3:4 预裁剪"
+                : "正在检查 1:1、3:4 预裁剪，可再次点击取消";
             } else if (jobRunning) {
               selectionFeedback.classList.add("asset-warning");
               selectionFeedback.textContent = "已取消选择；后台结果仅用于缓存";
@@ -4536,6 +4508,10 @@
           };
 
           select.addEventListener("change", () => {
+            if (globalAssetSelectionInFlight) {
+              refreshSelectionCard();
+              return;
+            }
             if (select.checked) {
               if (selectedByOtherProduct()) {
                 select.checked = false;
@@ -4576,7 +4552,7 @@
             renderSelected();
           });
           const toggleCardSelection = () => {
-            if (select.disabled) return;
+            if (globalAssetSelectionInFlight || select.disabled) return;
             select.checked = !select.checked;
             select.dispatchEvent(new Event("change"));
           };
@@ -4667,7 +4643,9 @@
             );
             const remove = element("button", "button-secondary", "取消选择");
             remove.type = "button";
+            remove.disabled = globalAssetSelectionInFlight;
             remove.addEventListener("click", () => {
+              if (globalAssetSelectionInFlight) return;
               const assetId = String(candidate.asset_id);
               setSelectionIntent(productId, assetId, false);
               cancelSelectionPreflightIfUnused(assetId);
@@ -4742,6 +4720,7 @@
           - Math.max(0, Math.floor(Number(missingMaterials) || 0) * 3)
         ),
         run: selectMinimumForProduct,
+        redraw: draw,
       });
       draw();
     });
@@ -4791,9 +4770,6 @@
           const insufficientCount = outcomes.filter(
             (item) => item.status === "insufficient",
           ).length;
-          const conflictCount = outcomes.filter(
-            (item) => item.status === "existing_ratio_conflict",
-          ).length;
           const addedCount = outcomes.reduce(
             (total, item) => total + Math.max(
               0,
@@ -4808,9 +4784,6 @@
           ];
           if (insufficientCount) {
             notices.push(`${insufficientCount} 个商品素材不足，已选择全部可用素材`);
-          }
-          if (conflictCount) {
-            notices.push(`${conflictCount} 个商品的原有选图比例不一致，请手工调整`);
           }
           globalSelectionStatus.textContent = `${notices.join("；")}。`;
           actionMessage.textContent = globalSelectionStatus.textContent;
@@ -4832,6 +4805,7 @@
           currentStageId === "asset_matching"
           && renderGeneration === stageGeneration
         ) {
+          globalSelectionContexts.forEach((context) => context.redraw());
           globalSelectionButton.disabled = false;
           globalSelectionButton.textContent = "一键为全部商品选图";
           refreshAllSelectionAvailability();

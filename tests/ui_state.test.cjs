@@ -448,6 +448,28 @@ test("global asset selection targets three images for every missing slot", () =>
   assert.equal(UiState.globalAssetSelectionTarget(0, 20), 0);
 });
 
+test("global asset selection keeps 3:4 first and supplements with 1:1", () => {
+  const both = { asset_id: "both", feasible_ratios: ["3:4", "1:1"] };
+  const square = { asset_id: "square", feasible_ratios: ["1:1"] };
+  const portrait = { asset_id: "portrait", feasible_ratios: ["3:4"] };
+  const unsupported = { asset_id: "unsupported", feasible_ratios: [] };
+
+  assert.deepEqual(
+    UiState.prioritizeGlobalAssetCandidates([
+      square,
+      both,
+      unsupported,
+      portrait,
+    ]).map((item) => item.asset_id),
+    ["both", "portrait", "square", "unsupported"],
+  );
+  assert.equal(
+    UiState.prioritizeGlobalAssetCandidates([both, square])
+      .filter((item) => item.asset_id === "both").length,
+    1,
+  );
+});
+
 test("global asset selection recognizes all ratios accepted by existing checks", () => {
   assert.deepEqual(UiState.candidateFeasibleRatios({
     preflight: {

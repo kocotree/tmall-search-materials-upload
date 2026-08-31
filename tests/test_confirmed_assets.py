@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import os
 import threading
 import time
 
@@ -113,6 +114,31 @@ def test_image_enumeration_uses_scandir_without_pathlib_rglob(
     )
 
     assert [path.name for path in _iter_images(tmp_path)] == ["a.png", "b.jpg"]
+
+
+def test_image_enumeration_skips_an_unreadable_nested_directory(
+    tmp_path, monkeypatch
+):
+    readable = tmp_path / "readable"
+    unreadable = tmp_path / "unreadable"
+    readable.mkdir()
+    unreadable.mkdir()
+    _image(readable / "kept.png", (1, 2, 3))
+    _image(unreadable / "skipped.png", (4, 5, 6))
+    original_scandir = confirmed_assets.os.scandir
+
+    def guarded_scandir(path):
+        if Path(path) == unreadable:
+            raise PermissionError("nested directory is unavailable")
+        return original_scandir(path)
+
+    monkeypatch.setattr(confirmed_assets.os, "scandir", guarded_scandir)
+    errors = {}
+
+    images = _iter_images(tmp_path, error_counts=errors)
+
+    assert [path.name for path in images] == ["kept.png"]
+    assert errors == {"directory_scan_failure_count": 1}
 
 
 def test_confirmed_gallery_samples_proportionally_across_folders(tmp_path):
@@ -373,9 +399,9 @@ def test_nested_confirmed_folders_share_one_recursive_enumeration(
     enumerated_roots = []
     original_iter_images = _iter_images
 
-    def counted_iter_images(folder):
+    def counted_iter_images(folder, **kwargs):
         enumerated_roots.append(Path(folder))
-        return original_iter_images(folder)
+        return original_iter_images(folder, **kwargs)
 
     monkeypatch.setattr(
         "upload_search_materials.confirmed_assets._iter_images",
@@ -797,6 +823,208 @@ def test_confirmed_gallery_resume_reuses_task_checkpoint_and_previews(
     assert first_calls == 3
     assert calls == first_calls
     assert first["asset_candidates"] == second["asset_candidates"]
+
+
+def test_confirmed_gallery_reuses_unchanged_files_after_folder_identity_change(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    sources = []
+    for index in range(3):
+        source = folder / f"{index}.png"
+        _image(source, (index * 10, 20, 30))
+        sources.append(source)
+    calls = []
+    original_loader = image_compliance.load_image_preflight_source
+
+    def counted_loader(path, *args, **kwargs):
+        calls.append(Path(path).name)
+        return original_loader(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets.load_image_preflight_source",
+        counted_loader,
+    )
+    args = (
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_id": "FOLDER-A",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+    )
+    common = {
+        "candidate_limit": 3,
+        "preview_dir": tmp_path / "previews",
+        "checkpoint_path": tmp_path / "gallery-checkpoint.json",
+        "sampling_seed": "same-task",
+    }
+
+    build_confirmed_folder_gallery(
+        *args,
+        checkpoint_identity_sha256="folder-decisions-a",
+        **common,
+    )
+    first_calls = len(calls)
+    build_confirmed_folder_gallery(
+        *args,
+        checkpoint_identity_sha256="folder-decisions-b",
+        **common,
+    )
+
+    assert first_calls == 3
+    assert len(calls) == first_calls
+
+
+def test_confirmed_gallery_reloads_only_a_changed_file_in_same_task(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    changed = folder / "changed.png"
+    unchanged = folder / "unchanged.png"
+    _image(changed, (1, 2, 3))
+    _image(unchanged, (4, 5, 6))
+    calls = []
+    original_loader = image_compliance.load_image_preflight_source
+
+    def counted_loader(path, *args, **kwargs):
+        calls.append(Path(path).name)
+        return original_loader(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets.load_image_preflight_source",
+        counted_loader,
+    )
+    args = (
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_id": "FOLDER-A",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+    )
+    common = {
+        "candidate_limit": 2,
+        "preview_dir": tmp_path / "previews",
+        "checkpoint_path": tmp_path / "gallery-checkpoint.json",
+        "sampling_seed": "same-task",
+    }
+    build_confirmed_folder_gallery(
+        *args,
+        checkpoint_identity_sha256="folder-decisions-a",
+        **common,
+    )
+    first_calls = len(calls)
+    previous_mtime = changed.stat().st_mtime_ns
+    _image(changed, (10, 20, 30))
+    os.utime(
+        changed,
+        ns=(
+            changed.stat().st_atime_ns,
+            previous_mtime + 1_000_000_000,
+        ),
+    )
+
+    build_confirmed_folder_gallery(
+        *args,
+        checkpoint_identity_sha256="folder-decisions-b",
+        **common,
+    )
+
+    assert first_calls == 2
+    assert calls.count("unchanged.png") == 1
+    assert calls.count("changed.png") == 2
+
+
+def test_confirmed_gallery_prunes_checkpoint_entries_from_excluded_folders(
+    tmp_path,
+):
+    retained = tmp_path / "retained"
+    excluded = tmp_path / "excluded"
+    retained.mkdir()
+    excluded.mkdir()
+    _image(retained / "kept.png", (1, 2, 3))
+    _image(excluded / "removed.png", (4, 5, 6))
+    checkpoint_path = tmp_path / "gallery-checkpoint.json"
+    products = [ProductRecord("123", sku="SKU-123", title="测试商品")]
+    status_rows = [{"商品ID": "123", "缺失数量": "1"}]
+    retained_decision = {
+        "decision": "confirmed",
+        "folder_id": "RETAINED",
+        "folder_path": str(retained),
+        "product_id": "123",
+        "source_system": "model",
+    }
+    excluded_decision = {
+        "decision": "confirmed",
+        "folder_id": "EXCLUDED",
+        "folder_path": str(excluded),
+        "product_id": "123",
+        "source_system": "model",
+    }
+
+    build_confirmed_folder_gallery(
+        products,
+        status_rows,
+        [retained_decision, excluded_decision],
+        candidate_limit=2,
+        checkpoint_path=checkpoint_path,
+        checkpoint_identity_sha256="both-folders",
+    )
+    build_confirmed_folder_gallery(
+        products,
+        status_rows,
+        [retained_decision],
+        candidate_limit=1,
+        checkpoint_path=checkpoint_path,
+        checkpoint_identity_sha256="retained-folder-only",
+    )
+
+    checkpoint = confirmed_assets.json.loads(
+        checkpoint_path.read_text(encoding="utf-8")
+    )
+    records = [entry["record"] for entry in checkpoint["entries"].values()]
+    assert [record["folder_id"] for record in records] == ["RETAINED"]
+
+
+def test_confirmed_gallery_continues_when_optional_checkpoint_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    _image(folder / "a.png", (1, 2, 3))
+    monkeypatch.setattr(
+        "upload_search_materials.confirmed_assets._write_task_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError("checkpoint is temporarily unavailable")
+        ),
+    )
+
+    data = build_confirmed_folder_gallery(
+        [ProductRecord("123", sku="SKU-123", title="测试商品")],
+        [{"商品ID": "123", "缺失数量": "1"}],
+        [{
+            "decision": "confirmed",
+            "folder_path": str(folder),
+            "product_id": "123",
+            "source_system": "model",
+        }],
+        checkpoint_path=tmp_path / "gallery-checkpoint.json",
+        checkpoint_identity_sha256="same-task",
+    )
+
+    assert len(data["asset_candidates"]) == 1
+    assert data["scan_summary"]["performance"][
+        "checkpoint_write_failure_count"
+    ] == 1
 
 
 def test_confirmed_gallery_batches_checkpoint_writes(tmp_path, monkeypatch):
