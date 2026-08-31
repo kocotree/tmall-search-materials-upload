@@ -15,6 +15,38 @@
     completed: "已完成",
   };
 
+  function setupConfigurationLoadView(
+    phase,
+    { hasSavedConfiguration = false, userMessage = "" } = {},
+  ) {
+    const normalizedPhase = String(phase || "loading");
+    if (normalizedPhase === "ready") {
+      return { message: "配置已准备好，请检查后提交" };
+    }
+    if (normalizedPhase === "failed") {
+      const detail = String(userMessage || "")
+        .trim()
+        .replace(/[。！？!?；;，,：:]+$/u, "");
+      return {
+        message: detail
+          ? `任务配置加载失败：${detail}。请刷新页面后重试，已保存的数据不会丢失。`
+          : "任务配置加载失败：系统暂时无法读取当前配置。请刷新页面后重试，已保存的数据不会丢失。",
+      };
+    }
+    return {
+      message: hasSavedConfiguration
+        ? "正在加载已保存的配置…"
+        : "正在准备任务配置…",
+    };
+  }
+
+  function hasSavedSetupConfiguration(session) {
+    const setup = session?.stages?.setup;
+    if (!setup || typeof setup !== "object") return false;
+    return Number(setup.revision || 0) > 0
+      || !["", "draft"].includes(String(setup.status || "draft"));
+  }
+
   function createState(stageId) {
     return {
       stageId,
@@ -1127,6 +1159,8 @@
     resultView,
     resultSections,
     resolveProductTitle,
+    setupConfigurationLoadView,
+    hasSavedSetupConfiguration,
     folderReviewPresentation,
     statusLabels,
     stageNeedsResultHydration,

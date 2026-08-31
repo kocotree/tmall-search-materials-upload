@@ -78,6 +78,47 @@ test("result view clears stale content and later replaces it", () => {
   assert.equal(UiState.resultView(state).result.summary, "新结果");
 });
 
+test("setup loading copy distinguishes new and saved configuration", () => {
+  const newSession = {
+    stages: { setup: { revision: 0, status: "draft" } },
+  };
+  const savedSession = {
+    stages: { setup: { revision: 2, status: "draft" } },
+  };
+
+  assert.equal(UiState.hasSavedSetupConfiguration(newSession), false);
+  assert.equal(UiState.hasSavedSetupConfiguration(savedSession), true);
+  assert.equal(
+    UiState.setupConfigurationLoadView("loading", {
+      hasSavedConfiguration: false,
+    }).message,
+    "正在准备任务配置…",
+  );
+  assert.equal(
+    UiState.setupConfigurationLoadView("loading", {
+      hasSavedConfiguration: true,
+    }).message,
+    "正在加载已保存的配置…",
+  );
+  assert.equal(
+    UiState.setupConfigurationLoadView("ready").message,
+    "配置已准备好，请检查后提交",
+  );
+});
+
+test("setup loading failure stays explicit and business friendly", () => {
+  assert.equal(
+    UiState.setupConfigurationLoadView("failed").message,
+    "任务配置加载失败：系统暂时无法读取当前配置。请刷新页面后重试，已保存的数据不会丢失。",
+  );
+  assert.equal(
+    UiState.setupConfigurationLoadView("failed", {
+      userMessage: "工作台暂时无法连接。",
+    }).message,
+    "任务配置加载失败：工作台暂时无法连接。请刷新页面后重试，已保存的数据不会丢失。",
+  );
+});
+
 test("blocked completeness is not presented as an empty inspection", () => {
   let state = UiState.createState("completeness");
   state = UiState.receiveStage(state, {

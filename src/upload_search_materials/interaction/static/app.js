@@ -104,6 +104,7 @@
   let isHydrating = false;
   let currentStageInputLoaded = false;
   let currentStageHasPersistedInput = false;
+  let hasSavedSetupConfiguration = false;
   let stageLoadSequence = 0;
   let folderCountsLoading = false;
   let folderCountsLoadedFor = "";
@@ -1493,6 +1494,7 @@
 
   function applySessionSnapshot(session) {
     if (!session || typeof session !== "object") return;
+    hasSavedSetupConfiguration = UiState.hasSavedSetupConfiguration(session);
     if (stages.has(session.current_stage)) {
       sessionCurrentStageId = session.current_stage;
     }
@@ -7586,6 +7588,9 @@
           discoverImageSources(),
           discoverTeamIndex(),
         ]);
+        actionMessage.textContent = UiState.setupConfigurationLoadView(
+          "ready",
+        ).message;
       }
       return;
     }
@@ -7645,6 +7650,8 @@
         }
       }
       if (requestedStageId === "setup") {
+        hasSavedSetupConfiguration = Boolean(payload.input)
+          || hasSavedSetupConfiguration;
         const setupDiscoveryTasks = [];
         if (!payload.input) setupDiscoveryTasks.push(discoverImageSources());
         const teamIndexInput = teamIndexConfig?.querySelector(
@@ -7659,6 +7666,14 @@
       renderHandoffStatus(currentHandoffStatus, currentWorkflowDispatch);
       renderProcessingClaim(currentProcessingClaim, currentCollectionStatus);
       renderSubmission();
+      if (
+        requestedStageId === "setup"
+        && uiState.serverStatus === "draft"
+      ) {
+        actionMessage.textContent = UiState.setupConfigurationLoadView(
+          "ready",
+        ).message;
+      }
       if (
         requestedStageId === "asset_matching"
         && ["queued", "running"].includes(currentGalleryJob?.status)
@@ -7681,7 +7696,11 @@
         || requestedGeneration !== stageGeneration
         || requestedLoadSequence !== stageLoadSequence
       ) return;
-      actionMessage.textContent = error.message;
+      actionMessage.textContent = requestedStageId === "setup"
+        ? UiState.setupConfigurationLoadView("failed", {
+          userMessage: error.userMessage,
+        }).message
+        : error.userMessage || error.message;
     }
   }
 
@@ -8463,9 +8482,11 @@
     const stage = stages.get(stageId);
     titleLabel.textContent = stage.title;
     currentStageLabel.textContent = stage.title;
-    actionMessage.textContent = sessionId
-      ? "正在恢复当前阶段数据…"
-      : "填写完成后，可以保存进度或提交。";
+    actionMessage.textContent = stageId === "setup"
+      ? UiState.setupConfigurationLoadView("loading", {
+        hasSavedConfiguration: hasSavedSetupConfiguration,
+      }).message
+      : "正在加载当前步骤…";
     renderStageLoadingState(stageId);
     renderStatus();
     renderSubmission();
@@ -8639,7 +8660,9 @@
         initialStage = selected.stageId;
         warning = selected.warning;
       } catch (error) {
-        warning = `任务状态加载失败，已回退到第一阶段：${error.message}`;
+        warning = UiState.setupConfigurationLoadView("failed", {
+          userMessage: error.userMessage,
+        }).message;
       }
     }
     activateStage(initialStage);
