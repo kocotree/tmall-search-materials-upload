@@ -3444,11 +3444,13 @@
       );
       const group = element("section", "folder-product");
       group.tabIndex = -1;
-      productTargets.push({
+      const productTarget = {
         productId,
         productTitle,
         target: group,
-      });
+        navigationStatus: "",
+      };
+      productTargets.push(productTarget);
       const heading = element("div", "asset-product-heading");
       const headingText = element("div");
       headingText.append(
@@ -3483,7 +3485,11 @@
             candidate.decision,
           ) === "rejected",
         ).length;
-        progress.textContent = `采用 ${productCandidates.length - rejected} · 排除 ${rejected}`;
+        const accepted = productCandidates.length - rejected;
+        const navigationStatus = `${accepted}个采用`;
+        progress.textContent = `采用 ${accepted} · 排除 ${rejected}`;
+        productTarget.navigationStatus = navigationStatus;
+        productTarget.updateNavigationStatus?.(navigationStatus);
       };
 
       productCandidates.forEach((candidate) => {

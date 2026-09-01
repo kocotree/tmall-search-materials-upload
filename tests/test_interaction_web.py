@@ -4343,6 +4343,12 @@ def test_asset_gallery_javascript_exposes_review_controls_and_safety_status():
         'stateBadge.textContent = selected ? "已采用" : "已排除"'
         in folder_review_source
     )
+    assert 'navigationStatus: ""' in folder_review_source
+    assert 'const navigationStatus = `${accepted}个采用`' in folder_review_source
+    assert (
+        "productTarget.updateNavigationStatus?.(navigationStatus)"
+        in folder_review_source
+    )
     assert 'document.createElement("select")' not in folder_review_source
     assert 'document.createElement("input")' not in folder_review_source
     assert "备注（可选）" not in folder_review_source
