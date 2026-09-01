@@ -26,6 +26,7 @@ from .agent_handoff import (
     find_equivalent_agent_request,
     read_agent_request,
     recovery_prompt,
+    resume_agent_request,
     retry_agent_request,
 )
 from .browser.qianniu_copy import (
@@ -510,9 +511,10 @@ def resume_copy_draft_request(
     session_id: str,
     request_id: str,
     *,
+    current_copy_edits: list[Mapping[str, Any]] | None = None,
     actor: str = "user",
 ) -> dict[str, Any]:
-    """Requeue one interrupted copy version without discarding checkpoints."""
+    """Retry every empty draft while preserving completed drafts and history."""
 
     request = read_agent_request(store, session_id, request_id)
     if request.get("kind") != "copy_draft":
@@ -520,16 +522,162 @@ def resume_copy_draft_request(
     status = str(request.get("status", ""))
     if status in {"pending_agent", "processing"}:
         return request
-    if status != "failed":
+    if status not in {"failed", "completed"}:
         raise InteractionConflict("COPY_DRAFT_REQUEST_NOT_RESUMABLE")
     # Validate the original bounded authorization before making the request
     # claimable again. The processor will independently repeat this check.
-    _validate_or_migrate_copy_authorization(store, session_id, request)
-    return retry_agent_request(
-        store,
-        session_id,
-        request_id,
-        actor=actor,
+    request = _validate_or_migrate_copy_authorization(
+        store, session_id, request
+    )
+    context = request.get("request_context", {})
+    slots = context.get("slots", []) if isinstance(context, Mapping) else []
+    slot_by_id = {
+        str(slot.get("slot_id", "")): dict(slot)
+        for slot in slots
+        if isinstance(slot, Mapping) and slot.get("slot_id")
+    }
+    if not slot_by_id:
+        raise InteractionConflict("AGENT_COPY_REQUEST_HAS_NO_SLOTS")
+
+    request_root = _request_root(store, session_id, request_id)
+    progress_path = request_root / "progress.json"
+    response_path = request_root / "response.json"
+    prior_progress = (
+        SessionStore._read_json(progress_path, "copy-progress")
+        if progress_path.is_file()
+        else {}
+    )
+    prior_response = (
+        SessionStore._read_json(response_path, "copy-response")
+        if response_path.is_file()
+        else {}
+    )
+
+    def complete_draft(item: Mapping[str, Any]) -> bool:
+        return bool(
+            str(item.get("title", "")).strip()
+            and str(item.get("description", "")).strip()
+        )
+
+    preserved: dict[str, dict[str, Any]] = {}
+
+    def preserve_complete_draft(item: Mapping[str, Any]) -> None:
+        slot_id = str(item.get("slot_id", ""))
+        slot = slot_by_id.get(slot_id)
+        if slot is None or not complete_draft(item):
+            return
+        supplied_request_id = str(item.get("request_id", "")).strip()
+        if supplied_request_id and supplied_request_id != request_id:
+            return
+        output_sha256 = [
+            str(output.get("output_sha256", ""))
+            for output in slot.get("ordered_outputs", [])
+            if isinstance(output, Mapping) and output.get("output_sha256")
+        ]
+        draft = {
+            **dict(item),
+            "slot_id": slot_id,
+            "product_id": str(slot.get("product_id", "")),
+            "title": str(item.get("title", "")).strip(),
+            "description": str(item.get("description", "")).strip(),
+            "evidence": [
+                str(value).strip()
+                for value in item.get("evidence", [])
+                if str(value).strip()
+            ] or ["已完成文案，继续获取时予以保留"],
+            "risks": [
+                str(value).strip()
+                for value in item.get("risks", [])
+                if str(value).strip()
+            ],
+            "source": str(item.get("source") or "manual_override"),
+            "generation_status": "generated",
+            "confirmed": False,
+            "request_id": request_id,
+            "output_sha256": output_sha256,
+        }
+        for key in (
+            "skip_reason_code",
+            "skip_message",
+            "failure_category",
+            "final_retry_exhausted",
+            "initial_skip_reason_code",
+            "recovered_after_batch",
+        ):
+            draft.pop(key, None)
+        preserved[slot_id] = draft
+
+    prior_drafts = prior_response.get("result", {}).get("copy_drafts", [])
+    prior_progress_drafts = prior_progress.get("copy_drafts", [])
+    for collection in (
+        prior_drafts if isinstance(prior_drafts, list) else [],
+        prior_progress_drafts
+        if isinstance(prior_progress_drafts, list)
+        else [],
+    ):
+        for item in collection:
+            if isinstance(item, Mapping):
+                preserve_complete_draft(item)
+
+    # The visible editor is authoritative. Clearing either field means that
+    # slot must be fetched again even when an older generated value exists.
+    for item in current_copy_edits or []:
+        if not isinstance(item, Mapping):
+            continue
+        slot_id = str(item.get("slot_id", ""))
+        if slot_id not in slot_by_id:
+            continue
+        supplied_request_id = str(item.get("request_id", "")).strip()
+        if supplied_request_id and supplied_request_id != request_id:
+            continue
+        preserved.pop(slot_id, None)
+        preserve_complete_draft(item)
+
+    if len(preserved) == len(slot_by_id):
+        raise InteractionConflict("COPY_DRAFT_REQUEST_HAS_NO_EMPTY_SLOTS")
+
+    next_round = int(request.get("manual_resume_count", 0) or 0) + 1
+    history_root = request_root / "resume-history" / f"round-{next_round:03d}"
+    if prior_progress:
+        store._write_json_atomic(
+            history_root / "previous-progress.json", prior_progress
+        )
+    if prior_response:
+        store._write_json_atomic(
+            history_root / "previous-response.json", prior_response
+        )
+    ordered_preserved = [
+        preserved[slot_id] for slot_id in slot_by_id if slot_id in preserved
+    ]
+    store._write_json_atomic(
+        progress_path,
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "stage_id": "slots_copy",
+            "request_id": request_id,
+            "context_fingerprint": str(context.get("context_fingerprint", "")),
+            "status": "pending_agent",
+            "current_slot_id": "",
+            "completed_count": len(ordered_preserved),
+            "generated_count": len(ordered_preserved),
+            "skipped_count": 0,
+            "total_count": len(slot_by_id),
+            "copy_drafts": ordered_preserved,
+            "skipped_slots": [],
+            "reason_code": "",
+            "current_retry_count": 0,
+            "max_retries": COPY_SLOT_MAX_RETRIES,
+            "repair_total_count": 0,
+            "repair_processed_count": 0,
+            "current_repair_pass": 0,
+            "max_repair_passes": COPY_FAILED_ONLY_MAX_PASSES,
+            "manual_resume_round": next_round,
+            "updated_at": _now(),
+        },
+    )
+    return resume_agent_request(
+        store, session_id, request_id, actor=actor
     )
 
 

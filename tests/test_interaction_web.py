@@ -2418,6 +2418,8 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
         "agent-requests/${encodeURIComponent(requestId)}/resume"
         in javascript
     )
+    assert "JSON.stringify({ copy_edits: copyState })" in javascript
+    assert '["failed", "completed"].includes(currentCopyRequestStatus)' in javascript
     assert "已恢复，将从未完成的坑位继续获取" in javascript
     assert "copy-skipped-notice" in javascript
     assert "完成常规重试和 1 轮失败项补跑后仍未完成" in javascript
@@ -3584,7 +3586,7 @@ def test_asset_matching_folder_review_is_a_distinct_first_submit(
     assert persisted["values"]["source_types"] == ["image"]
     assert [
         item["decision"] for item in persisted["values"]["folder_decisions"]
-    ] == ["confirmed", "confirmed", "confirmed", "rejected"]
+    ] == ["confirmed", "rejected", "confirmed", "rejected"]
     assert persisted["values"].get("asset_decisions", []) == []
     stage_path = tmp_path / session_id / "03-asset-matching"
     assert not (stage_path / "handoff.json").exists()
@@ -4491,7 +4493,7 @@ def test_fuzzy_folder_default_and_warning_are_visible_risk_controls():
 
     assert 'candidate.match_type === "fuzzy_name_candidate"' in source
     assert '"asset-warning folder-match-warning-danger"' in source
-    assert "粗略名称命中；默认采用，请重点核对，不属于本商品请排除" in source
+    assert "粗略名称命中；默认排除，确认属于本商品后再采用" in source
     assert (
         ".folder-match-warning-danger { color: var(--danger); font-weight: 700; }"
         in stylesheet

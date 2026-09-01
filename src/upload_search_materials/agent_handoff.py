@@ -551,6 +551,41 @@ def retry_agent_request(
     return retried
 
 
+def resume_agent_request(
+    store: SessionStore,
+    session_id: str,
+    request_id: str,
+    *,
+    actor: str = "user",
+) -> dict[str, Any]:
+    """Requeue one failed or completed request for a user-started resume round."""
+
+    request = read_agent_request(store, session_id, request_id)
+    if request["status"] in {"pending_agent", "processing"}:
+        return request
+    if request["status"] not in {"failed", "completed"}:
+        raise InteractionConflict("Agent request is not resumable")
+    resumed = _transition_agent_request(
+        store,
+        session_id,
+        request,
+        "pending_agent",
+        actor=actor,
+        reason_code="AGENT_REQUEST_MANUAL_RESUME",
+        allowed_from={"failed", "completed"},
+    )
+    resumed["claimed_at"] = None
+    resumed["completed_at"] = None
+    resumed["manual_resume_count"] = int(
+        request.get("manual_resume_count", 0) or 0
+    ) + 1
+    _atomic_json(
+        _request_path(store, session_id, request_id) / "request.json",
+        resumed,
+    )
+    return resumed
+
+
 def fail_agent_request(
     store: SessionStore,
     session_id: str,

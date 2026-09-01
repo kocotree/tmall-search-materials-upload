@@ -1518,7 +1518,18 @@ def test_failed_copy_request_can_resume_same_version_from_checkpoint(
     assert resumed.status_code == 200, resumed.json
     assert resumed.json["request"]["request_id"] == request_id
     assert resumed.json["request"]["status"] == "pending_agent"
-    assert store._read_json(progress_path, "copy-progress") == failed_progress
+    resumed_progress = store._read_json(progress_path, "copy-progress")
+    assert resumed_progress["status"] == "pending_agent"
+    assert [
+        item["slot_id"] for item in resumed_progress["copy_drafts"]
+    ] == ["slot-completed"]
+    history_path = (
+        progress_path.parent
+        / "resume-history"
+        / "round-001"
+        / "previous-progress.json"
+    )
+    assert store._read_json(history_path, "copy-progress") == failed_progress
 
     resumed_calls = []
 
@@ -1554,6 +1565,153 @@ def test_failed_copy_request_can_resume_same_version_from_checkpoint(
     }
     assert drafts["slot-completed"]["title"] == "已保存的标题"
     assert drafts["slot-interrupted"]["title"] == "恢复后的标题"
+
+
+def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(
+        tmp_path, asset_count=6
+    )
+    request_id = _queue_copy_request(
+        client,
+        store,
+        session_id,
+        slot_assignments=[
+            {
+                "slot_id": "slot-complete",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            },
+            {
+                "slot_id": "slot-empty",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-3", "asset-4", "asset-5"],
+            },
+        ],
+    )
+    runtime = SimpleNamespace(
+        cdp_url="http://127.0.0.1:9222",
+        material_center_url="https://example.test/materials",
+    )
+
+    def skip_empty(_page, slots, *, material_center_url):
+        assert material_center_url == runtime.material_center_url
+        slot = slots[0]
+        if slot["slot_id"] == "slot-empty":
+            raise workflow.QianniuCopyError(
+                "QIANNIU_SLOT_NOT_FOUND", "目标坑位暂时未找到"
+            )
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "已经完成的标题",
+            "description": "该坑位在后续继续获取时不应重新生成。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    _patch_copy_product_session(monkeypatch, workflow, skip_empty)
+    first_response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=runtime,
+        page=object(),
+    )
+    first_drafts = first_response["result"]["copy_drafts"]
+    assert [item["generation_status"] for item in first_drafts] == [
+        "generated",
+        "skipped",
+    ]
+
+    resume_url = (
+        f"/api/sessions/{session_id}/stages/slots_copy/agent-requests/"
+        f"{request_id}/resume"
+    )
+    first_resume = client.post(
+        resume_url, json={"copy_edits": first_drafts}
+    )
+    assert first_resume.status_code == 200, first_resume.json
+    assert first_resume.json["request"]["status"] == "pending_agent"
+    assert first_resume.json["request"]["manual_resume_count"] == 1
+    pending_detail = client.get(resume_url.removesuffix("/resume"))
+    assert pending_detail.status_code == 200
+    assert pending_detail.json["response"] is None
+    assert [
+        item["slot_id"]
+        for item in pending_detail.json["progress"]["copy_drafts"]
+    ] == ["slot-complete"]
+
+    # A bounded resume round may still skip the same slot. The user can start
+    # another round without creating a new version or regenerating successes.
+    second_response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=runtime,
+        page=object(),
+    )
+    second_drafts = second_response["result"]["copy_drafts"]
+    second_resume = client.post(
+        resume_url, json={"copy_edits": second_drafts}
+    )
+    assert second_resume.status_code == 200, second_resume.json
+    assert second_resume.json["request"]["manual_resume_count"] == 2
+
+    resumed_calls = []
+
+    def finish_empty(_page, slots, *, material_center_url):
+        slot = slots[0]
+        resumed_calls.append(slot["slot_id"])
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "第二次继续后完成",
+            "description": "只重新处理仍然为空的坑位。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    _patch_copy_product_session(monkeypatch, workflow, finish_empty)
+    final_response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=runtime,
+        page=object(),
+    )
+    assert resumed_calls == ["slot-empty"]
+    final_drafts = {
+        item["slot_id"]: item
+        for item in final_response["result"]["copy_drafts"]
+    }
+    assert final_drafts["slot-complete"]["title"] == "已经完成的标题"
+    assert final_drafts["slot-empty"]["title"] == "第二次继续后完成"
+    request_root = (
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+    )
+    assert (
+        request_root
+        / "resume-history"
+        / "round-001"
+        / "previous-response.json"
+    ).is_file()
+    assert (
+        request_root
+        / "resume-history"
+        / "round-002"
+        / "previous-response.json"
+    ).is_file()
 
 
 def test_slots_copy_back_is_disabled_until_active_copy_finishes(

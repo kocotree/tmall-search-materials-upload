@@ -41,6 +41,8 @@ DEFAULT_MATERIAL_CENTER_URL = (
 )
 REMOTE_ID_OBSERVE_ATTEMPTS = 20
 REMOTE_ID_OBSERVE_DELAY_MS = 500
+MATERIAL_CONFIRM_OVERLAY_SELECTOR = ".J_MIDDLEWARE_FRAME_WIDGET"
+MATERIAL_CONFIRM_CLICK_TIMEOUT_MS = 15_000
 
 
 class QianniuUploadError(RuntimeError):
@@ -126,6 +128,81 @@ def _wait_for_material_confirm_ready(
         "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
         confirm_text,
     )
+
+
+def _material_confirm_overlay_visible(page, selector_frame) -> bool:
+    """Return whether Qianniu still has a middleware layer over confirm."""
+
+    scopes = [selector_frame, page]
+    try:
+        scopes.extend(page.frames)
+    except (AttributeError, PlaywrightError):
+        pass
+    visited: set[int] = set()
+    for scope in scopes:
+        scope_identity = id(scope)
+        if scope_identity in visited:
+            continue
+        visited.add(scope_identity)
+        try:
+            overlays = scope.locator(MATERIAL_CONFIRM_OVERLAY_SELECTOR)
+            for index in range(overlays.count()):
+                if overlays.nth(index).is_visible():
+                    return True
+        except (AttributeError, PlaywrightError):
+            # Frames can be replaced while the local-upload panel settles.
+            continue
+    return False
+
+
+def _click_material_confirm_when_unblocked(
+    page,
+    selector_frame,
+    confirm,
+    *,
+    attempts: int,
+    delay_ms: int,
+) -> None:
+    """Wait out Qianniu's transient overlay and normalize click failures."""
+
+    max_attempts = max(1, attempts)
+    for attempt_index in range(max_attempts):
+        if not _material_confirm_overlay_visible(page, selector_frame):
+            break
+        if attempt_index + 1 < max_attempts:
+            page.wait_for_timeout(delay_ms)
+    else:
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+            "material confirmation overlay remained visible",
+        )
+
+    try:
+        confirm.click(timeout=MATERIAL_CONFIRM_CLICK_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        overlay_visible = _material_confirm_overlay_visible(
+            page,
+            selector_frame,
+        )
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+            (
+                "confirm click timed out;"
+                f"middleware_overlay_visible={str(overlay_visible).lower()}"
+            ),
+        ) from exc
+    except PlaywrightError as exc:
+        # A successful confirmation may detach the material iframe before
+        # Playwright finishes its actionability bookkeeping.
+        if "frame was detached" in str(exc).lower() and not any(
+            MATERIAL_SELECTOR_FRAME_FRAGMENT in frame.url
+            for frame in page.frames
+        ):
+            return
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+            str(exc),
+        ) from exc
 
 
 def _set_local_files(
@@ -413,7 +490,13 @@ def _select_uploaded_cards(
         delay_ms=delay_ms,
     )
     for _ in range(3):
-        confirm.click()
+        _click_material_confirm_when_unblocked(
+            page,
+            selector_frame,
+            confirm,
+            attempts=attempts,
+            delay_ms=delay_ms,
+        )
         page.wait_for_timeout(1_500)
         if not any(
             MATERIAL_SELECTOR_FRAME_FRAGMENT in frame.url

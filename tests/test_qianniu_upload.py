@@ -2,10 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from upload_search_materials.browser.qianniu_upload import (
     QianniuProductUploadSession,
     QianniuUploadError,
+    _click_material_confirm_when_unblocked,
     _wait_for_material_confirm_ready,
     _wait_for_upload_completion,
 )
@@ -136,6 +138,67 @@ def test_material_confirm_reports_not_ready_after_wait_exhaustion(
 
     assert exc_info.value.reason_code == "QIANNIU_MATERIAL_CONFIRM_NOT_READY"
     assert waits == [300, 300]
+
+
+def test_material_confirm_waits_for_middleware_overlay_before_click(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    waits = []
+    clicks = []
+    overlay_states = iter([True, True, False])
+    page = SimpleNamespace(wait_for_timeout=lambda delay: waits.append(delay))
+    confirm = SimpleNamespace(
+        click=lambda **kwargs: clicks.append(kwargs["timeout"])
+    )
+    monkeypatch.setattr(
+        module,
+        "_material_confirm_overlay_visible",
+        lambda *_args: next(overlay_states),
+    )
+
+    _click_material_confirm_when_unblocked(
+        page,
+        object(),
+        confirm,
+        attempts=5,
+        delay_ms=300,
+    )
+
+    assert waits == [300, 300]
+    assert clicks == [module.MATERIAL_CONFIRM_CLICK_TIMEOUT_MS]
+
+
+def test_material_confirm_click_timeout_becomes_retryable_upload_error(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    overlay_states = iter([False, True])
+    page = SimpleNamespace(wait_for_timeout=lambda _delay: None)
+
+    def timeout_click(**_kwargs):
+        raise PlaywrightTimeoutError("overlay intercepts pointer events")
+
+    confirm = SimpleNamespace(click=timeout_click)
+    monkeypatch.setattr(
+        module,
+        "_material_confirm_overlay_visible",
+        lambda *_args: next(overlay_states),
+    )
+
+    with pytest.raises(QianniuUploadError) as exc_info:
+        _click_material_confirm_when_unblocked(
+            page,
+            object(),
+            confirm,
+            attempts=5,
+            delay_ms=300,
+        )
+
+    assert exc_info.value.reason_code == "QIANNIU_MATERIAL_CONFIRM_NOT_READY"
+    assert "middleware_overlay_visible=true" in exc_info.value.detail
 
 
 def test_product_upload_session_reuses_filtered_product_row(monkeypatch):

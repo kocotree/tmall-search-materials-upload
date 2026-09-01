@@ -3264,7 +3264,7 @@
         const key = `${candidate.product_id}\u0000${candidate.folder_id}`;
         const saved = savedByKey.get(key) || {};
         const defaultDecision = candidate.match_type === "fuzzy_name_candidate"
-          ? "confirmed"
+          ? "rejected"
           : candidate.decision === "rejected"
             ? "rejected"
             : "confirmed";
@@ -3565,7 +3565,7 @@
                 : candidate.match_type === "short_split_name_candidate"
                   ? "文件夹包含 3–4 字完整片段；默认排除，确认属于本商品后再采用"
               : candidate.match_type === "fuzzy_name_candidate"
-                ? "粗略名称命中；默认采用，请重点核对，不属于本商品请排除"
+                ? "粗略名称命中；默认排除，确认属于本商品后再采用"
                 : "名称精确命中；默认采用，可手动排除",
         );
         status.append(stateBadge, warning);
@@ -6202,6 +6202,7 @@
       );
       const form = element("div", "copy-slot-list");
       const copyState = [];
+      let currentCopyRequestStatus = "";
       let finishButton = null;
       let finishHint = null;
       let copyVersionCount = 0;
@@ -6279,6 +6280,10 @@
             || !String(draft.description || "").trim(),
         ).length;
         const hasCompleteDrafts = copyState.length > 0 && incompleteCount === 0;
+        const canResume = incompleteCount > 0
+          && ["failed", "completed"].includes(currentCopyRequestStatus);
+        resumeCopyButton.hidden = !canResume;
+        resumeCopyButton.disabled = !canResume;
         copyButton.className = hasCompleteDrafts
           ? "button-secondary"
           : "primary-button";
@@ -6543,10 +6548,9 @@
           );
           if (!copyVersions.isConnected) return;
           const requestState = detail.request?.status || "";
+          currentCopyRequestStatus = requestState;
           const requestIsActive = ["pending_agent", "processing"]
             .includes(requestState);
-          resumeCopyButton.hidden = requestState !== "failed";
-          resumeCopyButton.disabled = requestState !== "failed";
           setLocalCopyRequestInFlight(requestIsActive);
           setSubpage("copy");
           const progressDrafts = detail.progress?.copy_drafts || [];
@@ -6604,6 +6608,7 @@
             resumeCopyButton.hidden = false;
             resumeCopyButton.disabled = false;
             copyButton.disabled = false;
+            updateCopyActions();
             return;
           }
           if (["cancelled", "superseded"].includes(requestState)) {
@@ -6675,7 +6680,10 @@
             apiPath(
               `/stages/slots_copy/agent-requests/${encodeURIComponent(requestId)}/resume`,
             ),
-            { method: "POST", body: JSON.stringify({}) },
+            {
+              method: "POST",
+              body: JSON.stringify({ copy_edits: copyState }),
+            },
           );
           resumeCopyButton.hidden = true;
           copyStatus.textContent = "已恢复，将从未完成的坑位继续获取。";

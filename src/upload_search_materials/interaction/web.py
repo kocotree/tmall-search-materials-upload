@@ -4929,7 +4929,7 @@ def create_app(
             / "response.json"
         )
         response = None
-        if response_path.is_file():
+        if value.get("status") == "completed" and response_path.is_file():
             try:
                 response = SessionStore._read_json(response_path, "response")
             except InteractionConflict:
@@ -5012,11 +5012,18 @@ def create_app(
         "<request_id>/resume"
     )
     def resume_slot_copy_request(session_id: str, request_id: str):
+        payload = _json_object()
+        copy_edits = payload.get("copy_edits", [])
+        if not isinstance(copy_edits, list):
+            return _validation_error(
+                {"copy_edits": "当前标题和描述格式无效，请刷新后重试。"}
+            )
         try:
             resumed = resume_copy_draft_request(
                 store,
                 session_id,
                 request_id,
+                current_copy_edits=copy_edits,
                 actor="user",
             )
             notify_workflow_dispatcher(session_id)
@@ -5765,11 +5772,12 @@ def _normalize_stage_values(
         if submitted in {"confirmed", "rejected"}:
             return submitted
         match_type = str(item.get("match_type", ""))
-        if match_type == "fuzzy_name_candidate":
-            return "confirmed"
         if (
             str(item.get("decision", "")) == "rejected"
-            or match_type == "short_split_name_candidate"
+            or match_type in {
+                "short_split_name_candidate",
+                "fuzzy_name_candidate",
+            }
         ):
             return "rejected"
         return "confirmed"

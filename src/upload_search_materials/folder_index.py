@@ -1278,7 +1278,10 @@ def build_folder_review_data(
         saved_decision = str(decision.get("decision", "")).strip()
         default_decision = (
             "rejected"
-            if match_type == "short_split_name_candidate"
+            if match_type in {
+                "short_split_name_candidate",
+                "fuzzy_name_candidate",
+            }
             and not is_exact_query
             else "confirmed"
         )
