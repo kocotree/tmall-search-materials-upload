@@ -2456,8 +2456,13 @@ def test_crop_preflight_failures_are_visible_locatable_and_recoverable(client):
     assert "setCropPreflightControlsLocked(true)" in javascript
     assert "setCropPreflightControlsLocked(false)" in javascript
     assert 'control.closest(".product-jump-nav")' in javascript
-    assert "...railButtons" in javascript
-    assert "backButton," in javascript
+    crop_lock = javascript.split(
+        "const setCropPreflightControlsLocked", 1
+    )[1].split("const backToCompose", 1)[0]
+    assert "...railButtons" not in crop_lock
+    assert "backButton," not in crop_lock
+    assert "endCurrentTaskButton," not in crop_lock
+    assert "(globalAssetSelectionInFlight || cropPreflightInFlight)" not in javascript
     assert "if (cropPreflightInFlight) return;" in javascript
     assert ".is-crop-preflight-running .crop-overlay.is-disabled" in stylesheet
     assert "invalidateProcessedOutputs();" in javascript
@@ -5046,6 +5051,17 @@ def test_asset_and_slot_editors_expose_scoped_remove_actions(client):
     assert "本次任务至少需要保留一个商品" in source
     assert "该商品的候选文件夹、已选图片和后续坑位会一并移除" in source
     assert "该坑位的图片编排会移除" in source
+    slot_delete = source.split('title: "去掉当前坑位"', 1)[1].split(
+        "drawAssets();", 1
+    )[0]
+    assert 'apiPath("/stages/slots_copy/current-slot-plan")' in slot_delete
+    assert 'method: "POST"' in slot_delete
+    assert "plan_revision: currentPlanRevision" in slot_delete
+    assert "slot_assignments: nextAssignments" in slot_delete
+    assert slot_delete.index("await fetchJson") < slot_delete.index(
+        "assignments.splice"
+    )
+    assert "刷新后也不会恢复" in slot_delete
 
 
 def test_collection_ui_prompts_for_human_check_and_auto_resume():

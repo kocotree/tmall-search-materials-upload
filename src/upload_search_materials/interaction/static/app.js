@@ -1564,8 +1564,7 @@
     if (endCurrentTaskButton) {
       endCurrentTaskButton.hidden = !sessionId || shutdown.enabled !== true;
       if (!endCurrentTaskInFlight) {
-        endCurrentTaskButton.disabled = shutdown.status === "closing"
-          || cropPreflightInFlight;
+        endCurrentTaskButton.disabled = shutdown.status === "closing";
         endCurrentTaskButton.textContent = shutdown.status === "review_window"
           ? "立即关闭工作台"
           : "结束当前任务";
@@ -1681,7 +1680,7 @@
     );
     const localBackLockActive = stageLocalActionInFlight
       || globalAssetSelectionInFlight
-      || cropPreflightInFlight
+      || (currentStageId === "slots_copy" && cropPreflightInFlight)
       || pendingBackNavigation
       || (currentStageId === "slots_copy" && localCopyRequestInFlight)
       || (
@@ -1699,7 +1698,7 @@
     backButton.title = localBackLockActive
       ? globalAssetSelectionInFlight
         ? "正在为全部商品选图，完成后才能返回上一步。"
-        : cropPreflightInFlight
+        : currentStageId === "slots_copy" && cropPreflightInFlight
           ? "正在执行裁剪预校验，完成后才能返回上一步。"
         : stageLocalActionInFlight
         ? "当前步骤正在保存或处理，完成后才能返回上一步。"
@@ -5721,16 +5720,6 @@
             "button, input, select, textarea, .crop-overlay, .slot-asset-card",
           ),
           ...wizard.querySelectorAll("button"),
-          ...railButtons,
-          backButton,
-          saveButton,
-          submitButton,
-          goCurrentStageButton,
-          recoveryButton,
-          withdrawButton,
-          recoverProcessingButton,
-          retryGalleryButton,
-          endCurrentTaskButton,
         ]),
       ].filter((control) => (
         control && !control.closest(".product-jump-nav")
@@ -5860,13 +5849,16 @@
         (assignment) => String(assignment.slot_id || ""),
       ),
     );
-    const currentSlotPlanSignature = () => JSON.stringify(
-      currentSlotAssignments().map((assignment) => ({
+    const slotPlanSignature = (assignments) => JSON.stringify(
+      assignments.map((assignment) => ({
         product_id: String(assignment.product_id || ""),
         slot_id: String(assignment.slot_id || ""),
         target_ratio: String(assignment.target_ratio || ""),
         asset_ids: (assignment.asset_ids || []).map(String),
       })),
+    );
+    const currentSlotPlanSignature = () => slotPlanSignature(
+      currentSlotAssignments(),
     );
     const responseMatchesCurrentPlan = (response) => {
       const assignments = currentSlotAssignments();
@@ -7103,6 +7095,7 @@
       if (cropPreflightInFlight) return;
       cropPreflightInFlight = true;
       setCropPreflightControlsLocked(true);
+      renderStatus();
       processStatus.textContent = "正在逐张试裁并检查最终文件大小…";
       let focusFirstFailure = false;
       let completionMessage = "";
@@ -7144,6 +7137,7 @@
         cropPreflightInFlight = false;
         setCropPreflightControlsLocked(false);
         renderProcessingPage({ focusFirstFailure });
+        renderStatus();
         if (completionMessage) processStatus.textContent = completionMessage;
       }
     });
@@ -7591,16 +7585,49 @@
             });
             if (!confirmed || cropPreflightInFlight) return;
             const assignments = stateByProduct.get(productId);
-            assignments.splice(slotIndex, 1);
-            Object.keys(cropParameters)
-              .filter((key) => key.startsWith(`${currentSlotId}:`))
-              .forEach((key) => delete cropParameters[key]);
-            invalidateCropPreflight();
-            persist(true);
-            draw();
-            renderProcessingPage();
-            composeStatus.textContent = `已去掉坑位“${currentSlotId}”；请重新确认剩余坑位。`;
-            actionMessage.textContent = `已去掉当前坑位“${currentSlotId}”。`;
+            const nextAssignments = [...stateByProduct.values()]
+              .flat()
+              .filter((item) => item !== assignment);
+            if (!nextAssignments.length) {
+              composeStatus.textContent = "本次任务至少需要保留一个坑位。";
+              return;
+            }
+            const requestPlanSignature = slotPlanSignature(nextAssignments);
+            remove.disabled = true;
+            remove.textContent = "正在去掉…";
+            composeStatus.textContent = `正在保存坑位“${currentSlotId}”的删除结果…`;
+            try {
+              const updated = await fetchJson(
+                apiPath("/stages/slots_copy/current-slot-plan"),
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    plan_revision: currentPlanRevision,
+                    slot_assignments: nextAssignments,
+                  }),
+                },
+              );
+              currentPlanRevision = Number(
+                updated.current_slot_plan?.plan_revision || currentPlanRevision,
+              );
+              assignments.splice(slotIndex, 1);
+              Object.keys(cropParameters)
+                .filter((key) => key.startsWith(`${currentSlotId}:`))
+                .forEach((key) => delete cropParameters[key]);
+              invalidateCropPreflight();
+              persist();
+              slotPlanDirty = currentSlotPlanSignature() !== requestPlanSignature;
+              draw();
+              renderProcessingPage();
+              composeStatus.textContent = `已去掉坑位“${currentSlotId}”；刷新后也不会恢复。`;
+              actionMessage.textContent = `已去掉当前坑位“${currentSlotId}”。`;
+            } catch (error) {
+              remove.disabled = false;
+              remove.textContent = "去掉当前坑位";
+              composeStatus.textContent = error.userMessage
+                || Object.values(error.fieldErrors || {})[0]
+                || "坑位删除结果未保存，请重试。";
+            }
           });
           drawAssets();
         });
@@ -8823,7 +8850,7 @@
   async function activateStage(stageId) {
     if (!stages.has(stageId)) return;
     if (
-      (globalAssetSelectionInFlight || cropPreflightInFlight)
+      globalAssetSelectionInFlight
       && stageId !== currentStageId
     ) return;
     const previousStageId = currentStageId;
@@ -8893,7 +8920,7 @@
       || !currentBackNavigation?.target_stage_id
       || stageLocalActionInFlight
       || globalAssetSelectionInFlight
-      || cropPreflightInFlight
+      || (currentStageId === "slots_copy" && cropPreflightInFlight)
     ) return;
     const unsavedWarning = uiState.dirty
       ? " 当前步骤尚未保存的修改也不会保留。"
