@@ -83,6 +83,7 @@
   let larkActivationInFlight = false;
   let currentApprovalUploadIdentity = null;
   let persistenceInFlight = false;
+  let activePersistenceMode = "";
   let endCurrentTaskInFlight = false;
   let confirmationResolver = null;
   let confirmationReturnFocus = null;
@@ -159,6 +160,36 @@
 
   function apiPath(suffix = "") {
     return `/api/sessions/${encodeURIComponent(sessionId)}${suffix}`;
+  }
+
+  function paintBusyState() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(resolve);
+      });
+    });
+  }
+
+  function beginPersistenceUi(mode) {
+    persistenceInFlight = true;
+    activePersistenceMode = mode;
+    saveButton.disabled = true;
+    if (mode === "submit") {
+      submitButton.disabled = true;
+      submitButton.setAttribute("aria-busy", "true");
+      submitButton.textContent = "正在检查并提交…";
+    } else {
+      saveButton.setAttribute("aria-busy", "true");
+    }
+    renderStatus();
+  }
+
+  function releasePersistenceUi() {
+    persistenceInFlight = false;
+    activePersistenceMode = "";
+    submitButton.removeAttribute("aria-busy");
+    saveButton.removeAttribute("aria-busy");
+    renderStatus();
   }
 
   function closeConfirmation(confirmed) {
@@ -1595,11 +1626,17 @@
           : "提交给工作台";
     const lockedByServer = !uiState.dirty
       && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
+    const submittingNow = persistenceInFlight && activePersistenceMode === "submit";
     const approvalHasSelectedTasks = currentStageId !== "approval" || String(
       activeForm()?.querySelector('[name="task_ids"]')?.value || "",
     ).split(/\r?\n/).some((taskId) => taskId.trim());
     submitButton.disabled = lockedByServer
-      || !approvalHasSelectedTasks;
+      || !approvalHasSelectedTasks
+      || submittingNow;
+    if (submittingNow) {
+      submitButton.textContent = "正在检查并提交…";
+      submitButton.setAttribute("aria-busy", "true");
+    }
     if (
       currentStageId === "asset_matching"
       && ["queued", "running"].includes(currentGalleryJob?.status)
@@ -1620,7 +1657,7 @@
       submitButton.disabled = true;
       submitButton.textContent = "正在为全部商品选图…";
     }
-    saveButton.disabled = lockedByServer;
+    saveButton.disabled = lockedByServer || persistenceInFlight;
     if (currentStageId === "setup" && !setupLoginReady) {
       saveButton.disabled = true;
       submitButton.disabled = true;
@@ -4737,17 +4774,25 @@
       const renderGeneration = stageGeneration;
       globalAssetSelectionInFlight = true;
       window.clearTimeout(autoSaveTimer);
-      setGlobalSelectionControlsLocked(true);
       globalSelectionButton.disabled = true;
+      globalSelectionButton.setAttribute("aria-busy", "true");
       globalSelectionButton.textContent = "正在为全部商品选图…";
-      refreshAllSelectionAvailability();
-      renderStatus();
+      globalSelectionStatus.textContent = "正在准备自动选图…";
+      actionMessage.textContent = globalSelectionStatus.textContent;
       const outcomes = [];
       const orderedContexts = [...globalSelectionContexts].sort(
         (left, right) => left.priority() - right.priority()
           || left.productId.localeCompare(right.productId, "zh-CN"),
       );
       try {
+        await paintBusyState();
+        if (
+          currentStageId !== "asset_matching"
+          || renderGeneration !== stageGeneration
+        ) return;
+        setGlobalSelectionControlsLocked(true);
+        refreshAllSelectionAvailability();
+        renderStatus();
         for (let index = 0; index < orderedContexts.length; index += 1) {
           if (
             currentStageId !== "asset_matching"
@@ -4809,6 +4854,7 @@
       } finally {
         globalAssetSelectionInFlight = false;
         setGlobalSelectionControlsLocked(false);
+        globalSelectionButton.removeAttribute("aria-busy");
         if (
           currentStageId === "asset_matching"
           && renderGeneration === stageGeneration
@@ -7899,6 +7945,10 @@
 
   async function persistStage(mode, { automatic = false, queued = false } = {}) {
     if (persistenceInFlight) {
+      if (mode === "submit" && activePersistenceMode === "submit") {
+        actionMessage.textContent = "当前提交正在处理中，请勿重复点击。";
+        return;
+      }
       pendingPersistenceMode = UiState.mergePersistenceIntent(
         pendingPersistenceMode,
         mode,
@@ -7912,12 +7962,23 @@
       renderStatus();
       return;
     }
-    persistenceInFlight = true;
     const startedEditVersion = localEditVersion;
     let completedSuccessfully = false;
     if (mode === "submit") window.clearTimeout(autoSaveTimer);
     const requestedStageId = currentStageId;
     const requestedGeneration = stageGeneration;
+    beginPersistenceUi(mode);
+    if (mode === "submit") {
+      actionMessage.textContent = "正在检查当前内容，请稍候…";
+      await paintBusyState();
+      if (
+        requestedStageId !== currentStageId
+        || requestedGeneration !== stageGeneration
+      ) {
+        releasePersistenceUi();
+        return;
+      }
+    }
     if (
       mode === "submit"
       && requestedStageId === "asset_matching"
@@ -7928,7 +7989,7 @@
     ) {
       actionMessage.textContent =
         "请使用文件夹列表下方的“确认文件夹并加载图片”。";
-      persistenceInFlight = false;
+      releasePersistenceUi();
       return;
     }
     if (
@@ -7952,13 +8013,13 @@
         requestedStageId !== currentStageId
         || requestedGeneration !== stageGeneration
       ) {
-        persistenceInFlight = false;
+        releasePersistenceUi();
         return;
       }
     }
     const form = activeForm();
     if (!form) {
-      persistenceInFlight = false;
+      releasePersistenceUi();
       return;
     }
     clearFieldErrors(form);
@@ -7968,7 +8029,7 @@
         showFieldErrors(form, fieldErrors);
         const message = focusFirstFieldError(form, fieldErrors);
         actionMessage.textContent = `${message}，页面已定位到需要补充的位置。`;
-        persistenceInFlight = false;
+        releasePersistenceUi();
         return;
       }
     }
@@ -7980,7 +8041,7 @@
       const count = incompleteImageSourceRows().length;
       updateImageSourceIncompleteHint();
       actionMessage.textContent = `还有 ${count} 个图片源未填写完整，请补充后再提交。`;
-      persistenceInFlight = false;
+      releasePersistenceUi();
       return;
     }
     let values;
@@ -7988,7 +8049,7 @@
       values = serializeForm(form);
     } catch (error) {
       actionMessage.textContent = error.message;
-      persistenceInFlight = false;
+      releasePersistenceUi();
       return;
     }
     if (
@@ -7998,7 +8059,7 @@
     ) {
       actionMessage.textContent =
         "团队索引文件夹检测未通过；请选择可访问的索引文件夹后再提交。";
-      persistenceInFlight = false;
+      releasePersistenceUi();
       return;
     }
     if (
@@ -8008,7 +8069,7 @@
     ) {
       actionMessage.textContent =
         "图片源检测未通过；请修改本次配置后再提交，工作台尚未接收。";
-      persistenceInFlight = false;
+      releasePersistenceUi();
       return;
     }
     if (
@@ -8052,7 +8113,7 @@
         const message = `还有 ${pendingSelectionCount} 张图片正在进行预裁剪检查，请等待完成。`;
         showFieldErrors(form, { asset_decisions: message });
         actionMessage.textContent = message;
-        persistenceInFlight = false;
+        releasePersistenceUi();
         return;
       }
       let unchecked = decisions.filter((item) => {
@@ -8088,7 +8149,7 @@
         const message = `有 ${blocked.length} 张已选图片未通过预裁剪，已在“已选素材”中标红，请取消后更换。`;
         showFieldErrors(form, { asset_decisions: message });
         actionMessage.textContent = message;
-        persistenceInFlight = false;
+        releasePersistenceUi();
         renderStageResult(stages.get(currentStageId).component);
         return;
       }
@@ -8155,7 +8216,7 @@
             : `每个商品至少需要 3 张共同支持同一比例的图片：${incompatibleRatios.join("、")}`;
         showFieldErrors(form, { asset_decisions: message });
         actionMessage.textContent = message;
-        persistenceInFlight = false;
+        releasePersistenceUi();
         return;
       }
     }
@@ -8308,7 +8369,7 @@
       uiState = UiState.markDirty(uiState);
       renderStatus();
     } finally {
-      persistenceInFlight = false;
+      releasePersistenceUi();
       const pending = pendingPersistenceMode;
       pendingPersistenceMode = null;
       if (

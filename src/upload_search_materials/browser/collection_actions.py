@@ -27,6 +27,14 @@ PAGE_RESTORE_CLOSE_RETRY_MS = 2_000
 PAGE_RESTORE_GO_BACK_TIMEOUT_MS = 15_000
 RANDOM_ACTION_INTERACTION_TIMEOUT_MS = 3_000
 RANDOM_ACTION_POPUP_SETTLE_DELAY_MS = 250
+RANDOM_ACTION_TYPES = (
+    "view_filled_slot",
+    "hover_filled_slot",
+    "hover_filled_slot",
+    "small_scroll",
+    "short_pause",
+    "short_pause",
+)
 ACTION_OVERLAY_SELECTOR = (
     ".next-overlay-wrapper.opened, "
     ".ant-modal-wrap:visible, "
@@ -374,6 +382,79 @@ def _restore_current_page(
     }
 
 
+def _current_page_restore_state(
+    page: Any,
+    *,
+    rows_selector: str,
+    product_ids_before: tuple[str, ...],
+    url_before: str,
+    baseline_overlay_count: int,
+) -> dict[str, Any]:
+    """Verify a lightweight action left the collector on the same page."""
+
+    observed_product_ids = _ordered_product_ids(page, rows_selector)
+    state = {
+        "url_matches": str(getattr(page, "url", "")) == url_before,
+        "product_order_matches": observed_product_ids == product_ids_before,
+        "publish_frame_visible": _publish_frame_visible(page),
+        "action_overlay_count": len(_visible_action_overlays(page)),
+        "baseline_overlay_count": baseline_overlay_count,
+        "expected_product_count": len(product_ids_before),
+        "observed_product_count": len(observed_product_ids),
+    }
+    return {
+        "restored": (
+            state["url_matches"]
+            and state["product_order_matches"]
+            and not state["publish_frame_visible"]
+            and state["action_overlay_count"] <= baseline_overlay_count
+        ),
+        "elapsed_ms": 0,
+        "stable_samples": 1,
+        **state,
+    }
+
+
+def _restore_failure_result(
+    *,
+    action: str,
+    restore: Mapping[str, Any],
+    product_id: str = "",
+    slot_position: int | None = None,
+) -> dict[str, Any]:
+    detail = (
+        f"elapsed_ms={restore['elapsed_ms']};"
+        f"url_matches={str(restore['url_matches']).lower()};"
+        "product_order_matches="
+        f"{str(restore['product_order_matches']).lower()};"
+        "publish_frame_visible="
+        f"{str(restore['publish_frame_visible']).lower()};"
+        "action_overlay_count="
+        f"{restore['action_overlay_count']};"
+        "baseline_overlay_count="
+        f"{restore['baseline_overlay_count']};"
+        "observed_product_count="
+        f"{restore['observed_product_count']};"
+        "expected_product_count="
+        f"{restore['expected_product_count']}"
+    )
+    result: dict[str, Any] = {
+        "status": "skipped",
+        "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
+        "action": action,
+        "read_only": True,
+        "source": "current_page",
+        "page_state_restored": False,
+        "detail": detail,
+        "restore_diagnostics": dict(restore),
+    }
+    if product_id:
+        result["product_id"] = product_id
+    if slot_position is not None:
+        result["slot_position"] = slot_position
+    return result
+
+
 def perform_random_collection_action(
     page: Any,
     *,
@@ -382,11 +463,11 @@ def perform_random_collection_action(
     rng: RandomSource | None = None,
     wait_for_human_check: HumanCheckWaiter | None = None,
 ) -> dict[str, Any]:
-    """View one filled slot from the current page and restore that exact page.
+    """Run one bounded, read-only action on the current collection page.
 
     The function never enters a product id in a search field.  Candidate rows
-    and filled slots are taken only from the collector's currently visible
-    page. Empty slots are never opened by this read-only random action.
+    and filled slots are taken only from the collector's current page. Empty
+    slots and publish forms are never opened by these optional actions.
     """
 
     selector = str(rows_selector).strip()
@@ -410,70 +491,122 @@ def perform_random_collection_action(
         return {"status": "skipped", "reason_code": "RANDOM_ACTION_NO_CURRENT_ROW"}
 
     product_ids_before = tuple(_row_product_id(row) for row in rows)
-    candidates: list[tuple[Any, str, int]] = []
-    for row in rows:
-        product_id = _row_product_id(row)
-        try:
-            slots = _slot_cells(row)
-            empty_positions = _empty_slot_positions(row)
-        except QianniuCopyError:
-            continue
-        empty_set = set(empty_positions)
-        candidates.extend(
-            (row, product_id, position)
-            for position in range(1, slots.count() + 1)
-            if position not in empty_set
-        )
-    if not candidates:
-        return {
-            "status": "skipped",
-            "reason_code": "RANDOM_ACTION_NO_FILLED_SLOT",
-        }
+    action = str(source.choice(RANDOM_ACTION_TYPES))
+    row = None
+    product_id = ""
+    position: int | None = None
+    if action in {"view_filled_slot", "hover_filled_slot"}:
+        candidates: list[tuple[Any, str, int]] = []
+        for candidate_row in rows:
+            candidate_product_id = _row_product_id(candidate_row)
+            try:
+                slots = _slot_cells(candidate_row)
+                empty_positions = _empty_slot_positions(candidate_row)
+            except QianniuCopyError:
+                continue
+            empty_set = set(empty_positions)
+            candidates.extend(
+                (candidate_row, candidate_product_id, candidate_position)
+                for candidate_position in range(1, slots.count() + 1)
+                if candidate_position not in empty_set
+            )
+        if not candidates:
+            return {
+                "status": "skipped",
+                "reason_code": "RANDOM_ACTION_NO_FILLED_SLOT",
+                "action": action,
+                "read_only": True,
+                "source": "current_page",
+            }
+        row, product_id, position = source.choice(candidates)
 
-    action = "view_filled_slot"
-    row, product_id, position = source.choice(candidates)
     pages_before = _context_pages(page)
     url_before = str(getattr(page, "url", ""))
     baseline_overlay_count = 0
     opened_scope = None
     result: dict[str, Any]
     action_started = False
+    full_restore_required = False
+    scroll_y_before: float | int | None = None
     try:
-        slots = _slot_cells(row)
-        action_started = True
-        slot = slots.nth(position - 1)
-        slot.hover(
-            force=True,
-            timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
-        )
-        slot.click(
-            force=True,
-            timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
-        )
-        page.wait_for_timeout(source.randint(600, 1_200))
-        if wait_for_human_check is not None:
-            wait_for_human_check(page, "random_action_after_open")
-        result = {
-            "status": "completed",
-            "action": action,
-            "product_id": product_id,
-            "slot_position": position,
-            "read_only": True,
-            "source": "current_page",
-        }
+        if action in {"view_filled_slot", "hover_filled_slot"}:
+            assert row is not None and position is not None
+            slots = _slot_cells(row)
+            slot = slots.nth(position - 1)
+            action_started = True
+            slot.hover(
+                force=True,
+                timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
+            )
+            if action == "view_filled_slot":
+                full_restore_required = True
+                slot.click(
+                    force=True,
+                    timeout=RANDOM_ACTION_INTERACTION_TIMEOUT_MS,
+                )
+                page.wait_for_timeout(source.randint(600, 1_200))
+                if wait_for_human_check is not None:
+                    wait_for_human_check(page, "random_action_after_open")
+            else:
+                page.wait_for_timeout(source.randint(250, 600))
+            result = {
+                "status": "completed",
+                "action": action,
+                "product_id": product_id,
+                "slot_position": position,
+                "read_only": True,
+                "source": "current_page",
+            }
+        elif action == "small_scroll":
+            action_started = True
+            scroll_y_before = page.evaluate("() => window.scrollY")
+            page.evaluate(
+                "distance => window.scrollBy({top: distance, behavior: 'auto'})",
+                source.randint(120, 320),
+            )
+            page.wait_for_timeout(source.randint(250, 600))
+            result = {
+                "status": "completed",
+                "action": action,
+                "read_only": True,
+                "source": "current_page",
+            }
+        else:
+            action_started = True
+            page.wait_for_timeout(source.randint(250, 650))
+            result = {
+                "status": "completed",
+                "action": "short_pause",
+                "read_only": True,
+                "source": "current_page",
+            }
     except QianniuCopyError as error:
         result = {
             "status": "skipped",
             "reason_code": error.reason_code,
             "detail": error.detail,
+            "action": action,
+            "read_only": True,
+            "source": "current_page",
         }
     except Exception as error:
         result = {
             "status": "skipped",
             "reason_code": "RANDOM_ACTION_RUNTIME_FAILED",
             "detail": str(error),
+            "action": action,
+            "read_only": True,
+            "source": "current_page",
         }
     finally:
+        if scroll_y_before is not None:
+            try:
+                page.evaluate(
+                    "position => window.scrollTo({top: position, behavior: 'auto'})",
+                    scroll_y_before,
+                )
+            except Exception:
+                pass
         if safe_popup_selectors:
             _settle_safe_popups(
                 page,
@@ -482,45 +615,32 @@ def perform_random_collection_action(
             )
         _close_new_pages(page, pages_before)
         if action_started:
-            restore = _restore_current_page(
-                page,
-                rows_selector=selector,
-                product_ids_before=product_ids_before,
-                url_before=url_before,
-                opened_scope=opened_scope,
-                baseline_overlay_count=baseline_overlay_count,
-            )
+            if full_restore_required:
+                restore = _restore_current_page(
+                    page,
+                    rows_selector=selector,
+                    product_ids_before=product_ids_before,
+                    url_before=url_before,
+                    opened_scope=opened_scope,
+                    baseline_overlay_count=baseline_overlay_count,
+                )
+            else:
+                restore = _current_page_restore_state(
+                    page,
+                    rows_selector=selector,
+                    product_ids_before=product_ids_before,
+                    url_before=url_before,
+                    baseline_overlay_count=baseline_overlay_count,
+                )
             if restore["restored"]:
                 result["page_state_restored"] = True
             else:
-                detail = (
-                    f"elapsed_ms={restore['elapsed_ms']};"
-                    f"url_matches={str(restore['url_matches']).lower()};"
-                    "product_order_matches="
-                    f"{str(restore['product_order_matches']).lower()};"
-                    "publish_frame_visible="
-                    f"{str(restore['publish_frame_visible']).lower()};"
-                    "action_overlay_count="
-                    f"{restore['action_overlay_count']};"
-                    "baseline_overlay_count="
-                    f"{restore['baseline_overlay_count']};"
-                    "observed_product_count="
-                    f"{restore['observed_product_count']};"
-                    "expected_product_count="
-                    f"{restore['expected_product_count']}"
+                result = _restore_failure_result(
+                    action=action,
+                    restore=restore,
+                    product_id=product_id,
+                    slot_position=position,
                 )
-                result = {
-                    "status": "skipped",
-                    "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
-                    "action": action,
-                    "product_id": product_id,
-                    "slot_position": position,
-                    "read_only": True,
-                    "source": "current_page",
-                    "page_state_restored": False,
-                    "detail": detail,
-                    "restore_diagnostics": restore,
-                }
     return result
 
 

@@ -1415,7 +1415,7 @@ def test_high_value_scan_runs_random_action_every_one_or_two_new_pages():
     ] == [2, 3]
 
 
-def test_high_value_scan_stops_if_random_action_does_not_restore_page():
+def test_high_value_scan_continues_if_optional_random_action_does_not_restore_page():
     page = FakePromotionPage(
         [
             ["商品一 商品ID 100 发布坑位到 9 篇，当前发布 0 篇"],
@@ -1423,33 +1423,41 @@ def test_high_value_scan_stops_if_random_action_does_not_restore_page():
         ]
     )
 
-    with pytest.raises(
-        PaginationStateError, match="RANDOM_ACTION_PAGE_RESTORE_FAILED"
-    ):
-        scan_recommended_material_status(
-            page,
-            {
-                "promotion_tab": "#promotion",
-                "high_value_filter": "#recommended",
-                "promotion_rows": ".promotion-row",
-                "promotion_current_page": "#current",
-                "promotion_first_page": "#first",
-                "promotion_terminal_page": "#terminal",
-                "promotion_next_page": "#next",
-            },
-            collected_at="2026-08-10T10:00:00+08:00",
-            filter_selector_key="high_value_filter",
-            settle_delay_ms=0,
-            action_wait_ms=500,
-            on_page=lambda _page_number, _rows: None,
-            random_action=lambda _page_number: {
-                "status": "skipped",
-                "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
-                "page_state_restored": False,
-                "detail": "url_matches=true;product_order_matches=false",
-            },
-            random_interval_picker=lambda: 1,
-        )
+    rows = scan_recommended_material_status(
+        page,
+        {
+            "promotion_tab": "#promotion",
+            "high_value_filter": "#recommended",
+            "promotion_rows": ".promotion-row",
+            "promotion_current_page": "#current",
+            "promotion_first_page": "#first",
+            "promotion_terminal_page": "#terminal",
+            "promotion_next_page": "#next",
+        },
+        collected_at="2026-08-10T10:00:00+08:00",
+        filter_selector_key="high_value_filter",
+        settle_delay_ms=0,
+        action_wait_ms=500,
+        on_page=lambda _page_number, _rows: None,
+        random_action=lambda _page_number: {
+            "status": "skipped",
+            "reason_code": "RANDOM_ACTION_PAGE_RESTORE_FAILED",
+            "page_state_restored": False,
+            "detail": "url_matches=true;product_order_matches=false",
+        },
+        random_interval_picker=lambda: 1,
+    )
+
+    assert [row["商品ID"] for row in rows] == ["100", "200"]
+    random_events = [
+        event
+        for event in page._tmall_collection_events
+        if event.get("action") == "random_collection_action"
+    ]
+    assert len(random_events) == 2
+    assert all(event["optional_action"] is True for event in random_events)
+    assert all(event["non_blocking"] is True for event in random_events)
+    assert all(event["continued"] is True for event in random_events)
 
 
 def test_high_value_scan_checks_human_verification_around_checkpoint():

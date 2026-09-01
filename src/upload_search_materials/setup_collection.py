@@ -1244,11 +1244,11 @@ def process_setup_collection(
             if progress_callback is not None:
                 progress_callback(
                     "random_action",
-                    action="inspect_random_slot",
+                    action="read_only_random_action",
                     target=f"page:{page_number}",
                     retry_count=0,
                     current_page=page_number,
-                    next_recovery="随机查看动作结束后继续当前分页采集",
+                    next_recovery="动作完成或跳过后继续当前分页采集",
                 )
             return perform_random_collection_action(
                 live_page,

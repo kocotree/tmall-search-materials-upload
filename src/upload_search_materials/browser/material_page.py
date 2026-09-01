@@ -848,6 +848,11 @@ def scan_recommended_material_status(
                 and page_number >= next_random_action_page
             ):
                 event = dict(random_action(page_number) or {})
+                if event.get("page_state_restored") is False:
+                    event["optional_action"] = True
+                    event["non_blocking"] = True
+                    event["continued"] = True
+                    _settle_safe_popups(page, selectors, delay_ms=0)
                 events = getattr(page, "_tmall_collection_events", None)
                 if not isinstance(events, list):
                     events = []
@@ -865,19 +870,6 @@ def scan_recommended_material_status(
                     else 1
                 )
                 next_random_action_page = page_number + interval
-                if event.get("page_state_restored") is False:
-                    detail = str(event.get("detail", "")).strip()
-                    raise _pagination_error(
-                        "RANDOM_ACTION_PAGE_RESTORE_FAILED",
-                        ";".join(
-                            value
-                            for value in (
-                                f"page={page_number}",
-                                detail,
-                            )
-                            if value
-                        ),
-                    )
                 if human_check_waiter is not None:
                     human_check_waiter(page_number, "after_random_action")
         if max_pages is not None and page_number >= max_pages:

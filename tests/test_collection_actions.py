@@ -9,6 +9,19 @@ class FixedRandom:
         return minimum
 
 
+class ActionRandom(FixedRandom):
+    def __init__(self, action, *, choose_last_candidate=False):
+        self.action = action
+        self.choose_last_candidate = choose_last_candidate
+
+    def choice(self, values):
+        if values is collection_actions.RANDOM_ACTION_TYPES:
+            return self.action
+        if self.choose_last_candidate:
+            return values[-1]
+        return values[0]
+
+
 class Slot:
     def __init__(self):
         self.hovered = False
@@ -148,6 +161,7 @@ class Page:
         self.waited = []
         self.parent_backdrop = None
         self.action_overlay = None
+        self.scroll_y = 0
 
     def locator(self, selector):
         if selector == ".promotion-row":
@@ -165,6 +179,17 @@ class Page:
 
     def wait_for_timeout(self, milliseconds):
         self.waited.append(milliseconds)
+
+    def evaluate(self, expression, argument=None):
+        if expression == "() => window.scrollY":
+            return self.scroll_y
+        if "window.scrollBy" in expression:
+            self.scroll_y += argument
+            return None
+        if "window.scrollTo" in expression:
+            self.scroll_y = argument
+            return None
+        raise AssertionError(f"unexpected evaluate expression: {expression}")
 
 
 def common_stubs(monkeypatch, slots, empty_positions):
@@ -208,10 +233,6 @@ def test_random_action_views_filled_slot_on_current_page(monkeypatch):
 
 
 def test_random_action_only_chooses_from_filled_slots(monkeypatch):
-    class ChooseLastRandom(FixedRandom):
-        def choice(self, values):
-            return values[-1]
-
     row = Row("150")
     page = Page([row])
     slots = Slots(6)
@@ -220,7 +241,7 @@ def test_random_action_only_chooses_from_filled_slots(monkeypatch):
     result = collection_actions.perform_random_collection_action(
         page,
         rows_selector=".promotion-row",
-        rng=ChooseLastRandom(),
+        rng=ActionRandom("view_filled_slot", choose_last_candidate=True),
     )
 
     assert result["action"] == "view_filled_slot"
@@ -316,6 +337,9 @@ def test_random_action_skips_page_with_only_empty_slots(monkeypatch):
     assert result == {
         "status": "skipped",
         "reason_code": "RANDOM_ACTION_NO_FILLED_SLOT",
+        "action": "view_filled_slot",
+        "read_only": True,
+        "source": "current_page",
     }
     assert slots.values[0].hovered is False
     assert slots.values[0].clicked is False
@@ -328,6 +352,76 @@ def test_random_action_safely_skips_without_current_page_rows():
     )
 
     assert result["reason_code"] == "RANDOM_ACTION_NO_CURRENT_ROW"
+
+
+def test_random_action_can_hover_without_opening_slot(monkeypatch):
+    page = Page([Row("250")])
+    slots = Slots(1)
+    common_stubs(monkeypatch, slots, [])
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=ActionRandom("hover_filled_slot"),
+    )
+
+    assert result == {
+        "status": "completed",
+        "action": "hover_filled_slot",
+        "product_id": "250",
+        "slot_position": 1,
+        "read_only": True,
+        "source": "current_page",
+        "page_state_restored": True,
+    }
+    assert slots.values[0].hovered is True
+    assert slots.values[0].clicked is False
+    assert page.keyboard.keys == []
+
+
+def test_random_action_can_pause_without_reading_slots(monkeypatch):
+    page = Page([Row("260")])
+    monkeypatch.setattr(
+        collection_actions,
+        "_slot_cells",
+        lambda _row: (_ for _ in ()).throw(AssertionError("must not read slots")),
+    )
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=ActionRandom("short_pause"),
+    )
+
+    assert result == {
+        "status": "completed",
+        "action": "short_pause",
+        "read_only": True,
+        "source": "current_page",
+        "page_state_restored": True,
+    }
+    assert page.waited == [250]
+
+
+def test_random_action_small_scroll_is_restored(monkeypatch):
+    page = Page([Row("270")])
+    page.scroll_y = 500
+    monkeypatch.setattr(
+        collection_actions,
+        "_slot_cells",
+        lambda _row: (_ for _ in ()).throw(AssertionError("must not read slots")),
+    )
+
+    result = collection_actions.perform_random_collection_action(
+        page,
+        rows_selector=".promotion-row",
+        rng=ActionRandom("small_scroll"),
+    )
+
+    assert result["status"] == "completed"
+    assert result["action"] == "small_scroll"
+    assert result["page_state_restored"] is True
+    assert page.scroll_y == 500
 
 
 def test_random_action_reports_failed_page_restoration(monkeypatch):

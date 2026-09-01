@@ -4431,6 +4431,14 @@ def test_global_asset_selection_keeps_pipeline_full_and_locks_navigation():
     assert "正在为全部商品选图，完成后才能返回上一步。" in source
     assert "setGlobalSelectionControlsLocked(true)" in source
     assert "setGlobalSelectionControlsLocked(false)" in source
+    assert 'globalSelectionButton.setAttribute("aria-busy", "true")' in source
+    assert 'globalSelectionButton.removeAttribute("aria-busy")' in source
+    assert source.index("globalSelectionButton.disabled = true") < source.index(
+        "setGlobalSelectionControlsLocked(true)"
+    )
+    assert source.index("await paintBusyState()") < source.index(
+        "setGlobalSelectionControlsLocked(true)"
+    )
     assert ".asset-card input[type='checkbox']" in source
     assert ".selected-asset-card button" in source
     assert "select.disabled = globalAssetSelectionInFlight" in source
@@ -4439,6 +4447,29 @@ def test_global_asset_selection_keeps_pipeline_full_and_locks_navigation():
     assert "优先选择 3:4，不足时补充 1:1" in source
     assert "existing_ratio_conflict" not in source
     assert "if (uiState.dirty) scheduleAutoSave();" in source
+
+
+def test_stage_submit_locks_before_validation_and_ignores_duplicate_clicks():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "upload_search_materials"
+        / "interaction"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    function_body = source.split(
+        "async function persistStage", 1
+    )[1].split("async function withdrawSubmission", 1)[0]
+
+    assert 'let activePersistenceMode = ""' in source
+    assert "beginPersistenceUi(mode)" in function_body
+    assert 'submitButton.setAttribute("aria-busy", "true")' in source
+    assert 'submitButton.textContent = "正在检查并提交…"' in source
+    assert "await paintBusyState()" in function_body
+    assert 'mode === "submit" && activePersistenceMode === "submit"' in function_body
+    assert "当前提交正在处理中，请勿重复点击。" in function_body
+    assert "releasePersistenceUi()" in function_body
 
 
 def test_prepare_local_gallery_has_no_out_of_scope_stage_reference():
