@@ -89,6 +89,7 @@
   let confirmationReturnFocus = null;
   let stageLocalActionInFlight = false;
   let globalAssetSelectionInFlight = false;
+  let cropPreflightInFlight = false;
   let pendingBackNavigation = false;
   let pendingPersistenceMode = null;
   let localEditVersion = 0;
@@ -1563,7 +1564,8 @@
     if (endCurrentTaskButton) {
       endCurrentTaskButton.hidden = !sessionId || shutdown.enabled !== true;
       if (!endCurrentTaskInFlight) {
-        endCurrentTaskButton.disabled = shutdown.status === "closing";
+        endCurrentTaskButton.disabled = shutdown.status === "closing"
+          || cropPreflightInFlight;
         endCurrentTaskButton.textContent = shutdown.status === "review_window"
           ? "立即关闭工作台"
           : "结束当前任务";
@@ -1658,6 +1660,10 @@
       submitButton.textContent = "正在为全部商品选图…";
     }
     saveButton.disabled = lockedByServer || persistenceInFlight;
+    if (currentStageId === "slots_copy" && cropPreflightInFlight) {
+      saveButton.disabled = true;
+      submitButton.disabled = true;
+    }
     if (currentStageId === "setup" && !setupLoginReady) {
       saveButton.disabled = true;
       submitButton.disabled = true;
@@ -1675,6 +1681,7 @@
     );
     const localBackLockActive = stageLocalActionInFlight
       || globalAssetSelectionInFlight
+      || cropPreflightInFlight
       || pendingBackNavigation
       || (currentStageId === "slots_copy" && localCopyRequestInFlight)
       || (
@@ -1692,6 +1699,8 @@
     backButton.title = localBackLockActive
       ? globalAssetSelectionInFlight
         ? "正在为全部商品选图，完成后才能返回上一步。"
+        : cropPreflightInFlight
+          ? "正在执行裁剪预校验，完成后才能返回上一步。"
         : stageLocalActionInFlight
         ? "当前步骤正在保存或处理，完成后才能返回上一步。"
         : localCopyRequestInFlight
@@ -3043,6 +3052,10 @@
       );
       if (hasNavigationStatus) {
         const navigationStatus = element("small", "product-jump-status");
+        navigationStatus.classList.toggle(
+          "is-danger",
+          item.navigationTone === "danger",
+        );
         button.appendChild(navigationStatus);
         item.updateNavigationStatus = (value) => {
           item.navigationStatus = String(value || "").trim();
@@ -3838,9 +3851,17 @@
       "一键为全部商品选图",
     );
     globalSelectionButton.type = "button";
-    globalSelectionButton.disabled = !galleryComplete;
+    globalSelectionButton.disabled = !galleryComplete
+      || globalAssetSelectionInFlight;
+    if (globalAssetSelectionInFlight) {
+      globalSelectionButton.setAttribute("aria-busy", "true");
+      globalSelectionButton.textContent = "正在为全部商品选图…";
+    }
     const globalSelectionStatus = element("p", "asset-global-selection-status");
     globalSelectionStatus.setAttribute("role", "status");
+    if (globalAssetSelectionInFlight) {
+      globalSelectionStatus.textContent = "正在为全部商品选图，请稍候…";
+    }
     globalSelectionPanel.hidden = !galleryComplete;
     globalSelectionPanel.append(globalSelectionCopy, globalSelectionButton);
     content.append(globalSelectionPanel, globalSelectionStatus);
@@ -5203,6 +5224,10 @@
     let currentPlanRevision = 0;
     let slotPlanDirty = false;
     let processedOutputs = null;
+    let invalidateProcessedOutputs = () => {
+      processedOutputs = null;
+    };
+    let invalidateCropPreflight = () => {};
     const cropParameters = {};
     const candidatePageByProduct = new Map();
     products.forEach((product) => {
@@ -5225,7 +5250,10 @@
       stateByProduct.set(productId, assignments);
     });
     const persist = (notify = false) => {
-      if (notify) slotPlanDirty = true;
+      if (notify) {
+        slotPlanDirty = true;
+        invalidateCropPreflight();
+      }
       writeJsonListControl(
         "slot_assignments",
         [...stateByProduct.values()].flat(),
@@ -5680,6 +5708,81 @@
     processPlanButton.type = "button";
     processPlanButton.disabled = true;
     let cropPreflight = null;
+    const cropPreflightLockState = new Map();
+    const setCropPreflightControlsLocked = (locked) => {
+      processPanel.classList.toggle("is-crop-preflight-running", locked);
+      processPanel.setAttribute("aria-busy", String(locked));
+      const controls = [
+        ...new Set([
+          ...planningPage.querySelectorAll(
+            "button, input, select, textarea, .crop-overlay, .slot-asset-card",
+          ),
+          ...processPanel.querySelectorAll(
+            "button, input, select, textarea, .crop-overlay, .slot-asset-card",
+          ),
+          ...wizard.querySelectorAll("button"),
+          ...railButtons,
+          backButton,
+          saveButton,
+          submitButton,
+          goCurrentStageButton,
+          recoveryButton,
+          withdrawButton,
+          recoverProcessingButton,
+          retryGalleryButton,
+          endCurrentTaskButton,
+        ]),
+      ].filter((control) => (
+        control && !control.closest(".product-jump-nav")
+      ));
+      if (locked) {
+        controls.forEach((control) => {
+          if (!cropPreflightLockState.has(control)) {
+            cropPreflightLockState.set(control, {
+              disabled: "disabled" in control ? control.disabled : null,
+              ariaDisabled: control.getAttribute("aria-disabled"),
+              tabIndex: control.getAttribute("tabindex"),
+              draggable: control.classList.contains("slot-asset-card")
+                ? control.draggable
+                : null,
+            });
+          }
+          if ("disabled" in control) control.disabled = true;
+          if (control.classList.contains("slot-asset-card")) {
+            control.draggable = false;
+          }
+          if (control.classList.contains("crop-overlay")) {
+            control.classList.add("is-disabled");
+          }
+          control.setAttribute("aria-disabled", "true");
+          control.setAttribute("tabindex", "-1");
+        });
+        return;
+      }
+      cropPreflightLockState.forEach((previous, control) => {
+        if ("disabled" in control && previous.disabled !== null) {
+          control.disabled = previous.disabled;
+        }
+        if (
+          control.classList.contains("slot-asset-card")
+          && previous.draggable !== null
+        ) {
+          control.draggable = previous.draggable;
+        }
+        control.classList.remove("is-disabled");
+        if (previous.ariaDisabled === null) {
+          control.removeAttribute("aria-disabled");
+        } else {
+          control.setAttribute("aria-disabled", previous.ariaDisabled);
+        }
+        if (previous.tabIndex === null) {
+          control.removeAttribute("tabindex");
+        } else {
+          control.setAttribute("tabindex", previous.tabIndex);
+        }
+      });
+      cropPreflightLockState.clear();
+    };
     const backToCompose = element(
       "button",
       "button-secondary",
@@ -5705,6 +5808,16 @@
       processActions,
     );
     subpages.process.appendChild(processPanel);
+    invalidateProcessedOutputs = () => {
+      processedOutputs = null;
+      processPanel.querySelector(".processed-preview-grid")?.remove();
+      subpages.copy?.replaceChildren();
+      const processPageIndex = pageOrder.indexOf("process");
+      if (processPageIndex >= 0) {
+        maxUnlockedPage = Math.min(maxUnlockedPage, processPageIndex);
+      }
+      if (activeSubpage === "copy") setSubpage("process");
+    };
     const normalizedCropBox = (output) => {
       const value = output?.crop_box?.normalized || output?.crop_box;
       if (
@@ -5733,12 +5846,46 @@
           String(output.asset_id) === String(assetId)
           && String(output.target_ratio) === String(targetRatio),
       );
-    const invalidateCropPreflight = () => {
+    invalidateCropPreflight = () => {
       cropPreflight = null;
+      invalidateProcessedOutputs();
       cropFailureSummary.hidden = true;
       cropFailureSummary.replaceChildren();
       processPlanButton.disabled = true;
       processStatus.textContent = "裁剪参数已变化，请重新执行裁剪预校验。";
+    };
+    const currentSlotAssignments = () => [...stateByProduct.values()].flat();
+    const currentSlotIds = () => new Set(
+      currentSlotAssignments().map(
+        (assignment) => String(assignment.slot_id || ""),
+      ),
+    );
+    const currentSlotPlanSignature = () => JSON.stringify(
+      currentSlotAssignments().map((assignment) => ({
+        product_id: String(assignment.product_id || ""),
+        slot_id: String(assignment.slot_id || ""),
+        target_ratio: String(assignment.target_ratio || ""),
+        asset_ids: (assignment.asset_ids || []).map(String),
+      })),
+    );
+    const responseMatchesCurrentPlan = (response) => {
+      const assignments = currentSlotAssignments();
+      const responseSlots = Array.isArray(response?.slots) ? response.slots : [];
+      if (responseSlots.length !== assignments.length) return false;
+      const responseBySlot = new Map(
+        responseSlots.map((slot) => [String(slot?.slot_id || ""), slot]),
+      );
+      return assignments.every((assignment) => {
+        const slot = responseBySlot.get(String(assignment.slot_id || ""));
+        if (!slot) return false;
+        const orderedAssetIds = Array.isArray(slot.ordered_asset_ids)
+          ? slot.ordered_asset_ids.map(String)
+          : (slot.outputs || []).map((output) => String(output?.asset_id || ""));
+        return String(slot.product_id || "") === String(assignment.product_id || "")
+          && String(slot.target_ratio || "") === String(assignment.target_ratio || "")
+          && JSON.stringify(orderedAssetIds)
+            === JSON.stringify((assignment.asset_ids || []).map(String));
+      });
     };
     const cropFailureKey = (slotId, assetId, order) => JSON.stringify([
       String(slotId || ""),
@@ -5747,7 +5894,11 @@
     ]);
     const cropPreflightFailures = () => (
       Array.isArray(cropPreflight?.failures)
-        ? cropPreflight.failures.filter((item) => item && item.slot_id)
+        ? cropPreflight.failures.filter((item) => (
+          item
+          && item.slot_id
+          && currentSlotIds().has(String(item.slot_id))
+        ))
         : []
     );
     const renderCropFailureSummary = (
@@ -5758,12 +5909,15 @@
       cropFailureSummary.replaceChildren();
       cropFailureSummary.hidden = failures.length === 0;
       if (!failures.length) return;
+      const failedSlotCount = new Set(
+        failures.map((failure) => String(failure.slot_id || "")),
+      ).size;
       cropFailureSummary.append(
-        element("strong", "", `有 ${failures.length} 张图片需要更换`),
+        element("strong", "", `有 ${failedSlotCount} 个坑位未通过裁剪预校验`),
         element(
           "p",
           "",
-          "裁剪后文件不足 200KB。你可以更换图片，或去掉对应坑位后重新执行裁剪预校验。",
+          `其中 ${failures.length} 张图片裁剪后文件不足 200KB。你可以更换图片，或去掉对应坑位后重新执行裁剪预校验。`,
         ),
       );
       const list = element("div", "crop-preflight-failure-list");
@@ -5848,7 +6002,7 @@
         const box = currentBox();
         overlay.hidden = !box;
         preview.hidden = !box;
-        restore.disabled = !box;
+        restore.disabled = !box || cropPreflightInFlight;
         if (!box) {
           outputSize.textContent = "标准比例框暂不可用";
           return;
@@ -5883,7 +6037,7 @@
         }
       };
       const beginPointer = (event, mode) => {
-        if (!currentBox() || !width || !height) return;
+        if (cropPreflightInFlight || !currentBox() || !width || !height) return;
         event.preventDefault();
         const start = [...currentBox()];
         const startX = event.clientX;
@@ -5892,6 +6046,7 @@
         const targetRatio = assignment.target_ratio === "1:1" ? 1 : 0.75;
         const normalizedRatio = targetRatio * height / width;
         const move = (pointerEvent) => {
+          if (cropPreflightInFlight) return;
           const dx = (pointerEvent.clientX - startX) / rect.width;
           const dy = (pointerEvent.clientY - startY) / rect.height;
           if (mode === "move") {
@@ -5938,7 +6093,8 @@
       });
       overlay.addEventListener("keydown", (event) => {
         if (
-          !currentBox()
+          cropPreflightInFlight
+          || !currentBox()
           || !width
           || !height
           || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
@@ -5983,6 +6139,7 @@
       });
       image.addEventListener("load", update);
       restore.addEventListener("click", () => {
+        if (cropPreflightInFlight) return;
         cropState.normalized_box = normalizedCropBox(output);
         invalidateCropPreflight();
         update();
@@ -6002,6 +6159,24 @@
           failure,
         ]),
       );
+      const productIdBySlot = new Map(
+        currentSlotAssignments().map((assignment) => [
+          String(assignment.slot_id || ""),
+          String(assignment.product_id || ""),
+        ]),
+      );
+      const failedSlotIdsByProduct = new Map();
+      failures.forEach((failure) => {
+        const productId = String(
+          failure.product_id
+          || productIdBySlot.get(String(failure.slot_id || ""))
+          || "",
+        );
+        if (!failedSlotIdsByProduct.has(productId)) {
+          failedSlotIdsByProduct.set(productId, new Set());
+        }
+        failedSlotIdsByProduct.get(productId).add(String(failure.slot_id || ""));
+      });
       const failureTargets = new Map();
       let blockedReason = "";
       [...stateByProduct.values()].flat().forEach((assignment) => {
@@ -6012,10 +6187,15 @@
         card.tabIndex = -1;
         const productId = String(assignment.product_id || "");
         if (!productTargets.has(productId)) {
+          const failedSlotCount = failedSlotIdsByProduct.get(productId)?.size || 0;
           productTargets.set(productId, {
             productId,
             productTitle: product?.product_title,
             target: card,
+            navigationStatus: failedSlotCount
+              ? `${failedSlotCount} 个坑位未通过`
+              : "",
+            navigationTone: failedSlotCount ? "danger" : "",
           });
         }
         const heading = element("div", "slot-product-heading");
@@ -6037,6 +6217,7 @@
             `${assignment.slot_id} 使用 ${value} 比例`,
           );
           button.addEventListener("click", () => {
+            if (cropPreflightInFlight) return;
             if (value === assignment.target_ratio) return;
             invalidateCropPreflight();
             assignment.target_ratio = value;
@@ -6112,6 +6293,7 @@
             cropParameters[cropKey].confirm_compression === true;
           compression.disabled = !output.requires_compression;
           compression.addEventListener("change", () => {
+            if (cropPreflightInFlight) return;
             invalidateCropPreflight();
             cropParameters[cropKey].confirm_compression = compression.checked;
             renderProcessingPage();
@@ -6199,17 +6381,24 @@
       cropPreflightButton.disabled = Boolean(blockedReason);
       processPlanButton.disabled = Boolean(blockedReason)
         || cropPreflight?.workflow_state !== "crop_preflight_passed";
+      const failedSlotCount = new Set(
+        failures.map((failure) => String(failure.slot_id || "")),
+      ).size;
       processStatus.textContent = blockedReason
         || (failures.length
-          ? `有 ${failures.length} 张图片裁剪后文件不足 200KB，请更换图片或去掉对应坑位后重新预校验。`
+          ? `有 ${failedSlotCount} 个坑位未通过，其中 ${failures.length} 张图片裁剪后文件不足 200KB，请更换图片或去掉对应坑位后重新预校验。`
           : cropPreflight?.workflow_state === "crop_preflight_passed"
           ? `裁剪预校验已通过：${cropPreflight.checked_count || 0} 张图片均不少于 204,800 字节。`
           : "请先执行裁剪预校验；通过后才能进入文案生成。");
+      if (cropPreflightInFlight) setCropPreflightControlsLocked(true);
     };
     const renderProcessedPreview = (processed) => {
       processPanel.querySelector(".processed-preview-grid")?.remove();
       const preview = element("div", "slot-asset-grid processed-preview-grid");
-      (processed.slots || []).forEach((slot) => {
+      const activeSlotIds = currentSlotIds();
+      (processed.slots || [])
+        .filter((slot) => activeSlotIds.has(String(slot?.slot_id || "")))
+        .forEach((slot) => {
         (slot.outputs || []).forEach((output) => {
           const card = element("article", "slot-asset-card");
           const image = document.createElement("img");
@@ -6230,7 +6419,7 @@
           preview.appendChild(card);
         });
       });
-      processPanel.appendChild(preview);
+      if (preview.childElementCount) processPanel.appendChild(preview);
     };
 
     const renderCopyEditor = (processed, selectedRequestId = "") => {
@@ -6911,12 +7100,16 @@
     };
 
     cropPreflightButton.addEventListener("click", async () => {
-      cropPreflightButton.disabled = true;
-      processPlanButton.disabled = true;
+      if (cropPreflightInFlight) return;
+      cropPreflightInFlight = true;
+      setCropPreflightControlsLocked(true);
       processStatus.textContent = "正在逐张试裁并检查最终文件大小…";
+      let focusFirstFailure = false;
+      let completionMessage = "";
       try {
         const assignments = await ensureConfirmedSlotPlan();
-        cropPreflight = await fetchJson(
+        const requestPlanSignature = currentSlotPlanSignature();
+        const preflight = await fetchJson(
           apiPath("/stages/slots_copy/crop-preflight"),
           {
             method: "POST",
@@ -6926,23 +7119,32 @@
             }),
           },
         );
+        if (
+          requestPlanSignature !== currentSlotPlanSignature()
+          || !responseMatchesCurrentPlan(preflight)
+        ) {
+          cropPreflight = null;
+          completionMessage = "坑位编排已经变化，旧的裁剪结果已忽略，请重新执行裁剪预校验。";
+          return;
+        }
+        cropPreflight = preflight;
         currentPlanRevision = Number(
           cropPreflight.plan_revision || currentPlanRevision,
         );
         if (cropPreflight.workflow_state === "crop_preflight_failed") {
-          renderProcessingPage({ focusFirstFailure: true });
-          processPlanButton.disabled = true;
+          focusFirstFailure = true;
           return;
         }
-        processStatus.textContent = `裁剪预校验已通过：${cropPreflight.checked_count || 0} 张图片均不少于 204,800 字节。`;
-        processPlanButton.disabled = false;
       } catch (error) {
         cropPreflight = null;
-        processStatus.textContent = error.userMessage
+        completionMessage = error.userMessage
           || Object.values(error.fieldErrors || {})[0]
           || error.message;
       } finally {
-        cropPreflightButton.disabled = false;
+        cropPreflightInFlight = false;
+        setCropPreflightControlsLocked(false);
+        renderProcessingPage({ focusFirstFailure });
+        if (completionMessage) processStatus.textContent = completionMessage;
       }
     });
 
@@ -6957,6 +7159,7 @@
       setLocalCopyRequestInFlight(true);
       processStatus.textContent = "正在确认图片输出并创建千牛文案任务…";
       try {
+        const requestPlanSignature = currentSlotPlanSignature();
         const processed = await fetchJson(
           apiPath("/stages/slots_copy/process-plan"),
           {
@@ -6967,6 +7170,12 @@
             }),
           },
         );
+        if (
+          requestPlanSignature !== currentSlotPlanSignature()
+          || !responseMatchesCurrentPlan(processed)
+        ) {
+          throw new Error("坑位编排已经变化，旧的图片处理结果已忽略，请重新处理。");
+        }
         processedOutputs = processed;
         const copyRequestId = String(
           processed.copy_request?.request_id || processed.copy_request_id || "",
@@ -6993,11 +7202,18 @@
           !== "crop_preflight_passed";
       }
     });
+    const savedPreflightPlanSignature = currentSlotPlanSignature();
     fetchJson(apiPath("/stages/slots_copy/crop-preflight"))
       .then((preflight) => {
         if (!["crop_preflight_passed", "crop_preflight_failed"].includes(
           preflight.workflow_state,
         )) return;
+        if (
+          cropPreflightInFlight
+          || slotPlanDirty
+          || savedPreflightPlanSignature !== currentSlotPlanSignature()
+          || !responseMatchesCurrentPlan(preflight)
+        ) return;
         cropPreflight = preflight;
         if (preflight.crop_parameters) {
           Object.keys(cropParameters).forEach((key) => delete cropParameters[key]);
@@ -7011,9 +7227,17 @@
         });
       })
       .catch(() => {});
+    const savedProcessedPlanSignature = currentSlotPlanSignature();
     fetchJson(apiPath("/stages/slots_copy/processed-outputs"))
       .then((processed) => {
-        if (processed.workflow_state === "outputs_ready" && processed.plan_sha256) {
+        if (
+          processed.workflow_state === "outputs_ready"
+          && processed.plan_sha256
+          && !cropPreflightInFlight
+          && !slotPlanDirty
+          && savedProcessedPlanSignature === currentSlotPlanSignature()
+          && responseMatchesCurrentPlan(processed)
+        ) {
           processedOutputs = processed;
           processStatus.textContent = "当前坑位计划已有通过校验的输出；可以继续确认文案。";
           renderProcessedPreview(processed);
@@ -7105,6 +7329,7 @@
         const add = element("button", "button-secondary", "人工添加坑位");
         add.type = "button";
         add.addEventListener("click", () => {
+          if (cropPreflightInFlight) return;
           const assignments = stateByProduct.get(productId);
           const index = assignments.length + 1;
           const ratio = (product.outputs || [])[0]?.target_ratio || "3:4";
@@ -7221,6 +7446,7 @@
               const removeAsset = element("button", "button-secondary", "从坑位移除");
               removeAsset.type = "button";
               removeAsset.addEventListener("click", () => {
+                if (cropPreflightInFlight) return;
                 assignment.asset_ids = assignment.asset_ids.filter(
                   (value) => String(value) !== String(assetId),
                 );
@@ -7235,6 +7461,10 @@
               );
               card.draggable = true;
               card.addEventListener("dragstart", (event) => {
+                if (cropPreflightInFlight) {
+                  event.preventDefault();
+                  return;
+                }
                 event.dataTransfer?.setData("text/plain", assetId);
               });
               card.addEventListener("dragover", (event) => {
@@ -7242,6 +7472,7 @@
               });
               card.addEventListener("drop", (event) => {
                 event.preventDefault();
+                if (cropPreflightInFlight) return;
                 const moved = event.dataTransfer?.getData("text/plain");
                 const from = assignment.asset_ids.indexOf(String(moved));
                 const to = assignment.asset_ids.indexOf(assetId);
@@ -7292,6 +7523,7 @@
                 assignment.asset_ids.length >= Number(data.slot_image_max || 9)
               );
               addAsset.addEventListener("click", () => {
+                if (cropPreflightInFlight) return;
                 assignment.asset_ids.push(String(candidate.asset_id));
                 assignment.plan_source = assignment.plan_source === "agent_assisted"
                   ? "manual_override"
@@ -7335,10 +7567,12 @@
             persist();
           };
           slotId.addEventListener("change", () => {
+            if (cropPreflightInFlight) return;
             assignment.slot_id = slotId.value.trim();
             persist(true);
           });
           ratio.addEventListener("change", () => {
+            if (cropPreflightInFlight) return;
             assignment.target_ratio = ratio.value;
             assignment.plan_source = assignment.plan_source === "agent_assisted"
               ? "manual_override"
@@ -7347,6 +7581,7 @@
             draw();
           });
           remove.addEventListener("click", async () => {
+            if (cropPreflightInFlight) return;
             const currentSlotId = slotId.value.trim() || assignment.slot_id;
             const confirmed = await confirmAction({
               title: "去掉当前坑位",
@@ -7354,7 +7589,7 @@
               confirmLabel: "确认去掉",
               danger: true,
             });
-            if (!confirmed) return;
+            if (!confirmed || cropPreflightInFlight) return;
             const assignments = stateByProduct.get(productId);
             assignments.splice(slotIndex, 1);
             Object.keys(cropParameters)
@@ -7363,7 +7598,7 @@
             invalidateCropPreflight();
             persist(true);
             draw();
-            if (!processPanel.hidden) renderProcessingPage();
+            renderProcessingPage();
             composeStatus.textContent = `已去掉坑位“${currentSlotId}”；请重新确认剩余坑位。`;
             actionMessage.textContent = `已去掉当前坑位“${currentSlotId}”。`;
           });
@@ -7375,6 +7610,7 @@
         productTargets,
         { label: "坑位编排商品导航" },
       );
+      if (cropPreflightInFlight) setCropPreflightControlsLocked(true);
     };
     draw();
     persist();
@@ -8550,6 +8786,8 @@
         dirty: uiState.dirty,
         persistenceInFlight,
         pendingPreflightCount: selectionPreflightScheduler.desiredPendingCount(),
+        globalAssetSelectionInFlight,
+        cropPreflightInFlight,
         copyRequestInFlight: localCopyRequestInFlight,
       });
       if (stageHydrationChanged && !hydrationDeferred) {
@@ -8584,7 +8822,10 @@
 
   async function activateStage(stageId) {
     if (!stages.has(stageId)) return;
-    if (globalAssetSelectionInFlight && stageId !== currentStageId) return;
+    if (
+      (globalAssetSelectionInFlight || cropPreflightInFlight)
+      && stageId !== currentStageId
+    ) return;
     const previousStageId = currentStageId;
     if (currentStageId === "asset_matching" || stageId === "asset_matching") {
       resetSelectionPreflightClientState();
@@ -8652,6 +8893,7 @@
       || !currentBackNavigation?.target_stage_id
       || stageLocalActionInFlight
       || globalAssetSelectionInFlight
+      || cropPreflightInFlight
     ) return;
     const unsavedWarning = uiState.dirty
       ? " 当前步骤尚未保存的修改也不会保留。"

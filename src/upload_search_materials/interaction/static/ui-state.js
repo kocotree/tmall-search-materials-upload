@@ -477,6 +477,8 @@
     dirty = false,
     persistenceInFlight = false,
     pendingPreflightCount = 0,
+    globalAssetSelectionInFlight = false,
+    cropPreflightInFlight = false,
     copyRequestInFlight = false,
   } = {}) {
     const imageSelectionBusy = stageId === "asset_matching"
@@ -485,6 +487,7 @@
         dirty
         || persistenceInFlight
         || Number(pendingPreflightCount || 0) > 0
+        || globalAssetSelectionInFlight
       );
     const copyGenerationBusy = stageId === "slots_copy"
       && workflowStep === "copy"
@@ -493,7 +496,10 @@
         || persistenceInFlight
         || copyRequestInFlight
       );
-    return imageSelectionBusy || copyGenerationBusy;
+    const cropPreflightBusy = stageId === "slots_copy"
+      && workflowStep === "process"
+      && cropPreflightInFlight;
+    return imageSelectionBusy || copyGenerationBusy || cropPreflightBusy;
   }
 
   function activeProductTargetIndex(rects, activationLine = 0) {

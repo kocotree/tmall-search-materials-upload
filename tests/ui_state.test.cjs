@@ -571,6 +571,10 @@ test("image-selection hydration waits for edits, saves, or running preflights", 
     pendingPreflightCount: 2,
   }), true);
   assert.equal(UiState.shouldDeferEditableStageHydration({
+    ...idle,
+    globalAssetSelectionInFlight: true,
+  }), true);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
     stageId: "completeness",
     workflowStep: "image_selection",
     dirty: true,
@@ -600,6 +604,11 @@ test("copy generation keeps the current subpage during authoritative polling", (
     workflowStep: "process",
     copyRequestInFlight: true,
   }), false);
+  assert.equal(UiState.shouldDeferEditableStageHydration({
+    stageId: "slots_copy",
+    workflowStep: "process",
+    cropPreflightInFlight: true,
+  }), true);
 });
 
 test("product navigator selects the section crossing the viewport activation line", () => {

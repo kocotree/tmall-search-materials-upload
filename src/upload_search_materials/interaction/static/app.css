@@ -31,7 +31,14 @@ body {
 
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; touch-action: manipulation; }
-button:disabled { cursor: not-allowed; opacity: 0.5; }
+button:disabled {
+  color: #7b837f !important;
+  background: #e5e9e6 !important;
+  border-color: #c9cfcb !important;
+  box-shadow: none !important;
+  cursor: not-allowed;
+  opacity: 1;
+}
 [hidden] { display: none !important; }
 .technical-only { display: none !important; }
 
@@ -744,6 +751,9 @@ input:disabled, textarea:disabled, select:disabled { color: #89928e; background:
   line-height: 1.35;
   white-space: normal;
 }
+.product-jump-button .product-jump-status.is-danger {
+  color: var(--danger);
+}
 .folder-product,
 .asset-global-selection,
 .asset-product,
@@ -1407,6 +1417,13 @@ summary:focus-visible {
 .slot-process-workspace {
   display: grid;
   gap: 1rem;
+}
+
+.slot-process-page.is-crop-preflight-running .crop-overlay.is-disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.75);
+  opacity: 0.62;
+  pointer-events: none;
 }
 
 .crop-preflight-failure-summary {

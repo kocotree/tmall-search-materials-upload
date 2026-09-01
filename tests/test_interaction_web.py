@@ -2448,7 +2448,24 @@ def test_crop_preflight_failures_are_visible_locatable_and_recoverable(client):
     assert "crop-preflight-failed" in stylesheet
     assert "crop-preflight-image-error" in stylesheet
     assert "invalidateCropPreflight();" in javascript
-    assert "if (!processPanel.hidden) renderProcessingPage();" in javascript
+    assert "有 ${failedSlotCount} 个坑位未通过裁剪预校验" in javascript
+    assert "${failedSlotCount} 个坑位未通过" in javascript
+    assert 'navigationTone: failedSlotCount ? "danger" : ""' in javascript
+    assert ".product-jump-status.is-danger" in stylesheet
+    assert "let cropPreflightInFlight = false" in javascript
+    assert "setCropPreflightControlsLocked(true)" in javascript
+    assert "setCropPreflightControlsLocked(false)" in javascript
+    assert 'control.closest(".product-jump-nav")' in javascript
+    assert "...railButtons" in javascript
+    assert "backButton," in javascript
+    assert "if (cropPreflightInFlight) return;" in javascript
+    assert ".is-crop-preflight-running .crop-overlay.is-disabled" in stylesheet
+    assert "invalidateProcessedOutputs();" in javascript
+    assert "responseMatchesCurrentPlan" in javascript
+    assert "cropPreflightInFlight," in javascript
+    assert '.filter((slot) => activeSlotIds.has(String(slot?.slot_id || "")))' in javascript
+    assert "if (!processPanel.hidden) renderProcessingPage();" not in javascript
+    assert "renderProcessingPage();" in javascript
 
 
 def test_asset_matching_prefills_three_editable_labeled_image_roots(client):
@@ -4433,6 +4450,8 @@ def test_global_asset_selection_keeps_pipeline_full_and_locks_navigation():
     assert "setGlobalSelectionControlsLocked(false)" in source
     assert 'globalSelectionButton.setAttribute("aria-busy", "true")' in source
     assert 'globalSelectionButton.removeAttribute("aria-busy")' in source
+    assert "globalSelectionButton.disabled = !galleryComplete" in source
+    assert "|| globalAssetSelectionInFlight;" in source
     assert source.index("globalSelectionButton.disabled = true") < source.index(
         "setGlobalSelectionControlsLocked(true)"
     )
