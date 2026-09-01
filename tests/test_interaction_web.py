@@ -2383,8 +2383,9 @@ def test_fifth_stage_supports_two_page_deterministic_ui_without_raw_json_control
         "确认坑位并进入图片裁剪",
         "完成图片处理并进入文案生成",
         "进入上传任务确认",
+        "继续获取",
         "重新生成新版本",
-        "重新生成会创建独立新版本，不覆盖历史版本，也不会发布。",
+        "继续获取会保留已完成内容；重新生成会创建独立新版本。",
         "全部标题和描述已填写，可以进入上传任务确认",
     ):
         assert text in javascript
@@ -2412,9 +2413,16 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     assert '"裁剪预校验"' in javascript
     assert 'apiPath("/stages/slots_copy/crop-preflight")' in javascript
     assert 'copyButton.textContent = "重新生成新版本"' in javascript
+    assert '"继续获取"' in javascript
+    assert (
+        "agent-requests/${encodeURIComponent(requestId)}/resume"
+        in javascript
+    )
+    assert "已恢复，将从未完成的坑位继续获取" in javascript
     assert "copy-skipped-notice" in javascript
-    assert "已重试 3 次仍未完成，系统已跳过" in javascript
+    assert "完成常规重试和 1 轮失败项补跑后仍未完成" in javascript
     assert "当前坑位正在重试 ${retryCount}/3" in javascript
+    assert "正在单独补跑失败坑位" in javascript
     assert '"生成标题与描述"' not in javascript
     assert re.search(
         r'new CustomEvent\(\s*"input",\s*'

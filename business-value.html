@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="天猫搜推素材上新工作台业务流程与业务价值说明">
+  <title>天猫搜推素材上新工作台 · 业务价值</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f4f7f4;
+      --surface: #ffffff;
+      --surface-soft: #f8faf8;
+      --ink: #17221b;
+      --muted: #5e6d63;
+      --line: #dce5de;
+      --brand: #16734a;
+      --brand-dark: #0d5635;
+      --brand-soft: #e8f5ed;
+      --brand-line: #a9d8ba;
+      --warning: #a84a32;
+      --warning-soft: #fff1ed;
+      --warning-line: #f0c1b5;
+      --gold: #d99a20;
+      --shadow: 0 18px 50px rgba(20, 57, 36, 0.09);
+      --radius-lg: 28px;
+      --radius-md: 20px;
+      --radius-sm: 14px;
+      --content: 1180px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% 6%, rgba(22, 115, 74, 0.10), transparent 25rem),
+        radial-gradient(circle at 92% 18%, rgba(217, 154, 32, 0.10), transparent 23rem),
+        var(--page);
+      color: var(--ink);
+      font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    a {
+      color: var(--brand-dark);
+      text-underline-offset: 3px;
+    }
+
+    a:focus-visible,
+    button:focus-visible {
+      outline: 3px solid rgba(22, 115, 74, 0.32);
+      outline-offset: 3px;
+    }
+
+    .skip-link {
+      position: fixed;
+      left: 16px;
+      top: 12px;
+      z-index: 20;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: var(--ink);
+      color: #fff;
+      transform: translateY(-160%);
+      transition: transform 180ms ease;
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .shell {
+      width: min(calc(100% - 40px), var(--content));
+      margin-inline: auto;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding-block: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .brand img {
+      width: 42px;
+      height: 42px;
+      object-fit: contain;
+    }
+
+    .brand span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .print-button {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 9px 15px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--ink);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 8px 24px rgba(20, 57, 36, 0.06);
+      transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+    }
+
+    .print-button:hover {
+      border-color: var(--brand-line);
+      background: #fff;
+      box-shadow: 0 10px 28px rgba(20, 57, 36, 0.10);
+    }
+
+    .print-button svg {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(34px, 6vw, 72px);
+      border: 1px solid rgba(22, 115, 74, 0.14);
+      border-radius: var(--radius-lg);
+      background: linear-gradient(135deg, #f7fcf9 0%, #ffffff 55%, #fff9ee 100%);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -90px;
+      bottom: -120px;
+      width: 340px;
+      height: 340px;
+      border: 64px solid rgba(22, 115, 74, 0.06);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding: 6px 11px;
+      border: 1px solid var(--brand-line);
+      border-radius: 999px;
+      background: var(--brand-soft);
+      color: var(--brand-dark);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--brand);
+      box-shadow: 0 0 0 5px rgba(22, 115, 74, 0.11);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      position: relative;
+      z-index: 1;
+      max-width: 860px;
+      margin-bottom: 20px;
+      font-size: clamp(34px, 5.5vw, 66px);
+      line-height: 1.12;
+      letter-spacing: -0.055em;
+    }
+
+    .hero-lead {
+      position: relative;
+      z-index: 1;
+      max-width: 810px;
+      margin-bottom: 30px;
+      color: var(--muted);
+      font-size: clamp(17px, 2vw, 21px);
+    }
+
+    .capabilities {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      max-width: 820px;
+    }
+
+    .capability {
+      min-height: 112px;
+      padding: 18px;
+      border: 1px solid rgba(22, 115, 74, 0.14);
+      border-radius: var(--radius-sm);
+      background: rgba(255, 255, 255, 0.76);
+      backdrop-filter: blur(8px);
+    }
+
+    .capability strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--brand-dark);
+      font-size: 18px;
+      line-height: 1.35;
+    }
+
+    .capability span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    main {
+      padding-block: 68px 84px;
+    }
+
+    .section-heading {
+      display: grid;
+      grid-template-columns: minmax(0, 0.72fr) minmax(300px, 1fr);
+      align-items: end;
+      gap: 30px;
+      margin-bottom: 26px;
+    }
+
+    .section-heading h2 {
+      margin-bottom: 0;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.2;
+      letter-spacing: -0.04em;
+    }
+
+    .section-heading p {
+      margin-bottom: 4px;
+      color: var(--muted);
+    }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .workflow {
+      padding: clamp(22px, 3vw, 34px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      box-shadow: 0 12px 34px rgba(20, 57, 36, 0.06);
+    }
+
+    .workflow.manual {
+      border-top: 5px solid var(--warning);
+    }
+
+    .workflow.plugin {
+      border-top: 5px solid var(--brand);
+    }
+
+    .workflow-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .workflow h3 {
+      margin-bottom: 6px;
+      font-size: clamp(22px, 3vw, 30px);
+      line-height: 1.25;
+      letter-spacing: -0.025em;
+    }
+
+    .workflow-header p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .tag {
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .manual .tag {
+      background: var(--warning-soft);
+      color: var(--warning);
+    }
+
+    .plugin .tag {
+      background: var(--brand-soft);
+      color: var(--brand-dark);
+    }
+
+    .steps {
+      display: grid;
+      gap: 0;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .stage-label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 4px 0 22px;
+      padding: 11px 14px;
+      border: 1px solid var(--brand-line);
+      border-radius: var(--radius-sm);
+      background: var(--brand-soft);
+      color: var(--brand-dark);
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .stage-label:not(:first-of-type) {
+      margin-top: 8px;
+    }
+
+    .stage-label code {
+      padding: 2px 7px;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.78);
+      color: inherit;
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: 12px;
+    }
+
+    .step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 14px;
+      min-height: 86px;
+      padding-bottom: 18px;
+    }
+
+    .step:last-child {
+      min-height: 50px;
+      padding-bottom: 0;
+    }
+
+    .step:not(:last-child)::before {
+      content: "";
+      position: absolute;
+      left: 18px;
+      top: 38px;
+      bottom: 0;
+      width: 2px;
+      background: var(--line);
+    }
+
+    .step-number {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      width: 38px;
+      height: 38px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-soft);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .plugin .step-number {
+      border-color: var(--brand-line);
+      background: var(--brand-soft);
+      color: var(--brand-dark);
+    }
+
+    .step h4 {
+      margin: 1px 0 4px;
+      font-size: 17px;
+      line-height: 1.4;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .manual .step.emphasis {
+      margin: 0 -10px 12px;
+      padding: 12px 10px 18px;
+      border: 1px solid var(--warning-line);
+      border-radius: var(--radius-sm);
+      background: var(--warning-soft);
+    }
+
+    .manual .step.emphasis::before {
+      display: none;
+    }
+
+    .manual .step.emphasis + .step::after {
+      content: "";
+      position: absolute;
+      left: 18px;
+      top: -14px;
+      width: 2px;
+      height: 14px;
+      background: var(--line);
+    }
+
+    .link-arrow {
+      display: inline-block;
+      color: var(--brand);
+      font-weight: 800;
+      text-decoration-thickness: 1px;
+    }
+
+    .outcome {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 22px;
+      margin-top: 22px;
+    }
+
+    .outcome-copy,
+    .value-grid {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      box-shadow: 0 12px 34px rgba(20, 57, 36, 0.06);
+    }
+
+    .outcome-copy {
+      padding: clamp(26px, 4vw, 46px);
+      background: linear-gradient(135deg, var(--brand-dark), #16734a);
+      color: #fff;
+    }
+
+    .outcome-copy h2 {
+      max-width: 670px;
+      margin-bottom: 14px;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.18;
+      letter-spacing: -0.04em;
+    }
+
+    .outcome-copy p {
+      max-width: 680px;
+      margin-bottom: 0;
+      color: rgba(255, 255, 255, 0.82);
+      font-size: 17px;
+    }
+
+    .value-grid {
+      display: grid;
+      gap: 0;
+      padding: 10px 24px;
+    }
+
+    .value-item {
+      padding: 18px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .value-item:last-child {
+      border-bottom: 0;
+    }
+
+    .value-item strong {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 18px;
+    }
+
+    .value-item span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    footer {
+      padding: 26px 0 44px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (max-width: 860px) {
+      .capabilities,
+      .comparison,
+      .outcome,
+      .section-heading {
+        grid-template-columns: 1fr;
+      }
+
+      .section-heading {
+        align-items: start;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .shell {
+        width: min(calc(100% - 24px), var(--content));
+      }
+
+      .topbar {
+        padding-block: 16px;
+      }
+
+      .brand span {
+        max-width: 210px;
+      }
+
+      .print-button span {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+      }
+
+      .print-button {
+        width: 44px;
+        padding: 0;
+      }
+
+      .hero {
+        padding: 30px 22px;
+      }
+
+      .capabilities {
+        gap: 9px;
+      }
+
+      .capability {
+        min-height: auto;
+      }
+
+      main {
+        padding-block: 48px 60px;
+      }
+
+      .workflow-header {
+        display: grid;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .topbar,
+      footer {
+        padding-block: 12px;
+      }
+
+      .print-button,
+      .skip-link {
+        display: none;
+      }
+
+      .hero,
+      .workflow,
+      .outcome-copy,
+      .value-grid {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+
+      main {
+        padding-block: 32px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到主要内容</a>
+
+  <header class="shell topbar" aria-label="页面顶部">
+    <div class="brand">
+      <img src="data:image/png;base64,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" alt="KK树公司标志">
+      <span>天猫搜推素材上新工作台 · 业务价值</span>
+    </div>
+    <button class="print-button" type="button" onclick="window.print()" aria-label="打印或导出为 PDF">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 9V3h12v6"></path>
+        <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+        <path d="M6 14h12v7H6z"></path>
+      </svg>
+      <span>打印 / 导出 PDF</span>
+    </button>
+  </header>
+
+  <section class="shell hero" aria-labelledby="hero-title">
+    <div class="eyebrow">业务流程升级</div>
+    <h1 id="hero-title">从跨平台手工作业，变成按“下一步”完成的标准流程</h1>
+    <p class="hero-lead">
+      工作台连接飞书商品信息、千牛后台与 NAS 素材库，将坑位巡检、素材匹配、图片检查、文案生成、批量上传和结果记录串成一条完整链路。
+    </p>
+    <div class="capabilities" aria-label="业务价值概览">
+      <div class="capability">
+        <strong>定时发现空缺</strong>
+        <span>无需负责人逐个商品检查，系统主动汇总空缺情况。</span>
+      </div>
+      <div class="capability">
+        <strong>集中通知负责人</strong>
+        <span>将商品坑位空缺发送到群聊，让负责人及时处理。</span>
+      </div>
+      <div class="capability">
+        <strong>工作台批量完成</strong>
+        <span>贯通飞书、千牛、NAS、素材处理和批量上传。</span>
+      </div>
+    </div>
+  </section>
+
+  <main id="content" class="shell">
+    <div class="section-heading">
+      <h2>同一项工作，两种处理方式</h2>
+      <p>纯人工流程的时间主要消耗在反复搜索、跨平台切换和逐张检查；使用插件后，系统承担重复劳动，用户只保留关键业务判断。</p>
+    </div>
+
+    <div class="comparison">
+      <article class="workflow manual" aria-labelledby="manual-title">
+        <header class="workflow-header">
+          <div>
+            <h3 id="manual-title">纯人工处理（耗时）</h3>
+            <p>步骤繁琐，需要在飞书、千牛和 NAS 之间反复切换</p>
+          </div>
+          <span class="tag">人工全程参与</span>
+        </header>
+
+        <ol class="steps">
+          <li class="step">
+            <span class="step-number">01</span>
+            <div>
+              <h4>找到负责人对应的商品</h4>
+              <p>在<a class="link-arrow" href="https://kocotree.feishu.cn/wiki/A5x4wrZiBimLFWknwk8ccOwznY4?from=from_copylink" target="_blank" rel="noopener noreferrer">天猫商品信息表</a>中逐个查询。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">02</span>
+            <div>
+              <h4>在千牛后台搜索商品</h4>
+              <p>进入商品素材页面，找到对应商品及全部坑位。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">03</span>
+            <div>
+              <h4>逐个检查坑位完整度</h4>
+              <p>人工判断哪些坑位已经填满，哪些仍需补充素材。</p>
+            </div>
+          </li>
+          <li class="step emphasis">
+            <span class="step-number">04</span>
+            <div>
+              <h4>在 NAS 中手动寻找素材</h4>
+              <p>在大量目录和图片中查找对应商品，是整个流程中最耗时的环节。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">05</span>
+            <div>
+              <h4>逐张检查素材要求</h4>
+              <p>核对 200KB～20MB 文件范围、坑位图片比例、重复素材及内容是否匹配。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">06</span>
+            <div>
+              <h4>填写标题和描述词</h4>
+              <p>根据每组图片手动编写或生成文案，再逐项核对。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">07</span>
+            <div>
+              <h4>逐个坑位上传并记录</h4>
+              <p>上传完成后，还需要回到表格中补充上传结果。</p>
+            </div>
+          </li>
+        </ol>
+      </article>
+
+      <article class="workflow plugin" aria-labelledby="plugin-title">
+        <header class="workflow-header">
+          <div>
+            <h3 id="plugin-title">使用插件</h3>
+            <p>解放双手，傻瓜式点击“下一步”；由两个项目协同完成</p>
+          </div>
+          <span class="tag">系统自动执行</span>
+        </header>
+
+        <div class="stage-label">
+          阶段一 · 定时巡检通知
+          <code>tmall-empty-slot-notifier</code>
+        </div>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-number">01</span>
+            <div>
+              <h4>定时采集坑位空缺</h4>
+              <p>定时任务自动检查千牛后台中各个商品的素材坑位情况。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">02</span>
+            <div>
+              <h4>在群聊中通知负责人</h4>
+              <p>将商品坑位空缺情况发送到“打爆款小分队”，通知每一位对应负责人。</p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="stage-label">
+          阶段二 · 使用插件完成上传
+          <code>tmall-search-materials-upload</code>
+        </div>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-number">01</span>
+            <div>
+              <h4>负责人决定集中补充素材</h4>
+              <p>当负责人了解到商品空缺较多时，进入 Codex 开始批量处理。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">02</span>
+            <div>
+              <h4>一句话启动工作台</h4>
+              <p>在 Codex 输入“使用插件完成搜推素材的上传”，系统自动启动工作台。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">03</span>
+            <div>
+              <h4>完成素材源与账号连接</h4>
+              <p>用户一键配置 NAS 素材源，并授权千牛后台和飞书<a class="link-arrow" href="https://kocotree.feishu.cn/wiki/A5x4wrZiBimLFWknwk8ccOwznY4?from=from_copylink" target="_blank" rel="noopener noreferrer">天猫商品信息表</a>。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">04</span>
+            <div>
+              <h4>巡检并匹配素材</h4>
+              <p>点击“坑位完整度巡检”，系统自动匹配 NAS 中对应商品的候选素材。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">05</span>
+            <div>
+              <h4>自动生成并填充文案</h4>
+              <p>系统根据坑位图片自动获取 AI 生成的标题和提示词，负责人集中核对。</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-number">06</span>
+            <div>
+              <h4>批量全自动上传</h4>
+              <p>用户确认任务后批量上传；成功结果自动记录，便于后续查询与复盘。</p>
+            </div>
+          </li>
+        </ol>
+      </article>
+    </div>
+
+    <section class="outcome" aria-label="项目最终价值">
+      <div class="outcome-copy">
+        <h2>人负责判断，系统负责重复劳动</h2>
+        <p>项目不是简单的上传脚本，而是一套连接飞书、千牛、NAS 与人工审核的素材运营工作台。它让复杂流程可批量执行、可恢复、可检查、可追踪。</p>
+      </div>
+      <div class="value-grid">
+        <div class="value-item">
+          <strong>更高效率</strong>
+          <span>减少跨平台切换、重复搜索和逐项填写，让负责人专注业务判断。</span>
+        </div>
+        <div class="value-item">
+          <strong>更少错误</strong>
+          <span>降低素材错配、重复上传、比例混用和遗漏坑位的风险。</span>
+        </div>
+        <div class="value-item">
+          <strong>可追踪沉淀</strong>
+          <span>成功结果自动记录，为负责人统计、复盘和素材复用提供数据。</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell">
+    天猫搜推素材上新工作台 · 天猫部运营团队工作流
+  </footer>
+</body>
+</html>

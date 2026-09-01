@@ -21,19 +21,19 @@ from .material_page import _settle_safe_popups
 MATERIAL_RECOMMEND_QUERY = "?tab=recommend"
 PUBLISH_FRAME_FRAGMENT = "/publish-feeds/imagePreview"
 MATERIAL_SELECTOR_FRAME_FRAGMENT = "sucai-selector-ng"
-NAVIGATION_TIMEOUT_MS = 60_000
+NAVIGATION_TIMEOUT_MS = 90_000
 PRODUCT_SCOPE_ATTEMPTS = 300
 PRODUCT_SCOPE_DELAY_MS = 300
-PRODUCT_ROW_ATTEMPTS = 100
-LIVE_SLOT_ATTEMPTS = 100
-PUBLISH_FRAME_ATTEMPTS = 100
-PUBLISH_BODY_ATTEMPTS = 120
-MATERIAL_ROOT_ATTEMPTS = 120
-MATERIAL_CARD_ATTEMPTS = 120
-MATERIAL_SELECTOR_FRAME_ATTEMPTS = 100
+PRODUCT_ROW_ATTEMPTS = 150
+LIVE_SLOT_ATTEMPTS = 150
+PUBLISH_FRAME_ATTEMPTS = 150
+PUBLISH_BODY_ATTEMPTS = 180
+MATERIAL_ROOT_ATTEMPTS = 180
+MATERIAL_CARD_ATTEMPTS = 180
+MATERIAL_SELECTOR_FRAME_ATTEMPTS = 150
 COPY_UPLOAD_TIMEOUT_MS = 120_000
 COPY_UPLOAD_CARD_ATTEMPTS = 100
-AI_COPY_TIMEOUT_MS = 180_000
+AI_COPY_TIMEOUT_MS = 240_000
 AI_COPY_POLL_MS = 500
 PUBLISH_FORM_CLOSE_ATTEMPTS = 12
 PUBLISH_FORM_CLOSE_DELAY_MS = 250
@@ -1213,63 +1213,126 @@ class QianniuProductCopySession:
             self._close_safely()
         return False
 
-    def _resolve_positions(self, row) -> None:
+    def _resolve_position(
+        self,
+        row,
+        raw_slot: Mapping[str, Any],
+    ) -> int:
+        """Resolve only the current slot against the latest visible row."""
+
         empty_positions = _empty_slot_positions(row)
-        positions: dict[str, int] = {}
-        seen_positions: set[int] = set()
-        for local_occurrence, raw_slot in enumerate(self.slots):
-            slot_id = str(raw_slot.get("slot_id", "")).strip()
-            if not slot_id or slot_id in positions:
+        slot_id = str(raw_slot.get("slot_id", "")).strip()
+        if not slot_id or slot_id not in self._slot_ids:
+            raise QianniuCopyError(
+                "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                "文案请求包含缺失或未知的 slot_id",
+            )
+        requested_position = raw_slot.get("remote_slot_position")
+        if requested_position is not None:
+            position = int(requested_position)
+            slot_count = _slot_cells(row).count()
+            if position < 1 or position > slot_count:
                 raise QianniuCopyError(
-                    "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
-                    "文案请求包含缺失或重复的 slot_id",
+                    "QIANNIU_SLOT_NOT_FOUND",
+                    f"商品 {self.product_id} 不存在第 {position} 个坑位",
                 )
-            requested_position = raw_slot.get("remote_slot_position")
-            if requested_position is not None:
-                position = int(requested_position)
-                if position not in empty_positions:
-                    raise QianniuCopyError(
-                        "QIANNIU_SLOT_OCCUPIED",
-                        f"商品 {self.product_id} 第 {position} 个坑位不可用",
-                    )
-            else:
-                occurrence = int(
-                    raw_slot.get("remote_slot_occurrence", local_occurrence)
-                )
-                if occurrence < 0:
-                    raise QianniuCopyError(
-                        "QIANNIU_SLOT_OCCURRENCE_INVALID",
-                        f"商品 {self.product_id} 的空坑位序号不可为负数",
-                    )
-                if occurrence >= len(empty_positions):
-                    raise QianniuCopyError(
-                        "QIANNIU_EMPTY_SLOT_SHORTAGE",
-                        (
-                            f"商品 {self.product_id} 需要第 {occurrence + 1} 个空坑位，"
-                            f"当前只识别到 {len(empty_positions)} 个"
-                        ),
-                    )
-                position = empty_positions[occurrence]
-            if position in seen_positions:
+            if position not in empty_positions:
                 raise QianniuCopyError(
-                    "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
-                    f"商品 {self.product_id} 的多个文案坑位指向同一位置 {position}",
+                    "QIANNIU_SLOT_OCCUPIED",
+                    f"商品 {self.product_id} 第 {position} 个坑位不可用",
                 )
-            seen_positions.add(position)
-            positions[slot_id] = position
-        self._positions = positions
+            return position
+
+        occurrence = int(raw_slot.get("remote_slot_occurrence", 0))
+        if occurrence < 0:
+            raise QianniuCopyError(
+                "QIANNIU_SLOT_OCCURRENCE_INVALID",
+                f"商品 {self.product_id} 的空坑位序号不可为负数",
+            )
+        if occurrence >= len(empty_positions):
+            raise QianniuCopyError(
+                "QIANNIU_EMPTY_SLOT_SHORTAGE",
+                (
+                    f"商品 {self.product_id} 需要第 {occurrence + 1} 个空坑位，"
+                    f"当前只识别到 {len(empty_positions)} 个"
+                ),
+            )
+        return empty_positions[occurrence]
 
     def _open(self) -> None:
-        if self._row is not None and self._positions:
+        if self._row is not None:
             return
         _ensure_recommend_list(self.page, self.material_center_url)
-        row = _find_product_row_with_recovery(
+        self._row = _find_product_row_with_recovery(
             self.page,
             self.product_id,
             self.material_center_url,
         )
-        self._resolve_positions(row)
-        self._row = row
+
+    @staticmethod
+    def _slot_state_error(error: QianniuCopyError) -> bool:
+        return error.reason_code in {
+            "QIANNIU_EMPTY_SLOT_SHORTAGE",
+            "QIANNIU_SLOT_NOT_FOUND",
+            "QIANNIU_SLOT_OCCUPIED",
+            "QIANNIU_SLOT_TABLE_INVALID",
+        }
+
+    @staticmethod
+    def _normalize_refreshed_slot_error(
+        error: QianniuCopyError,
+    ) -> QianniuCopyError:
+        if error.reason_code in {
+            "QIANNIU_EMPTY_SLOT_SHORTAGE",
+            "QIANNIU_SLOT_OCCUPIED",
+        }:
+            return QianniuCopyError(
+                "QIANNIU_SLOT_STATE_CHANGED",
+                (
+                    "重新读取商品后，当前真实空坑位已少于任务计划；"
+                    f"{error.detail}"
+                ),
+            )
+        return error
+
+    def rebuild_context(self) -> None:
+        """Close residue, reopen the list, and search this product again."""
+
+        _close_publish_form_in_place(self.page, self._publish_frame)
+        self._publish_frame = None
+        self._row = None
+        self._positions = {}
+        _open_recommend_list(self.page, self.material_center_url)
+        self._open()
+
+    def _open_slot_form_with_recovery(
+        self,
+        raw_slot: Mapping[str, Any],
+    ) -> tuple[Any, int]:
+        """Re-read one unavailable target once before declaring it changed."""
+
+        last_error: QianniuCopyError | None = None
+        for refresh_index in range(2):
+            try:
+                self._open()
+                position = self._resolve_position(self._row, raw_slot)
+                frame = _open_slot_publish_form(
+                    self.page,
+                    self.product_id,
+                    position,
+                    row=self._row,
+                )
+                return frame, position
+            except QianniuCopyError as error:
+                last_error = error
+                if not self._slot_state_error(error):
+                    raise
+                if refresh_index == 0:
+                    self.rebuild_context()
+                    continue
+                raise self._normalize_refreshed_slot_error(error) from error
+        assert last_error is not None
+        raise last_error
 
     def _close_current_form(self) -> None:
         if _close_publish_form_in_place(
@@ -1304,14 +1367,11 @@ class QianniuProductCopySession:
                 f"商品 {product_id} 的坑位缺少最终图片输出",
             )
         seed_output = ordered_outputs[0]
-        self._open()
         self._close_current_form()
-        self._publish_frame = _open_slot_publish_form(
-            self.page,
-            self.product_id,
-            self._positions[slot_id],
-            row=self._row,
+        self._publish_frame, position = self._open_slot_form_with_recovery(
+            raw_slot,
         )
+        self._positions[slot_id] = position
         seed_image_name = _select_seed_image(
             self.page,
             self._publish_frame,
@@ -1332,7 +1392,7 @@ class QianniuProductCopySession:
         return QianniuCopyDraft(
             slot_id=slot_id,
             product_id=product_id,
-            remote_slot_position=self._positions[slot_id],
+            remote_slot_position=position,
             title=title,
             description=description,
             seed_image_name=seed_image_name,

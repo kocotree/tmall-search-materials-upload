@@ -55,6 +55,16 @@ COPY_AUTHORIZATION_SOURCES = {
     "legacy_workbench_copy_request",
 }
 COPY_SLOT_MAX_RETRIES = 3
+COPY_FAILED_ONLY_MAX_PASSES = 1
+COPY_SLOT_IMMEDIATE_SKIP_REASON_CODES = frozenset(
+    {
+        # The product session has already closed residual dialogs, reloaded the
+        # live row, and searched the product again before raising these.  More
+        # identical outer retries would only repeat a deterministic miss.
+        "QIANNIU_SLOT_NOT_FOUND",
+        "QIANNIU_SLOT_STATE_CHANGED",
+    }
+)
 COPY_SLOT_RETRYABLE_REASON_CODES = frozenset(
     {
         "QIANNIU_AI_COPY_ACTION_NOT_FOUND",
@@ -79,21 +89,31 @@ COPY_SLOT_RETRYABLE_REASON_CODES = frozenset(
         "QIANNIU_PUBLISH_FORM_CLOSE_FAILED",
         "QIANNIU_SLOT_NOT_FOUND",
         "QIANNIU_SLOT_OCCUPIED",
+        "QIANNIU_SLOT_STATE_CHANGED",
         "QIANNIU_SLOT_TABLE_INVALID",
     }
 )
-COPY_SLOT_SKIP_MESSAGES = {
-    "QIANNIU_AI_COPY_TIMEOUT": "千牛生成文案超时",
-    "QIANNIU_COPY_RESULT_INVALID": "千牛返回的标题或描述不完整",
-    "QIANNIU_COPY_RESULT_STALE": "千牛没有返回当前图片的新文案",
-    "QIANNIU_EMPTY_SLOT_SHORTAGE": "目标坑位当前不可用",
-    "QIANNIU_MATERIAL_CONFIRM_NOT_READY": "千牛素材选择确认暂时未就绪",
-    "QIANNIU_PRODUCT_IDENTITY_MISMATCH": "千牛未找到该商品",
-    "QIANNIU_PRODUCT_NOT_BOUND": "千牛页面未锁定到该商品",
-    "QIANNIU_PRODUCT_SEARCH_NOT_FOUND": "千牛商品列表暂时未加载完成",
-    "QIANNIU_PUBLISH_FORM_CLOSE_FAILED": "上一坑位页面未能正常关闭",
-    "QIANNIU_SLOT_NOT_FOUND": "千牛未找到目标坑位",
-    "QIANNIU_SLOT_OCCUPIED": "目标坑位当前不可用",
+COPY_SLOT_FAILURE_CATEGORIES = {
+    "QIANNIU_EMPTY_SLOT_SHORTAGE": ("slot_state_changed", "坑位状态已变化"),
+    "QIANNIU_SLOT_OCCUPIED": ("slot_state_changed", "坑位状态已变化"),
+    "QIANNIU_SLOT_STATE_CHANGED": ("slot_state_changed", "坑位状态已变化"),
+    "QIANNIU_SLOT_NOT_FOUND": ("slot_not_found", "未找到坑位"),
+    "QIANNIU_SLOT_TABLE_INVALID": ("slot_not_found", "未找到坑位"),
+    "QIANNIU_PRODUCT_IDENTITY_MISMATCH": ("slot_not_found", "未找到坑位"),
+    "QIANNIU_PRODUCT_NOT_BOUND": ("slot_not_found", "未找到坑位"),
+    "QIANNIU_PRODUCT_SEARCH_NOT_FOUND": ("slot_not_found", "未找到坑位"),
+    "QIANNIU_COPY_SEED_SELECTION_INVALID": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_MATERIAL_CONFIRM_NOT_READY": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_MATERIAL_ROOT_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_MATERIAL_SEARCH_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_MATERIAL_SELECTOR_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_IMAGE_TEXT_ACTION_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_IMAGE_TEXT_ACTION_UNSTABLE": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_AI_COPY_ACTION_NOT_FOUND": ("ai_timeout", "AI 生成超时"),
+    "QIANNIU_AI_COPY_TIMEOUT": ("ai_timeout", "AI 生成超时"),
+    "QIANNIU_COPY_RESPONSE_INVALID": ("copy_incomplete", "标题描述读取不完整"),
+    "QIANNIU_COPY_RESULT_INVALID": ("copy_incomplete", "标题描述读取不完整"),
+    "QIANNIU_COPY_RESULT_STALE": ("copy_incomplete", "标题描述读取不完整"),
 }
 
 
@@ -119,9 +139,9 @@ def _skipped_copy_draft(
     slot_id = str(slot.get("slot_id", "")).strip()
     product_id = str(slot.get("product_id", "")).strip()
     reason_code = str(error.reason_code)
-    message = COPY_SLOT_SKIP_MESSAGES.get(
+    failure_category, message = COPY_SLOT_FAILURE_CATEGORIES.get(
         reason_code,
-        "千牛自动获取文案未完成",
+        ("copy_generation_failed", "千牛自动获取文案未完成"),
     )
     skipped = {
         "slot_id": slot_id,
@@ -134,6 +154,7 @@ def _skipped_copy_draft(
         "generation_status": "skipped",
         "skip_reason_code": reason_code,
         "skip_message": message,
+        "failure_category": failure_category,
         "attempt_count": attempt_count,
         "retry_count": max(0, attempt_count - 1),
     }
@@ -484,6 +505,34 @@ def create_copy_draft_request(
     return created
 
 
+def resume_copy_draft_request(
+    store: SessionStore,
+    session_id: str,
+    request_id: str,
+    *,
+    actor: str = "user",
+) -> dict[str, Any]:
+    """Requeue one interrupted copy version without discarding checkpoints."""
+
+    request = read_agent_request(store, session_id, request_id)
+    if request.get("kind") != "copy_draft":
+        raise InteractionConflict("AGENT_REQUEST_KIND_MISMATCH")
+    status = str(request.get("status", ""))
+    if status in {"pending_agent", "processing"}:
+        return request
+    if status != "failed":
+        raise InteractionConflict("COPY_DRAFT_REQUEST_NOT_RESUMABLE")
+    # Validate the original bounded authorization before making the request
+    # claimable again. The processor will independently repeat this check.
+    _validate_or_migrate_copy_authorization(store, session_id, request)
+    return retry_agent_request(
+        store,
+        session_id,
+        request_id,
+        actor=actor,
+    )
+
+
 def process_copy_draft_request(
     store: SessionStore,
     session_id: str,
@@ -533,6 +582,11 @@ def process_copy_draft_request(
         for item in prior.get("copy_drafts", [])
         if isinstance(item, Mapping) and item.get("slot_id")
     }
+    repair_total_count = int(prior.get("repair_total_count", 0) or 0)
+    repair_processed_count = int(
+        prior.get("repair_processed_count", 0) or 0
+    )
+    current_repair_pass = int(prior.get("current_repair_pass", 0) or 0)
 
     def ordered_completed() -> list[dict[str, Any]]:
         return [
@@ -571,6 +625,10 @@ def process_copy_draft_request(
             "reason_code": reason_code,
             "current_retry_count": current_retry_count,
             "max_retries": COPY_SLOT_MAX_RETRIES,
+            "repair_total_count": repair_total_count,
+            "repair_processed_count": repair_processed_count,
+            "current_repair_pass": current_repair_pass,
+            "max_repair_passes": COPY_FAILED_ONLY_MAX_PASSES,
             "updated_at": _now(),
         }
         store._write_json_atomic(progress_path, document)
@@ -613,84 +671,222 @@ def process_copy_draft_request(
     try:
         write_progress("processing")
         with browser_context as browser_page:
-            product_groups = _unfinished_slots_by_product(slots, completed)
-            for product_slots in product_groups:
+            def process_slot(
+                product_session: Any,
+                slot: Mapping[str, Any],
+                *,
+                repair_pass: int,
+            ) -> tuple[bool, dict[str, Any] | None]:
+                """Process one slot; return success and optional stop response."""
+
+                nonlocal current_slot_id, repair_processed_count
+                current_slot_id = str(slot.get("slot_id", ""))
+                previous = dict(completed.get(current_slot_id, {}))
+                previous_attempt_count = int(
+                    previous.get("attempt_count", 0) or 0
+                )
+                initial_skip_reason = str(
+                    previous.get("initial_skip_reason_code")
+                    or previous.get("skip_reason_code")
+                    or ""
+                )
                 stopped = stopped_response()
                 if stopped is not None:
-                    return stopped
-                with open_qianniu_product_copy_session(
-                    browser_page,
-                    product_slots,
-                    material_center_url=runtime.material_center_url,
-                ) as product_session:
-                    for slot in product_slots:
-                        current_slot_id = str(slot.get("slot_id", ""))
+                    return False, stopped
+                write_progress(
+                    "processing",
+                    current_slot_id=current_slot_id,
+                )
+                attempts_in_pass = 0
+                for attempt_index in range(COPY_SLOT_MAX_RETRIES + 1):
+                    attempts_in_pass = attempt_index + 1
+                    try:
+                        draft = product_session.generate_slot(slot)
+                        if (
+                            not isinstance(draft, Mapping)
+                            or str(draft.get("slot_id", ""))
+                            != current_slot_id
+                        ):
+                            raise QianniuCopyError(
+                                "QIANNIU_COPY_RESPONSE_INVALID",
+                                f"坑位 {current_slot_id} 未返回唯一文案",
+                            )
                         stopped = stopped_response()
                         if stopped is not None:
-                            return stopped
+                            return False, stopped
+                        generated = dict(draft)
+                        generated["generation_status"] = "generated"
+                        if repair_pass:
+                            generated.update(
+                                {
+                                    "repair_pass_count": repair_pass,
+                                    "recovered_after_batch": True,
+                                    "initial_skip_reason_code": (
+                                        initial_skip_reason
+                                    ),
+                                    "attempt_count": (
+                                        previous_attempt_count
+                                        + attempts_in_pass
+                                    ),
+                                }
+                            )
+                            repair_processed_count += 1
+                        completed[current_slot_id] = generated
+                        write_progress("processing")
+                        return True, None
+                    except QianniuCopyError as error:
+                        if (
+                            error.reason_code
+                            not in COPY_SLOT_RETRYABLE_REASON_CODES
+                        ):
+                            raise
+                        stopped = stopped_response()
+                        if stopped is not None:
+                            return False, stopped
+                        immediate_skip = (
+                            error.reason_code
+                            in COPY_SLOT_IMMEDIATE_SKIP_REASON_CODES
+                        )
+                        if not immediate_skip:
+                            product_session.recover_after_failure()
+                        if (
+                            not immediate_skip
+                            and attempt_index < COPY_SLOT_MAX_RETRIES
+                        ):
+                            write_progress(
+                                "processing",
+                                current_slot_id=current_slot_id,
+                                reason_code=error.reason_code,
+                                current_retry_count=attempt_index + 1,
+                            )
+                            continue
+                        skipped = _skipped_copy_draft(
+                            slot,
+                            error,
+                            attempt_count=(
+                                previous_attempt_count + attempts_in_pass
+                            ),
+                        )
+                        if repair_pass:
+                            skipped.update(
+                                {
+                                    "repair_pass_count": repair_pass,
+                                    "final_retry_exhausted": True,
+                                    "initial_skip_reason_code": (
+                                        initial_skip_reason
+                                    ),
+                                    # Retry count describes this pass instead
+                                    # of exposing a confusing accumulated 7.
+                                    "retry_count": (
+                                        0
+                                        if immediate_skip
+                                        else COPY_SLOT_MAX_RETRIES
+                                    ),
+                                }
+                            )
+                            repair_processed_count += 1
+                        completed[current_slot_id] = skipped
                         write_progress(
                             "processing",
                             current_slot_id=current_slot_id,
+                            reason_code=error.reason_code,
+                            current_retry_count=(
+                                0
+                                if immediate_skip
+                                else COPY_SLOT_MAX_RETRIES
+                            ),
                         )
-                        for attempt_index in range(
-                            COPY_SLOT_MAX_RETRIES + 1
-                        ):
-                            try:
-                                draft = product_session.generate_slot(slot)
-                                if (
-                                    not isinstance(draft, Mapping)
-                                    or str(draft.get("slot_id", ""))
-                                    != current_slot_id
-                                ):
-                                    raise QianniuCopyError(
-                                        "QIANNIU_COPY_RESPONSE_INVALID",
-                                        (
-                                            f"坑位 {current_slot_id} "
-                                            "未返回唯一文案"
-                                        ),
-                                    )
-                                stopped = stopped_response()
-                                if stopped is not None:
-                                    return stopped
-                                completed[current_slot_id] = dict(draft)
-                                write_progress("processing")
-                                break
-                            except QianniuCopyError as error:
-                                if (
-                                    error.reason_code
-                                    not in COPY_SLOT_RETRYABLE_REASON_CODES
-                                ):
-                                    raise
-                                stopped = stopped_response()
-                                if stopped is not None:
-                                    return stopped
-                                product_session.recover_after_failure()
-                                if attempt_index < COPY_SLOT_MAX_RETRIES:
-                                    write_progress(
-                                        "processing",
-                                        current_slot_id=current_slot_id,
-                                        reason_code=error.reason_code,
-                                        current_retry_count=(
-                                            attempt_index + 1
-                                        ),
-                                    )
-                                    continue
-                                completed[current_slot_id] = (
-                                    _skipped_copy_draft(
-                                        slot,
-                                        error,
-                                        attempt_count=attempt_index + 1,
-                                    )
+                        return False, None
+                raise AssertionError("copy retry loop exited unexpectedly")
+
+            def process_product_groups(
+                product_groups: list[list[Mapping[str, Any]]],
+                *,
+                repair_pass: int,
+            ) -> dict[str, Any] | None:
+                """Keep one product context, rebuilding after two final misses."""
+
+                for product_slots in product_groups:
+                    stopped = stopped_response()
+                    if stopped is not None:
+                        return stopped
+                    with open_qianniu_product_copy_session(
+                        browser_page,
+                        product_slots,
+                        material_center_url=runtime.material_center_url,
+                    ) as product_session:
+                        consecutive_failures = 0
+                        for slot_index, slot in enumerate(product_slots):
+                            succeeded, stopped = process_slot(
+                                product_session,
+                                slot,
+                                repair_pass=repair_pass,
+                            )
+                            if stopped is not None:
+                                return stopped
+                            consecutive_failures = (
+                                0 if succeeded else consecutive_failures + 1
+                            )
+                            if (
+                                consecutive_failures >= 2
+                                and slot_index + 1 < len(product_slots)
+                            ):
+                                rebuild = getattr(
+                                    product_session,
+                                    "rebuild_context",
+                                    None,
                                 )
-                                write_progress(
-                                    "processing",
-                                    current_slot_id=current_slot_id,
-                                    reason_code=error.reason_code,
-                                    current_retry_count=(
-                                        COPY_SLOT_MAX_RETRIES
-                                    ),
-                                )
-                                break
+                                if callable(rebuild):
+                                    try:
+                                        rebuild()
+                                    except QianniuCopyError:
+                                        # The following slot still performs its
+                                        # own bounded open/recovery path.
+                                        product_session.recover_after_failure()
+                                consecutive_failures = 0
+                return None
+
+            initial_groups = _unfinished_slots_by_product(slots, completed)
+            stopped = process_product_groups(initial_groups, repair_pass=0)
+            if stopped is not None:
+                return stopped
+
+            failed_only_slots = [
+                slot
+                for slot in slots
+                if (
+                    completed.get(str(slot.get("slot_id", "")), {}).get(
+                        "generation_status"
+                    )
+                    == "skipped"
+                    and int(
+                        completed.get(
+                            str(slot.get("slot_id", "")), {}
+                        ).get("repair_pass_count", 0)
+                        or 0
+                    )
+                    < COPY_FAILED_ONLY_MAX_PASSES
+                )
+            ]
+            if failed_only_slots:
+                repair_total_count = len(failed_only_slots)
+                repair_processed_count = 0
+                current_repair_pass = 1
+                write_progress("processing")
+                repair_groups = _unfinished_slots_by_product(
+                    failed_only_slots,
+                    {
+                        slot_id: item
+                        for slot_id, item in completed.items()
+                        if item.get("generation_status") != "skipped"
+                    },
+                )
+                stopped = process_product_groups(
+                    repair_groups,
+                    repair_pass=current_repair_pass,
+                )
+                if stopped is not None:
+                    return stopped
         response = complete_agent_request(
             store,
             session_id,

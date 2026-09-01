@@ -1063,10 +1063,10 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
 @pytest.mark.parametrize(
     ("reason_code", "skip_message"),
     [
-        ("QIANNIU_PRODUCT_IDENTITY_MISMATCH", "千牛未找到该商品"),
+        ("QIANNIU_PRODUCT_IDENTITY_MISMATCH", "未找到坑位"),
         (
             "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
-            "千牛素材选择确认暂时未就绪",
+            "上传图片失败",
         ),
     ],
 )
@@ -1131,7 +1131,7 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
         page=object(),
     )
 
-    assert calls == ["slot-fail"] * 4 + ["slot-ok"]
+    assert calls == ["slot-fail"] * 4 + ["slot-ok"] + ["slot-fail"] * 4
     drafts = {
         item["slot_id"]: item
         for item in response["result"]["copy_drafts"]
@@ -1141,8 +1141,10 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
     assert skipped["title"] == ""
     assert skipped["description"] == ""
     assert skipped["retry_count"] == 3
-    assert skipped["attempt_count"] == 4
+    assert skipped["attempt_count"] == 8
     assert skipped["skip_message"] == skip_message
+    assert skipped["repair_pass_count"] == 1
+    assert skipped["final_retry_exhausted"] is True
     assert drafts["slot-ok"]["title"] == "继续生成的标题"
     assert read_agent_request(store, session_id, request_id)["status"] == (
         "completed"
@@ -1159,7 +1161,158 @@ def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
     assert progress["generated_count"] == 1
     assert progress["skipped_count"] == 1
     assert progress["max_retries"] == 3
+    assert progress["repair_total_count"] == 1
+    assert progress["repair_processed_count"] == 1
+    assert progress["current_repair_pass"] == 1
     assert progress["skipped_slots"][0]["slot_id"] == "slot-fail"
+
+
+def test_copy_processor_repairs_only_failed_slots_after_the_batch(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(
+        tmp_path, asset_count=6
+    )
+    request_id = _queue_copy_request(
+        client,
+        store,
+        session_id,
+        slot_assignments=[
+            {
+                "slot_id": "slot-fail-once",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            },
+            {
+                "slot_id": "slot-success",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-3", "asset-4", "asset-5"],
+            },
+        ],
+    )
+    calls = []
+
+    def fake_generate(_page, slots, *, material_center_url):
+        assert material_center_url == "https://example.test/materials"
+        slot = slots[0]
+        calls.append(slot["slot_id"])
+        failed_calls = calls.count("slot-fail-once")
+        if slot["slot_id"] == "slot-fail-once" and failed_calls <= 4:
+            raise workflow.QianniuCopyError(
+                "QIANNIU_AI_COPY_TIMEOUT",
+                "等待 AI 生成超时",
+            )
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": f"{slot['slot_id']} 标题",
+            "description": f"{slot['slot_id']} 描述",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    _patch_copy_product_session(monkeypatch, workflow, fake_generate)
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert calls == ["slot-fail-once"] * 4 + ["slot-success", "slot-fail-once"]
+    drafts = {
+        item["slot_id"]: item
+        for item in response["result"]["copy_drafts"]
+    }
+    assert drafts["slot-success"]["title"] == "slot-success 标题"
+    repaired = drafts["slot-fail-once"]
+    assert repaired["generation_status"] == "generated"
+    assert repaired["recovered_after_batch"] is True
+    assert repaired["repair_pass_count"] == 1
+    assert repaired["attempt_count"] == 5
+
+
+def test_copy_processor_rebuilds_product_after_two_consecutive_slot_failures(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(
+        tmp_path, asset_count=9
+    )
+    request_id = _queue_copy_request(
+        client,
+        store,
+        session_id,
+        slot_assignments=[
+            {
+                "slot_id": f"slot-{index}",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": [
+                    f"asset-{index * 3 + offset}" for offset in range(3)
+                ],
+            }
+            for index in range(3)
+        ],
+    )
+    events = []
+
+    class FakeProductSession:
+        def __init__(self, _page, slots, *, material_center_url):
+            assert material_center_url == "https://example.test/materials"
+            events.append(("open", tuple(slot["slot_id"] for slot in slots)))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        def generate_slot(self, slot):
+            events.append(("generate", slot["slot_id"]))
+            raise workflow.QianniuCopyError(
+                "QIANNIU_SLOT_NOT_FOUND",
+                "实时读取后仍未找到坑位",
+            )
+
+        def recover_after_failure(self):
+            events.append(("recover",))
+
+        def rebuild_context(self):
+            events.append(("rebuild",))
+
+    monkeypatch.setattr(
+        workflow,
+        "open_qianniu_product_copy_session",
+        FakeProductSession,
+    )
+    process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert events.count(("rebuild",)) == 2
+    assert events.count(("generate", "slot-0")) == 2
+    assert events.count(("generate", "slot-1")) == 2
+    assert events.count(("generate", "slot-2")) == 2
 
 
 def test_copy_processor_reuses_one_session_for_same_product_slots(
@@ -1282,6 +1435,125 @@ def test_copy_processor_does_not_skip_batch_identity_failures(
     )
     assert progress["status"] == "failed"
     assert progress["skipped_count"] == 0
+
+
+def test_failed_copy_request_can_resume_same_version_from_checkpoint(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(
+        tmp_path, asset_count=6
+    )
+    request_id = _queue_copy_request(
+        client,
+        store,
+        session_id,
+        slot_assignments=[
+            {
+                "slot_id": "slot-completed",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-0", "asset-1", "asset-2"],
+            },
+            {
+                "slot_id": "slot-interrupted",
+                "product_id": "P1",
+                "target_ratio": "3:4",
+                "asset_ids": ["asset-3", "asset-4", "asset-5"],
+            },
+        ],
+    )
+
+    def interrupt_second_slot(_page, slots, *, material_center_url):
+        assert material_center_url == "https://example.test/materials"
+        slot = slots[0]
+        if slot["slot_id"] == "slot-interrupted":
+            raise workflow.QianniuCopyError(
+                "QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
+                "页面上下文中断",
+            )
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "已保存的标题",
+            "description": "这个坑位已完成，恢复时不应重新生成。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    _patch_copy_product_session(
+        monkeypatch, workflow, interrupt_second_slot
+    )
+    with pytest.raises(workflow.CopyDraftProcessingError):
+        process_copy_draft_request(
+            store,
+            session_id,
+            request_id,
+            runtime=SimpleNamespace(
+                cdp_url="http://127.0.0.1:9222",
+                material_center_url="https://example.test/materials",
+            ),
+            page=object(),
+        )
+
+    progress_path = (
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "progress.json"
+    )
+    failed_progress = store._read_json(progress_path, "copy-progress")
+    assert [
+        item["slot_id"] for item in failed_progress["copy_drafts"]
+    ] == ["slot-completed"]
+
+    resumed = client.post(
+        f"/api/sessions/{session_id}/stages/slots_copy/agent-requests/"
+        f"{request_id}/resume",
+        json={},
+    )
+    assert resumed.status_code == 200, resumed.json
+    assert resumed.json["request"]["request_id"] == request_id
+    assert resumed.json["request"]["status"] == "pending_agent"
+    assert store._read_json(progress_path, "copy-progress") == failed_progress
+
+    resumed_calls = []
+
+    def finish_remaining(_page, slots, *, material_center_url):
+        slot = slots[0]
+        resumed_calls.append(slot["slot_id"])
+        return [{
+            "slot_id": slot["slot_id"],
+            "product_id": slot["product_id"],
+            "title": "恢复后的标题",
+            "description": "只继续处理尚未成功的坑位。",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    _patch_copy_product_session(monkeypatch, workflow, finish_remaining)
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            material_center_url="https://example.test/materials",
+        ),
+        page=object(),
+    )
+
+    assert resumed_calls == ["slot-interrupted"]
+    drafts = {
+        item["slot_id"]: item
+        for item in response["result"]["copy_drafts"]
+    }
+    assert drafts["slot-completed"]["title"] == "已保存的标题"
+    assert drafts["slot-interrupted"]["title"] == "恢复后的标题"
 
 
 def test_slots_copy_back_is_disabled_until_active_copy_finishes(

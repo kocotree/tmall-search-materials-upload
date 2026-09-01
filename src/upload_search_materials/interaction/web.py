@@ -27,7 +27,10 @@ from ..browser.session import (
     inspect_cdp_endpoint,
     open_cdp_page,
 )
-from ..copy_draft_workflow import create_copy_draft_request
+from ..copy_draft_workflow import (
+    create_copy_draft_request,
+    resume_copy_draft_request,
+)
 from ..collection_readiness import (
     build_collection_readiness,
     create_selector_candidate,
@@ -5003,6 +5006,31 @@ def create_app(
                             actor="system",
                         )
         return jsonify(request=value, response=response, progress=progress)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/slots_copy/agent-requests/"
+        "<request_id>/resume"
+    )
+    def resume_slot_copy_request(session_id: str, request_id: str):
+        try:
+            resumed = resume_copy_draft_request(
+                store,
+                session_id,
+                request_id,
+                actor="user",
+            )
+            notify_workflow_dispatcher(session_id)
+        except (InteractionConflict, OSError, TypeError, ValueError) as error:
+            message = (
+                "当前图片或坑位已经发生变化，请重新生成新版本。"
+                if "AUTHORIZATION_INVALID" in str(error)
+                else "当前文案任务无法继续，请选择现有版本或重新生成新版本。"
+            )
+            return _validation_error(
+                {"copy_request": message},
+                message=message,
+            )
+        return jsonify(request=resumed)
 
     @app.get(
         "/api/sessions/<session_id>/stages/slots_copy/current-slot-plan"

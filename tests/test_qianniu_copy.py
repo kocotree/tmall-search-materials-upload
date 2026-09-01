@@ -852,13 +852,108 @@ def test_product_scope_keeps_waiting_past_previous_sixty_second_limit():
 def test_copy_network_waits_cover_slow_navigation_upload_and_ai():
     import upload_search_materials.browser.qianniu_copy as copy_module
 
-    assert copy_module.NAVIGATION_TIMEOUT_MS == 60_000
+    assert copy_module.NAVIGATION_TIMEOUT_MS == 90_000
     assert (
         copy_module.PRODUCT_SCOPE_ATTEMPTS
         * copy_module.PRODUCT_SCOPE_DELAY_MS
     ) >= 90_000
+    assert copy_module.PRODUCT_ROW_ATTEMPTS * 300 >= 45_000
+    assert copy_module.LIVE_SLOT_ATTEMPTS * 300 >= 45_000
+    assert copy_module.PUBLISH_FRAME_ATTEMPTS * 300 >= 45_000
+    assert copy_module.MATERIAL_ROOT_ATTEMPTS * 250 >= 45_000
+    assert copy_module.MATERIAL_CARD_ATTEMPTS * 250 >= 45_000
     assert copy_module.COPY_UPLOAD_TIMEOUT_MS == 120_000
-    assert copy_module.AI_COPY_TIMEOUT_MS == 180_000
+    assert copy_module.AI_COPY_TIMEOUT_MS == 240_000
+
+
+def test_product_session_rechecks_only_the_unavailable_slot(monkeypatch):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    first_row = object()
+    refreshed_row = object()
+    frame = object()
+    rows = [first_row, refreshed_row]
+    opens = []
+    refreshes = []
+    monkeypatch.setattr(
+        copy_module,
+        "_ensure_recommend_list",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_open_recommend_list",
+        lambda page, url: refreshes.append((page, url)),
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_find_product_row_with_recovery",
+        lambda *_args, **_kwargs: rows.pop(0),
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_empty_slot_positions",
+        lambda row: [2] if row is first_row else [],
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_open_slot_publish_form",
+        lambda _page, _product_id, position, **_kwargs: (
+            opens.append(position) or frame
+        ),
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_close_publish_form_in_place",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_select_seed_image",
+        lambda *_args, **_kwargs: "seed.jpg",
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_wait_for_frame",
+        lambda *_args, **_kwargs: frame,
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_generate_copy",
+        lambda *_args, **_kwargs: ("标题", "描述", 0.1),
+    )
+    slots = [
+        {
+            "slot_id": "slot-ok",
+            "product_id": "P1",
+            "remote_slot_occurrence": 0,
+            "ordered_outputs": [
+                {"output_path": "a.jpg", "output_sha256": "a" * 64}
+            ],
+        },
+        {
+            "slot_id": "slot-changed",
+            "product_id": "P1",
+            "remote_slot_occurrence": 1,
+            "ordered_outputs": [
+                {"output_path": "b.jpg", "output_sha256": "b" * 64}
+            ],
+        },
+    ]
+
+    with QianniuProductCopySession(
+        object(),
+        slots,
+        material_center_url="https://example.test/materials",
+    ) as session:
+        first = session.generate_slot(slots[0])
+        with pytest.raises(QianniuCopyError) as exc_info:
+            session.generate_slot(slots[1])
+
+    assert first["slot_id"] == "slot-ok"
+    assert opens == [2]
+    assert len(refreshes) == 1
+    assert exc_info.value.reason_code == "QIANNIU_SLOT_STATE_CHANGED"
 
 
 def test_product_scope_timeout_refreshes_once_before_retrying(monkeypatch):

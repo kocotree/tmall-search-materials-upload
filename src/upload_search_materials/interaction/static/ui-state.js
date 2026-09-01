@@ -249,6 +249,11 @@
           : sameVersion
             ? String(existing.skip_message || "")
             : "",
+        failure_category: draft
+          ? String(draft.failure_category || "")
+          : sameVersion
+            ? String(existing.failure_category || "")
+            : "",
         attempt_count: draft
           ? Number(draft.attempt_count || 0)
           : sameVersion
@@ -259,6 +264,16 @@
           : sameVersion
             ? Number(existing.retry_count || 0)
             : 0,
+        repair_pass_count: draft
+          ? Number(draft.repair_pass_count || 0)
+          : sameVersion
+            ? Number(existing.repair_pass_count || 0)
+            : 0,
+        final_retry_exhausted: draft
+          ? Boolean(draft.final_retry_exhausted)
+          : sameVersion
+            ? Boolean(existing.final_retry_exhausted)
+            : false,
         request_id: versionId,
         output_sha256: outputSha256,
       };

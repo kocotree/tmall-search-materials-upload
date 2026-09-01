@@ -6237,7 +6237,9 @@
           element(
             "strong",
             "",
-            `以下 ${skipped.length} 个坑位已重试 3 次仍未完成，系统已跳过：`,
+            skipped.some((item) => Number(item.repair_pass_count || 0) > 0)
+              ? `以下 ${skipped.length} 个坑位完成常规重试和 1 轮失败项补跑后仍未完成，系统已跳过：`
+              : `以下 ${skipped.length} 个坑位自动处理后仍未完成，系统已跳过：`,
           ),
           element("p", "", "请核对这些坑位，并补充仍为空白的标题和描述；其他坑位不受影响。"),
           list,
@@ -6250,16 +6252,24 @@
       );
       copyButton.type = "button";
       copyButton.hidden = true;
+      const resumeCopyButton = element(
+        "button",
+        "primary-button",
+        "继续获取",
+      );
+      resumeCopyButton.type = "button";
+      resumeCopyButton.hidden = true;
       const copyVersions = document.createElement("select");
       copyVersions.setAttribute("aria-label", "AI 文案版本");
       const copyToolbarActions = element("div", "copy-toolbar-actions");
       copyToolbarActions.append(
+        resumeCopyButton,
         copyButton,
         copyVersions,
         element(
           "small",
           "copy-version-help",
-          "重新生成会创建独立新版本，不覆盖历史版本，也不会发布。",
+          "继续获取会保留已完成内容；重新生成会创建独立新版本。",
         ),
       );
       copyActions.append(copyStatus, copyToolbarActions);
@@ -6307,8 +6317,11 @@
           generation_status: String(existing.generation_status || "pending"),
           skip_reason_code: String(existing.skip_reason_code || ""),
           skip_message: String(existing.skip_message || ""),
+          failure_category: String(existing.failure_category || ""),
           attempt_count: Number(existing.attempt_count || 0),
           retry_count: Number(existing.retry_count || 0),
+          repair_pass_count: Number(existing.repair_pass_count || 0),
+          final_retry_exhausted: Boolean(existing.final_retry_exhausted),
           request_id: String(existing.request_id || ""),
           output_sha256: Array.isArray(existing.output_sha256)
             ? existing.output_sha256
@@ -6532,6 +6545,8 @@
           const requestState = detail.request?.status || "";
           const requestIsActive = ["pending_agent", "processing"]
             .includes(requestState);
+          resumeCopyButton.hidden = requestState !== "failed";
+          resumeCopyButton.disabled = requestState !== "failed";
           setLocalCopyRequestInFlight(requestIsActive);
           setSubpage("copy");
           const progressDrafts = detail.progress?.copy_drafts || [];
@@ -6556,7 +6571,24 @@
                 )
               ),
           ).length;
-          if (drafts.length > knownCount) {
+          const localDrafts = new Map(
+            readJsonListControl("copy_edits")
+              .filter((item) => String(item.request_id || "") === requestId)
+              .map((item) => [String(item.slot_id || ""), item]),
+          );
+          const draftsChanged = drafts.some((draft) => {
+            const existing = localDrafts.get(String(draft.slot_id || ""));
+            if (!existing) return true;
+            return String(existing.title || "") !== String(draft.title || "")
+              || String(existing.description || "") !== String(draft.description || "")
+              || String(existing.generation_status || "")
+                !== String(draft.generation_status || "generated")
+              || String(existing.skip_reason_code || "")
+                !== String(draft.skip_reason_code || "")
+              || Number(existing.repair_pass_count || 0)
+                !== Number(draft.repair_pass_count || 0);
+          });
+          if (drafts.length > knownCount || draftsChanged) {
             applyCopyDrafts(drafts, requestId);
             return;
           }
@@ -6568,7 +6600,9 @@
             return;
           }
           if (requestState === "failed") {
-            copyStatus.textContent = `文案生成遇到问题，已保留 ${progressDrafts.length}/${assignments.length} 个坑位；排查信息已保存。`;
+            copyStatus.textContent = `文案获取已中断，已保留 ${progressDrafts.length}/${assignments.length} 个坑位；可继续获取剩余内容。`;
+            resumeCopyButton.hidden = false;
+            resumeCopyButton.disabled = false;
             copyButton.disabled = false;
             return;
           }
@@ -6579,11 +6613,18 @@
           }
           copyButton.disabled = true;
           const retryCount = Number(detail.progress?.current_retry_count || 0);
+          const repairPass = Number(detail.progress?.current_repair_pass || 0);
+          const repairProcessed = Number(
+            detail.progress?.repair_processed_count || 0,
+          );
+          const repairTotal = Number(detail.progress?.repair_total_count || 0);
           const retryText = retryCount
             ? `；当前坑位正在重试 ${retryCount}/3`
             : "";
           copyStatus.textContent = requestState === "processing"
-            ? `正在生成千牛文案：已处理 ${progressDrafts.length}/${assignments.length} 个坑位${retryText}。`
+            ? repairPass && repairTotal
+              ? `正在单独补跑失败坑位：已处理 ${repairProcessed}/${repairTotal}${retryText}。`
+              : `正在生成千牛文案：已处理 ${progressDrafts.length}/${assignments.length} 个坑位${retryText}。`
             : "图片已确认，正在获取千牛标题和描述。";
           window.setTimeout(() => pollCopyRequest(requestId), 1500);
         } catch (error) {
@@ -6595,6 +6636,7 @@
       const requestCopy = async (regenerate = false) => {
         setLocalCopyRequestInFlight(true);
         setSubpage("copy");
+        resumeCopyButton.hidden = true;
         copyButton.disabled = true;
         copyButton.textContent = `正在创建版本 ${copyVersionCount + 1}…`;
         copyStatus.textContent = "正在创建新的千牛文案任务…";
@@ -6620,6 +6662,33 @@
           copyButton.textContent = "重新生成新版本";
         }
       };
+      const resumeCopy = async () => {
+        const requestId = String(copyVersions.value || "");
+        if (!requestId) return;
+        setLocalCopyRequestInFlight(true);
+        setSubpage("copy");
+        resumeCopyButton.disabled = true;
+        copyButton.disabled = true;
+        copyStatus.textContent = "正在恢复当前文案任务…";
+        try {
+          await fetchJson(
+            apiPath(
+              `/stages/slots_copy/agent-requests/${encodeURIComponent(requestId)}/resume`,
+            ),
+            { method: "POST", body: JSON.stringify({}) },
+          );
+          resumeCopyButton.hidden = true;
+          copyStatus.textContent = "已恢复，将从未完成的坑位继续获取。";
+          pollCopyRequest(requestId);
+        } catch (error) {
+          setLocalCopyRequestInFlight(false);
+          resumeCopyButton.hidden = false;
+          resumeCopyButton.disabled = false;
+          copyButton.disabled = false;
+          copyStatus.textContent = error.userMessage || error.message;
+        }
+      };
+      resumeCopyButton.addEventListener("click", resumeCopy);
       copyButton.addEventListener("click", () => requestCopy(true));
       fetchJson(apiPath("/stages/slots_copy/agent-requests"))
         .then(async (payload) => {
