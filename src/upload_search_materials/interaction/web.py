@@ -133,6 +133,11 @@ from ..nas_sources import (
 )
 from ..platform_support import AssetSourceUnavailable
 from ..persistence import PersistenceAccessDenied, read_json
+from ..publish_retry import (
+    PublishRetryError,
+    inspect_publish_retry,
+    retry_failed_publish_tasks,
+)
 from ..product_selection_handoff import (
     ProductSelectionProcessingError,
     process_product_selection_handoff,
@@ -2162,7 +2167,85 @@ def create_app(
             )
         elif stage_id == "approval":
             response["upload_identity"] = lark_upload_identity(refresh=True)
+            try:
+                publish_retry = inspect_publish_retry(store, session_id)
+            except (InteractionConflict, OSError, TypeError, ValueError):
+                publish_retry = {"available": False, "can_retry": False}
+            response["publish_retry"] = publish_retry
+            if (
+                isinstance(response.get("result"), dict)
+                and publish_retry.get("available") is True
+            ):
+                response["result"] = {
+                    **response["result"],
+                    "data": {
+                        **(
+                            response["result"].get("data")
+                            if isinstance(
+                                response["result"].get("data"), dict
+                            )
+                            else {}
+                        ),
+                        "publish_retry": publish_retry,
+                    },
+                }
         return jsonify(response)
+
+    @app.post(
+        "/api/sessions/<session_id>/stages/approval/retry-upload"
+    )
+    def retry_failed_approval_uploads(session_id: str):
+        payload = _json_object()
+        request_id = str(payload.get("request_id", "")).strip()
+        if not request_id:
+            return _error(
+                "retry request is invalid",
+                422,
+                reason_code="UPLOAD_RETRY_REQUEST_INVALID",
+                message="本次继续上传请求无效，请刷新页面后重试。",
+            )
+        upload_identity = lark_upload_identity(refresh=True)
+        if upload_identity.get("status") != "authorized":
+            return _error(
+                "upload identity unavailable",
+                422,
+                reason_code=str(
+                    upload_identity.get("reason_code")
+                    or "LARK_UPLOAD_IDENTITY_UNAVAILABLE"
+                ),
+                message=str(
+                    upload_identity.get("message")
+                    or "请先完成飞书授权后再继续上传。"
+                ),
+            )
+        try:
+            retried = retry_failed_publish_tasks(
+                store,
+                session_id,
+                request_id=request_id,
+                authorized_user_name=str(
+                    upload_identity.get("user_name", "")
+                ),
+            )
+        except PublishRetryError as error:
+            return _error(
+                "upload retry is not available",
+                409,
+                reason_code=error.reason_code,
+                message=error.user_message,
+            )
+        except (InteractionConflict, OSError, TypeError, ValueError) as error:
+            return _error(
+                "upload retry state changed",
+                409,
+                reason_code=str(error).split(":", 1)[0],
+                message="上传状态已经变化，请刷新页面后重新检查。",
+            )
+        notify_workflow_dispatcher(session_id)
+        return jsonify(
+            **retried,
+            workflow_dispatch=workflow_dispatch_status(session_id),
+        )
 
     @app.post(
         "/api/sessions/<session_id>/stages/asset_matching/prepare-gallery"

@@ -562,6 +562,176 @@ class SessionStore:
             )
             return {"status": "draft", "revision": expected_revision}
 
+    def requeue_blocked_handoff(
+        self,
+        session_id: str,
+        stage_id: str,
+        *,
+        expected_revision: int,
+        request_id: str,
+        reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Requeue an exact blocked handoff after an explicit UI retry action.
+
+        The input, revision, handoff and production authorization remain
+        immutable.  ``request_id`` makes a double click or a retried HTTP
+        request idempotent, while ``retry_generation`` gives the managed
+        dispatcher a fresh queue identity for the same exact handoff.
+        """
+
+        self._stage_index(stage_id)
+        normalized_request_id = str(request_id).strip()
+        if not normalized_request_id or len(normalized_request_id) > 256:
+            raise InteractionConflict("UPLOAD_RETRY_REQUEST_INVALID")
+        normalized_reason = str(reason).strip()
+        if not normalized_reason:
+            raise InteractionConflict("UPLOAD_RETRY_REASON_REQUIRED")
+        normalized_details = dict(details or {})
+        details_sha256 = hashlib.sha256(
+            json.dumps(
+                normalized_details,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        with self._session_lock(session_id):
+            stage_path = self._stage_path(session_id, stage_id)
+            request_path = (
+                stage_path
+                / "upload-retry-requests"
+                / (
+                    hashlib.sha256(
+                        normalized_request_id.encode("utf-8")
+                    ).hexdigest()
+                    + ".json"
+                )
+            )
+            existing_request = None
+            if request_path.is_file():
+                existing_request = self._read_json(
+                    request_path, "upload-retry-request"
+                )
+                if (
+                    existing_request.get("request_id")
+                    != normalized_request_id
+                    or existing_request.get("details_sha256")
+                    != details_sha256
+                    or int(existing_request.get("revision", -1))
+                    != int(expected_revision)
+                ):
+                    raise InteractionConflict(
+                        "UPLOAD_RETRY_REQUEST_CONFLICT"
+                    )
+                response = existing_request.get("response")
+                if isinstance(response, dict):
+                    return dict(response)
+
+            state = self._load_session_file(session_id)
+            if state.get("current_stage") != stage_id:
+                raise InteractionConflict("UPLOAD_RETRY_STAGE_CHANGED")
+            stage_state = state["stages"][stage_id]
+            current_revision = int(stage_state["revision"])
+            if current_revision != int(expected_revision):
+                raise InteractionConflict("UPLOAD_RETRY_REVISION_STALE")
+
+            retry_generation = int(
+                (existing_request or {}).get(
+                    "retry_generation",
+                    int(stage_state.get("retry_generation", 0)) + 1,
+                )
+            )
+            if stage_state["status"] != "blocked":
+                if (
+                    existing_request is not None
+                    and stage_state["status"]
+                    in {"ready_for_agent", "processing"}
+                    and int(stage_state.get("retry_generation", 0))
+                    == retry_generation
+                ):
+                    response = {
+                        "status": stage_state["status"],
+                        "session_id": session_id,
+                        "stage_id": stage_id,
+                        "revision": current_revision,
+                        "retry_generation": retry_generation,
+                        "request_id": normalized_request_id,
+                    }
+                    existing_request["status"] = "queued"
+                    existing_request["response"] = response
+                    self._write_json_atomic(request_path, existing_request)
+                    return response
+                raise InteractionConflict("UPLOAD_RETRY_NOT_BLOCKED")
+
+            handoff = self._read_json(
+                stage_path / "handoff.json", "handoff"
+            )
+            self._validate_handoff(
+                session_id, stage_id, stage_path, handoff
+            )
+            if int(handoff.get("revision", -1)) != current_revision:
+                raise InteractionConflict("UPLOAD_RETRY_REVISION_STALE")
+            result = self._read_json(
+                stage_path / "result.json", "result"
+            )
+            if (
+                result.get("status") != "blocked"
+                or int(result.get("revision", -1)) != current_revision
+                or result.get("input_sha256")
+                != handoff.get("input_sha256")
+            ):
+                raise InteractionConflict("UPLOAD_RETRY_RESULT_STALE")
+
+            prepared_at = self._iso_timestamp(datetime.now(timezone.utc))
+            request_document = existing_request or {
+                "schema_version": SCHEMA_VERSION,
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": current_revision,
+                "request_id": normalized_request_id,
+                "reason": normalized_reason,
+                "details": normalized_details,
+                "details_sha256": details_sha256,
+                "retry_generation": retry_generation,
+                "status": "prepared",
+                "created_at": prepared_at,
+            }
+            self._write_json_atomic(request_path, request_document)
+
+            stage_state["status"] = "ready_for_agent"
+            stage_state["retry_generation"] = retry_generation
+            state["processing_claim"] = None
+            state["agent_wait"] = None
+            self._write_session_state(session_id, state)
+            response = {
+                "status": "ready_for_agent",
+                "session_id": session_id,
+                "stage_id": stage_id,
+                "revision": current_revision,
+                "retry_generation": retry_generation,
+                "request_id": normalized_request_id,
+            }
+            request_document["status"] = "queued"
+            request_document["queued_at"] = self._iso_timestamp(
+                datetime.now(timezone.utc)
+            )
+            request_document["response"] = response
+            self._write_json_atomic(request_path, request_document)
+            self._append_event(
+                self._session_path(session_id),
+                "blocked_handoff_requeued",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=current_revision,
+                retry_generation=retry_generation,
+                persistence_request_id=normalized_request_id,
+                reason=normalized_reason,
+                **normalized_details,
+            )
+            return response
+
     def reopen_previous_stage(
         self,
         session_id: str,

@@ -98,6 +98,33 @@ def test_invalid_transition_does_not_modify_state(tmp_path):
     store.close()
 
 
+def test_user_retry_can_reopen_a_pre_publish_blocked_item(tmp_path):
+    store = StateStore(tmp_path / "run.sqlite3")
+    store.save_item(
+        "MAT-1",
+        "blocked",
+        evidence=(
+            "QIANNIU_FORM_NOT_READY;pre_publish_attempts=4;"
+            "skipped_after_pre_publish_retries=true"
+        ),
+    )
+
+    store.record_transition(
+        "MAT-1",
+        "blocked",
+        "ready_for_review",
+        reason="USER_RETRY_SAFE_PRE_PUBLISH_FAILURE",
+        evidence=(
+            "pre_publish_attempts=4;"
+            "skipped_after_pre_publish_retries=true;"
+            "user_retry_authorized=true"
+        ),
+    )
+
+    assert store.item_status("MAT-1") == "ready_for_review"
+    store.close()
+
+
 def test_run_metadata_survives_restart(tmp_path):
     database = tmp_path / "run.sqlite3"
     store = StateStore(database)

@@ -1731,6 +1731,12 @@
     retryGalleryButton.disabled = retryGalleryButton.hidden;
     setFormLocked(uiState.serverStatus);
     updateResultsRecovery(UiState.recoveryView(uiState));
+    if (approvalRetryViewActive()) {
+      saveButton.hidden = true;
+      submitButton.hidden = true;
+      saveButton.disabled = true;
+      submitButton.disabled = true;
+    }
     if (currentStageId !== "slots_copy") {
       handoffActions?.classList.remove("is-stage-managed");
     }
@@ -2244,6 +2250,107 @@
       list.appendChild(card);
     });
     content.appendChild(list);
+  }
+
+  function approvalRetryViewActive() {
+    return currentStageId === "approval"
+      && uiState.result?.data?.publish_retry?.available === true;
+  }
+
+  function renderUploadRetryPanel(content, retryState) {
+    content.replaceChildren();
+    const panel = element("section", "upload-retry-panel");
+    panel.dataset.status = retryState.stage_status || "blocked";
+    panel.append(
+      element("strong", "upload-retry-title", "上传未全部完成"),
+      element(
+        "p",
+        "upload-retry-message",
+        retryState.message || "本次上传进度已经保留。",
+      ),
+    );
+
+    const metrics = element("div", "upload-confirmation-summary");
+    [
+      ["已成功", Number(retryState.successful_count || 0)],
+      ["可继续", Number(retryState.retryable_count || 0)],
+      [
+        "待确认",
+        Number(retryState.uncertain_count || 0)
+          + Number(retryState.manual_review_count || 0),
+      ],
+    ].forEach(([label, value]) => {
+      const item = element("div", "upload-confirmation-metric");
+      item.append(element("strong", "", String(value)), element("span", "", label));
+      metrics.appendChild(item);
+    });
+    panel.appendChild(metrics);
+
+    const retryableTasks = Array.isArray(retryState.retryable_tasks)
+      ? retryState.retryable_tasks
+      : [];
+    if (retryableTasks.length) {
+      const details = element("details", "upload-retry-details");
+      details.appendChild(element(
+        "summary",
+        "",
+        `查看 ${retryableTasks.length} 个未完成坑位`,
+      ));
+      const list = element("ul", "upload-retry-task-list");
+      retryableTasks.forEach((task) => {
+        const product = task.product_id ? `商品 ${task.product_id}` : "商品待确认";
+        const slot = task.slot_index == null ? "坑位待确认" : `坑位 ${task.slot_index}`;
+        list.appendChild(element(
+          "li",
+          "",
+          `${product} · ${slot} · ${task.status_label || "未完成"}`,
+        ));
+      });
+      details.appendChild(list);
+      panel.appendChild(details);
+    }
+
+    const actions = element("div", "upload-retry-actions");
+    const retryButton = element(
+      "button",
+      "primary-button",
+      ["ready_for_agent", "processing"].includes(retryState.stage_status)
+        ? "正在继续上传…"
+        : "继续上传未完成坑位",
+    );
+    retryButton.type = "button";
+    retryButton.disabled = retryState.can_retry !== true;
+    if (["ready_for_agent", "processing"].includes(retryState.stage_status)) {
+      retryButton.setAttribute("aria-busy", "true");
+    }
+    retryButton.addEventListener("click", async () => {
+      if (retryButton.disabled) return;
+      retryButton.disabled = true;
+      retryButton.textContent = "正在继续上传…";
+      retryButton.setAttribute("aria-busy", "true");
+      actionMessage.textContent = "正在恢复未完成坑位，已成功坑位不会重复上传。";
+      const requestIdentity = persistenceRequestId("approval", "retry_upload");
+      try {
+        const payload = await fetchJson(
+          apiPath("/stages/approval/retry-upload"),
+          {
+            method: "POST",
+            body: JSON.stringify({ request_id: requestIdentity.value }),
+          },
+        );
+        persistenceRequestIds.delete(requestIdentity.key);
+        actionMessage.textContent = payload.message || "正在继续上传未完成坑位。";
+        await loadStage();
+      } catch (error) {
+        actionMessage.textContent = error.userMessage || error.message;
+        retryButton.disabled = retryState.can_retry !== true;
+        retryButton.textContent = "继续上传未完成坑位";
+        retryButton.removeAttribute("aria-busy");
+      }
+    });
+    actions.appendChild(retryButton);
+    panel.appendChild(actions);
+    content.appendChild(panel);
   }
 
   function completenessSelectedIds() {
@@ -7721,6 +7828,11 @@
     if (!content || view.mode === "empty") return;
 
     const documentData = view.result?.data || {};
+    const retryState = documentData.publish_retry;
+    if (retryState?.available === true) {
+      renderUploadRetryPanel(content, retryState);
+      return;
+    }
     const tasks = Array.isArray(documentData.tasks) ? documentData.tasks : [];
     const control = activeForm()?.querySelector('[name="task_ids"]');
     const selected = new Set(

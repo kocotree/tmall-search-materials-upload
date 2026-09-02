@@ -16,6 +16,7 @@ ALLOWED_TRANSITIONS = {
     "submitted": {"under_review", "success", "failed", "publish_uncertain"},
     "under_review": {"success", "failed", "publish_uncertain"},
     "failed": {"ready_for_review"},
+    "blocked": {"ready_for_review"},
 }
 
 VERIFICATION_STATUSES = {"uploading", "submitted", "under_review", "publish_uncertain"}

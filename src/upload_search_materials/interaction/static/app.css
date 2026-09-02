@@ -1935,6 +1935,31 @@ summary:focus-visible {
 .upload-task-blocker { color: #b42318; font-weight: 600; }
 .upload-task-warning { color: #9a6700; }
 
+.upload-retry-panel {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #efc2bd;
+  border-left: 4px solid #c9463d;
+  border-radius: 14px;
+  background: #fffafa;
+}
+
+.upload-retry-panel[data-status="ready_for_agent"],
+.upload-retry-panel[data-status="processing"] {
+  border-color: #b8d5f5;
+  border-left-color: #2274e0;
+  background: #f8fbff;
+}
+
+.upload-retry-title { font-size: 1.05rem; }
+.upload-retry-message { margin: 0; color: #475569; line-height: 1.65; }
+.upload-retry-details { border-top: 1px solid #eadfdd; padding-top: 12px; }
+.upload-retry-details summary { cursor: pointer; font-weight: 700; }
+.upload-retry-task-list { margin: 12px 0 0; padding-left: 22px; color: #475569; }
+.upload-retry-task-list li + li { margin-top: 6px; }
+.upload-retry-actions { display: flex; justify-content: flex-end; }
+
 .upload-results-summary {
   margin: 0 0 16px;
   color: var(--ink, #172033);

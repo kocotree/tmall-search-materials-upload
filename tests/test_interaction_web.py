@@ -2296,6 +2296,45 @@ def test_page_has_all_reusable_stage_renderers_and_exact_match_labels(client):
     assert "已确认别名" not in html
 
 
+def test_failed_upload_retry_is_a_workbench_owned_idempotent_action(
+    client, session_id, monkeypatch
+):
+    observed = {}
+
+    def fake_retry(store, requested_session_id, **kwargs):
+        observed["store"] = store
+        observed["session_id"] = requested_session_id
+        observed.update(kwargs)
+        return {
+            "status": "ready_for_agent",
+            "revision": 3,
+            "retryable_count": 2,
+            "retry_task_ids": ["task-1", "task-2"],
+            "message": "已开始继续上传 2 个未完成坑位。",
+        }
+
+    monkeypatch.setattr(web_module, "retry_failed_publish_tasks", fake_retry)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/stages/approval/retry-upload",
+        json={"request_id": "retry-request-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json["status"] == "ready_for_agent"
+    assert observed["session_id"] == session_id
+    assert observed["request_id"] == "retry-request-1"
+    assert observed["authorized_user_name"] == "测试用户"
+
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+    stylesheet = client.get("/static/app.css").get_data(as_text=True)
+    assert "继续上传未完成坑位" in javascript
+    assert 'apiPath("/stages/approval/retry-upload")' in javascript
+    assert 'retryButton.disabled = true;' in javascript
+    assert "已成功坑位不会重复上传" in javascript
+    assert ".upload-retry-panel" in stylesheet
+
+
 def test_completeness_stage_exposes_review_controls_without_raw_json_as_primary_ui(client):
     html = client.get("/").get_data(as_text=True)
 

@@ -320,7 +320,10 @@ class WorkflowDispatcher:
         status = str(stage_state.get("status", ""))
         claim = self.store.processing_claim(self.session_id, stage_id)
         handoff_recoverable = status == "ready_for_agent"
+        retry_generation = int(stage_state.get("retry_generation", 0))
         handoff_generation = f"ready-r{stage_state.get('revision', 0)}"
+        if retry_generation:
+            handoff_generation += f"-g{retry_generation}"
         if status == "needs_user_input" and stage_id == "setup":
             result = self.store.read_optional_stage_document(
                 self.session_id, "setup", "result"
