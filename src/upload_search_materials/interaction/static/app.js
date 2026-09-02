@@ -6666,6 +6666,9 @@
         const item = {
           slot_id: assignment.slot_id,
           product_id: assignment.product_id,
+          remote_slot_position: existing.remote_slot_position == null
+            ? null
+            : Number(existing.remote_slot_position),
           title: String(existing.title || ""),
           description: String(existing.description || ""),
           confirmed: Boolean(
@@ -6941,6 +6944,8 @@
             if (!existing) return true;
             return String(existing.title || "") !== String(draft.title || "")
               || String(existing.description || "") !== String(draft.description || "")
+              || Number(existing.remote_slot_position || 0)
+                !== Number(draft.remote_slot_position || 0)
               || String(existing.generation_status || "")
                 !== String(draft.generation_status || "generated")
               || String(existing.skip_reason_code || "")

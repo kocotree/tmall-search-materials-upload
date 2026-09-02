@@ -8,9 +8,26 @@ from upload_search_materials.browser.qianniu_upload import (
     QianniuProductUploadSession,
     QianniuUploadError,
     _click_material_confirm_when_unblocked,
+    _uploaded_card_for_unique_name,
     _wait_for_material_confirm_ready,
     _wait_for_upload_completion,
 )
+
+
+def test_uploaded_card_zero_match_is_not_found():
+    with pytest.raises(QianniuUploadError) as exc_info:
+        _uploaded_card_for_unique_name("seed.jpg", [])
+
+    assert exc_info.value.reason_code == "QIANNIU_MATERIAL_CARD_NOT_FOUND"
+    assert exc_info.value.detail == "seed.jpg:matches=0"
+
+
+def test_uploaded_card_multiple_matches_are_ambiguous():
+    with pytest.raises(QianniuUploadError) as exc_info:
+        _uploaded_card_for_unique_name("seed.jpg", [object(), object()])
+
+    assert exc_info.value.reason_code == "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS"
+    assert exc_info.value.detail == "seed.jpg:matches=2"
 
 
 class _RaisingLocator:

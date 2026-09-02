@@ -214,6 +214,7 @@ test("a new copy version never fills unfinished slots from an old version", () =
     [
       {
         slot_id: "slot-1",
+        remote_slot_position: 3,
         title: "新标题一",
         description: "新描述一",
       },
@@ -226,6 +227,7 @@ test("a new copy version never fills unfinished slots from an old version", () =
   );
 
   assert.equal(merged[0].title, "新标题一");
+  assert.equal(merged[0].remote_slot_position, 3);
   assert.equal(merged[0].request_id, "new");
   assert.deepEqual(merged[0].output_sha256, ["sha-1"]);
   assert.equal(merged[1].title, "");
@@ -241,6 +243,7 @@ test("a skipped copy slot keeps its manual-fill reason in the active version", (
     [{
       slot_id: "slot-1",
       product_id: "p1",
+      remote_slot_position: 5,
       title: "",
       description: "",
       evidence: ["自动获取未完成"],
@@ -258,6 +261,7 @@ test("a skipped copy slot keeps its manual-fill reason in the active version", (
   assert.equal(merged[0].generation_status, "skipped");
   assert.equal(merged[0].skip_message, "千牛未找到该商品");
   assert.equal(merged[0].retry_count, 3);
+  assert.equal(merged[0].remote_slot_position, 5);
   assert.equal(merged[0].confirmed, false);
 });
 

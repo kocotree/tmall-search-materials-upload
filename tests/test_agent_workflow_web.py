@@ -1068,6 +1068,10 @@ def test_image_completion_queues_copy_for_codex_and_reuses_existing_playwright(
             "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
             "上传图片失败",
         ),
+        (
+            "QIANNIU_MATERIAL_CARD_NOT_FOUND",
+            "上传图片失败",
+        ),
     ],
 )
 def test_copy_processor_retries_one_slot_three_times_then_skips_and_continues(
@@ -1391,8 +1395,21 @@ def test_copy_processor_reuses_one_session_for_same_product_slots(
     ] == ["slot-a", "slot-b"]
 
 
+@pytest.mark.parametrize(
+    ("reason_code", "detail"),
+    [
+        (
+            "QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
+            "多个页面区域同时包含商品搜索框和商品表格",
+        ),
+        (
+            "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS",
+            "seed.jpg:matches=2",
+        ),
+    ],
+)
 def test_copy_processor_does_not_skip_batch_identity_failures(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, reason_code, detail
 ):
     from types import SimpleNamespace
     import upload_search_materials.copy_draft_workflow as workflow
@@ -1404,14 +1421,14 @@ def test_copy_processor_does_not_skip_batch_identity_failures(
     def fake_generate(_page, slots, *, material_center_url):
         calls.append((slots[0]["slot_id"], material_center_url))
         raise workflow.QianniuCopyError(
-            "QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
-            "多个页面区域同时包含商品搜索框和商品表格",
+            reason_code,
+            detail,
         )
 
     _patch_copy_product_session(monkeypatch, workflow, fake_generate)
     with pytest.raises(
         workflow.CopyDraftProcessingError,
-        match="QIANNIU_PRODUCT_SCOPE_AMBIGUOUS",
+        match=reason_code,
     ):
         process_copy_draft_request(
             store,
@@ -1610,6 +1627,7 @@ def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
         return [{
             "slot_id": slot["slot_id"],
             "product_id": slot["product_id"],
+            "remote_slot_position": 2,
             "title": "已经完成的标题",
             "description": "该坑位在后续继续获取时不应重新生成。",
             "evidence": ["千牛商品坑位内置 AI 生成"],
@@ -1635,8 +1653,18 @@ def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
         f"/api/sessions/{session_id}/stages/slots_copy/agent-requests/"
         f"{request_id}/resume"
     )
+    # Reproduce the old frontend, which kept the visible copy but omitted the
+    # hidden browser-verified slot identity when starting another round.
+    first_editor_drafts = [
+        {
+            key: value
+            for key, value in item.items()
+            if key != "remote_slot_position"
+        }
+        for item in first_drafts
+    ]
     first_resume = client.post(
-        resume_url, json={"copy_edits": first_drafts}
+        resume_url, json={"copy_edits": first_editor_drafts}
     )
     assert first_resume.status_code == 200, first_resume.json
     assert first_resume.json["request"]["status"] == "pending_agent"
@@ -1648,6 +1676,9 @@ def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
         item["slot_id"]
         for item in pending_detail.json["progress"]["copy_drafts"]
     ] == ["slot-complete"]
+    assert pending_detail.json["progress"]["copy_drafts"][0][
+        "remote_slot_position"
+    ] == 2
 
     # A bounded resume round may still skip the same slot. The user can start
     # another round without creating a new version or regenerating successes.
@@ -1659,8 +1690,16 @@ def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
         page=object(),
     )
     second_drafts = second_response["result"]["copy_drafts"]
+    second_editor_drafts = [
+        {
+            key: value
+            for key, value in item.items()
+            if key != "remote_slot_position"
+        }
+        for item in second_drafts
+    ]
     second_resume = client.post(
-        resume_url, json={"copy_edits": second_drafts}
+        resume_url, json={"copy_edits": second_editor_drafts}
     )
     assert second_resume.status_code == 200, second_resume.json
     assert second_resume.json["request"]["manual_resume_count"] == 2
@@ -1673,6 +1712,7 @@ def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
         return [{
             "slot_id": slot["slot_id"],
             "product_id": slot["product_id"],
+            "remote_slot_position": 4,
             "title": "第二次继续后完成",
             "description": "只重新处理仍然为空的坑位。",
             "evidence": ["千牛商品坑位内置 AI 生成"],
@@ -1695,6 +1735,8 @@ def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(
     }
     assert final_drafts["slot-complete"]["title"] == "已经完成的标题"
     assert final_drafts["slot-empty"]["title"] == "第二次继续后完成"
+    assert final_drafts["slot-complete"]["remote_slot_position"] == 2
+    assert final_drafts["slot-empty"]["remote_slot_position"] == 4
     request_root = (
         store._stage_path(session_id, "slots_copy")
         / "agent-requests"

@@ -423,7 +423,27 @@ def _copy_remote_positions(
                 and context.get("final_outputs_sha256") == outputs_identity
             ):
                 request_ids.add(path.name)
-    positions: dict[str, int] = {}
+    position_candidates: dict[str, set[int]] = {}
+
+    def collect_positions(drafts: Any) -> None:
+        if not isinstance(drafts, list):
+            return
+        for draft in drafts:
+            if not isinstance(draft, dict):
+                continue
+            slot_id = str(draft.get("slot_id", ""))
+            copy = copies.get(slot_id)
+            position = draft.get("remote_slot_position")
+            if (
+                copy is None
+                or str(draft.get("product_id", ""))
+                != str(copy.get("product_id", ""))
+                or not isinstance(position, int)
+                or position <= 0
+            ):
+                continue
+            position_candidates.setdefault(slot_id, set()).add(position)
+
     for request_id in sorted(request_ids):
         request_path = request_root / request_id
         try:
@@ -480,21 +500,34 @@ def _copy_remote_positions(
                 continue
             drafts = progress_drafts
 
-        for draft in drafts:
-            if not isinstance(draft, dict):
-                continue
-            slot_id = str(draft.get("slot_id", ""))
-            copy = copies.get(slot_id)
-            position = draft.get("remote_slot_position")
-            if (
-                copy is not None
-                and str(draft.get("product_id", ""))
-                == str(copy.get("product_id", ""))
-                and isinstance(position, int)
-                and position > 0
+        collect_positions(drafts)
+
+        # Versions resumed by the workbench keep immutable snapshots of every
+        # earlier response.  A frontend regression used to omit the hidden
+        # slot position when carrying completed copy into the next round, so
+        # the final response alone may be incomplete even though earlier
+        # responses still contain the verified identity.  Merge only response
+        # artifacts from this already identity-matched request; conflicts stay
+        # unresolved and are blocked below instead of being guessed.
+        history_root = request_path / "resume-history"
+        if history_root.is_dir():
+            for history_path in sorted(
+                history_root.glob("round-*/previous-response.json")
             ):
-                positions[slot_id] = position
-    return positions
+                try:
+                    historical = store._read_json(
+                        history_path, "copy-resume-response"
+                    )
+                except InteractionConflict:
+                    continue
+                collect_positions(
+                    historical.get("result", {}).get("copy_drafts", [])
+                )
+    return {
+        slot_id: next(iter(candidates))
+        for slot_id, candidates in position_candidates.items()
+        if len(candidates) == 1
+    }
 
 
 def build_dry_run_document(
@@ -736,7 +769,7 @@ def _slots_copy_blocking_messages(document: dict[str, Any]) -> list[str]:
             "文案对应的商品与当前坑位不一致，请重新生成该坑位的标题与描述。"
         ),
         "DRY_RUN_REMOTE_SLOT_POSITION_MISSING": (
-            "未取得千牛目标坑位，请重新生成或载入该坑位的标题与描述。"
+            "未取得千牛目标坑位绑定，请重新获取该坑位信息；已有标题和描述会保留。"
         ),
         "DRY_RUN_REMOTE_SLOT_POSITION_DUPLICATE": (
             "多个坑位指向同一个千牛目标坑位，请重新生成相关坑位的标题与描述。"

@@ -217,9 +217,15 @@
         : sameVersion
           ? String(existing.generation_status || "pending")
           : "pending";
+      const remoteSlotPosition = draft?.remote_slot_position != null
+        ? Number(draft.remote_slot_position)
+        : sameVersion && existing.remote_slot_position != null
+          ? Number(existing.remote_slot_position)
+          : null;
       return {
         slot_id: slotId,
         product_id: String(assignment?.product_id || ""),
+        remote_slot_position: remoteSlotPosition,
         title,
         description,
         evidence: draft

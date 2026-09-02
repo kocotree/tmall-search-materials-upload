@@ -121,7 +121,8 @@
 | `HUMAN_CHECK` | 验证码、扫码、短信或风控 | 保存当前 checkpoint 并暂停页面动作；用户验证通过后自动继续同一 attempt |
 | `UPLOAD_REJECTED` | 页面拒绝文件或字段 | 记录原始提示，转人工审核 |
 | `PUBLISH_UNCERTAIN` | 点击发布后没有可信结果 | 禁止重发，先远端回查 |
-| `QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS` | 本地上传后短唯一名称没有恰好命中一张素材卡 | 停在发布前；检查素材选择器，不点击发布 |
+| `QIANNIU_MATERIAL_CARD_NOT_FOUND` | 本地上传后短唯一名称暂未命中素材卡 | 文案获取按单坑可恢复错误重试；正式上传停在发布前并按发布前失败规则重试 |
+| `QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS` | 本地上传后短唯一名称同时命中多张素材卡 | 停在发布前；按身份歧义处理，不点击发布或自动重试 |
 | `QIANNIU_CONTENT_FIELD_MISSING` | 标题或正文控件不可识别，包括 Cangjie 代理 textarea 变化 | 停在发布前；更新现有表单定位并回归测试 |
 | `COPY_DRAFT_AUTHORIZATION_INVALID` | 文案请求的限定授权缺失、被改写，或与当前首图/最终输出指纹不一致 | 不启动千牛浏览器动作；保留现场并从工作台当前有效图片输出重新创建请求 |
 | `QIANNIU_PUBLISH_BUTTON_AMBIGUOUS` | 发布专用语义或明确发布按钮不是唯一可见 | 停在发布前；禁止降级点击通用确认按钮 |

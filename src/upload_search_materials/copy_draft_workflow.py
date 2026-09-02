@@ -81,6 +81,7 @@ COPY_SLOT_RETRYABLE_REASON_CODES = frozenset(
         "QIANNIU_IMAGE_TEXT_ACTION_NOT_FOUND",
         "QIANNIU_IMAGE_TEXT_ACTION_UNSTABLE",
         "QIANNIU_MATERIAL_CONFIRM_NOT_READY",
+        "QIANNIU_MATERIAL_CARD_NOT_FOUND",
         "QIANNIU_MATERIAL_ROOT_NOT_FOUND",
         "QIANNIU_MATERIAL_SEARCH_NOT_FOUND",
         "QIANNIU_MATERIAL_SELECTOR_NOT_FOUND",
@@ -104,6 +105,7 @@ COPY_SLOT_FAILURE_CATEGORIES = {
     "QIANNIU_PRODUCT_NOT_BOUND": ("slot_not_found", "未找到坑位"),
     "QIANNIU_PRODUCT_SEARCH_NOT_FOUND": ("slot_not_found", "未找到坑位"),
     "QIANNIU_COPY_SEED_SELECTION_INVALID": ("image_upload_failed", "上传图片失败"),
+    "QIANNIU_MATERIAL_CARD_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
     "QIANNIU_MATERIAL_CONFIRM_NOT_READY": ("image_upload_failed", "上传图片失败"),
     "QIANNIU_MATERIAL_ROOT_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
     "QIANNIU_MATERIAL_SEARCH_NOT_FOUND": ("image_upload_failed", "上传图片失败"),
@@ -630,8 +632,20 @@ def resume_copy_draft_request(
         supplied_request_id = str(item.get("request_id", "")).strip()
         if supplied_request_id and supplied_request_id != request_id:
             continue
+        prior_preserved = preserved.get(slot_id)
         preserved.pop(slot_id, None)
         preserve_complete_draft(item)
+        # The editor may change copy, but it must not be able to discard or
+        # replace the browser-verified Qianniu slot identity checkpointed by
+        # this request.  Older frontends omitted this hidden field entirely.
+        if (
+            prior_preserved is not None
+            and isinstance(prior_preserved.get("remote_slot_position"), int)
+            and slot_id in preserved
+        ):
+            preserved[slot_id]["remote_slot_position"] = int(
+                prior_preserved["remote_slot_position"]
+            )
 
     if len(preserved) == len(slot_by_id):
         raise InteractionConflict("COPY_DRAFT_REQUEST_HAS_NO_EMPTY_SLOTS")

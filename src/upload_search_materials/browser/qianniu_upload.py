@@ -393,6 +393,20 @@ def _wait_for_upload_completion(
         page.wait_for_timeout(1_000)
 
 
+def _uploaded_card_for_unique_name(filename: str, visible: Sequence):
+    if not visible:
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_CARD_NOT_FOUND",
+            f"{filename}:matches=0",
+        )
+    if len(visible) > 1:
+        raise QianniuUploadError(
+            "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS",
+            f"{filename}:matches={len(visible)}",
+        )
+    return visible[0]
+
+
 def _select_uploaded_cards(
     page,
     selector_frame,
@@ -450,12 +464,9 @@ def _select_uploaded_cards(
         page.wait_for_timeout(300)
         selected_cards = []
         for filename, visible in candidates_by_path:
-            if len(visible) != 1:
-                raise QianniuUploadError(
-                    "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS",
-                    f"{filename}:matches={len(visible)}",
-                )
-            selected_cards.append(visible[0])
+            selected_cards.append(
+                _uploaded_card_for_unique_name(filename, visible)
+            )
 
     if not use_existing_selection:
         for (filename, _visible), card in zip(
@@ -463,7 +474,7 @@ def _select_uploaded_cards(
         ):
             if card is None:
                 raise QianniuUploadError(
-                    "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS",
+                    "QIANNIU_MATERIAL_CARD_NOT_FOUND",
                     filename,
                 )
             checkbox = card.locator('input[type="checkbox"]')
