@@ -862,7 +862,8 @@ def test_copy_network_waits_cover_slow_navigation_upload_and_ai():
     assert copy_module.PUBLISH_FRAME_ATTEMPTS * 300 >= 45_000
     assert copy_module.MATERIAL_ROOT_ATTEMPTS * 250 >= 45_000
     assert copy_module.MATERIAL_CARD_ATTEMPTS * 250 >= 45_000
-    assert copy_module.COPY_UPLOAD_TIMEOUT_MS == 120_000
+    assert copy_module.COPY_UPLOAD_TIMEOUT_MS == 60_000
+    assert copy_module.COPY_UPLOAD_CARD_ATTEMPTS * 300 == 15_000
     assert copy_module.AI_COPY_TIMEOUT_MS == 240_000
 
 
