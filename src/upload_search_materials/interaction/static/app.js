@@ -3873,7 +3873,6 @@
         ...content.querySelectorAll(
           ".folder-card, .local-gallery-action button, .asset-product-actions button, .asset-card input[type='checkbox'], .selected-asset-card button",
         ),
-        ...railButtons,
       ];
       if (locked) {
         controls.forEach((control) => {
@@ -5221,6 +5220,7 @@
     const saved = readJsonListControl("slot_assignments");
     const stateByProduct = new Map();
     let currentPlanRevision = 0;
+    let currentPlanConfirmed = false;
     let slotPlanDirty = false;
     let processedOutputs = null;
     let invalidateProcessedOutputs = () => {
@@ -5251,6 +5251,7 @@
     const persist = (notify = false) => {
       if (notify) {
         slotPlanDirty = true;
+        currentPlanConfirmed = false;
         invalidateCropPreflight();
       }
       writeJsonListControl(
@@ -5278,6 +5279,7 @@
         stateByProduct.set(productId, assignments);
       });
       currentPlanRevision = Number(plan.plan_revision || 0);
+      currentPlanConfirmed = plan.confirmed === true;
       slotPlanDirty = false;
       const page = twoPageWorkflow
         ? UiState.twoStepFifthStagePage(plan.workflow_state)
@@ -5286,15 +5288,29 @@
       setSubpage(page);
       persist();
       draw();
-      if (page === "process" && plan.confirmed === true) {
-        processPanel.hidden = false;
-        renderProcessingPage();
+      if (page === "process") {
+        processPanel.hidden = plan.confirmed !== true;
+        if (plan.confirmed === true) renderProcessingPage();
       } else if (
         page === "copy"
         && processedOutputs?.workflow_state === "outputs_ready"
       ) {
         renderCopyEditor(processedOutputs);
       }
+    };
+    const confirmCurrentSlotPlan = async () => {
+      const confirmed = await fetchJson(
+        apiPath("/stages/slots_copy/current-slot-plan/confirm"),
+        {
+          method: "POST",
+          body: JSON.stringify({ plan_revision: currentPlanRevision }),
+        },
+      );
+      currentPlanRevision = Number(
+        confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
+      );
+      currentPlanConfirmed = confirmed.current_slot_plan?.confirmed === true;
+      return confirmed.current_slot_plan;
     };
     const wizard = element("nav", "slot-workflow-steps");
     const twoPageWorkflow = Boolean(
@@ -7031,18 +7047,10 @@
           currentPlanRevision = Number(
             updated.current_slot_plan?.plan_revision || currentPlanRevision,
           );
+          currentPlanConfirmed = false;
           slotPlanDirty = false;
         }
-        const confirmed = await fetchJson(
-          apiPath("/stages/slots_copy/current-slot-plan/confirm"),
-          {
-            method: "POST",
-            body: JSON.stringify({ plan_revision: currentPlanRevision }),
-          },
-        );
-        currentPlanRevision = Number(
-          confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
-        );
+        await confirmCurrentSlotPlan();
         composeStatus.textContent = "坑位已确认；现在逐图检查裁剪与压缩。";
         processPanel.hidden = false;
         maxUnlockedPage = Math.max(
@@ -7076,18 +7084,10 @@
         currentPlanRevision = Number(
           updated.current_slot_plan?.plan_revision || currentPlanRevision,
         );
-        const confirmed = await fetchJson(
-          apiPath("/stages/slots_copy/current-slot-plan/confirm"),
-          {
-            method: "POST",
-            body: JSON.stringify({ plan_revision: currentPlanRevision }),
-          },
-        );
-        currentPlanRevision = Number(
-          confirmed.current_slot_plan?.plan_revision || currentPlanRevision,
-        );
+        currentPlanConfirmed = false;
         slotPlanDirty = false;
       }
+      if (!currentPlanConfirmed) await confirmCurrentSlotPlan();
       return assignments;
     };
 
@@ -7610,6 +7610,7 @@
               currentPlanRevision = Number(
                 updated.current_slot_plan?.plan_revision || currentPlanRevision,
               );
+              currentPlanConfirmed = false;
               assignments.splice(slotIndex, 1);
               Object.keys(cropParameters)
                 .filter((key) => key.startsWith(`${currentSlotId}:`))
@@ -7618,8 +7619,25 @@
               persist();
               slotPlanDirty = currentSlotPlanSignature() !== requestPlanSignature;
               draw();
+              if (slotPlanDirty) {
+                currentPlanConfirmed = false;
+                processPanel.hidden = true;
+                composeStatus.textContent = `坑位“${currentSlotId}”已删除并保存；请确认剩余坑位后继续图片处理。`;
+                actionMessage.textContent = "坑位删除已保存，请确认剩余坑位。";
+                return;
+              }
+              try {
+                await confirmCurrentSlotPlan();
+              } catch (_error) {
+                currentPlanConfirmed = false;
+                processPanel.hidden = true;
+                composeStatus.textContent = `坑位“${currentSlotId}”已删除并保存；请确认剩余坑位后继续图片处理。`;
+                actionMessage.textContent = "坑位删除已保存，请确认剩余坑位。";
+                return;
+              }
+              processPanel.hidden = !currentPlanConfirmed;
               renderProcessingPage();
-              composeStatus.textContent = `已去掉坑位“${currentSlotId}”；刷新后也不会恢复。`;
+              composeStatus.textContent = `已去掉坑位“${currentSlotId}”并确认剩余坑位；刷新后也不会恢复。`;
               actionMessage.textContent = `已去掉当前坑位“${currentSlotId}”。`;
             } catch (error) {
               remove.disabled = false;
@@ -8852,7 +8870,10 @@
     if (
       globalAssetSelectionInFlight
       && stageId !== currentStageId
-    ) return;
+    ) {
+      actionMessage.textContent = "正在为全部商品选图，完成后可以切换步骤。";
+      return;
+    }
     const previousStageId = currentStageId;
     if (currentStageId === "asset_matching" || stageId === "asset_matching") {
       resetSelectionPreflightClientState();

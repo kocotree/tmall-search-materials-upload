@@ -4453,6 +4453,11 @@ def test_global_asset_selection_keeps_pipeline_full_and_locks_navigation():
     assert "正在为全部商品选图，完成后才能返回上一步。" in source
     assert "setGlobalSelectionControlsLocked(true)" in source
     assert "setGlobalSelectionControlsLocked(false)" in source
+    global_lock = source.split(
+        "const setGlobalSelectionControlsLocked", 1
+    )[1].split("const pendingSelectionIntents", 1)[0]
+    assert "...railButtons" not in global_lock
+    assert "正在为全部商品选图，完成后可以切换步骤。" in source
     assert 'globalSelectionButton.setAttribute("aria-busy", "true")' in source
     assert 'globalSelectionButton.removeAttribute("aria-busy")' in source
     assert "globalSelectionButton.disabled = !galleryComplete" in source
@@ -5058,10 +5063,16 @@ def test_asset_and_slot_editors_expose_scoped_remove_actions(client):
     assert 'method: "POST"' in slot_delete
     assert "plan_revision: currentPlanRevision" in slot_delete
     assert "slot_assignments: nextAssignments" in slot_delete
+    assert "await confirmCurrentSlotPlan()" in slot_delete
     assert slot_delete.index("await fetchJson") < slot_delete.index(
         "assignments.splice"
     )
     assert "刷新后也不会恢复" in slot_delete
+
+    ensure_confirmed = source.split(
+        "const ensureConfirmedSlotPlan", 1
+    )[1].split("cropPreflightButton.addEventListener", 1)[0]
+    assert "if (!currentPlanConfirmed) await confirmCurrentSlotPlan();" in ensure_confirmed
 
 
 def test_collection_ui_prompts_for_human_check_and_auto_resume():
