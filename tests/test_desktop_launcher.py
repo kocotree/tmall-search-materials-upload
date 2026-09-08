@@ -512,12 +512,6 @@ def test_login_gate_blocks_visible_textless_human_check_inside_frame(
             True,
         ),
         (
-            "https://myseller.taobao.com/material-center/index",
-            "store_unrecognized",
-            "STORE_IDENTITY_NOT_FOUND",
-            False,
-        ),
-        (
             "https://myseller.taobao.com/workbench",
             "opening_material_center",
             "MATERIAL_CENTER_OPENING",
@@ -579,3 +573,186 @@ def test_login_gate_distinguishes_page_and_login_states(
     assert result["login_state"] == login_state
     assert result["reason_code"] == reason_code
     assert page.focused is expected_focus
+
+
+def test_login_gate_opens_official_login_for_unusable_material_page(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def count(self):
+            return 0
+
+    class Page:
+        def __init__(self):
+            self.url = runtime.material_center_url
+            self.focused = False
+            self.navigated_to = ""
+
+        def bring_to_front(self):
+            self.focused = True
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, _selector):
+            return Locator()
+
+        def goto(self, url, **_kwargs):
+            self.navigated_to = url
+            self.url = url
+
+    page = Page()
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield page
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["ready"] is False
+    assert result["login_state"] == "interaction_required"
+    assert result["reason_code"] == "LOGIN_INTERACTION_REQUIRED"
+    assert page.focused is True
+    assert page.navigated_to.startswith(
+        "https://login.taobao.com/member/login.jhtml?"
+    )
+    assert "redirectURL=" in page.navigated_to
+
+
+def test_login_gate_detects_embedded_login_surface_on_material_url(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def __init__(self, visible=False):
+            self.visible = visible
+
+        def count(self):
+            return 1 if self.visible else 0
+
+        def nth(self, _index):
+            return self
+
+        def is_visible(self):
+            return self.visible
+
+    class Page:
+        url = runtime.material_center_url
+
+        def __init__(self):
+            self.focused = False
+
+        def bring_to_front(self):
+            self.focused = True
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, selector):
+            return Locator(selector == 'input[type="password"]')
+
+        def goto(self, *_args, **_kwargs):
+            raise AssertionError("visible login surface must not be replaced")
+
+    page = Page()
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield page
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["login_state"] == "interaction_required"
+    assert page.focused is True
+
+
+def test_login_gate_keeps_loaded_material_center_in_background(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = RuntimeConfig(
+        workspace_root=tmp_path,
+        products=DiscoveredPath(None, "missing"),
+        rules=DiscoveredPath(None, "missing"),
+        image_sources=(),
+        runs_root=tmp_path / "runs",
+    )
+
+    class Locator:
+        def __init__(self, visible=False):
+            self.visible = visible
+
+        def count(self):
+            return 1 if self.visible else 0
+
+        def nth(self, _index):
+            return self
+
+        def is_visible(self):
+            return self.visible
+
+    class Page:
+        url = runtime.material_center_url
+
+        def bring_to_front(self):
+            raise AssertionError("loaded material center must stay in background")
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, selector):
+            return Locator("搜推素材" in selector)
+
+        def goto(self, *_args, **_kwargs):
+            raise AssertionError("loaded material center must not navigate")
+
+    @contextmanager
+    def open_page(*_args, **_kwargs):
+        yield Page()
+
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.ensure_login_browser",
+        lambda _runtime: {"connected": True, "status": "connected"},
+    )
+    monkeypatch.setattr(
+        "upload_search_materials.desktop_launcher.open_cdp_page", open_page
+    )
+
+    result = inspect_login_browser(runtime)
+
+    assert result["ready"] is False
+    assert result["login_state"] == "store_unrecognized"
+    assert result["reason_code"] == "STORE_IDENTITY_NOT_FOUND"

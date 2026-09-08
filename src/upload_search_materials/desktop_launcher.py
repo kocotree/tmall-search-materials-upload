@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from .browser.config import SelectorConfigError, load_selector_profile
 from .browser.session import (
@@ -20,6 +21,16 @@ from .runtime_config import RuntimeConfig
 
 
 SESSION_PATTERN = re.compile(r"^\d{8}_\d{6}(?:_\d{2})?$")
+QIANNIU_LOGIN_URL = "https://login.taobao.com/member/login.jhtml"
+LOGIN_SURFACE_SELECTORS = (
+    'input[type="password"]',
+    'iframe[src*="login" i]',
+    'iframe[src*="passport" i]',
+    'form[action*="login" i]',
+    ':text-is("扫码登录")',
+    ':text-is("账号登录")',
+    ':text-is("请登录")',
+)
 
 
 class DesktopLauncherError(ValueError):
@@ -88,6 +99,32 @@ def _is_material_center_url(url: str) -> bool:
         marker in normalized
         for marker in ("material-center", "material-management")
     )
+
+
+def _login_entry_url(material_center_url: str) -> str:
+    return f"{QIANNIU_LOGIN_URL}?{urlencode({'redirectURL': material_center_url})}"
+
+
+def _has_login_surface(scopes: list[Any]) -> bool:
+    return any(
+        _has_visible_locator(scope, selector, limit=10)
+        for scope in scopes
+        for selector in LOGIN_SURFACE_SELECTORS
+    )
+
+
+def _has_material_center_surface(
+    scopes: list[Any],
+    selectors: dict[str, str],
+) -> bool:
+    for field in ("promotion_tab", "high_value_filter", "material_page"):
+        selector = str(selectors.get(field, "")).strip()
+        if selector and any(
+            _has_visible_locator(scope, selector, limit=10)
+            for scope in scopes
+        ):
+            return True
+    return False
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -190,6 +227,20 @@ def _request_login_browser_attention(page: Any) -> None:
         pass
 
 
+def _open_login_entry(page: Any, material_center_url: str) -> str:
+    """Open the official login page and return to the material center after login."""
+
+    login_url = _login_entry_url(material_center_url)
+    try:
+        page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
+    except Exception:
+        # A timeout can occur after the interactive login surface has already
+        # rendered. Keep the browser visible and let the login gate poll again.
+        pass
+    _request_login_browser_attention(page)
+    return str(getattr(page, "url", "") or login_url)
+
+
 def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
     """Ensure the visible browser exists and return a safe login gate state.
 
@@ -266,7 +317,7 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                     "reason_code": "READY",
                 }
             observed_url = str(page.url)
-            if _is_login_url(observed_url):
+            if _is_login_url(observed_url) or _has_login_surface(scopes):
                 _request_login_browser_attention(page)
                 return {
                     **browser,
@@ -276,6 +327,18 @@ def inspect_login_browser(runtime: RuntimeConfig) -> dict[str, Any]:
                     "reason_code": "LOGIN_INTERACTION_REQUIRED",
                 }
             if _is_material_center_url(observed_url):
+                if not _has_material_center_surface(scopes, selectors):
+                    observed_url = _open_login_entry(
+                        page,
+                        runtime.material_center_url,
+                    )
+                    return {
+                        **browser,
+                        "ready": False,
+                        "login_state": "interaction_required",
+                        "observed_url": observed_url,
+                        "reason_code": "LOGIN_INTERACTION_REQUIRED",
+                    }
                 return {
                     **browser,
                     "ready": False,
