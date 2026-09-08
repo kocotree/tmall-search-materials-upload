@@ -1925,6 +1925,63 @@ class SessionStore:
             )
             return dict(claim)
 
+    def rotate_processing_attempt(
+        self,
+        session_id: str,
+        stage_id: str,
+        *,
+        claim_id: str,
+        expected_attempt_id: str,
+        expected_revision: int,
+        expected_input_sha256: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Give an active claim a fresh attempt without discarding evidence.
+
+        A detached worker attempt is immutable once its binding has been
+        written.  If a historical race attached the claim to an attempt from
+        another revision, recovery must keep that directory as evidence and
+        rotate only the claim's attempt identity.
+        """
+
+        normalized_reason = str(reason_code).strip()
+        if not normalized_reason:
+            raise InteractionConflict("PROCESSING_ATTEMPT_ROTATION_REASON_REQUIRED")
+        with self._session_lock(session_id):
+            state = self.load_session(session_id)
+            claim = state.get("processing_claim")
+            if (
+                state["stages"][stage_id]["status"] != "processing"
+                or not isinstance(claim, dict)
+                or claim.get("stage_id") != stage_id
+                or claim.get("claim_id") != claim_id
+                or claim.get("attempt_id") != expected_attempt_id
+                or int(claim.get("revision", -1)) != int(expected_revision)
+                or claim.get("input_sha256") != expected_input_sha256
+            ):
+                raise InteractionConflict("PROCESSING_CLAIM_IDENTITY_MISMATCH")
+            previous_attempt_id = str(claim["attempt_id"])
+            replacement_attempt_id = uuid.uuid4().hex
+            claim["attempt_id"] = replacement_attempt_id
+            claim["attempt_rotated_from"] = previous_attempt_id
+            claim["attempt_rotation_reason"] = normalized_reason
+            claim["attempt_rotated_at"] = self._iso_timestamp(
+                datetime.now(timezone.utc)
+            )
+            self._write_session_state(session_id, state)
+            self._append_event(
+                self._session_path(session_id),
+                "processing_attempt_rotated",
+                session_id=session_id,
+                stage_id=stage_id,
+                revision=expected_revision,
+                claim_id=claim_id,
+                previous_attempt_id=previous_attempt_id,
+                attempt_id=replacement_attempt_id,
+                reason_code=normalized_reason,
+            )
+            return dict(claim)
+
     @staticmethod
     def _claim_is_expired(claim: object) -> bool:
         if not isinstance(claim, dict):

@@ -448,6 +448,33 @@ def launch_collection_worker(
         selector_sha256=profile.sha256,
         target_store=target_store,
     )
+    prior_attempt = (
+        read_json_object(attempt_file) if attempt_file.is_file() else None
+    )
+    binding_mismatch = next(
+        (
+            field
+            for field, expected in binding.as_dict().items()
+            if prior_attempt is not None and prior_attempt.get(field) != expected
+        ),
+        "",
+    )
+    if binding_mismatch:
+        claim = store.rotate_processing_attempt(
+            session_id,
+            "setup",
+            claim_id=str(claim["claim_id"]),
+            expected_attempt_id=attempt_id,
+            expected_revision=int(handoff["revision"]),
+            expected_input_sha256=str(handoff["input_sha256"]),
+            reason_code=(
+                f"COLLECTION_ATTEMPT_BINDING_MISMATCH:{binding_mismatch}"
+            ),
+        )
+        attempt_id = str(claim["attempt_id"])
+        attempt_file, private_file, public_file, log_file = _worker_paths(
+            session_path, attempt_id
+        )
     attempt = create_attempt_document(
         binding,
         attempt_id=attempt_id,

@@ -16,6 +16,7 @@ from upload_search_materials.lark_base_sync import (
 )
 from upload_search_materials.runtime_config import LarkBaseConfig, load_runtime_config
 from upload_search_materials.setup_collection import (
+    _claim_setup,
     process_setup_collection,
     refresh_completeness_product_metadata,
 )
@@ -134,6 +135,58 @@ def prepare_session(tmp_path: Path, rows: list[dict[str, str]]):
     )
     runtime = load_runtime_config(environ={}, start=tmp_path)
     return store, session, handoff, runtime, selectors
+
+
+def test_claim_setup_uses_handoff_returned_by_atomic_claim(
+    tmp_path, monkeypatch
+):
+    store, session, first_handoff, _, _ = prepare_session(
+        tmp_path, [product_row("886506466908")]
+    )
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="workbench-dispatcher",
+    )
+    first_claim = store.processing_claim(session.session_id, "setup")
+    store.write_result(
+        session.session_id,
+        "setup",
+        int(first_handoff["revision"]),
+        str(first_handoff["input_sha256"]),
+        status="needs_user_input",
+        summary="请修正后重新提交",
+        claim_id=str(first_claim["claim_id"]),
+    )
+    original_wait = SessionStore.wait_for_handoff
+
+    def submit_new_revision_then_claim(self, *args, **kwargs):
+        current_input = self.read_optional_stage_document(
+            session.session_id, "setup", "input"
+        )
+        self.save_input(
+            session.session_id,
+            "setup",
+            dict(current_input["values"]),
+            expected_revision=2,
+            allowed_current_statuses={"needs_user_input"},
+        )
+        return original_wait(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        SessionStore,
+        "wait_for_handoff",
+        submit_new_revision_then_claim,
+    )
+
+    handoff, claim = _claim_setup(
+        store, session.session_id, "workbench-dispatcher"
+    )
+
+    assert handoff["revision"] == 2
+    assert claim["revision"] == 2
+    assert handoff["input_sha256"] == claim["input_sha256"]
 
 
 def collected_row(product_id="886506466908"):

@@ -17,7 +17,11 @@ from upload_search_materials.collection_worker import (
     launch_collection_worker,
     run_collection_worker,
 )
-from upload_search_materials.collection_runtime import attempt_path
+from upload_search_materials.collection_runtime import (
+    CollectionBinding,
+    attempt_path,
+    create_attempt_document,
+)
 from upload_search_materials.collection_readiness import SelectorBootstrapError
 from upload_search_materials.browser.config import load_selector_profile
 import upload_search_materials.collection_worker as worker_module
@@ -262,6 +266,71 @@ def test_launcher_returns_promptly_and_reuses_matching_live_worker(
     assert Path(calls[0][0][0][1]).name == "run-plugin.py"
     assert "-m" not in calls[0][0][0]
     assert "ownership_token" not in first["worker"]
+
+
+def test_mismatched_dead_attempt_is_preserved_and_rotated(
+    tmp_path, monkeypatch
+):
+    runtime, runs, store, session, selectors = prepare(tmp_path)
+    handoff = store.read_optional_stage_document(
+        session.session_id, "setup", "handoff"
+    )
+    store.wait_for_handoff(
+        session.session_id,
+        "setup",
+        timeout_seconds=0.1,
+        claimant_id="collection-worker",
+    )
+    original_claim = store.processing_claim(session.session_id, "setup")
+    original_attempt_id = str(original_claim["attempt_id"])
+    original_attempt_path = attempt_path(session.path, original_attempt_id)
+    original_attempt_path.mkdir(parents=True)
+    stale_attempt = create_attempt_document(
+        CollectionBinding(
+            session_id=session.session_id,
+            stage_id="setup",
+            revision=0,
+            input_sha256="stale-input",
+            selector_sha256="stale-selector",
+            target_store="测试店铺",
+        ),
+        attempt_id=original_attempt_id,
+        claim_id=str(original_claim["claim_id"]),
+        claimant_id="collection-worker",
+    )
+    (original_attempt_path / "attempt.json").write_text(
+        json.dumps(stale_attempt), encoding="utf-8"
+    )
+
+    launched = launch_collection_worker(
+        runs_root=runs,
+        session_id=session.session_id,
+        runtime=runtime,
+        selectors_path=selectors,
+        popen=lambda *_args, **_kwargs: Process(),
+        identity_provider=lambda _pid: "test-process",
+    )
+
+    assert launched["attempt_id"] != original_attempt_id
+    assert json.loads(
+        (original_attempt_path / "attempt.json").read_text(encoding="utf-8")
+    )["revision"] == 0
+    replacement_path = attempt_path(session.path, launched["attempt_id"])
+    replacement = json.loads(
+        (replacement_path / "attempt.json").read_text(encoding="utf-8")
+    )
+    assert replacement["revision"] == handoff["revision"]
+    assert replacement["input_sha256"] == handoff["input_sha256"]
+    current_claim = store.processing_claim(session.session_id, "setup")
+    assert current_claim["attempt_id"] == launched["attempt_id"]
+    events = [
+        json.loads(line)
+        for line in (session.path / "events.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert events[-1]["event"] == "processing_attempt_rotated"
+    assert events[-1]["previous_attempt_id"] == original_attempt_id
 
 
 def test_missing_selector_bootstraps_then_launches_collection(

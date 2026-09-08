@@ -180,7 +180,11 @@ checkpoint 与当前 revision、input SHA-256、选择器 SHA-256、店铺和 `a
 绑定。每页写入前先验证当前 claim，CSV 原子写入后记录 SHA-256、唯一商品 ID、页码
 和行数。旧 Worker 的迟到写入必须被拒绝；恢复只从最后完整页之后继续。PID 只有同时
 匹配私有 ownership token、session/attempt 和进程创建身份时才可判定归属；无法证明
-时不得结束或抢占进程。
+时不得结束或抢占进程。领取 setup 时必须使用原子领取操作实际返回的 handoff，禁止把
+领取前读取的旧 handoff 与领取后生成的新 claim 混用。恢复发现已停止 attempt 的
+revision、input SHA-256 或其他绑定与当前 claim 不一致时，旧 attempt 必须原样保留为
+诊断证据，并为当前 claim 换用新的 attempt ID；不得覆盖旧 attempt，也不得让阶段永久
+停留在 processing 中循环失败。
 
 每次完整页 checkpoint 成功后，采集器按随机 1–2 页间隔执行一次短时只读随机动作，动作池仅包含
 短暂停留、悬停当前页已填坑位、小幅滚动后立即复位，以及低概率查看当前页已填坑位详情后退出。

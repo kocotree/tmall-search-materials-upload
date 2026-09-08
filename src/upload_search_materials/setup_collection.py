@@ -565,7 +565,13 @@ def _claim_setup(
     if current_status == "processing" and claim and not claim["expired"]:
         if claim.get("claimant_id") != claimant_id:
             raise InteractionConflict("PROCESSING_CLAIM_ACTIVE")
-        return handoff, claim
+        current_handoff = store.read_optional_stage_document(
+            session_id, "setup", "handoff"
+        )
+        if current_handoff is None:
+            raise InteractionConflict("SETUP_HANDOFF_REQUIRED")
+        _validate_setup_claim_identity(current_handoff, claim)
+        return current_handoff, claim
     if current_status == "processing" and (
         claim is None or claim.get("expired")
     ):
@@ -573,7 +579,7 @@ def _claim_setup(
             store._session_path(session_id),
             handoff,
         )
-    store.wait_for_handoff(
+    handoff = store.wait_for_handoff(
         session_id,
         "setup",
         timeout_seconds=0.5,
@@ -585,7 +591,18 @@ def _claim_setup(
     claim = store.processing_claim(session_id, "setup")
     if claim is None:
         raise InteractionConflict("PROCESSING_CLAIM_REQUIRED")
+    _validate_setup_claim_identity(handoff, claim)
     return handoff, claim
+
+
+def _validate_setup_claim_identity(
+    handoff: dict[str, Any], claim: dict[str, Any]
+) -> None:
+    for field in ("session_id", "stage_id", "revision", "input_sha256"):
+        if claim.get(field) != handoff.get(field):
+            raise InteractionConflict(
+                f"PROCESSING_CLAIM_IDENTITY_MISMATCH:{field}"
+            )
 
 
 def _validate_expired_recovery(
