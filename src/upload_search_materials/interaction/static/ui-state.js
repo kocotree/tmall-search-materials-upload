@@ -197,22 +197,45 @@
       const draft = draftsBySlot.get(slotId);
       const existing = existingBySlot.get(slotId) || {};
       const sameVersion = String(existing.request_id || "") === versionId;
+      const hasExplicitManualFields = sameVersion
+        && existing.manual_fields
+        && typeof existing.manual_fields === "object";
+      const manualFields = hasExplicitManualFields
+        ? existing.manual_fields
+        : {};
+      const legacyManualOverride = sameVersion
+        && !hasExplicitManualFields
+        && String(existing.source || "") === "manual";
+      const keepManualTitle = legacyManualOverride
+        || manualFields.title === true;
+      const keepManualDescription = legacyManualOverride
+        || manualFields.description === true;
+      const hasManualOverride = keepManualTitle || keepManualDescription;
       const outputSha256 = sameVersion && Array.isArray(existing.output_sha256)
         ? existing.output_sha256
         : (processedBySlot.get(slotId)?.outputs || [])
           .map((output) => String(output?.output_sha256 || ""))
           .filter(Boolean);
-      const title = draft
+      const title = keepManualTitle
+        ? String(existing.title || "")
+        : draft
         ? String(draft.title || "")
         : sameVersion
           ? String(existing.title || "")
           : "";
-      const description = draft
+      const description = keepManualDescription
+        ? String(existing.description || "")
+        : draft
         ? String(draft.description || "")
         : sameVersion
           ? String(existing.description || "")
           : "";
-      const generationStatus = draft
+      const copyCompleted = Boolean(title.trim() && description.trim());
+      const generationStatus = hasManualOverride
+        ? copyCompleted
+          ? "manual_completed"
+          : String(existing.generation_status || "manual_editing")
+        : draft
         ? String(draft.generation_status || "generated")
         : sameVersion
           ? String(existing.generation_status || "pending")
@@ -238,24 +261,36 @@
           : sameVersion && Array.isArray(existing.risks)
             ? existing.risks
             : [],
-        confirmed: Boolean(title.trim() && description.trim()),
-        source: draft
+        confirmed: copyCompleted,
+        source: hasManualOverride
+          ? "manual"
+          : draft
           ? String(draft.source || "qianniu_builtin_ai")
           : sameVersion
             ? String(existing.source || "pending_qianniu_builtin_ai")
             : "pending_qianniu_builtin_ai",
+        manual_fields: {
+          title: keepManualTitle,
+          description: keepManualDescription,
+        },
         generation_status: generationStatus,
-        skip_reason_code: draft
+        skip_reason_code: hasManualOverride
+          ? copyCompleted ? "" : String(existing.skip_reason_code || "")
+          : draft
           ? String(draft.skip_reason_code || "")
           : sameVersion
             ? String(existing.skip_reason_code || "")
             : "",
-        skip_message: draft
+        skip_message: hasManualOverride
+          ? copyCompleted ? "" : String(existing.skip_message || "")
+          : draft
           ? String(draft.skip_message || "")
           : sameVersion
             ? String(existing.skip_message || "")
             : "",
-        failure_category: draft
+        failure_category: hasManualOverride
+          ? copyCompleted ? "" : String(existing.failure_category || "")
+          : draft
           ? String(draft.failure_category || "")
           : sameVersion
             ? String(existing.failure_category || "")

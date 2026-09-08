@@ -81,6 +81,7 @@
   let autoSaveTimer = null;
   let larkAuthPollTimer = null;
   let larkActivationInFlight = false;
+  let approvalAuthorizationInFlight = false;
   let currentApprovalUploadIdentity = null;
   let persistenceInFlight = false;
   let activePersistenceMode = "";
@@ -913,7 +914,74 @@
     }
   }
 
+  function renderHeaderLarkStatus(payload) {
+    const status = payload?.status || "authorization_required";
+    const awaiting = status === "awaiting_user";
+    const authorized = status === "authorized";
+    const userName = String(payload?.user_name || "").trim();
+    if (!headerLarkUser || !headerLarkUserName) return;
+    headerLarkUser.dataset.status = authorized
+      ? userName ? "authorized" : "checking"
+      : awaiting ? "awaiting" : "required";
+    headerLarkUserName.textContent = authorized
+      ? userName || "已授权"
+      : awaiting ? "等待授权" : "未授权";
+    headerLarkUser.title = authorized && userName
+      ? `当前飞书账号：${userName}`
+      : String(payload?.message || "可在任务配置中完成飞书授权");
+  }
+
+  function applyApprovalUploadIdentity(payload, { rerender = false } = {}) {
+    const next = payload && typeof payload === "object" ? payload : null;
+    const changed = !UiState.jsonSemanticallyEqual(
+      currentApprovalUploadIdentity,
+      next,
+    );
+    currentApprovalUploadIdentity = next;
+    renderHeaderLarkStatus(next);
+    if (
+      rerender
+      && changed
+      && currentStageId === "approval"
+      && uiState.result
+    ) {
+      renderUploadTaskConfirmation(UiState.resultView(uiState));
+      renderStatus();
+    }
+  }
+
+  async function ensureApprovalUploadIdentityForSubmit() {
+    if (approvalAuthorizationInFlight) {
+      actionMessage.textContent = "正在确认飞书授权，请勿重复点击。";
+      return false;
+    }
+    approvalAuthorizationInFlight = true;
+    submitButton.disabled = true;
+    submitButton.setAttribute("aria-busy", "true");
+    submitButton.textContent = "正在确认飞书授权…";
+    actionMessage.textContent = "正在确认当前飞书账号…";
+    try {
+      const payload = await authorizeLarkBase({ activateDefaults: false });
+      if (
+        payload?.status === "authorized"
+        && String(payload?.user_name || "").trim()
+      ) {
+        applyApprovalUploadIdentity(payload, { rerender: true });
+        return true;
+      }
+      actionMessage.textContent = payload?.status === "awaiting_user"
+        ? "请在新打开的飞书页面完成授权；授权完成后，请再次点击上传。"
+        : String(payload?.message || "暂时无法确认飞书账号，请稍后重试。");
+      return false;
+    } finally {
+      approvalAuthorizationInFlight = false;
+      submitButton.removeAttribute("aria-busy");
+      renderStatus();
+    }
+  }
+
   function renderLarkAuthStatus(payload) {
+    renderHeaderLarkStatus(payload);
     if (!larkBaseConfig) return;
     const status = payload?.status || "authorization_required";
     const summary = larkBaseConfig.querySelector("[data-lark-base-summary]");
@@ -924,17 +992,6 @@
     const awaiting = status === "awaiting_user";
     const authorized = status === "authorized";
     const userName = String(payload?.user_name || "").trim();
-    if (headerLarkUser && headerLarkUserName) {
-      headerLarkUser.dataset.status = authorized
-        ? userName ? "authorized" : "checking"
-        : awaiting ? "awaiting" : "required";
-      headerLarkUserName.textContent = authorized
-        ? userName || "已授权"
-        : awaiting ? "等待授权" : "未授权";
-      headerLarkUser.title = authorized && userName
-        ? `当前飞书账号：${userName}`
-        : "可在任务配置中完成飞书授权";
-    }
     larkBaseConfig.dataset.ready = authorized ? "pending" : awaiting ? "pending" : "false";
     summary.textContent = authorized
       ? "已授权 · 正在检查"
@@ -1065,18 +1122,25 @@
     try {
       const payload = await fetchJson("/api/runtime/lark-base/auth");
       renderLarkAuthStatus(payload);
+      if (currentStageId === "approval") {
+        applyApprovalUploadIdentity(payload, { rerender: true });
+      }
       if (payload.status === "awaiting_user") scheduleLarkAuthPoll();
       else if (payload.status === "authorized") await activateLarkBase();
     } catch (_error) {
-      renderLarkAuthStatus({
+      const failed = {
         status: "failed",
         message: "暂时无法检查飞书授权，请稍后重试。",
-      });
+      };
+      renderLarkAuthStatus(failed);
+      if (currentStageId === "approval") {
+        applyApprovalUploadIdentity(failed, { rerender: true });
+      }
     }
   }
 
-  async function authorizeLarkBase() {
-    if (!larkBaseConfig) return;
+  async function authorizeLarkBase({ activateDefaults = true } = {}) {
+    if (!larkBaseConfig) return null;
     const popup = window.open("about:blank", "tmallFeishuAuthorization");
     try {
       const payload = await fetchJson("/api/runtime/lark-base/auth/start", {
@@ -1084,19 +1148,30 @@
         body: JSON.stringify({}),
       });
       renderLarkAuthStatus(payload);
+      if (currentStageId === "approval") {
+        applyApprovalUploadIdentity(payload, { rerender: true });
+      }
       if (payload.verification_url && popup) {
         popup.location.replace(payload.verification_url);
       } else if (popup) {
         popup.close();
       }
       if (payload.status === "awaiting_user") scheduleLarkAuthPoll();
-      else if (payload.status === "authorized") await activateLarkBase();
+      else if (payload.status === "authorized" && activateDefaults) {
+        await activateLarkBase();
+      }
+      return payload;
     } catch (_error) {
       if (popup) popup.close();
-      renderLarkAuthStatus({
+      const failed = {
         status: "failed",
         message: "飞书授权页面暂时无法打开，请稍后重试。",
-      });
+      };
+      renderLarkAuthStatus(failed);
+      if (currentStageId === "approval") {
+        applyApprovalUploadIdentity(failed, { rerender: true });
+      }
+      return failed;
     }
   }
 
@@ -1627,14 +1702,20 @@
           : "提交给工作台";
     const lockedByServer = !uiState.dirty
       && ["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus);
+    const checkingApprovalAuthorization = currentStageId === "approval"
+      && approvalAuthorizationInFlight;
     const submittingNow = persistenceInFlight && activePersistenceMode === "submit";
     const approvalHasSelectedTasks = currentStageId !== "approval" || String(
       activeForm()?.querySelector('[name="task_ids"]')?.value || "",
     ).split(/\r?\n/).some((taskId) => taskId.trim());
     submitButton.disabled = lockedByServer
       || !approvalHasSelectedTasks
+      || checkingApprovalAuthorization
       || submittingNow;
-    if (submittingNow) {
+    if (checkingApprovalAuthorization) {
+      submitButton.textContent = "正在确认飞书授权…";
+      submitButton.setAttribute("aria-busy", "true");
+    } else if (submittingNow) {
       submitButton.textContent = "正在检查并提交…";
       submitButton.setAttribute("aria-busy", "true");
     }
@@ -6676,6 +6757,10 @@
             && String(existing.description || "").trim()
           ),
           source: String(existing.source || "manual"),
+          manual_fields: existing.manual_fields
+            && typeof existing.manual_fields === "object"
+            ? { ...existing.manual_fields }
+            : {},
           evidence: Array.isArray(existing.evidence) ? existing.evidence : [],
           risks: Array.isArray(existing.risks) ? existing.risks : [],
           generation_status: String(existing.generation_status || "pending"),
@@ -6805,9 +6890,22 @@
         );
         reviewMeta.append(evidence, risks);
 
-        const save = () => {
+        const save = (fieldName) => {
           item.title = title.value;
           item.description = description.value;
+          item.manual_fields = {
+            ...(item.manual_fields || {}),
+            [fieldName]: true,
+          };
+          item.source = "manual";
+          item.generation_status = item.title.trim() && item.description.trim()
+            ? "manual_completed"
+            : "manual_editing";
+          if (item.generation_status === "manual_completed") {
+            item.skip_reason_code = "";
+            item.skip_message = "";
+            item.failure_category = "";
+          }
           copyState.forEach((draft) => {
             draft.confirmed = Boolean(
               String(draft.title || "").trim()
@@ -6819,8 +6917,8 @@
           writeJsonListControl("copy_edits", copyState, { notify: true });
           updateCopyActions();
         };
-        title.addEventListener("input", save);
-        description.addEventListener("input", save);
+        title.addEventListener("input", () => save("title"));
+        description.addEventListener("input", () => save("description"));
         editor.append(
           titleLabel,
           descriptionLabel,
@@ -6906,6 +7004,10 @@
             apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(requestId)}`),
           );
           if (!copyVersions.isConnected) return;
+          if (persistenceInFlight) {
+            window.setTimeout(() => pollCopyRequest(requestId), 500);
+            return;
+          }
           const requestState = detail.request?.status || "";
           currentCopyRequestStatus = requestState;
           const requestIsActive = ["pending_agent", "processing"]
@@ -6942,16 +7044,36 @@
           const draftsChanged = drafts.some((draft) => {
             const existing = localDrafts.get(String(draft.slot_id || ""));
             if (!existing) return true;
-            return String(existing.title || "") !== String(draft.title || "")
-              || String(existing.description || "") !== String(draft.description || "")
+            const manualFields = existing.manual_fields
+              && typeof existing.manual_fields === "object"
+              ? existing.manual_fields
+              : {};
+            const hasExplicitManualFields = existing.manual_fields
+              && typeof existing.manual_fields === "object";
+            const legacyManualOverride = !hasExplicitManualFields
+              && String(existing.source || "") === "manual";
+            const hasManualOverride = legacyManualOverride
+              || manualFields.title === true
+              || manualFields.description === true;
+            return (!legacyManualOverride
+                && manualFields.title !== true
+                && String(existing.title || "") !== String(draft.title || ""))
+              || (!legacyManualOverride
+                && manualFields.description !== true
+                && String(existing.description || "") !== String(draft.description || ""))
               || Number(existing.remote_slot_position || 0)
                 !== Number(draft.remote_slot_position || 0)
-              || String(existing.generation_status || "")
-                !== String(draft.generation_status || "generated")
-              || String(existing.skip_reason_code || "")
-                !== String(draft.skip_reason_code || "")
-              || Number(existing.repair_pass_count || 0)
-                !== Number(draft.repair_pass_count || 0);
+              || (!legacyManualOverride
+                && manualFields.title !== true
+                && manualFields.description !== true
+                && String(existing.generation_status || "")
+                  !== String(draft.generation_status || "generated"))
+              || (!hasManualOverride
+                && String(existing.skip_reason_code || "")
+                  !== String(draft.skip_reason_code || ""))
+              || (!hasManualOverride
+                && Number(existing.repair_pass_count || 0)
+                  !== Number(draft.repair_pass_count || 0));
           });
           if (drafts.length > knownCount || draftsChanged) {
             applyCopyDrafts(drafts, requestId);
@@ -6962,6 +7084,7 @@
               ? `自动获取完成 ${generatedCount} 个坑位，跳过 ${skippedDrafts.length} 个坑位；请核对并补充跳过项。`
               : "千牛文案已载入；请核对全部内容后统一确认。";
             copyButton.disabled = false;
+            updateCopyActions();
             return;
           }
           if (requestState === "failed") {
@@ -7877,14 +8000,17 @@
         "",
         uploadOwnerReady
           ? `${uploadOwnerName}（飞书账号）`
-          : "尚未取得飞书授权账号",
+          : String(
+            currentApprovalUploadIdentity?.message
+              || "尚未取得飞书授权账号",
+          ),
       ),
     );
     if (!uploadOwnerReady) {
       uploadOwner.appendChild(element(
         "p",
         "",
-        "请先在任务配置中完成飞书授权，再提交上传任务。",
+        "点击“提交并自动上传所选任务”后，系统会重新检查并在需要时打开飞书授权页面。",
       ));
     }
     content.appendChild(uploadOwner);
@@ -8161,7 +8287,7 @@
           hydrateForm(form, payload.input.values);
         }
         if (requestedStageId === "approval" && payload.upload_identity) {
-          currentApprovalUploadIdentity = payload.upload_identity;
+          applyApprovalUploadIdentity(payload.upload_identity);
         }
         renderStageResult(stages.get(requestedStageId).component);
       } finally {
@@ -8358,6 +8484,13 @@
     }
     if (["ready_for_agent", "processing", "completed"].includes(uiState.serverStatus)) {
       renderStatus();
+      return;
+    }
+    if (
+      mode === "submit"
+      && currentStageId === "approval"
+      && !(await ensureApprovalUploadIdentityForSubmit())
+    ) {
       return;
     }
     const startedEditVersion = localEditVersion;

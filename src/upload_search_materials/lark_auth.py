@@ -79,7 +79,7 @@ class LarkAuthCoordinator:
 
         with self._lock:
             current = self._status
-            if current.status in {"awaiting_user", "failed"} or not refresh:
+            if current.status == "awaiting_user" or not refresh:
                 return current.public_document()
 
         result = self._runner(

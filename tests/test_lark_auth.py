@@ -229,3 +229,30 @@ def test_missing_cli_is_reported_without_raw_command_details():
     assert status["status"] == "failed"
     assert status["message"] == "当前工作台缺少飞书授权组件，请联系维护者完成环境准备。"
     assert "raw implementation detail" not in str(status)
+
+
+def test_auth_status_retries_after_a_transient_failed_check():
+    calls = 0
+
+    def runner(_args, _timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LarkCliResult(
+                ok=False,
+                reason_code="LARK_COMMAND_FAILED",
+                message="temporary timeout",
+            )
+        return LarkCliResult(
+            ok=True,
+            payload=_authorized_payload(scopes=REQUIRED_LARK_USER_SCOPES),
+        )
+
+    coordinator = LarkAuthCoordinator(runner=runner)
+
+    assert coordinator.status()["status"] == "failed"
+    recovered = coordinator.status()
+
+    assert recovered["status"] == "authorized"
+    assert recovered["user_name"] == "测试用户"
+    assert calls == 2

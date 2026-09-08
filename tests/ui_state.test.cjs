@@ -265,6 +265,70 @@ test("a skipped copy slot keeps its manual-fill reason in the active version", (
   assert.equal(merged[0].confirmed, false);
 });
 
+test("late AI copy results never overwrite manual fields in the same version", () => {
+  const merged = UiState.copyDraftsForVersion(
+    [{ slot_id: "slot-1", product_id: "p1" }],
+    [{
+      slot_id: "slot-1",
+      product_id: "p1",
+      title: "人工标题",
+      description: "人工描述",
+      source: "manual",
+      manual_fields: { title: true, description: true },
+      generation_status: "manual_completed",
+      request_id: "request-1",
+      output_sha256: ["sha-1"],
+    }],
+    [{
+      slot_id: "slot-1",
+      product_id: "p1",
+      title: "",
+      description: "",
+      source: "manual_required",
+      generation_status: "skipped",
+      skip_reason_code: "QIANNIU_COPY_POPUP_BLOCKED",
+      skip_message: "千牛自动获取文案未完成",
+    }],
+    "request-1",
+  );
+
+  assert.equal(merged[0].title, "人工标题");
+  assert.equal(merged[0].description, "人工描述");
+  assert.equal(merged[0].source, "manual");
+  assert.equal(merged[0].generation_status, "manual_completed");
+  assert.equal(merged[0].skip_reason_code, "");
+  assert.equal(merged[0].confirmed, true);
+});
+
+test("manual copy fields merge independently with a late AI response", () => {
+  const merged = UiState.copyDraftsForVersion(
+    [{ slot_id: "slot-1", product_id: "p1" }],
+    [{
+      slot_id: "slot-1",
+      product_id: "p1",
+      title: "人工标题",
+      description: "",
+      source: "manual",
+      manual_fields: { title: true, description: false },
+      request_id: "request-1",
+    }],
+    [{
+      slot_id: "slot-1",
+      product_id: "p1",
+      title: "AI 标题",
+      description: "AI 描述",
+      generation_status: "generated",
+    }],
+    "request-1",
+  );
+
+  assert.equal(merged[0].title, "人工标题");
+  assert.equal(merged[0].description, "AI 描述");
+  assert.equal(merged[0].generation_status, "manual_completed");
+  assert.equal(merged[0].skip_reason_code, "");
+  assert.equal(merged[0].confirmed, true);
+});
+
 test("completeness products can be filtered by owner and product grade", () => {
   assert.equal(typeof UiState.filterCompletenessProducts, "function");
   const products = [

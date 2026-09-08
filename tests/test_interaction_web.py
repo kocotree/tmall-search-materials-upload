@@ -2464,6 +2464,11 @@ def test_copy_versions_restore_the_selected_response_and_persist_loaded_drafts(c
     assert "完成常规重试和 1 轮失败项补跑后仍未完成" in javascript
     assert "当前坑位正在重试 ${retryCount}/3" in javascript
     assert "正在单独补跑失败坑位" in javascript
+    assert "if (persistenceInFlight)" in javascript
+    assert "updateCopyActions();" in javascript.split(
+        'if (requestState === "completed")', 1
+    )[1].split("return;", 1)[0]
+    assert "manual_fields" in javascript
     assert '"生成标题与描述"' not in javascript
     assert re.search(
         r'new CustomEvent\(\s*"input",\s*'
@@ -3371,6 +3376,17 @@ def test_approval_autosave_preserves_review_context_in_frontend(client):
         "const preservesReviewContext = [", 1
     )[1].split("]", 1)[0]
     assert '"approval"' in preservation_block
+
+
+def test_approval_uses_one_live_lark_identity_and_can_start_authorization(client):
+    javascript = client.get("/static/app.js").get_data(as_text=True)
+
+    assert "function applyApprovalUploadIdentity" in javascript
+    assert "ensureApprovalUploadIdentityForSubmit" in javascript
+    assert "authorizeLarkBase({ activateDefaults: false })" in javascript
+    assert "if (approvalUploadIdentityReady()) return true;" not in javascript
+    assert "请在新打开的飞书页面完成授权；授权完成后，请再次点击上传。" in javascript
+    assert "applyApprovalUploadIdentity(payload.upload_identity)" in javascript
 
 
 def test_current_workflow_hides_legacy_production_confirmation(client, session_id):
