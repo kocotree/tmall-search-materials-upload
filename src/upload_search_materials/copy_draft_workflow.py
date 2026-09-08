@@ -561,12 +561,78 @@ def resume_copy_draft_request(
             and str(item.get("description", "")).strip()
         )
 
+    def bound_draft(item: Mapping[str, Any]) -> bool:
+        position = item.get("remote_slot_position")
+        return isinstance(position, int) and position > 0
+
+    raw_manual_copy_overrides = prior_progress.get(
+        "manual_copy_overrides", {}
+    )
+    if not isinstance(raw_manual_copy_overrides, Mapping):
+        raw_manual_copy_overrides = {}
+    manual_copy_overrides: dict[str, dict[str, Any]] = {
+        str(slot_id): dict(value)
+        for slot_id, value in raw_manual_copy_overrides.items()
+        if str(slot_id) in slot_by_id and isinstance(value, Mapping)
+    }
+
+    def remember_manual_copy(item: Mapping[str, Any]) -> None:
+        slot_id = str(item.get("slot_id", ""))
+        if slot_id not in slot_by_id:
+            return
+        supplied_request_id = str(item.get("request_id", "")).strip()
+        if supplied_request_id and supplied_request_id != request_id:
+            return
+        manual_fields = item.get("manual_fields")
+        explicit_fields = (
+            manual_fields
+            if isinstance(manual_fields, Mapping)
+            else {}
+        )
+        legacy_manual = (
+            not explicit_fields
+            and str(item.get("source", "")) == "manual"
+        )
+        override = dict(manual_copy_overrides.get(slot_id, {}))
+        override_fields = dict(override.get("manual_fields", {}))
+        for field in ("title", "description"):
+            is_manual = legacy_manual or explicit_fields.get(field) is True
+            if not is_manual:
+                if explicit_fields.get(field) is False:
+                    override.pop(field, None)
+                    override_fields.pop(field, None)
+                continue
+            value = str(item.get(field, "")).strip()
+            if value:
+                override[field] = value
+                override_fields[field] = True
+            else:
+                override.pop(field, None)
+                override_fields.pop(field, None)
+        if override_fields:
+            override.update(
+                {
+                    "slot_id": slot_id,
+                    "product_id": str(
+                        slot_by_id[slot_id].get("product_id", "")
+                    ),
+                    "manual_fields": override_fields,
+                }
+            )
+            manual_copy_overrides[slot_id] = override
+        else:
+            manual_copy_overrides.pop(slot_id, None)
+
     preserved: dict[str, dict[str, Any]] = {}
 
     def preserve_complete_draft(item: Mapping[str, Any]) -> None:
         slot_id = str(item.get("slot_id", ""))
         slot = slot_by_id.get(slot_id)
-        if slot is None or not complete_draft(item):
+        if (
+            slot is None
+            or not complete_draft(item)
+            or not bound_draft(item)
+        ):
             return
         supplied_request_id = str(item.get("request_id", "")).strip()
         if supplied_request_id and supplied_request_id != request_id:
@@ -632,20 +698,21 @@ def resume_copy_draft_request(
         supplied_request_id = str(item.get("request_id", "")).strip()
         if supplied_request_id and supplied_request_id != request_id:
             continue
+        remember_manual_copy(item)
         prior_preserved = preserved.get(slot_id)
         preserved.pop(slot_id, None)
-        preserve_complete_draft(item)
+        candidate = dict(item)
         # The editor may change copy, but it must not be able to discard or
         # replace the browser-verified Qianniu slot identity checkpointed by
         # this request.  Older frontends omitted this hidden field entirely.
         if (
             prior_preserved is not None
             and isinstance(prior_preserved.get("remote_slot_position"), int)
-            and slot_id in preserved
         ):
-            preserved[slot_id]["remote_slot_position"] = int(
+            candidate["remote_slot_position"] = int(
                 prior_preserved["remote_slot_position"]
             )
+        preserve_complete_draft(candidate)
 
     if len(preserved) == len(slot_by_id):
         raise InteractionConflict("COPY_DRAFT_REQUEST_HAS_NO_EMPTY_SLOTS")
@@ -687,6 +754,7 @@ def resume_copy_draft_request(
             "current_repair_pass": 0,
             "max_repair_passes": COPY_FAILED_ONLY_MAX_PASSES,
             "manual_resume_round": next_round,
+            "manual_copy_overrides": manual_copy_overrides,
             "updated_at": _now(),
         },
     )
@@ -749,6 +817,37 @@ def process_copy_draft_request(
         prior.get("repair_processed_count", 0) or 0
     )
     current_repair_pass = int(prior.get("current_repair_pass", 0) or 0)
+    raw_manual_copy_overrides = prior.get("manual_copy_overrides", {})
+    if not isinstance(raw_manual_copy_overrides, Mapping):
+        raw_manual_copy_overrides = {}
+    valid_slot_ids = {
+        str(slot.get("slot_id", "")) for slot in slots
+    }
+    manual_copy_overrides = {
+        str(slot_id): dict(value)
+        for slot_id, value in raw_manual_copy_overrides.items()
+        if str(slot_id) in valid_slot_ids and isinstance(value, Mapping)
+    }
+
+    def apply_manual_copy_override(
+        item: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        output = dict(item)
+        slot_id = str(output.get("slot_id", ""))
+        override = manual_copy_overrides.get(slot_id, {})
+        manual_fields = override.get("manual_fields", {})
+        applied = False
+        if isinstance(manual_fields, Mapping):
+            for field in ("title", "description"):
+                value = str(override.get(field, "")).strip()
+                if manual_fields.get(field) is True and value:
+                    output[field] = value
+                    applied = True
+        if applied:
+            output["source"] = "manual"
+            output["manual_fields"] = dict(manual_fields)
+            output["manual_copy_preserved"] = True
+        return output
 
     def ordered_completed() -> list[dict[str, Any]]:
         return [
@@ -791,6 +890,7 @@ def process_copy_draft_request(
             "repair_processed_count": repair_processed_count,
             "current_repair_pass": current_repair_pass,
             "max_repair_passes": COPY_FAILED_ONLY_MAX_PASSES,
+            "manual_copy_overrides": manual_copy_overrides,
             "updated_at": _now(),
         }
         store._write_json_atomic(progress_path, document)
@@ -863,7 +963,24 @@ def process_copy_draft_request(
                 for attempt_index in range(COPY_SLOT_MAX_RETRIES + 1):
                     attempts_in_pass = attempt_index + 1
                     try:
-                        draft = product_session.generate_slot(slot)
+                        override = manual_copy_overrides.get(
+                            current_slot_id, {}
+                        )
+                        override_fields = override.get(
+                            "manual_fields", {}
+                        )
+                        binding_only = bool(
+                            isinstance(override_fields, Mapping)
+                            and override_fields.get("title") is True
+                            and override_fields.get("description") is True
+                            and str(override.get("title", "")).strip()
+                            and str(override.get("description", "")).strip()
+                        )
+                        draft = (
+                            product_session.bind_slot(slot)
+                            if binding_only
+                            else product_session.generate_slot(slot)
+                        )
                         if (
                             not isinstance(draft, Mapping)
                             or str(draft.get("slot_id", ""))
@@ -876,7 +993,7 @@ def process_copy_draft_request(
                         stopped = stopped_response()
                         if stopped is not None:
                             return False, stopped
-                        generated = dict(draft)
+                        generated = apply_manual_copy_override(draft)
                         generated["generation_status"] = "generated"
                         if repair_pass:
                             generated.update(
@@ -922,12 +1039,14 @@ def process_copy_draft_request(
                                 current_retry_count=attempt_index + 1,
                             )
                             continue
-                        skipped = _skipped_copy_draft(
-                            slot,
-                            error,
-                            attempt_count=(
-                                previous_attempt_count + attempts_in_pass
-                            ),
+                        skipped = apply_manual_copy_override(
+                            _skipped_copy_draft(
+                                slot,
+                                error,
+                                attempt_count=(
+                                    previous_attempt_count + attempts_in_pass
+                                ),
+                            )
                         )
                         if repair_pass:
                             skipped.update(

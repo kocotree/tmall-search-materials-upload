@@ -6716,8 +6716,13 @@
           (draft) => !String(draft.title || "").trim()
             || !String(draft.description || "").trim(),
         ).length;
-        const hasCompleteDrafts = copyState.length > 0 && incompleteCount === 0;
-        const canResume = incompleteCount > 0
+        const missingBindingCount = copyState.filter(
+          (draft) => Number(draft.remote_slot_position || 0) <= 0,
+        ).length;
+        const hasCompleteDrafts = copyState.length > 0
+          && incompleteCount === 0
+          && missingBindingCount === 0;
+        const canResume = (incompleteCount > 0 || missingBindingCount > 0)
           && ["failed", "completed"].includes(currentCopyRequestStatus);
         resumeCopyButton.hidden = !canResume;
         resumeCopyButton.disabled = !canResume;
@@ -6726,15 +6731,19 @@
           : "primary-button";
         if (finishButton) {
           finishButton.disabled = !hasCompleteDrafts;
-          finishButton.title = incompleteCount
+          finishButton.title = missingBindingCount
+            ? `还有 ${missingBindingCount} 个坑位需要重新确认千牛目标坑位`
+            : incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述`
             : "全部标题和描述已填写，可以进入上传任务确认";
         }
         if (finishHint) {
-          finishHint.textContent = incompleteCount
+          finishHint.textContent = missingBindingCount
+            ? `还有 ${missingBindingCount} 个坑位需要重新确认千牛目标坑位，请点击“继续获取”。`
+            : incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述。`
             : "全部标题和描述已填写，可以进入上传任务确认。";
-          finishHint.dataset.status = incompleteCount
+          finishHint.dataset.status = incompleteCount || missingBindingCount
             ? "waiting"
             : "ready";
         }

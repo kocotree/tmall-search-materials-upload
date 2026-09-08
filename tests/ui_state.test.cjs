@@ -282,6 +282,7 @@ test("late AI copy results never overwrite manual fields in the same version", (
     [{
       slot_id: "slot-1",
       product_id: "p1",
+      remote_slot_position: 6,
       title: "",
       description: "",
       source: "manual_required",
@@ -298,6 +299,7 @@ test("late AI copy results never overwrite manual fields in the same version", (
   assert.equal(merged[0].generation_status, "manual_completed");
   assert.equal(merged[0].skip_reason_code, "");
   assert.equal(merged[0].confirmed, true);
+  assert.equal(merged[0].remote_slot_position, 6);
 });
 
 test("manual copy fields merge independently with a late AI response", () => {

@@ -25,7 +25,9 @@ from upload_search_materials.interaction.session import (
 from upload_search_materials.interaction.web import create_app
 
 
-def _patch_copy_product_session(monkeypatch, workflow, fake_generate):
+def _patch_copy_product_session(
+    monkeypatch, workflow, fake_generate, *, fake_bind=None
+):
     """Adapt legacy one-slot browser fakes to the product-session contract."""
 
     class FakeProductSession:
@@ -42,6 +44,15 @@ def _patch_copy_product_session(monkeypatch, workflow, fake_generate):
 
         def generate_slot(self, slot):
             drafts = fake_generate(
+                self.page,
+                [slot],
+                material_center_url=self.material_center_url,
+            )
+            return drafts[0]
+
+        def bind_slot(self, slot):
+            handler = fake_bind or fake_generate
+            drafts = handler(
                 self.page,
                 [slot],
                 material_center_url=self.material_center_url,
@@ -1494,6 +1505,7 @@ def test_failed_copy_request_can_resume_same_version_from_checkpoint(
         return [{
             "slot_id": slot["slot_id"],
             "product_id": slot["product_id"],
+            "remote_slot_position": 2,
             "title": "已保存的标题",
             "description": "这个坑位已完成，恢复时不应重新生成。",
             "evidence": ["千牛商品坑位内置 AI 生成"],
@@ -1582,6 +1594,97 @@ def test_failed_copy_request_can_resume_same_version_from_checkpoint(
     }
     assert drafts["slot-completed"]["title"] == "已保存的标题"
     assert drafts["slot-interrupted"]["title"] == "恢复后的标题"
+
+
+def test_resume_retries_manual_copy_that_is_missing_remote_slot_binding(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import upload_search_materials.copy_draft_workflow as workflow
+
+    client, store, session_id = _prepared_slot_client(tmp_path)
+    request_id = _queue_copy_request(client, store, session_id)
+    runtime = SimpleNamespace(
+        cdp_url="http://127.0.0.1:9222",
+        material_center_url="https://example.test/materials",
+    )
+
+    def skip_slot(_page, slots, *, material_center_url):
+        raise workflow.QianniuCopyError(
+            "QIANNIU_SLOT_NOT_FOUND", "目标坑位暂时未找到"
+        )
+
+    _patch_copy_product_session(monkeypatch, workflow, skip_slot)
+    process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=runtime,
+        page=object(),
+    )
+
+    resume_url = (
+        f"/api/sessions/{session_id}/stages/slots_copy/agent-requests/"
+        f"{request_id}/resume"
+    )
+    resumed = client.post(
+        resume_url,
+        json={
+            "copy_edits": [{
+                "slot_id": "slot-a",
+                "product_id": "P1",
+                "request_id": request_id,
+                "title": "人工标题",
+                "description": "人工描述",
+                "source": "manual",
+                "manual_fields": {"title": True, "description": True},
+            }]
+        },
+    )
+    assert resumed.status_code == 200, resumed.json
+    progress_path = (
+        store._stage_path(session_id, "slots_copy")
+        / "agent-requests"
+        / request_id
+        / "progress.json"
+    )
+    pending = store._read_json(progress_path, "copy-progress")
+    assert pending["copy_drafts"] == []
+    assert pending["manual_copy_overrides"]["slot-a"]["title"] == "人工标题"
+
+    def should_not_generate(_page, slots, *, material_center_url):
+        raise AssertionError("手工文案完整时不应再次调用 AI 生成")
+
+    def bind_slot(_page, slots, *, material_center_url):
+        return [{
+            "slot_id": "slot-a",
+            "product_id": "P1",
+            "remote_slot_position": 6,
+            "title": "",
+            "description": "",
+            "evidence": ["千牛商品坑位内置 AI 生成"],
+            "risks": [],
+            "source": "qianniu_builtin_ai",
+        }]
+
+    _patch_copy_product_session(
+        monkeypatch,
+        workflow,
+        should_not_generate,
+        fake_bind=bind_slot,
+    )
+    response = process_copy_draft_request(
+        store,
+        session_id,
+        request_id,
+        runtime=runtime,
+        page=object(),
+    )
+    draft = response["result"]["copy_drafts"][0]
+    assert draft["remote_slot_position"] == 6
+    assert draft["title"] == "人工标题"
+    assert draft["description"] == "人工描述"
+    assert draft["source"] == "manual"
 
 
 def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(

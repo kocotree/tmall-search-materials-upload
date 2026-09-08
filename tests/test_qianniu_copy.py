@@ -12,6 +12,7 @@ from upload_search_materials.browser.qianniu_copy import (
     QianniuCopyError,
     _click_visible_image_text_action,
     _ensure_recommend_list,
+    _fill_product_search,
     _find_product_row_with_recovery,
     _generate_copy,
     _open_recommend_list,
@@ -106,15 +107,38 @@ def test_parse_qianniu_ai_copy_accepts_labels_on_separate_lines():
 
 
 class _FakeInput:
-    def __init__(self, placeholder, visible=True):
+    def __init__(
+        self,
+        placeholder,
+        visible=True,
+        *,
+        enabled=True,
+        editable=True,
+    ):
         self.placeholder = placeholder
         self.visible = visible
+        self.enabled = enabled
+        self.editable = editable
+        self.filled = []
+        self.pressed = []
 
     def get_attribute(self, name):
         return self.placeholder if name == "placeholder" else None
 
     def is_visible(self):
         return self.visible
+
+    def is_enabled(self):
+        return self.enabled
+
+    def is_editable(self):
+        return self.editable
+
+    def fill(self, value, **_kwargs):
+        self.filled.append(value)
+
+    def press(self, key, **_kwargs):
+        self.pressed.append(key)
 
 
 class _FakeCollection:
@@ -656,6 +680,60 @@ def test_product_session_retry_closes_form_without_researching_product(
     assert navigations == []
 
 
+def test_product_session_can_bind_manual_copy_without_uploading_or_ai(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    slot = {
+        "slot_id": "p1-slot-1",
+        "product_id": "p1",
+        "remote_slot_occurrence": 0,
+        "ordered_outputs": [{
+            "output_path": "unused.jpg",
+            "output_sha256": "a" * 64,
+        }],
+    }
+    frame = object()
+    monkeypatch.setattr(
+        copy_module,
+        "_close_publish_form_in_place",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_select_seed_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("binding-only must not upload an image")
+        ),
+    )
+    monkeypatch.setattr(
+        copy_module,
+        "_generate_copy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("binding-only must not invoke Qianniu AI")
+        ),
+    )
+    session = QianniuProductCopySession(
+        object(),
+        [slot],
+        material_center_url="https://example.test/materials",
+    )
+    monkeypatch.setattr(
+        session,
+        "_open_slot_form_with_recovery",
+        lambda _slot: (frame, 4),
+    )
+
+    result = session.bind_slot(slot)
+
+    assert result["slot_id"] == "p1-slot-1"
+    assert result["remote_slot_position"] == 4
+    assert result["title"] == ""
+    assert result["description"] == ""
+    assert result["source"] == "qianniu_slot_binding"
+
+
 def test_close_publish_form_in_place_uses_backdrop_without_navigation():
     import upload_search_materials.browser.qianniu_copy as copy_module
 
@@ -806,6 +884,104 @@ def test_product_scope_ignores_help_search_and_uses_product_frame():
 
     assert scope is product_scope
     assert search.placeholder == "商品名称/ID"
+
+
+def test_product_scope_ignores_visible_but_non_editable_product_input():
+    product_scope = _FakeScope(
+        "https://myseller.taobao.com/material-frame",
+        [],
+        table_ready=True,
+    )
+    disabled = _FakeInput("商品名称/ID", editable=False)
+    active = _FakeInput("商品名称/ID")
+    product_scope.inputs = [disabled, active]
+
+    scope, search = _wait_for_product_scope(_FakePage([product_scope]))
+
+    assert scope is product_scope
+    assert search is active
+
+
+class _ReorderingInputLocator:
+    def __init__(self, scope, index):
+        self.scope = scope
+        self.index = index
+
+    @property
+    def current(self):
+        return self.scope.inputs[self.index]
+
+    def get_attribute(self, name):
+        return self.current.get_attribute(name)
+
+    def is_visible(self):
+        return self.current.is_visible()
+
+    def is_enabled(self):
+        return self.current.is_enabled()
+
+    def is_editable(self):
+        return self.current.is_editable()
+
+    def element_handle(self, **_kwargs):
+        pinned = self.current
+        if pinned.placeholder == "商品名称/ID":
+            self.scope.inputs.insert(
+                self.index,
+                _FakeInput("选择时间", visible=False),
+            )
+        return pinned
+
+
+class _ReorderingInputCollection:
+    def __init__(self, scope):
+        self.scope = scope
+
+    def count(self):
+        return len(self.scope.inputs)
+
+    def nth(self, index):
+        return _ReorderingInputLocator(self.scope, index)
+
+
+class _ReorderingScope(_FakeScope):
+    def locator(self, selector):
+        if selector == "input":
+            return _ReorderingInputCollection(self)
+        return super().locator(selector)
+
+
+def test_fill_product_search_pins_visible_input_before_spa_reorders_dom(
+    monkeypatch,
+):
+    import upload_search_materials.browser.qianniu_copy as copy_module
+
+    monkeypatch.setattr(
+        copy_module,
+        "_settle_copy_popups",
+        lambda *_args, **_kwargs: 0,
+    )
+    scope = _ReorderingScope(
+        "https://myseller.taobao.com/material-frame",
+        ["如何设置电子发票", "商品名称/ID"],
+        table_ready=True,
+    )
+
+    selected_scope = _fill_product_search(
+        _FakePage([scope]),
+        "1025875706262",
+    )
+
+    product_input = next(
+        item for item in scope.inputs if item.placeholder == "商品名称/ID"
+    )
+    hidden_input = next(
+        item for item in scope.inputs if item.placeholder == "选择时间"
+    )
+    assert selected_scope is scope
+    assert product_input.filled == ["1025875706262"]
+    assert product_input.pressed == ["Enter"]
+    assert hidden_input.filled == []
 
 
 def test_product_scope_waits_for_spa_table_hydration(monkeypatch):

@@ -24,6 +24,9 @@ MATERIAL_SELECTOR_FRAME_FRAGMENT = "sucai-selector-ng"
 NAVIGATION_TIMEOUT_MS = 90_000
 PRODUCT_SCOPE_ATTEMPTS = 300
 PRODUCT_SCOPE_DELAY_MS = 300
+PRODUCT_SEARCH_ACTION_ATTEMPTS = 3
+PRODUCT_SEARCH_ACTION_TIMEOUT_MS = 5_000
+PRODUCT_SEARCH_REACQUIRE_ATTEMPTS = 20
 PRODUCT_ROW_ATTEMPTS = 150
 LIVE_SLOT_ATTEMPTS = 150
 PUBLISH_FRAME_ATTEMPTS = 150
@@ -597,8 +600,22 @@ def _product_search_candidate(scope):
         ).strip()
         if placeholder:
             placeholders.append(placeholder)
+        try:
+            visible = candidate.is_visible()
+            enabled_check = getattr(candidate, "is_enabled", None)
+            editable_check = getattr(candidate, "is_editable", None)
+            enabled = (
+                enabled_check() if callable(enabled_check) else True
+            )
+            editable = (
+                editable_check() if callable(editable_check) else True
+            )
+        except Exception:
+            visible = enabled = editable = False
         if (
-            candidate.is_visible()
+            visible
+            and enabled
+            and editable
             and "商品" in placeholder
             and ("ID" in placeholder.upper() or "名称" in placeholder)
         ):
@@ -611,9 +628,12 @@ def _product_search_candidate(scope):
     )
 
 
-def _wait_for_product_scope(page):
+def _wait_for_product_scope(page, *, attempts: int | None = None):
     observations: dict[str, dict[str, Any]] = {}
-    for attempt in range(PRODUCT_SCOPE_ATTEMPTS):
+    attempt_limit = (
+        PRODUCT_SCOPE_ATTEMPTS if attempts is None else max(1, attempts)
+    )
+    for attempt in range(attempt_limit):
         if attempt % 10 == 0:
             _settle_copy_popups(page, require_clear_surface=False)
         ready = []
@@ -648,13 +668,88 @@ def _wait_for_product_scope(page):
     )
 
 
+def _pinned_search_control(search):
+    """Resolve a positional locator to the exact current DOM element.
+
+    Qianniu can reorder its inputs while the SPA hydrates. Keeping an
+    ``locator("input").nth(index)`` across that render can therefore point to
+    a different, hidden input by the time ``fill`` runs. An element handle
+    pins the visible control selected in the current DOM; detached handles are
+    treated as transient and reacquired by ``_fill_product_search``.
+    """
+
+    resolver = getattr(search, "element_handle", None)
+    if not callable(resolver):
+        return search
+    try:
+        return resolver(timeout=1_000)
+    except TypeError:
+        # Lightweight adapters and older Playwright-compatible objects may
+        # not accept the timeout keyword.
+        return resolver()
+
+
+def _search_control_is_ready(control) -> bool:
+    if control is None:
+        return False
+    try:
+        if not control.is_visible():
+            return False
+        for method_name in ("is_enabled", "is_editable"):
+            check = getattr(control, method_name, None)
+            if callable(check) and not check():
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _fill_product_search(page, product_id: str):
+    """Fill the unique live product search input and return its DOM scope."""
+
+    last_error = ""
+    for attempt in range(PRODUCT_SEARCH_ACTION_ATTEMPTS):
+        if attempt:
+            page.wait_for_timeout(PRODUCT_SCOPE_DELAY_MS)
+        _settle_copy_popups(page)
+        try:
+            scope, search = _wait_for_product_scope(
+                page,
+                attempts=(
+                    None
+                    if attempt == 0
+                    else PRODUCT_SEARCH_REACQUIRE_ATTEMPTS
+                ),
+            )
+            control = _pinned_search_control(search)
+            if not _search_control_is_ready(control):
+                last_error = "商品搜索框在操作前已失效"
+                continue
+            control.fill(
+                product_id,
+                timeout=PRODUCT_SEARCH_ACTION_TIMEOUT_MS,
+            )
+            control.press(
+                "Enter",
+                timeout=PRODUCT_SEARCH_ACTION_TIMEOUT_MS,
+            )
+            return scope
+        except QianniuCopyError as error:
+            if error.reason_code == "QIANNIU_PRODUCT_SCOPE_AMBIGUOUS":
+                raise
+            last_error = str(error)
+        except Exception as error:
+            last_error = f"{type(error).__name__}: {error}"
+    raise QianniuCopyError(
+        "QIANNIU_PRODUCT_SEARCH_NOT_FOUND",
+        "当前可见商品搜索框无法稳定输入"
+        + (f"；{last_error}" if last_error else ""),
+    )
+
+
 def _find_product_row(page, product_id: str):
     product_id = str(product_id).strip()
-    _settle_copy_popups(page)
-    scope, search = _wait_for_product_scope(page)
-    _settle_copy_popups(page)
-    search.fill(product_id)
-    search.press("Enter")
+    scope = _fill_product_search(page, product_id)
     last_count = 0
     for attempt in range(PRODUCT_ROW_ATTEMPTS):
         if attempt and attempt % 10 == 0:
@@ -1398,6 +1493,33 @@ class QianniuProductCopySession:
             seed_image_name=seed_image_name,
             elapsed_seconds=elapsed,
         ).as_response_item()
+
+    def bind_slot(self, raw_slot: Mapping[str, Any]) -> dict[str, Any]:
+        """Verify one live empty slot without uploading or invoking Qianniu AI."""
+
+        slot_id = str(raw_slot.get("slot_id", "")).strip()
+        product_id = str(raw_slot.get("product_id", "")).strip()
+        if product_id != self.product_id or slot_id not in self._slot_ids:
+            raise QianniuCopyError(
+                "QIANNIU_COPY_SLOT_IDENTITY_INVALID",
+                "当前坑位不属于已打开的商品级文案会话",
+            )
+        self._close_current_form()
+        self._publish_frame, position = self._open_slot_form_with_recovery(
+            raw_slot,
+        )
+        self._positions[slot_id] = position
+        self._close_current_form()
+        return {
+            "slot_id": slot_id,
+            "product_id": product_id,
+            "remote_slot_position": position,
+            "title": "",
+            "description": "",
+            "evidence": ["已核验千牛真实空坑位"],
+            "risks": [],
+            "source": "qianniu_slot_binding",
+        }
 
     def recover_after_failure(self) -> None:
         """Close the failed slot form before retrying the same product row."""
