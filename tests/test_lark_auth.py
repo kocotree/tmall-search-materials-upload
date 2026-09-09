@@ -57,6 +57,77 @@ def test_auth_start_reuses_login_when_required_scopes_are_present():
     assert calls[0][:2] == ["auth", "status"]
 
 
+def test_auth_status_falls_back_for_lark_cli_1_0_44_without_json_flag():
+    calls = []
+
+    def runner(args, _timeout):
+        calls.append(list(args))
+        if "--json" in args:
+            return LarkCliResult(
+                ok=False,
+                reason_code="LARK_COMMAND_FAILED",
+                stderr="Error: unknown flag: --json",
+                message="Error: unknown flag: --json",
+            )
+        return LarkCliResult(
+            ok=True,
+            payload=_authorized_payload(scopes=REQUIRED_LARK_USER_SCOPES),
+        )
+
+    coordinator = LarkAuthCoordinator(runner=runner)
+    status = coordinator.status()
+
+    assert status["status"] == "authorized"
+    assert status["user_name"] == "测试用户"
+    assert calls == [
+        ["auth", "status", "--json", "--verify"],
+        ["auth", "status", "--verify"],
+    ]
+
+    coordinator.status()
+    assert calls[-1] == ["auth", "status", "--verify"]
+    assert sum("--json" in call for call in calls) == 1
+
+
+def test_auth_start_accepts_verified_old_cli_identity_without_scope_metadata():
+    calls = []
+
+    def runner(args, _timeout):
+        calls.append(list(args))
+        if "--json" in args:
+            return LarkCliResult(
+                ok=False,
+                reason_code="LARK_COMMAND_FAILED",
+                stderr="Error: unknown flag: --json",
+                message="Error: unknown flag: --json",
+            )
+        payload = _authorized_payload()
+        payload["identities"]["user"].pop("scope", None)
+        return LarkCliResult(ok=True, payload=payload)
+
+    status = LarkAuthCoordinator(runner=runner).start()
+
+    assert status["status"] == "authorized"
+    assert not any("login" in call for call in calls)
+
+
+def test_auth_status_does_not_retry_without_json_for_other_failures():
+    calls = []
+
+    def runner(args, _timeout):
+        calls.append(list(args))
+        return LarkCliResult(
+            ok=False,
+            reason_code="LARK_CLI_TIMEOUT",
+            message="temporary timeout",
+        )
+
+    status = LarkAuthCoordinator(runner=runner).status()
+
+    assert status["status"] == "failed"
+    assert calls == [["auth", "status", "--json", "--verify"]]
+
+
 def test_auth_start_requests_missing_wiki_scope_for_existing_base_login():
     calls = []
     base_only_scopes = tuple(
@@ -256,3 +327,86 @@ def test_auth_status_retries_after_a_transient_failed_check():
     assert recovered["status"] == "authorized"
     assert recovered["user_name"] == "测试用户"
     assert calls == 2
+
+
+def test_pending_auth_reconciles_with_verified_cli_state_before_completion():
+    completion_started = threading.Event()
+    completion_returned = threading.Event()
+    release_completion = threading.Event()
+
+    def runner(args, _timeout):
+        if args[:2] == ["auth", "status"]:
+            if completion_started.is_set():
+                return LarkCliResult(
+                    ok=True,
+                    payload=_authorized_payload(scopes=REQUIRED_LARK_USER_SCOPES),
+                )
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "appId": "cli_test",
+                    "identities": {
+                        "user": {"status": "missing", "available": False}
+                    },
+                },
+            )
+        if "--no-wait" in args:
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "device_code": "pending-live-check",
+                    "verification_url": "https://accounts.feishu.cn/pending-live-check",
+                },
+            )
+        completion_started.set()
+        release_completion.wait(2)
+        completion_returned.set()
+        return LarkCliResult(
+            ok=False,
+            reason_code="LARK_COMMAND_FAILED",
+            message="late completion failure",
+        )
+
+    coordinator = LarkAuthCoordinator(runner=runner)
+    started = coordinator.start()
+    assert started["status"] == "awaiting_user"
+    assert completion_started.wait(1)
+
+    reconciled = coordinator.status()
+
+    assert reconciled["status"] == "authorized"
+    assert reconciled["user_name"] == "测试用户"
+    release_completion.set()
+    assert completion_returned.wait(1)
+    time.sleep(0.01)
+    assert coordinator.status(refresh=False)["status"] == "authorized"
+
+
+def test_pending_auth_keeps_waiting_after_a_transient_status_failure():
+    release_completion = threading.Event()
+
+    def runner(args, _timeout):
+        if args[:2] == ["auth", "status"]:
+            return LarkCliResult(
+                ok=False,
+                reason_code="LARK_COMMAND_FAILED",
+                message="temporary status failure",
+            )
+        if "--no-wait" in args:
+            return LarkCliResult(
+                ok=True,
+                payload={
+                    "device_code": "pending-transient",
+                    "verification_url": "https://accounts.feishu.cn/pending-transient",
+                },
+            )
+        release_completion.wait(2)
+        return LarkCliResult(ok=True, payload=_authorized_payload())
+
+    coordinator = LarkAuthCoordinator(runner=runner)
+    started = coordinator.start()
+
+    assert started["status"] == "awaiting_user"
+    assert coordinator.status()["status"] == "awaiting_user"
+    assert coordinator.start()["status"] == "awaiting_user"
+    release_completion.set()

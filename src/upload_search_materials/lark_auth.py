@@ -73,22 +73,38 @@ class LarkAuthCoordinator:
         )
         self._attempt = 0
         self._device_code = ""
+        self._auth_status_supports_json: bool | None = None
 
     def status(self, *, refresh: bool = True) -> dict[str, object]:
         """Return a safe public status, optionally checking the local login."""
 
         with self._lock:
             current = self._status
-            if current.status == "awaiting_user" or not refresh:
+            if not refresh:
                 return current.public_document()
+            observed_status = current.status
 
-        result = self._runner(
-            ["auth", "status", "--json", "--verify"],
-            self._status_timeout_seconds,
-        )
+        result = self._read_auth_status()
         next_status = self._status_from_result(result)
         with self._lock:
-            if self._status.status != "awaiting_user":
+            current = self._status
+            if next_status.status == "authorized":
+                # The official authorization page can finish before the
+                # blocking device-code command returns.  Treat the verified
+                # local CLI state as authoritative and invalidate the pending
+                # completion so a late failure cannot overwrite success.
+                self._device_code = ""
+                self._status = next_status
+            elif current.status == "awaiting_user":
+                # An authorization attempt is still active.  A single status
+                # miss or transient CLI failure is not evidence that the user
+                # rejected it, so keep polling the current attempt.
+                pass
+            elif observed_status == "awaiting_user" and current.status == "authorized":
+                # The completion thread won the race while this status check
+                # was running; do not replace its success with a stale result.
+                pass
+            else:
                 self._status = next_status
             return self._status.public_document()
 
@@ -96,13 +112,13 @@ class LarkAuthCoordinator:
         """Start or reuse one in-memory device authorization attempt."""
 
         with self._lock:
-            if self._status.status == "awaiting_user":
-                return self._status.public_document()
+            awaiting_user = self._status.status == "awaiting_user"
+        if awaiting_user:
+            # The browser may already have completed the official flow.  Do a
+            # live verification before returning the cached waiting state.
+            return self.status(refresh=True)
 
-        status_result = self._runner(
-            ["auth", "status", "--json", "--verify"],
-            self._status_timeout_seconds,
-        )
+        status_result = self._read_auth_status()
         if _app_configuration_missing(status_result):
             configured = self._runner(
                 [
@@ -123,15 +139,13 @@ class LarkAuthCoordinator:
                 with self._lock:
                     self._status = failed
                 return failed.public_document()
-            status_result = self._runner(
-                ["auth", "status", "--json", "--verify"],
-                self._status_timeout_seconds,
-            )
+            status_result = self._read_auth_status()
         if (
             status_result.ok
             and _user_is_authorized(status_result.payload)
-            and set(self._required_scopes).issubset(
-                _granted_scopes(status_result.payload)
+            and _required_scopes_are_satisfied(
+                status_result.payload,
+                self._required_scopes,
             )
         ):
             authorized = LarkAuthStatus(
@@ -215,6 +229,31 @@ class LarkAuthCoordinator:
             return failed.public_document()
         return public_status
 
+    def _read_auth_status(self) -> LarkCliResult:
+        """Read auth status across supported lark-cli Windows versions."""
+
+        if self._auth_status_supports_json is False:
+            return self._runner(
+                ["auth", "status", "--verify"],
+                self._status_timeout_seconds,
+            )
+        result = self._runner(
+            ["auth", "status", "--json", "--verify"],
+            self._status_timeout_seconds,
+        )
+        if not _auth_status_json_flag_is_unsupported(result):
+            if result.ok:
+                self._auth_status_supports_json = True
+            return result
+        self._auth_status_supports_json = False
+        # lark-cli 1.0.44 emits the same JSON document without an explicit
+        # --json flag.  Retry only this read-only command so existing team
+        # installations can authorize without requiring a manual CLI update.
+        return self._runner(
+            ["auth", "status", "--verify"],
+            self._status_timeout_seconds,
+        )
+
     def _complete(self, attempt: int, device_code: str) -> None:
         result = self._runner(
             [
@@ -236,6 +275,9 @@ class LarkAuthCoordinator:
             completed = _friendly_failure(result, completion=True)
         with self._lock:
             if self._attempt != attempt or self._device_code != device_code:
+                return
+            if self._status.status == "authorized":
+                self._device_code = ""
                 return
             self._device_code = ""
             self._status = completed
@@ -288,6 +330,44 @@ def _app_configuration_missing(result: LarkCliResult) -> bool:
             "尚未配置应用",
         )
     )
+
+
+def _auth_status_json_flag_is_unsupported(result: LarkCliResult) -> bool:
+    if result.ok:
+        return False
+    text = " ".join(
+        part for part in (result.message, result.stderr, result.stdout) if part
+    ).casefold()
+    return "--json" in text and any(
+        marker in text
+        for marker in (
+            "unknown flag",
+            "unexpected argument",
+            "flag provided but not defined",
+            "unrecognized option",
+            "未知参数",
+            "不支持",
+        )
+    )
+
+
+def _required_scopes_are_satisfied(
+    payload: Any,
+    required_scopes: Sequence[str],
+) -> bool:
+    user = _user_identity(payload)
+    scope_metadata_available = any(
+        str(key).replace("_", "").casefold()
+        in {"scope", "scopes", "grantedscope", "grantedscopes"}
+        for key in user
+    )
+    if not scope_metadata_available:
+        # lark-cli 1.0.44 does not expose user scopes in auth status.  Its
+        # verified user identity is still usable; actual Base/Wiki access is
+        # checked immediately afterwards by the existing table capability
+        # checks instead of forcing an endless reauthorization loop.
+        return True
+    return set(required_scopes).issubset(_granted_scopes(payload))
 
 
 def _user_name(payload: Any) -> str:

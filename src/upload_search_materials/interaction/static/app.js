@@ -80,6 +80,7 @@
   let stageGeneration = 0;
   let autoSaveTimer = null;
   let larkAuthPollTimer = null;
+  let larkAuthRecheckUntil = 0;
   let larkActivationInFlight = false;
   let approvalAuthorizationInFlight = false;
   let currentApprovalUploadIdentity = null;
@@ -1117,6 +1118,20 @@
     larkAuthPollTimer = window.setTimeout(refreshLarkAuthStatus, 2000);
   }
 
+  function keepLarkAuthRecheckAlive() {
+    larkAuthRecheckUntil = Date.now() + 60000;
+  }
+
+  function shouldRecheckLarkAuth() {
+    return Date.now() < larkAuthRecheckUntil;
+  }
+
+  function finishLarkAuthRecheck() {
+    larkAuthRecheckUntil = 0;
+    if (larkAuthPollTimer) window.clearTimeout(larkAuthPollTimer);
+    larkAuthPollTimer = null;
+  }
+
   async function refreshLarkAuthStatus() {
     if (!larkBaseConfig) return;
     try {
@@ -1125,22 +1140,37 @@
       if (currentStageId === "approval") {
         applyApprovalUploadIdentity(payload, { rerender: true });
       }
-      if (payload.status === "awaiting_user") scheduleLarkAuthPoll();
-      else if (payload.status === "authorized") await activateLarkBase();
+      if (payload.status === "awaiting_user") {
+        keepLarkAuthRecheckAlive();
+        scheduleLarkAuthPoll();
+      } else if (payload.status === "authorized") {
+        finishLarkAuthRecheck();
+        await activateLarkBase();
+      } else if (shouldRecheckLarkAuth()) {
+        scheduleLarkAuthPoll();
+      }
     } catch (_error) {
-      const failed = {
-        status: "failed",
-        message: "暂时无法检查飞书授权，请稍后重试。",
-      };
+      const retrying = shouldRecheckLarkAuth();
+      const failed = retrying
+        ? {
+            status: "awaiting_user",
+            message: "正在确认飞书授权结果，工作台会自动继续。",
+          }
+        : {
+            status: "failed",
+            message: "暂时无法检查飞书授权，请稍后重试。",
+          };
       renderLarkAuthStatus(failed);
       if (currentStageId === "approval") {
         applyApprovalUploadIdentity(failed, { rerender: true });
       }
+      if (retrying) scheduleLarkAuthPoll();
     }
   }
 
   async function authorizeLarkBase({ activateDefaults = true } = {}) {
     if (!larkBaseConfig) return null;
+    keepLarkAuthRecheckAlive();
     const popup = window.open("about:blank", "tmallFeishuAuthorization");
     try {
       const payload = await fetchJson("/api/runtime/lark-base/auth/start", {
@@ -1156,9 +1186,13 @@
       } else if (popup) {
         popup.close();
       }
-      if (payload.status === "awaiting_user") scheduleLarkAuthPoll();
-      else if (payload.status === "authorized" && activateDefaults) {
-        await activateLarkBase();
+      if (payload.status === "awaiting_user") {
+        scheduleLarkAuthPoll();
+      } else if (payload.status === "authorized") {
+        finishLarkAuthRecheck();
+        if (activateDefaults) await activateLarkBase();
+      } else if (shouldRecheckLarkAuth()) {
+        scheduleLarkAuthPoll();
       }
       return payload;
     } catch (_error) {
@@ -1171,6 +1205,7 @@
       if (currentStageId === "approval") {
         applyApprovalUploadIdentity(failed, { rerender: true });
       }
+      if (shouldRecheckLarkAuth()) scheduleLarkAuthPoll();
       return failed;
     }
   }
