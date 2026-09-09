@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import Callable
 
@@ -27,6 +27,7 @@ from .qianniu_upload import (
 QIANNIU_NON_RETRYABLE_PRE_PUBLISH_REASONS = frozenset(
     {
         "QIANNIU_APPROVED_FILE_MISSING",
+        "QIANNIU_NO_EMPTY_SLOT",
         "QIANNIU_PUBLISH_BUTTON_AMBIGUOUS",
         "QIANNIU_REMOTE_BASELINE_MISSING",
         "QIANNIU_REMOTE_ID_AMBIGUOUS",
@@ -121,6 +122,11 @@ def upload_approved_item(
             batch_stop=True,
         )
     if workflow == "qianniu_recommend":
+        # The approval manifest binds the logical task and exact content, not
+        # a stale 1-based Qianniu position. Work on a copy so manifest
+        # verification remains immutable while preparation records the live
+        # empty slot selected immediately before upload.
+        working_item = replace(item, slot_index=0)
         try:
             assert_store_identity(
                 page, selectors["store_name"], expected_store
@@ -129,11 +135,11 @@ def upload_approved_item(
             if product_session is None:
                 before_remote_ids = prepare_qianniu_upload(
                     page,
-                    item,
+                    working_item,
                     material_center_url=material_center_url,
                 )
             else:
-                before_remote_ids = product_session.prepare(item)
+                before_remote_ids = product_session.prepare(working_item)
         except (StoreIdentityError, HumanCheckRequired) as error:
             return UploadOutcome(
                 "blocked",
@@ -143,6 +149,13 @@ def upload_approved_item(
                 batch_stop=True,
             )
         except QianniuUploadError as error:
+            if error.reason_code == "QIANNIU_NO_EMPTY_SLOT":
+                return UploadOutcome(
+                    "skipped",
+                    error.reason_code,
+                    retry_allowed=False,
+                    evidence=str(error),
+                )
             return UploadOutcome(
                 "blocked",
                 error.reason_code,
@@ -159,7 +172,7 @@ def upload_approved_item(
                 publish_kwargs["product_session"] = product_session
             observation = publish_qianniu_once(
                 page,
-                item,
+                working_item,
                 **publish_kwargs,
             )
         except QianniuUploadError as error:

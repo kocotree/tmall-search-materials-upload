@@ -23,6 +23,7 @@ from .qianniu_copy import (
     PUBLISH_FRAME_FRAGMENT,
     QianniuCopyError,
     _close_publish_form_in_place,
+    _empty_slot_positions,
     _ensure_recommend_list,
     _find_product_row,
     _find_product_row_with_recovery,
@@ -585,6 +586,23 @@ def _approved_upload_paths(item: MaterialItem) -> list[str]:
     return paths
 
 
+def _select_live_empty_slot(row, item: MaterialItem) -> int:
+    """Choose one current empty slot and retain it only for this attempt."""
+
+    position = int(item.slot_index)
+    if position > 0:
+        return position
+    empty_positions = _empty_slot_positions(row)
+    if not empty_positions:
+        raise QianniuUploadError(
+            "QIANNIU_NO_EMPTY_SLOT",
+            f"product={item.product_id}",
+        )
+    position = empty_positions[0]
+    item.slot_index = position
+    return position
+
+
 def _prepare_qianniu_upload_from_row(
     page,
     item: MaterialItem,
@@ -593,10 +611,11 @@ def _prepare_qianniu_upload_from_row(
     paths: Sequence[str],
 ) -> set[str]:
     before_remote_ids, _ = _remote_ids_from_row(row)
+    position = _select_live_empty_slot(row, item)
     frame = _open_slot_publish_form(
         page,
         str(item.product_id),
-        int(item.slot_index),
+        position,
         row=row,
     )
     upload = frame.get_by_role("button", name="上传图片", exact=True)
@@ -1005,13 +1024,19 @@ def publish_qianniu_once(
         return QianniuPublishObservation(
             "publish_uncertain",
             "PUBLISH_UNCERTAIN",
-            evidence=f"task={item.task_id};click_timeout=true",
+            evidence=(
+                f"task={item.task_id};requested_slot={item.slot_index};"
+                "click_timeout=true"
+            ),
         )
     except PlaywrightError as error:
         return QianniuPublishObservation(
             "publish_uncertain",
             "PUBLISH_UNCERTAIN",
-            evidence=f"task={item.task_id};click_error={error}",
+            evidence=(
+                f"task={item.task_id};requested_slot={item.slot_index};"
+                f"click_error={error}"
+            ),
         )
     page.wait_for_timeout(1_000)
     if _secondary_confirmation_visible(page):
@@ -1020,6 +1045,7 @@ def publish_qianniu_once(
             "QIANNIU_SECOND_CONFIRMATION_REQUIRED",
             evidence=(
                 f"task={item.task_id};"
+                f"requested_slot={item.slot_index};"
                 "secondary_confirmation_not_clicked=true"
             ),
         )
@@ -1040,7 +1066,10 @@ def publish_qianniu_once(
         return QianniuPublishObservation(
             "publish_uncertain",
             "QIANNIU_REMOTE_VERIFICATION_FAILED",
-            evidence=f"task={item.task_id};detail={error}",
+            evidence=(
+                f"task={item.task_id};requested_slot={item.slot_index};"
+                f"detail={error}"
+            ),
         )
 
 

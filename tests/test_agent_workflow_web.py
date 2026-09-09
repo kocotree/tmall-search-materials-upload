@@ -1596,7 +1596,7 @@ def test_failed_copy_request_can_resume_same_version_from_checkpoint(
     assert drafts["slot-interrupted"]["title"] == "恢复后的标题"
 
 
-def test_resume_retries_manual_copy_that_is_missing_remote_slot_binding(
+def test_complete_manual_copy_does_not_require_remote_slot_binding(
     tmp_path, monkeypatch
 ):
     from types import SimpleNamespace
@@ -1641,50 +1641,9 @@ def test_resume_retries_manual_copy_that_is_missing_remote_slot_binding(
             }]
         },
     )
-    assert resumed.status_code == 200, resumed.json
-    progress_path = (
-        store._stage_path(session_id, "slots_copy")
-        / "agent-requests"
-        / request_id
-        / "progress.json"
-    )
-    pending = store._read_json(progress_path, "copy-progress")
-    assert pending["copy_drafts"] == []
-    assert pending["manual_copy_overrides"]["slot-a"]["title"] == "人工标题"
-
-    def should_not_generate(_page, slots, *, material_center_url):
-        raise AssertionError("手工文案完整时不应再次调用 AI 生成")
-
-    def bind_slot(_page, slots, *, material_center_url):
-        return [{
-            "slot_id": "slot-a",
-            "product_id": "P1",
-            "remote_slot_position": 6,
-            "title": "",
-            "description": "",
-            "evidence": ["千牛商品坑位内置 AI 生成"],
-            "risks": [],
-            "source": "qianniu_builtin_ai",
-        }]
-
-    _patch_copy_product_session(
-        monkeypatch,
-        workflow,
-        should_not_generate,
-        fake_bind=bind_slot,
-    )
-    response = process_copy_draft_request(
-        store,
-        session_id,
-        request_id,
-        runtime=runtime,
-        page=object(),
-    )
-    draft = response["result"]["copy_drafts"][0]
-    assert draft["remote_slot_position"] == 6
-    assert draft["title"] == "人工标题"
-    assert draft["description"] == "人工描述"
-    assert draft["source"] == "manual"
+    assert resumed.status_code == 422, resumed.json
+    assert resumed.json["error"] == "validation failed"
+    assert "copy_request" in resumed.json["field_errors"]
 
 
 def test_completed_copy_request_can_repeatedly_retry_every_empty_slot(

@@ -153,6 +153,9 @@ def inspect_publish_retry(
             if status in REMOTE_SUCCESS_STATUSES and remote_material_id:
                 successful_count += 1
                 continue
+            if status == "skipped":
+                successful_count += 1
+                continue
             if status in REMOTE_UNCERTAIN_STATUSES:
                 uncertain_count += 1
                 continue

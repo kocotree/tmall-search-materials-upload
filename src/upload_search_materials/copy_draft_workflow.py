@@ -561,10 +561,6 @@ def resume_copy_draft_request(
             and str(item.get("description", "")).strip()
         )
 
-    def bound_draft(item: Mapping[str, Any]) -> bool:
-        position = item.get("remote_slot_position")
-        return isinstance(position, int) and position > 0
-
     raw_manual_copy_overrides = prior_progress.get(
         "manual_copy_overrides", {}
     )
@@ -631,7 +627,6 @@ def resume_copy_draft_request(
         if (
             slot is None
             or not complete_draft(item)
-            or not bound_draft(item)
         ):
             return
         supplied_request_id = str(item.get("request_id", "")).strip()
@@ -702,9 +697,9 @@ def resume_copy_draft_request(
         prior_preserved = preserved.get(slot_id)
         preserved.pop(slot_id, None)
         candidate = dict(item)
-        # The editor may change copy, but it must not be able to discard or
-        # replace the browser-verified Qianniu slot identity checkpointed by
-        # this request.  Older frontends omitted this hidden field entirely.
+        # Keep any historical browser position only as optional audit data.
+        # A complete manual copy no longer needs a fixed Qianniu slot binding;
+        # the live empty slot is selected immediately before formal upload.
         if (
             prior_preserved is not None
             and isinstance(prior_preserved.get("remote_slot_position"), int)

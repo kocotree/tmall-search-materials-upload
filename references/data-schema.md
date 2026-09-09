@@ -222,7 +222,7 @@ JSON 顶层为对象，键使用 `<商品ID>:<坑位号>`，值至少包含 `tit
 
 `product_task` 保存 `task_id`、`run_id`、商品 ID、资格状态、目标坑位数、负责人和原因码。
 
-`material_item` 保存 `task_id`、商品 ID、媒体类型、slot index、媒体清单、标题、描述、内容哈希、状态、尝试次数、远端素材 ID 和原因码。千牛搜推列表可能在发布后把新素材插入现有素材之前，因此远端证据必须同时保存发布前 ID 集合、发布后集合差异、当前显示位置和 `method=remote_id_set_delta`；不得仅凭批准时的 1-based 坑位位置写入 ID。只有旧集合完整保留且新增集合恰好包含一个 ID 时，任务才能进入 `submitted`、`under_review` 或 `success`。
+`material_item` 保存 `task_id`、商品 ID、媒体类型、媒体清单、标题、描述、内容哈希、状态、尝试次数、远端素材 ID 和原因码。新任务的 `slot index=0` 表示正式上传时动态选择当前空坑位；它不绑定文案阶段或批准时看到的固定位置。千牛搜推列表可能在发布后把新素材插入现有素材之前，因此远端证据必须同时保存发布前 ID 集合、发布后集合差异、实际选择坑位、当前显示位置和 `method=remote_id_set_delta`；不得仅凭历史 1-based 坑位位置写入 ID。只有旧集合完整保留且新增集合恰好包含一个 ID 时，任务才能进入 `submitted`、`under_review` 或 `success`。
 
 交互授权转换出的发布批次保存到 `07-approval/publish-runs/r<revision>-<input_sha前缀>/`，其中包含 `run.json`、`product-tasks.json`、`material-items.json`、`run.sqlite3`、`approval-manifest.json` 和 `upload-results.json`。同一 revision 与 input SHA 的重复调用只能幂等恢复；新 revision 必须使用新目录，禁止覆盖旧批次。
 
@@ -290,7 +290,7 @@ Codex 辅助请求位于 `05-slots-copy/agent-requests/<request_id>/`：
 - `crop-preflight.json` 绑定已确认的 `plan_revision`、`plan_sha256`、完整裁剪/压缩参数、逐图输出身份、检查数量、`minimum_size_bytes=204800` 和通过时间。只有该绑定与当前计划及页面参数完全一致时，图片完成按钮才可用；任何坑位、顺序、比例、裁剪框或压缩参数变化都会使其失效。
 - `processed-outputs.json` 同时保存计划 SHA 和包含裁剪参数的 processing SHA；输出逐图保存源/输出 SHA、宽高、大小、比例和顺序。它只可由仍然有效的 `crop-preflight.json` 转换得到，完成时复核任务内实际文件，不重复读取共享盘原图或重新裁剪。
 - `copy_draft` 请求绑定 `slot_plan_revision`、最终输出集合 SHA 和逐坑有序输出；`request_context.authorization` 固定记录 `status=granted`、授权来源、session/stage/revision、最终输出 SHA、各坑位首图身份、允许动作清单、`requires_chat_confirmation=false`、`publish_allowed=false` 及整个授权信封的 SHA-256。请求创建后状态为 `pending_agent`（保留该 schema 枚举以兼容历史数据），由工作台后台调度器通过唯一 `process-copy-request` 入口领取；处理器必须在打开浏览器前复核授权信封与当前不可变输出，旧版请求仅在最终输出指纹仍精确一致时补齐限定授权。`progress.json` 保存 `pending|processing|completed|failed`、总坑位数、已处理数、成功生成数、跳过数、当前 `slot_id`、当前重试次数、`max_retries=3`、`repair_total_count`、`repair_processed_count`、`current_repair_pass`、`max_repair_passes=1`、逐坑草稿、跳过清单及最后错误。整批失败后，工作台可把同一失败请求从 `failed` 幂等恢复为 `pending_agent`；恢复前必须重新校验授权和最终输出身份，继续处理时复用原 `progress.json` 并跳过已经成功的坑位，不创建新版本。单坑可恢复错误最多重试 3 次；实时重读并重新搜索后仍确定为坑位不存在或状态已变化时立即跳过无效重试。首轮结束后只对 `generation_status=skipped` 的坑位执行一轮失败项补跑，已经成功的坑位不再生成；补跑仍失败则保存 `final_retry_exhausted=true` 并停止自动循环。跳过草稿保存空标题/描述、`skip_reason_code`、`failure_category`、面向用户的 `skip_message`、累计 `attempt_count`、当前轮 `retry_count` 和 `repair_pass_count`；整批安全异常仍停止请求。正式 `response.json` 在所有坑位均已生成或记录为最终跳过后写入，并逐坑包含标题、描述、依据、风险、校验原因和未确认状态。
-完成或失败的 `copy_draft` 只要仍有空标题或空描述，都可由用户再次点击“继续获取”恢复为同一版本的 `pending_agent`。恢复时以当前编辑器为准，保留双字段均完整的草稿，清除所有空项此前的跳过/重试耗尽状态并重新进入一轮有界处理；上一轮 `progress.json` 与 `response.json` 归档到该请求的 `resume-history/round-NNN/`。若本轮仍有空项，允许用户再次点击；不得自动无限循环。
+完成或失败的 `copy_draft` 只要仍有空标题或空描述，都可由用户再次点击“继续获取”恢复为同一版本的 `pending_agent`。恢复时以当前编辑器为准，保留双字段均完整的草稿，清除所有空项此前的跳过/重试耗尽状态并重新进入一轮有界处理；完整文案不要求存在 `remote_slot_position`，该字段仅保留为历史审计信息。上一轮 `progress.json` 与 `response.json` 归档到该请求的 `resume-history/round-NNN/`。若本轮仍有空项，允许用户再次点击；不得自动无限循环。
 
 图片分析缓存键由源 SHA-256、`codex-agent-handoff`、模型标识和 schema 版本共同确定。
 # Agent wait envelope

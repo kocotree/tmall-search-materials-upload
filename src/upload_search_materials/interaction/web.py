@@ -6424,20 +6424,38 @@ def _upload_results_result(
                     "uncertain",
                     "状态待确认",
                 )
+            elif remote_status == "skipped":
+                material_status, material_status_label = (
+                    "skipped",
+                    "已跳过：当前无空坑位",
+                )
             else:
                 material_status, material_status_label = (
                     "failed",
                     "上传失败",
                 )
-            slot_index = manifest_entry.get("slot_index")
+            evidence = str(task.get("evidence") or "")
+            position_match = re.search(
+                r"(?:current_position|requested_slot)=(\d+)",
+                evidence,
+            )
+            slot_index = (
+                int(position_match.group(1))
+                if position_match
+                else manifest_entry.get("slot_index")
+            )
             materials.append(
                 {
                     "slot_index": (
                         int(slot_index)
-                        if isinstance(slot_index, int)
+                        if (
+                            isinstance(slot_index, int)
+                            and slot_index > 0
+                        )
                         or (
                             isinstance(slot_index, str)
                             and slot_index.isdigit()
+                            and int(slot_index) > 0
                         )
                         else None
                     ),
@@ -6455,9 +6473,16 @@ def _upload_results_result(
         success_count = sum(
             item["status"] == "success" for item in materials
         )
+        skipped_count = sum(
+            item["status"] == "skipped" for item in materials
+        )
         task_count = len(tasks)
         if success_count == task_count:
             status, status_label = "success", "上传成功"
+        elif skipped_count == task_count:
+            status, status_label = "skipped", "当前已无空坑位"
+        elif success_count + skipped_count == task_count:
+            status, status_label = "partial", "处理完成，部分坑位已无空位"
         elif success_count:
             status, status_label = "partial", "部分成功"
         else:
@@ -6470,14 +6495,26 @@ def _upload_results_result(
                 "status_label": status_label,
                 "task_count": task_count,
                 "success_count": success_count,
-                "failed_count": task_count - success_count,
+                "failed_count": task_count - success_count - skipped_count,
                 "materials": materials,
             }
         )
 
     succeeded = sum(item["status"] == "success" for item in products)
-    incomplete = len(products) - succeeded
-    if not incomplete:
+    skipped = sum(item["status"] == "skipped" for item in products)
+    completed_with_skip = sum(
+        item["status"] == "partial" and item["failed_count"] == 0
+        for item in products
+    )
+    incomplete = len(products) - succeeded - skipped - completed_with_skip
+    if skipped or completed_with_skip:
+        summary = (
+            f"上传处理完成：{succeeded} 个商品成功，"
+            f"{skipped + completed_with_skip} 个商品因当前无空坑位已跳过"
+        )
+        if incomplete:
+            summary += f"，{incomplete} 个商品未全部成功"
+    elif not incomplete:
         summary = f"上传完成：{succeeded} 个商品均已成功提交"
     else:
         summary = f"上传结束：{succeeded} 个商品成功，{incomplete} 个商品未全部成功"

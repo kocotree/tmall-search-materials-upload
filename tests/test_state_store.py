@@ -44,6 +44,23 @@ def test_valid_transition_is_persisted_with_evidence(tmp_path):
     store.close()
 
 
+def test_no_empty_slot_can_finish_as_non_retryable_skip(tmp_path):
+    store = StateStore(tmp_path / "run.sqlite3")
+    store.save_item("MAT-1", "approved")
+
+    store.record_transition(
+        "MAT-1",
+        "approved",
+        "skipped",
+        reason="QIANNIU_NO_EMPTY_SLOT",
+        evidence="product=123;pre_publish_attempts=1",
+    )
+
+    assert store.item_status("MAT-1") == "skipped"
+    assert store.recoverable_items(["MAT-1"]) == []
+    store.close()
+
+
 def test_reconciliation_can_resolve_uploading_directly_to_success(tmp_path):
     store = StateStore(tmp_path / "run.sqlite3")
     store.save_item("MAT-1", "uploading", evidence="PRE_PUBLISH_CHECKPOINT", attempt_count=1)

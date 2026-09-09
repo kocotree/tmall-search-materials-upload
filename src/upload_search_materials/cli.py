@@ -863,7 +863,11 @@ def _publish(
     write_json(results_path, durable_outcomes)
     successful_states = {"submitted", "under_review", "success"}
     return 0 if entries and all(
-        outcomes_by_task.get(task_id, {}).get("status") in successful_states
+        (
+            outcomes_by_task.get(task_id, {}).get("status") == "skipped"
+            or outcomes_by_task.get(task_id, {}).get("status")
+            in successful_states
+        )
         for task_id in entries
     ) else 1
 
@@ -1925,8 +1929,13 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
         state_store.close()
     completed = publish_code == 0 and all(
         record is not None
-        and record["status"] in {"submitted", "under_review", "success"}
-        and record.get("remote_material_id")
+        and (
+            record["status"] == "skipped"
+            or (
+                record["status"] in {"submitted", "under_review", "success"}
+                and record.get("remote_material_id")
+            )
+        )
         for record in records
     )
     results_path = Path(prepared["run_dir"]) / "upload-results.json"
@@ -1947,7 +1956,7 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
         str(claim["input_sha256"]),
         status="completed" if completed else "blocked",
         summary=(
-            f"已提交 {len(records)} 个搜推素材任务。"
+            f"已处理 {len(records)} 个搜推素材任务。"
             if completed
             else "上传未全部完成，已保留逐任务状态并停止自动重试。"
         ),
@@ -1970,6 +1979,11 @@ def _process_publish_authorization(args, page, page_factory=None) -> int:
                 for record in records
                 if record is not None
                 and record["status"] in {"submitted", "under_review", "success"}
+            ),
+            "skipped_count": sum(
+                1
+                for record in records
+                if record is not None and record["status"] == "skipped"
             ),
             "tasks": records,
             "lark_upload_log": (

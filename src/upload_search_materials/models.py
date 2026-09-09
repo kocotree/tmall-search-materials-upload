@@ -29,6 +29,7 @@ class MaterialStatus(str, Enum):
     READY_FOR_REVIEW = "ready_for_review"
     APPROVED = "approved"
     UPLOADING = "uploading"
+    SKIPPED = "skipped"
     SUBMITTED = "submitted"
     UNDER_REVIEW = "under_review"
     SUCCESS = "success"

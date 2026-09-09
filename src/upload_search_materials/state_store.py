@@ -10,13 +10,14 @@ ALLOWED_TRANSITIONS = {
     "pending_validation": {"needs_manual_review", "ready_for_review"},
     "needs_manual_review": {"ready_for_review", "failed"},
     "ready_for_review": {"approved", "needs_manual_review"},
-    "approved": {"uploading", "ready_for_review", "blocked"},
+    "approved": {"uploading", "ready_for_review", "blocked", "skipped"},
     "uploading": {"submitted", "under_review", "success", "failed", "publish_uncertain"},
     "publish_uncertain": {"submitted", "under_review", "success", "failed"},
     "submitted": {"under_review", "success", "failed", "publish_uncertain"},
     "under_review": {"success", "failed", "publish_uncertain"},
     "failed": {"ready_for_review"},
     "blocked": {"ready_for_review"},
+    "skipped": set(),
 }
 
 VERIFICATION_STATUSES = {"uploading", "submitted", "under_review", "publish_uncertain"}

@@ -6751,13 +6751,9 @@
           (draft) => !String(draft.title || "").trim()
             || !String(draft.description || "").trim(),
         ).length;
-        const missingBindingCount = copyState.filter(
-          (draft) => Number(draft.remote_slot_position || 0) <= 0,
-        ).length;
         const hasCompleteDrafts = copyState.length > 0
-          && incompleteCount === 0
-          && missingBindingCount === 0;
-        const canResume = (incompleteCount > 0 || missingBindingCount > 0)
+          && incompleteCount === 0;
+        const canResume = incompleteCount > 0
           && ["failed", "completed"].includes(currentCopyRequestStatus);
         resumeCopyButton.hidden = !canResume;
         resumeCopyButton.disabled = !canResume;
@@ -6766,19 +6762,15 @@
           : "primary-button";
         if (finishButton) {
           finishButton.disabled = !hasCompleteDrafts;
-          finishButton.title = missingBindingCount
-            ? `还有 ${missingBindingCount} 个坑位需要重新确认千牛目标坑位`
-            : incompleteCount
+          finishButton.title = incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述`
             : "全部标题和描述已填写，可以进入上传任务确认";
         }
         if (finishHint) {
-          finishHint.textContent = missingBindingCount
-            ? `还有 ${missingBindingCount} 个坑位需要重新确认千牛目标坑位，请点击“继续获取”。`
-            : incompleteCount
+          finishHint.textContent = incompleteCount
             ? `还有 ${incompleteCount} 个坑位缺少标题或描述。`
             : "全部标题和描述已填写，可以进入上传任务确认。";
-          finishHint.dataset.status = incompleteCount || missingBindingCount
+          finishHint.dataset.status = incompleteCount
             ? "waiting"
             : "ready";
         }
@@ -7048,7 +7040,7 @@
             apiPath(`/stages/slots_copy/agent-requests/${encodeURIComponent(requestId)}`),
           );
           if (!copyVersions.isConnected) return;
-          if (persistenceInFlight) {
+          if (persistenceInFlight || uiState.dirty) {
             window.setTimeout(() => pollCopyRequest(requestId), 500);
             return;
           }
@@ -7068,22 +7060,13 @@
           );
           const generatedCount = drafts.length - skippedDrafts.length;
           updateCopySkippedNotice(drafts);
-          const knownCount = readJsonListControl("copy_edits").filter(
-            (item) => String(item.request_id || "") === requestId
-              && (
-                ["generated", "skipped"].includes(
-                  String(item.generation_status || ""),
-                )
-                || (
-                  String(item.title || "").trim()
-                  && String(item.description || "").trim()
-                )
-              ),
-          ).length;
           const localDrafts = new Map(
             readJsonListControl("copy_edits")
               .filter((item) => String(item.request_id || "") === requestId)
               .map((item) => [String(item.slot_id || ""), item]),
+          );
+          const hasNewDrafts = drafts.some(
+            (draft) => !localDrafts.has(String(draft.slot_id || "")),
           );
           const draftsChanged = drafts.some((draft) => {
             const existing = localDrafts.get(String(draft.slot_id || ""));
@@ -7105,8 +7088,6 @@
               || (!legacyManualOverride
                 && manualFields.description !== true
                 && String(existing.description || "") !== String(draft.description || ""))
-              || Number(existing.remote_slot_position || 0)
-                !== Number(draft.remote_slot_position || 0)
               || (!legacyManualOverride
                 && manualFields.title !== true
                 && manualFields.description !== true
@@ -7119,7 +7100,7 @@
                 && Number(existing.repair_pass_count || 0)
                   !== Number(draft.repair_pass_count || 0));
           });
-          if (drafts.length > knownCount || draftsChanged) {
+          if (hasNewDrafts || draftsChanged) {
             applyCopyDrafts(drafts, requestId);
             return;
           }
@@ -8094,7 +8075,13 @@
       checkboxes.push(checkbox);
       choice.append(
         checkbox,
-        element("strong", "", `商品 ${task.product_id} · 坑位 ${task.remote_slot_position ?? "待确认"}`),
+        element(
+          "strong",
+          "",
+          Number(task.remote_slot_position || 0) > 0
+            ? `商品 ${task.product_id} · 历史坑位 ${task.remote_slot_position}`
+            : `商品 ${task.product_id} · 上传时自动选择空坑位`,
+        ),
       );
       const meta = element(
         "p",

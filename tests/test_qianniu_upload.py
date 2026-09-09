@@ -9,9 +9,32 @@ from upload_search_materials.browser.qianniu_upload import (
     QianniuUploadError,
     _click_material_confirm_when_unblocked,
     _uploaded_card_for_unique_name,
+    _select_live_empty_slot,
     _wait_for_material_confirm_ready,
     _wait_for_upload_completion,
 )
+
+
+def test_upload_selects_first_current_empty_slot(monkeypatch):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    item = SimpleNamespace(product_id="123", slot_index=0)
+    monkeypatch.setattr(module, "_empty_slot_positions", lambda _row: [3, 5])
+
+    assert _select_live_empty_slot(object(), item) == 3
+    assert item.slot_index == 3
+
+
+def test_upload_skips_product_when_no_current_empty_slot(monkeypatch):
+    import upload_search_materials.browser.qianniu_upload as module
+
+    item = SimpleNamespace(product_id="123", slot_index=0)
+    monkeypatch.setattr(module, "_empty_slot_positions", lambda _row: [])
+
+    with pytest.raises(QianniuUploadError) as exc_info:
+        _select_live_empty_slot(object(), item)
+
+    assert exc_info.value.reason_code == "QIANNIU_NO_EMPTY_SLOT"
 
 
 def test_uploaded_card_zero_match_is_not_found():

@@ -147,12 +147,18 @@ def prepare_publish_run_from_authorization(
             )
         if not assets:
             raise InteractionConflict("PUBLISH_TASK_HAS_NO_MEDIA")
+        raw_position = task.get("remote_slot_position")
+        slot_index = (
+            int(raw_position)
+            if isinstance(raw_position, int) and raw_position > 0
+            else 0
+        )
         items.append(
             MaterialItem(
                 task_id=task_id,
                 product_id=str(task.get("product_id", "")),
                 material_type="image_text",
-                slot_index=int(task.get("remote_slot_position", 0)),
+                slot_index=slot_index,
                 status=MaterialStatus.READY_FOR_REVIEW,
                 assets=assets,
                 title=str(task.get("title", "")),
@@ -573,16 +579,9 @@ def build_dry_run_document(
         for item in processed.get("slots", [])
         if isinstance(item, dict) and item.get("slot_id")
     }
-    positions = _copy_remote_positions(
-        store,
-        session_id,
-        copies,
-        outputs_identity=final_outputs_sha256(processed),
-    )
     blocking_reasons: list[str] = []
     warnings: list[dict[str, str]] = []
     tasks: list[dict[str, Any]] = []
-    seen_targets: set[tuple[str, int]] = set()
 
     if not assignments or set(assignments) != set(copies) or set(assignments) != set(outputs):
         blocking_reasons.append("DRY_RUN_SLOT_BOUNDARY_MISMATCH")
@@ -600,15 +599,8 @@ def build_dry_run_document(
         product_id = str(assignment.get("product_id", ""))
         task_blockers: list[str] = []
         task_warnings: list[str] = []
-        position = positions.get(slot_id)
         if not product_id or str(copy.get("product_id", "")) != product_id:
             task_blockers.append("DRY_RUN_PRODUCT_ID_MISMATCH")
-        if position is None:
-            task_blockers.append("DRY_RUN_REMOTE_SLOT_POSITION_MISSING")
-        elif (product_id, position) in seen_targets:
-            task_blockers.append("DRY_RUN_REMOTE_SLOT_POSITION_DUPLICATE")
-        else:
-            seen_targets.add((product_id, position))
         if (
             copy.get("confirmed") is not True
             or not str(copy.get("title", "")).strip()
@@ -664,7 +656,7 @@ def build_dry_run_document(
                 )
 
         identity = (
-            f"{session_id}:{product_id}:{slot_id}:{position}:"
+            f"{session_id}:{product_id}:{slot_id}:dynamic-empty-slot:"
             f"{input_sha256}"
         )
         task_id = "task-" + hashlib.sha256(
@@ -682,7 +674,7 @@ def build_dry_run_document(
                 ),
                 "product_id": product_id,
                 "slot_id": slot_id,
-                "remote_slot_position": position,
+                "remote_slot_position": None,
                 "target_ratio": str(assignment.get("target_ratio", "")),
                 "title": str(copy.get("title", "")),
                 "description": str(copy.get("description", "")),
@@ -697,7 +689,7 @@ def build_dry_run_document(
         {
             "code": REMOTE_SLOT_RECHECK_REQUIRED,
             "slot_id": "",
-            "message": "正式上传前仍需在千牛实时确认目标坑位为空。",
+            "message": "正式上传时将实时选择该商品当前可用的空坑位。",
         }
     )
     return {

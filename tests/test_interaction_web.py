@@ -4820,7 +4820,7 @@ def test_frontend_shows_processing_lease_and_expired_recovery_action():
     assert "currentWorkflowDispatch?.online === true" in source
 
 
-def test_frontend_enables_copy_submit_only_when_copy_and_bindings_are_complete():
+def test_frontend_enables_copy_submit_when_copy_is_complete():
     source = (
         Path(__file__).parents[1]
         / "src"
@@ -4833,9 +4833,12 @@ def test_frontend_enables_copy_submit_only_when_copy_and_bindings_are_complete()
     assert "已确认标题、描述，可进入上传任务确认" not in source
     assert "我已核对该标题、描述与左侧素材一致，可进入 dry-run" not in source
     assert "batchConfirmation" not in source
-    assert "missingBindingCount" in source
+    assert "missingBindingCount" not in source
     assert "finishButton.disabled = !hasCompleteDrafts;" in source
-    assert "需要重新确认千牛目标坑位，请点击“继续获取”" in source
+    assert "需要重新确认千牛目标坑位，请点击“继续获取”" not in source
+    assert "persistenceInFlight || uiState.dirty" in source
+    assert "hasNewDrafts || draftsChanged" in source
+    assert "上传时自动选择空坑位" in source
     assert "finishButton.hidden = !hasCompleteDrafts;" not in source
     assert "String(draft.title || \"\").trim()" in source
     assert "String(draft.description || \"\").trim()" in source

@@ -1859,6 +1859,9 @@ def test_qianniu_publish_workflow_uses_migrated_page_flow(
     calls = []
 
     def fake_prepare(page_arg, item_arg, *, material_center_url):
+        assert item_arg is not item
+        assert item_arg.slot_index == 0
+        item_arg.slot_index = 4
         calls.append(("prepare", item_arg.task_id, material_center_url))
         return {"OLD-1", "OLD-2"}
 
@@ -1871,6 +1874,7 @@ def test_qianniu_publish_workflow_uses_migrated_page_flow(
         before_remote_ids,
     ):
         assert before_remote_ids == {"OLD-1", "OLD-2"}
+        assert item_arg.slot_index == 4
         calls.append(("button-ready", item_arg.task_id))
         before_publish()
         calls.append(("clicked", item_arg.task_id))
@@ -1902,6 +1906,7 @@ def test_qianniu_publish_workflow_uses_migrated_page_flow(
 
     assert outcome.status == "submitted"
     assert outcome.remote_material_id == "RM-QIANNIU-1"
+    assert item.slot_index == 1
     assert calls == [
         (
             "prepare",
@@ -1950,6 +1955,40 @@ def test_qianniu_prepare_failure_stops_before_checkpoint(
     assert outcome.reason == "QIANNIU_MATERIAL_IDENTITY_AMBIGUOUS"
     assert outcome.retry_allowed is True
     assert checkpoints == []
+
+
+def test_qianniu_no_current_empty_slot_is_skipped_without_retry(
+    tmp_path, monkeypatch
+):
+    import upload_search_materials.browser.upload_page as upload_module
+    from upload_search_materials.browser.qianniu_upload import (
+        QianniuUploadError,
+    )
+
+    page = configured_upload_page()
+    item = approved_item(tmp_path)
+
+    def no_empty_slot(*args, **kwargs):
+        raise QianniuUploadError("QIANNIU_NO_EMPTY_SLOT")
+
+    monkeypatch.setattr(
+        upload_module, "prepare_qianniu_upload", no_empty_slot
+    )
+
+    outcome = upload_approved_item(
+        page,
+        item,
+        approval_manifest(item),
+        REQUIRED_SELECTOR_VALUES,
+        expected_store="KK Tree",
+        now="2026-07-17T11:00:00+08:00",
+        workflow="qianniu_recommend",
+    )
+
+    assert outcome.status == "skipped"
+    assert outcome.reason == "QIANNIU_NO_EMPTY_SLOT"
+    assert outcome.retry_allowed is False
+    assert outcome.batch_stop is False
 
 
 def test_qianniu_remote_id_uses_set_delta_not_requested_position(
