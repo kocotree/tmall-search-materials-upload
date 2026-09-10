@@ -8,7 +8,7 @@
       "name": "tmall-search-materials",
       "source": {
         "source": "url",
-        "url": "https://gitee.com/QuanLongZhang/tmall-search-materials-upload.git",
+        "url": "https://github.com/kocotree/tmall-search-materials-upload.git",
         "ref": "win"
       },
       "policy": {
